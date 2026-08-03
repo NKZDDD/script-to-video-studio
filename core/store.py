@@ -9,7 +9,10 @@ import threading
 import time
 from typing import Any, Optional
 
-_LOCK = threading.RLock()
+# 同一把可重入锁保护所有 JSON 读写。
+# 必须连读也锁住：Windows 上 os.replace 目标文件若被别的线程打开着读，会 WinError 5。
+LOCK = threading.RLock()
+_LOCK = LOCK  # 兼容旧引用
 
 # 与 skill V6.1 标准生产包目录对齐
 DIRS = [
@@ -24,19 +27,31 @@ DIRS = [
 
 
 def read_json(path: str, default: Any = None) -> Any:
-    if not os.path.isfile(path):
-        return default
-    with open(path, "r", encoding="utf-8-sig") as f:
-        return json.load(f)
+    with LOCK:
+        if not os.path.isfile(path):
+            return default
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return default
 
 
 def write_json(path: str, data: Any) -> None:
-    with _LOCK:
+    with LOCK:
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        tmp = path + ".tmp"
+        tmp = f"{path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        # Windows 上偶发被杀软/索引器短暂占用，重试几次
+        for i in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if i == 4:
+                    raise
+                time.sleep(0.05 * (i + 1))
 
 
 def read_text(path: str) -> str:

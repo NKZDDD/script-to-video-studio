@@ -133,6 +133,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 
 <!-- ============ 流程 ============ -->
 <section id="t-flow" class="hide">
+  <div class="card" id="healthCard">
+    <h2>项目进度与续跑 <span class="tag">以磁盘为准，重启服务也不丢</span></h2>
+    <div id="healthTip" class="alert warn" style="margin-bottom:12px">加载中…</div>
+    <div id="healthSteps"></div>
+    <div id="healthFails" style="margin-top:12px"></div>
+  </div>
   <div class="card">
     <h2>项目参数 <span class="tag">影响环节 2/7/8 的编译结果</span></h2>
     <div class="grid g3" id="paramBox"></div>
@@ -302,6 +308,53 @@ async function refreshProject() {
   const d = await api.get('/api/project', {root: PROJ});
   renderStages(d.stages_done);
   renderGen(d.tasks_summary);
+  renderHealth();
+}
+
+// ---------- 项目体检 / 续跑面板
+const STATE_LABEL = {done:'完成', partial:'部分完成', pending:'未开始', blocked:'待上游'};
+async function renderHealth() {
+  if (!PROJ) return;
+  const h = await api.get('/api/diagnose', {root: PROJ});
+  if (h.error) return;
+
+  $('#healthTip').className = 'alert ' + (h.failures.total ? 'err' : 'warn');
+  $('#healthTip').innerHTML = `<b>${h.tip}</b>`;
+
+  $('#healthSteps').innerHTML = h.steps.map(s => {
+    const pct = s.total ? Math.round(s.done / s.total * 100) : 0;
+    const cls = {done:'s-ok', partial:'s-run', blocked:'s-skip'}[s.state] || 's-pend';
+    return `<div class="stage ${s.state === 'done' ? 'done' : ''}">
+      <div class="no">${s.no}</div>
+      <div class="nm">${s.name}
+        <span class="muted" style="margin-left:6px">${s.total ? `${s.done}/${s.total}` : '—'}</span>
+      </div>
+      <div class="bar" style="width:110px"><i style="width:${pct}%"></i></div>
+      <span class="pill ${cls}">${STATE_LABEL[s.state]}</span>
+      <span class="muted" style="font-size:11px;min-width:120px">${s.action}</span>
+    </div>`;
+  }).join('');
+
+  const g = h.failures.groups || [];
+  $('#healthFails').innerHTML = g.length ? `<h2 style="font-size:13px;margin:12px 0 8px">
+      未解决的失败 <span class="tag">修完对应项后，回相应页面点执行/开始即可续跑</span></h2>` +
+    g.map(x => `<div class="alert err" style="margin-bottom:8px">
+      <div style="margin-bottom:4px"><b>${x.title}</b>
+        <span class="pill">${x.code}</span>
+        <span class="muted">影响 ${x.targets.length} 项：${x.targets.slice(0,6).join('、')}${x.targets.length>6?'…':''}</span></div>
+      <div><b>改哪里：</b>${x.where}</div>
+      <div><b>怎么改：</b><ol style="margin:4px 0 4px 18px;padding:0">${
+        x.fix.map(f => `<li>${f}</li>`).join('')}</ol></div>
+      <div><b>改完继续：</b>${x.resume}</div>
+      <div class="row" style="margin-top:6px">
+        <button class="btn ghost sm" data-clearfail="${x.code}">标记已处理</button>
+      </div>
+    </div>`).join('') : '';
+  $$('#healthFails [data-clearfail]').forEach(b => b.onclick = async () => {
+    const grp = g.find(x => x.code === b.dataset.clearfail);
+    for (const t of grp.targets) await api.post('/api/failures/clear', {project_root: PROJ, target: t});
+    renderHealth();
+  });
 }
 
 // ---------- 参数
@@ -373,7 +426,8 @@ function renderGen(summary) {
       <td><select class="p-sel" data-cap="${cap}" style="min-width:150px">${providerOptions(cap)}</select></td>
       <td><select class="m-sel" style="min-width:150px"></select></td>
       <td><input class="c-in" type="number" value="${(BOOT.config.defaults||{}).concurrency||3}" min="1" max="16" style="width:70px"></td>
-      <td><button class="btn sm" data-run="${k}">开始</button></td></tr>`;
+      <td><button class="btn sm" data-run="${k}">开始</button>
+          <button class="btn ghost sm" data-retry="${k}" title="只重跑记录在案的失败任务">补失败</button></td></tr>`;
   }).join('');
   $$('#genRows tr').forEach(tr => {
     const sel = tr.querySelector('.p-sel'), msel = tr.querySelector('.m-sel');
@@ -385,17 +439,20 @@ function renderGen(summary) {
       msel.title = block.notes || '';
     };
     sel.onchange = fill; fill();
-    tr.querySelector('[data-run]').onclick = () => startGen(tr.dataset.k, sel.value, msel.value,
-                                                            +tr.querySelector('.c-in').value);
+    const go = failedOnly => startGen(tr.dataset.k, sel.value, msel.value,
+                                      +tr.querySelector('.c-in').value, failedOnly);
+    tr.querySelector('[data-run]').onclick = () => go(false);
+    tr.querySelector('[data-retry]').onclick = () => go(true);
   });
 }
-async function startGen(kind, provider, model, concurrency) {
+async function startGen(kind, provider, model, concurrency, failedOnly) {
   if (!PROJ) return alert('先打开项目');
   const r = await api.post('/api/generate', {
-    project_root: PROJ, kind, concurrency,
+    project_root: PROJ, kind, concurrency, failed_only: !!failedOnly,
     provider_sel: {provider, model},
   });
   if (r.error || r.ok === false) return alert(r.error || r.msg);
+  if (r.todo === 0) alert('这批任务的产物都已存在，全部会跳过（生成即固定，不覆盖）');
   DETAIL = r.job_id;
 }
 $('#rebuildTasks').onclick = async () => {
@@ -427,12 +484,24 @@ async function tick() {
     const active = !['done','error','cancelled','aborted'].includes(j.status);
     const mine = j.project_root === PROJ;
     const failed = (j.counts||{}).failed || 0;
-    const banner = j.aborted
-      ? `<div class="alert err">⛔ <b>已熔断</b>（账户级错误，剩余任务未提交，没有浪费额度）<br>
-           ${j.abort_reason||''}<br>
-           <span class="muted">处理完（充值 / 换 key / 换服务商）后重新点「开始」，已完成的会自动跳过，只补未完成的。</span></div>`
+    const dg = j.abort_diag;
+    const banner = dg
+      ? `<div class="alert err">
+           <div style="margin-bottom:4px">⛔ <b>${dg.title}</b>
+             <span class="pill">${dg.code}</span>
+             ${j.aborted ? '<span class="muted">已熔断，剩余任务未提交，没有浪费额度</span>' : ''}</div>
+           <div><b>为什么：</b>${dg.why}</div>
+           <div><b>改哪里：</b>${dg.where}</div>
+           <div><b>怎么改：</b><ol style="margin:4px 0 4px 18px;padding:0">${
+             dg.fix.map(f => `<li>${f}</li>`).join('')}</ol></div>
+           <div><b>改完继续：</b>${dg.resume}</div>
+           <details style="margin-top:4px"><summary class="muted">原始报错</summary>
+             <pre class="log" style="max-height:120px;margin-top:4px">${
+               (dg.raw||'').replace(/</g,'&lt;')}</pre></details>
+         </div>`
       : (failed && !active
-          ? `<div class="alert warn">⚠ ${failed} 个任务失败。修复后重新点「开始」即可只补失败的（成功的会跳过）。</div>`
+          ? `<div class="alert warn">⚠ ${failed} 个任务失败。点该行的「补失败」只重跑它们，
+               或点「开始」补全部未完成的（已成功的会跳过）。详情见「流程」页的续跑面板。</div>`
           : '');
     return `<div class="jobcard" data-jid="${j.id}">
       <div class="top">

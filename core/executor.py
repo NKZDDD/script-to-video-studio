@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Callable, Optional
 
+from . import diagnose
 from .apiutil import BATCH_FATAL, RETRYABLE, TASK_FATAL, ApiError
 
 
@@ -102,7 +103,8 @@ class Job:
     _seq_lock = threading.Lock()
 
     def __init__(self, kind: str, total: int, concurrency: int,
-                 project_root: str = "", project_name: str = "", provider: str = ""):
+                 project_root: str = "", project_name: str = "", provider: str = "",
+                 model: str = ""):
         with Job._seq_lock:
             Job._seq += 1
             self.id = f"job{Job._seq}_{int(time.time())}"
@@ -112,25 +114,28 @@ class Job:
         self.project_root = project_root
         self.project_name = project_name
         self.provider = provider
+        self.model = model
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
         self.status = "running"
         self.cancelled = False
         self.aborted = False              # 熔断（账户级错误）
         self.abort_reason = ""
+        self.abort_diag: Optional[dict] = None
         self.items: dict = {}
         self.logs: list = []
         self._lock = threading.RLock()
 
-    def abort(self, reason: str) -> None:
-        """账户级错误熔断：停掉本批剩余任务。"""
+    def abort_with(self, diag: dict) -> None:
+        """账户级错误熔断：停掉本批剩余任务，并把诊断挂到 job 上。"""
         with self._lock:
             if self.aborted:
                 return
             self.aborted = True
             self.cancelled = True
-            self.abort_reason = reason[:400]
-        self.log("熔断", f"检测到账户级错误，已停止本批剩余任务 → {reason[:200]}")
+            self.abort_diag = diag
+            self.abort_reason = f"{diag['title']}：{diag['raw'][:200]}"
+        self.log("熔断", f"{diag['title']} —— 已停止本批剩余任务，未浪费额度")
 
     def set_item(self, key: str, **kw) -> None:
         with self._lock:
@@ -160,6 +165,7 @@ class Job:
                 "concurrency": self.concurrency, "provider": self.provider,
                 "project_root": self.project_root, "project_name": self.project_name,
                 "aborted": self.aborted, "abort_reason": self.abort_reason,
+                "abort_diag": self.abort_diag, "model": self.model,
                 "elapsed": int((self.finished_at or time.time()) - self.started_at)}
 
     def snapshot(self) -> dict:
@@ -255,24 +261,31 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                                      output=(result or {}).get("output", ""),
                                      msg=(result or {}).get("msg", ""))
                         log("完成")
+                    diagnose.clear(job.project_root, job.kind, key)   # 成功即销账
                     return
                 except Exception as exc:               # noqa: BLE001
-                    err = str(exc)[:300]
                     kind = getattr(exc, "kind", RETRYABLE)
+                    diag = diagnose.build(exc, stage=job.kind, target=key,
+                                          provider=job.provider, model=job.model)
+
+                    def fail():
+                        job.set_item(key, state="failed", msg=diagnose.one_line(diag),
+                                     kind=kind, diag=diag)
+                        diagnose.record(job.project_root, diag)
 
                     if kind == BATCH_FATAL:            # 余额/密钥 → 熔断整批
-                        log(f"账户级错误: {err}")
-                        job.set_item(key, state="failed", msg=err, kind=kind)
-                        job.abort(err)
+                        log(diagnose.one_line(diag))
+                        fail()
+                        job.abort_with(diag)
                         return
                     if kind == TASK_FATAL:             # 本任务的问题 → 不重试，继续别的
-                        log(f"任务级错误(不重试): {err}")
-                        job.set_item(key, state="failed", msg=err, kind=kind)
+                        log(diagnose.one_line(diag) + "（不重试）")
+                        fail()
                         return
 
-                    log(f"失败: {err}")                 # 可重试
+                    log(f"失败: {diag['raw'][:160]}")    # 可重试
                     if attempt >= max_retry:
-                        job.set_item(key, state="failed", msg=err, kind=kind)
+                        fail()
 
     with ThreadPoolExecutor(max_workers=max(1, job.concurrency)) as pool:
         list(pool.map(one, tasks))

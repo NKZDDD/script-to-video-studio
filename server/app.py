@@ -12,7 +12,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from core import docparse, stages as S
+from core import diagnose, docparse, stages as S
 from core.executor import GATE, JobManager, run_batch
 from core.llm import LLM
 from core.providers import build as build_provider, list_capabilities
@@ -116,6 +116,15 @@ def api_get(path: str, q: dict) -> dict:
                 stage_state[st["id"]] = os.path.isfile(pj.stage_path(st["out"]))
         return {"meta": pj.meta(), "tasks_summary": done, "stages_done": stage_state,
                 "root": pj.root}
+
+    if path == "/api/diagnose":
+        """项目体检：环节完成度 + 未解决的失败 + 下一步该干什么。磁盘为准，重启不丢。"""
+        pj = Project(q["root"][0])
+        return S.health(pj)
+
+    if path == "/api/failures":
+        pj = Project(q["root"][0])
+        return {"items": diagnose.load(pj.root), "summary": diagnose.summary(pj.root)}
 
     if path == "/api/stage_data":
         pj = Project(q["root"][0])
@@ -272,12 +281,18 @@ def api_post(path: str, body: dict) -> dict:
             job.set_item(key, state="running")
             try:
                 llm = build_llm(cfg, body.get("llm"))
+                job.model = llm.model
                 S.run_llm_stage(pj, stage_id, llm, params, log=lambda m: job.log(key, m))
                 job.set_item(key, state="ok")
                 job.status = "done"
+                diagnose.clear(pj.root, f"stage:{stage_id}")
             except Exception as exc:                     # noqa: BLE001
-                job.log(key, f"失败: {exc}")
-                job.set_item(key, state="failed", msg=str(exc)[:300])
+                diag = diagnose.build(exc, stage=f"stage:{stage_id}", target=stage_id,
+                                      model=getattr(job, "model", ""))
+                diagnose.record(pj.root, diag)
+                job.log(key, diagnose.one_line(diag))
+                job.set_item(key, state="failed", msg=diagnose.one_line(diag), diag=diag)
+                job.abort_diag = diag
                 job.status = "error"
             finally:
                 import time as _t
@@ -308,21 +323,33 @@ def api_post(path: str, body: dict) -> dict:
         items = tasks.get(key_map[kind], [])
         if only:
             items = [t for t in items if t["key"] in only]
+        if body.get("failed_only"):                     # 只补上次失败的
+            bad = {f["target"] for f in diagnose.load(pj.root) if f.get("stage") == kind}
+            items = [t for t in items if t["key"] in bad]
+            if not items:
+                return {"ok": False, "msg": "没有记录在案的失败任务"}
         if not items:
             return {"ok": False, "msg": "没有匹配的任务（先跑环节8生成 tasks.json）"}
+        # 未完成数（已存在的会在 worker 里跳过，这里只用于提示）
+        todo = sum(1 for t in items if not os.path.isfile(pj.p(*t["output"].split("/"))))
 
         worker = (S.make_video_worker(pj, pcfg) if kind == "video"
                   else S.make_image_worker(pj, pcfg, kind))
         job = JOBS.create(kind, len(items), conc,
                           project_root=pj.root, project_name=os.path.basename(pj.root),
-                          provider=pcfg["provider"])
+                          provider=pcfg["provider"], model=pcfg.get("model", ""))
         threading.Thread(
             target=run_batch,
             args=(job, items, worker),
             kwargs={"key_of": lambda t: t["key"], "max_retry": retry,
                     "provider": pcfg["provider"]},
             daemon=True).start()
-        return {"ok": True, "job_id": job.id, "total": len(items)}
+        return {"ok": True, "job_id": job.id, "total": len(items), "todo": todo}
+
+    if path == "/api/failures/clear":
+        pj = proj_of(body)
+        n = diagnose.clear(pj.root, body.get("stage", ""), body.get("target", ""))
+        return {"ok": True, "cleared": n}
 
     if path == "/api/job/cancel":
         job = JOBS.get(body["id"])

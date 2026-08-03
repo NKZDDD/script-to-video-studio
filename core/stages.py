@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from typing import Any, Callable, Optional
 
+from . import diagnose
 from .llm import LLM
 from .providers import ImageTask, VideoTask, build as build_provider
 from .apiutil import resolve_ref
@@ -72,12 +73,20 @@ _LLM_SPEC = {
 }
 
 
+_STAGE_OF_OUT = {s["out"]: s for s in STAGES if s.get("out")}
+
+
 def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict, log: Callable = print) -> dict:
     tpl_name, deps, required = _LLM_SPEC[stage_id]
     data = {d: pj.stage_data(d) for d in deps}
     missing = [d for d, v in data.items() if v is None]
     if missing:
-        raise RuntimeError(f"缺少前置产物 {missing}，请先跑对应环节")
+        names = "、".join(f"环节{_STAGE_OF_OUT[m]['no']}「{_STAGE_OF_OUT[m]['name']}」"
+                          for m in missing if m in _STAGE_OF_OUT)
+        raise RuntimeError(f"缺少前置产物，请先跑：{names or missing}")
+
+    if stage_id == "s8":                       # s8 分段编译，天然可续跑
+        return run_s8_incremental(pj, llm, params, data, log)
 
     g = data.get("s1_global") or {}
     tone = (g.get("visual_tone") or {})
@@ -105,20 +114,104 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict, log: Calla
     out = llm.json_call(system, user, required=required, log=log)
     pj.save_stage(_LLM_SPEC[stage_id][0], out)
 
-    # s5/s8 额外把提示词正文落成 txt，便于人工查看与执行器读取
+    # s5 额外把提示词正文落成 txt，便于人工查看与执行器读取
     if stage_id == "s5":
         for ap in out.get("asset_prompts", []):
             write_text(pj.p("03_提示词", "资产生产提示词", ap.get("filename") or f"{ap['asset_id']}_PROMPT.txt"),
                        ap.get("prompt", ""))
-    if stage_id == "s8":
-        for c in out.get("compiled", []):
-            sid = c["id"]
+    diagnose.clear(pj.root, f"stage:{stage_id}")
+    return out
+
+
+def s8_done_segments(pj: Project) -> set:
+    """已经编好两份提示词的段落（磁盘为准，重启也认）。"""
+    done = set()
+    sb_dir, vd_dir = pj.p("03_提示词", "故事板提示词"), pj.p("03_提示词", "视频提示词")
+    if not os.path.isdir(sb_dir):
+        return done
+    for f in os.listdir(sb_dir):
+        if f.endswith("_STORYBOARD_PROMPT.txt"):
+            sid = f[: -len("_STORYBOARD_PROMPT.txt")]
+            if os.path.isfile(os.path.join(vd_dir, f"{sid}_VIDEO_PROMPT.txt")):
+                done.add(sid)
+    return done
+
+
+def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
+                       log: Callable = print) -> dict:
+    """环节8 逐段编译：一段一次 LLM 调用。
+
+    整集一次调用的问题：17 段 × 2 份提示词输出太长，中途失败整批白跑。
+    逐段调用后，已完成的段落跳过，失败只影响那一段 —— 天然支持续跑。
+    """
+    segs = (data.get("s2_segments") or {}).get("segments", [])
+    if not segs:
+        raise RuntimeError("段落表为空，请先跑环节2")
+
+    tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
+    states = {s["id"]: s for s in (data.get("s3_states") or {}).get("segment_states", [])}
+    binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
+    shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
+    assets = (data.get("s4_assets") or {}).get("assets", [])
+
+    prev = pj.stage_data("s8_compile") or {"compiled": []}
+    by_id = {c["id"]: c for c in prev.get("compiled", [])}
+    done = s8_done_segments(pj)
+
+    system = load_prompt("_common")
+    tpl = load_prompt("s8_compile")
+    todo = [s for s in segs if s["id"] not in done]
+    log(f"共 {len(segs)} 段，已完成 {len(done)} 段，本次编译 {len(todo)} 段")
+
+    failed = []
+    for i, seg in enumerate(todo, 1):
+        sid = seg["id"]
+        used = set((binds.get(sid, {}).get("reference_images") or [])
+                   and [r.get("asset_id") for r in binds[sid]["reference_images"]] or [])
+        seg_assets = [a for a in assets if a["asset_id"] in used] or assets
+        user = render(tpl, {
+            "DURATION": params.get("duration", 15),
+            "FRAMES": params.get("frames", 4),
+            "TONE": jd({"compressed": tone.get("compressed", ""),
+                        "variants": tone.get("compressed_variants", [])}),
+            "SEGMENTS": jd(seg),
+            "STATES": jd(states.get(sid, {})),
+            "ASSETS": jd(seg_assets),
+            "BINDINGS": jd(binds.get(sid, {})),
+            "SHOTS": jd(shots.get(sid, {})),
+        }) + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
+        log(f"[{i}/{len(todo)}] 编译 {sid}")
+        try:
+            out = llm.json_call(system, user,
+                                required=["compiled[]", "compiled[].storyboard_prompt",
+                                          "compiled[].video_prompt"],
+                                log=lambda m: log(f"    {m}"))
+            c = out["compiled"][0]
+            c["id"] = sid
+            by_id[sid] = c
             write_text(pj.p("03_提示词", "故事板提示词", f"{sid}_STORYBOARD_PROMPT.txt"),
                        c.get("storyboard_prompt", ""))
             write_text(pj.p("03_提示词", "视频提示词", f"{sid}_VIDEO_PROMPT.txt"),
                        c.get("video_prompt", ""))
-        build_tasks(pj, params)
-    return out
+            # 每段都存盘：中途中断也不丢已完成的
+            pj.save_stage("s8_compile", {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]})
+            diagnose.clear(pj.root, "stage:s8", sid)
+        except Exception as exc:                            # noqa: BLE001
+            d = diagnose.build(exc, stage="stage:s8", target=sid, model=llm.model)
+            diagnose.record(pj.root, d)
+            failed.append(sid)
+            log(f"    {diagnose.one_line(d)}")
+
+    result = {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]}
+    pj.save_stage("s8_compile", result)
+    build_tasks(pj, params)
+
+    if failed:
+        raise RuntimeError(f"{len(failed)} 段编译失败：{'、'.join(failed[:8])}"
+                           f"{'…' if len(failed) > 8 else ''}。"
+                           f"已完成的 {len(result['compiled'])} 段已保存，重跑环节8只会补失败的这些段。")
+    log(f"全部 {len(result['compiled'])} 段编译完成，tasks.json 已装配")
+    return result
 
 
 # ====================================================================== 任务装配
@@ -301,6 +394,77 @@ def build_review_checklist(pj: Project) -> dict:
            "rows": rows}
     pj.save_stage("s11_review", out)
     return out
+
+
+def health(pj: Project) -> dict:
+    """项目体检：每个环节做到哪、卡在哪、下一步该干什么。
+
+    完全以磁盘为准 —— 重启服务、换电脑都能算出同样的结果。
+    """
+    steps = []
+    tasks = pj.tasks()
+    seg_total = len((pj.stage_data("s2_segments") or {}).get("segments", []))
+
+    for st in STAGES:
+        item = {"id": st["id"], "no": st["no"], "name": st["name"], "kind": st["kind"],
+                "done": 0, "total": 0, "state": "pending", "action": ""}
+        if st["kind"] == "llm":
+            if st["id"] == "s8":
+                item["total"] = seg_total
+                item["done"] = len(s8_done_segments(pj))
+            else:
+                ok = pj.stage_data(st["out"]) is not None
+                item["total"], item["done"] = 1, (1 if ok else 0)
+            item["action"] = "流程页 → 执行"
+        elif st["kind"] in ("image", "video"):
+            key = {"s5b": "asset_tasks", "s9": "storyboard_tasks", "s10": "video_tasks"}[st["id"]]
+            items = tasks.get(key, [])
+            item["total"] = len(items)
+            item["done"] = sum(1 for t in items
+                               if os.path.isfile(pj.p(*t["output"].split("/"))))
+            item["action"] = "生产页 → 开始"
+        else:
+            if st["id"] == "s11":
+                item["total"] = 1
+                item["done"] = 1 if pj.stage_data("s11_review") else 0
+                item["action"] = "产物页 → 生成人工复核清单"
+            else:
+                masters = []
+                d = pj.p("06_成片")
+                if os.path.isdir(d):
+                    masters = [f for f in os.listdir(d) if f.lower().endswith(".mp4")]
+                item["total"] = 1
+                item["done"] = 1 if masters else 0
+                item["action"] = "产物页 → 硬切拼接成片"
+
+        if item["total"] == 0:
+            item["state"] = "blocked" if st["kind"] != "llm" else "pending"
+        elif item["done"] >= item["total"]:
+            item["state"] = "done"
+        elif item["done"] > 0:
+            item["state"] = "partial"
+        else:
+            item["state"] = "pending"
+        steps.append(item)
+
+    fails = diagnose.summary(pj.root)
+    nxt = next((s for s in steps if s["state"] in ("partial", "pending") and s["total"] > 0), None)
+    if nxt is None:
+        nxt = next((s for s in steps if s["state"] == "blocked"), None)
+
+    tip = ""
+    if fails["total"]:
+        tip = f"有 {fails['total']} 条未解决的失败，先按下方指引处理，再点对应环节继续"
+    elif nxt:
+        remain = nxt["total"] - nxt["done"]
+        tip = (f"下一步：环节{nxt['no']}「{nxt['name']}」"
+               + (f"（还差 {remain}/{nxt['total']}）" if nxt["total"] > 1 else "")
+               + f" —— {nxt['action']}")
+    else:
+        tip = "全部环节已完成"
+
+    return {"steps": steps, "failures": fails, "next": nxt, "tip": tip,
+            "resumable": True}
 
 
 def find_ffmpeg() -> str:
