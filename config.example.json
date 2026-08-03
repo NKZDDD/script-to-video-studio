@@ -1,0 +1,38 @@
+{
+  "projects_dir": "../projects",
+
+  "providers": {
+    "lingganya": {
+      "api_key": "",
+      "base_url": "https://www.lingganyaapi.com",
+      "proxy": ""
+    },
+    "paisio": {
+      "api_key": "",
+      "base_url": "https://api.paisio.online",
+      "proxy": ""
+    }
+  },
+
+  "llm": {
+    "provider": "paisio",
+    "base_url": "https://api.paisio.online",
+    "api_key": "",
+    "model": "claude-sonnet-5",
+    "timeout": 900
+  },
+
+  "defaults": {
+    "duration": 15,
+    "ratio": "9:16",
+    "image_size": "1024x1536",
+    "frames": 4,
+    "frames_min": 4,
+    "frames_max": 6,
+    "shots_min": 5,
+    "shots_max": 8,
+    "episode_minutes": 3,
+    "concurrency": 3,
+    "max_retry": 2
+  }
+}

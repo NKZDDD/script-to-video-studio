@@ -1,0 +1,32 @@
+# 密钥与本地配置（绝不提交）
+config.json
+legacy/config.legacy.json
+config.local.*
+*.key
+.env
+.env.*
+secrets.*
+
+# 生产产物（体积大，另行备份）
+projects/
+output/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+*.log
+*.tmp

@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>剧本 → AI视频 自动化生产台</title>
+<style>
+:root{
+  --bg:#0f1115; --panel:#171a21; --panel2:#1d222b; --line:#2a303c;
+  --fg:#e6e9ef; --dim:#8d97a8; --accent:#4a9eff; --ok:#3ecf8e; --warn:#f5a623; --err:#ff5f56;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f5f6f8;--panel:#fff;--panel2:#f0f2f5;--line:#dfe3ea;--fg:#1a1d23;--dim:#697386;}
+}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg)}
+header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:10}
+header h1{font-size:15px;margin:0;font-weight:600}
+header .sp{flex:1}
+nav{display:flex;gap:4px}
+nav button{background:none;border:1px solid transparent;color:var(--dim);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+nav button.on{background:var(--panel2);color:var(--fg);border-color:var(--line)}
+main{padding:20px;max-width:1400px;margin:0 auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+.card h2{font-size:14px;margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:8px}
+.card h2 .tag{font-size:11px;color:var(--dim);font-weight:400}
+.grid{display:grid;gap:12px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+label{display:block;font-size:12px;color:var(--dim);margin-bottom:4px}
+input,select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+  padding:7px 10px;border-radius:6px;font:inherit;font-size:13px}
+textarea{min-height:120px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+button.btn{background:var(--accent);border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px}
+button.btn:disabled{opacity:.45;cursor:not-allowed}
+button.ghost{background:var(--panel2);color:var(--fg);border:1px solid var(--line)}
+button.sm{padding:4px 10px;font-size:12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:500;font-size:12px}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;border:1px solid var(--line)}
+.s-ok{color:var(--ok);border-color:var(--ok)} .s-run{color:var(--accent);border-color:var(--accent)}
+.s-fail{color:var(--err);border-color:var(--err)} .s-skip{color:var(--dim)}
+.s-pend{color:var(--dim)}
+pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-height:280px;
+  overflow:auto;font-size:11.5px;line-height:1.5;margin:0}
+.bar{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);transition:width .3s}
+.muted{color:var(--dim);font-size:12px}
+.stage{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);
+  border-radius:8px;margin-bottom:6px;background:var(--panel2)}
+.stage .no{width:26px;height:26px;border-radius:50%;background:var(--panel);display:grid;
+  place-items:center;font-size:11px;color:var(--dim);flex:none}
+.stage.done .no{background:var(--ok);color:#04150d}
+.stage .nm{flex:1}
+.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.thumb{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel2)}
+.thumb img,.thumb video{width:100%;display:block;aspect-ratio:9/16;object-fit:cover;background:#000}
+.thumb .cap{padding:5px 7px;font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hide{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>剧本 → AI视频 自动化生产台</h1>
+  <span class="muted" id="projTag">未选择项目</span>
+  <span class="sp"></span>
+  <nav>
+    <button data-t="proj" class="on">项目</button>
+    <button data-t="flow">流程</button>
+    <button data-t="gen">生产</button>
+    <button data-t="out">产物</button>
+    <button data-t="cfg">设置</button>
+  </nav>
+</header>
+<main>
+
+<!-- ============ 项目 ============ -->
+<section id="t-proj">
+  <div class="card">
+    <h2>项目列表 <span class="tag" id="projDir"></span></h2>
+    <table><thead><tr><th>名称</th><th>编号</th><th>集</th><th>更新</th><th></th></tr></thead>
+      <tbody id="projList"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody></table>
+  </div>
+  <div class="card">
+    <h2>新建项目</h2>
+    <div class="grid g3">
+      <div><label>目录名</label><input id="npName" placeholder="XYQY-002_新剧"></div>
+      <div><label>项目编号</label><input id="npCode" value="PROJ-001"></div>
+      <div><label>集数</label><input id="npEp" value="EP01"></div>
+    </div>
+    <div style="margin-top:10px"><label>完整剧本（粘贴正文）</label>
+      <textarea id="npScript" placeholder="粘贴剧本全文…"></textarea></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="npCreate">创建项目</button>
+      <span class="muted">创建后在「流程」页逐环节执行</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 流程 ============ -->
+<section id="t-flow" class="hide">
+  <div class="card">
+    <h2>项目参数 <span class="tag">影响环节 2/7/8 的编译结果</span></h2>
+    <div class="grid g3" id="paramBox"></div>
+    <div class="row" style="margin-top:10px"><button class="btn ghost sm" id="saveParams">保存参数</button></div>
+  </div>
+  <div class="card">
+    <h2>十二环节 <span class="tag">1-8 调 LLM 分析｜5b/9/10 出图出片｜11-12 本地</span></h2>
+    <div id="stageList"></div>
+  </div>
+  <div class="card"><h2>运行日志</h2><pre class="log" id="flowLog">—</pre></div>
+</section>
+
+<!-- ============ 生产 ============ -->
+<section id="t-gen" class="hide">
+  <div class="card">
+    <h2>生产任务 <span class="tag">读 tasks.json；已存在的输出自动跳过</span></h2>
+    <table><thead><tr><th>类型</th><th>进度</th><th>服务商</th><th>模型</th><th>并发</th><th></th></tr></thead>
+      <tbody id="genRows"></tbody></table>
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost sm" id="rebuildTasks">重建 tasks.json</button>
+      <span class="muted">环节 4/5/6/8 产物变化后点这里</span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>当前运行 <span class="tag" id="jobTag">空闲</span></h2>
+    <div class="bar" style="margin-bottom:10px"><i id="jobBar" style="width:0"></i></div>
+    <div id="jobCounts" class="row" style="margin-bottom:10px"></div>
+    <div class="row" style="margin-bottom:10px"><button class="btn ghost sm" id="cancelJob">取消运行</button></div>
+    <table><thead><tr><th>任务</th><th>状态</th><th>信息</th></tr></thead><tbody id="jobItems"></tbody></table>
+    <pre class="log" id="jobLog" style="margin-top:10px">—</pre>
+  </div>
+</section>
+
+<!-- ============ 产物 ============ -->
+<section id="t-out" class="hide">
+  <div class="card">
+    <h2>产物预览</h2>
+    <div class="row" style="margin-bottom:12px">
+      <select id="outKind" style="width:auto">
+        <option value="02_固定资产">固定资产</option>
+        <option value="04_故事板">故事板</option>
+        <option value="05_分段视频">分段视频</option>
+        <option value="06_成片">成片</option>
+        <option value="03_提示词">提示词</option>
+        <option value="01_剧本与分段">剧本与分段</option>
+        <option value="07_检查与记录">检查与记录</option>
+      </select>
+      <button class="btn ghost sm" id="outRefresh">刷新</button>
+      <span class="muted" id="outPath"></span>
+    </div>
+    <div class="thumbs" id="outGrid"></div>
+  </div>
+  <div class="card">
+    <h2>交付 <span class="tag">环节 11 / 12</span></h2>
+    <div class="row">
+      <button class="btn ghost" id="mkReview">生成人工复核清单</button>
+      <button class="btn" id="doAssemble">硬切拼接成片</button>
+    </div>
+    <pre class="log" id="outLog" style="margin-top:10px">—</pre>
+    <p class="muted" style="margin-bottom:0">拼接完成后，把整个项目目录拖给 Claude Code / Codex，用 skill 做验收与优化。</p>
+  </div>
+</section>
+
+<!-- ============ 设置 ============ -->
+<section id="t-cfg" class="hide">
+  <div class="card">
+    <h2>服务商 <span class="tag">key 存本地 config.json，不随包外发</span></h2>
+    <div id="provBox"></div>
+  </div>
+  <div class="card">
+    <h2>分析引擎（环节 1-8 的 LLM）</h2>
+    <div class="grid g3">
+      <div><label>Base URL</label><input id="llmBase" placeholder="https://api.paisio.online"></div>
+      <div><label>API Key</label><input id="llmKey" type="password" placeholder="留空则复用同域服务商的 key"></div>
+      <div><label>模型</label><input id="llmModel" placeholder="claude-sonnet-5"></div>
+    </div>
+    <div class="row" style="margin-top:10px"><button class="btn" id="saveLlm">保存</button></div>
+  </div>
+  <div class="card">
+    <h2>默认参数</h2>
+    <div class="grid g3" id="defBox"></div>
+    <div class="row" style="margin-top:10px"><button class="btn ghost sm" id="saveDefs">保存默认值</button></div>
+  </div>
+  <div class="card">
+    <h2>自检 <span class="tag">只拉模型列表，不产生生成费用</span></h2>
+    <button class="btn ghost" id="runSelftest">运行自检</button>
+    <pre class="log" id="selftestOut" style="margin-top:10px">—</pre>
+  </div>
+</section>
+
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const api = {
+  get: (p, q={}) => fetch(p + '?' + new URLSearchParams(q)).then(r => r.json()),
+  post: (p, b={}) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(b)}).then(r => r.json()),
+};
+let BOOT = null, PROJ = null, POLL = null, CURJOB = null;
+
+const PARAM_FIELDS = [
+  ['duration','单段时长(秒)','number'], ['ratio','画幅','text'],
+  ['image_size','图片尺寸','text'], ['frames','故事板格数','number'],
+  ['frames_min','关键帧下限','number'], ['frames_max','关键帧上限','number'],
+  ['shots_min','镜头数下限','number'], ['shots_max','镜头数上限','number'],
+  ['episode_minutes','单集分钟','number'], ['concurrency','默认并发','number'],
+  ['max_retry','技术重试上限','number'],
+];
+
+// ---------- tabs
+$$('nav button').forEach(b => b.onclick = () => {
+  $$('nav button').forEach(x => x.classList.toggle('on', x === b));
+  $$('main > section').forEach(s => s.classList.add('hide'));
+  $('#t-' + b.dataset.t).classList.remove('hide');
+  if (b.dataset.t === 'out') loadFiles();
+  if (b.dataset.t === 'gen') refreshProject();
+});
+
+// ---------- bootstrap
+async function boot() {
+  BOOT = await api.get('/api/bootstrap');
+  $('#projDir').textContent = BOOT.projects_dir;
+  renderProjects();
+  renderProviders();
+  renderDefaults();
+  const l = BOOT.config.llm || {};
+  $('#llmBase').value = l.base_url || 'https://api.paisio.online';
+  $('#llmModel').value = l.model || 'claude-sonnet-5';
+}
+
+function renderProjects() {
+  const tb = $('#projList');
+  if (!BOOT.projects.length) { tb.innerHTML = '<tr><td colspan="5" class="muted">还没有项目，在下方新建</td></tr>'; return; }
+  tb.innerHTML = BOOT.projects.map(p => `<tr>
+    <td>${p.title}</td><td class="muted">${p.project_code}</td><td class="muted">${p.episode}</td>
+    <td class="muted">${p.updated}</td>
+    <td><button class="btn sm" data-root="${p.root.replace(/"/g,'&quot;')}">打开</button></td></tr>`).join('');
+  tb.querySelectorAll('button').forEach(b => b.onclick = () => openProject(b.dataset.root));
+}
+
+async function openProject(root) {
+  PROJ = root;
+  $('#projTag').textContent = root.split(/[\\/]/).pop();
+  await refreshProject();
+  renderParams();
+  $$('nav button')[1].click();
+}
+
+async function refreshProject() {
+  if (!PROJ) return;
+  const d = await api.get('/api/project', {root: PROJ});
+  renderStages(d.stages_done);
+  renderGen(d.tasks_summary);
+}
+
+// ---------- 参数
+function currentParams() {
+  const meta = (BOOT.projects.find(p => p.root === PROJ) || {});
+  return Object.assign({}, BOOT.config.defaults || {}, meta.params || {});
+}
+function renderParams() {
+  const p = currentParams();
+  $('#paramBox').innerHTML = PARAM_FIELDS.map(([k, label, t]) =>
+    `<div><label>${label}</label><input data-pk="${k}" type="${t}" value="${p[k] ?? ''}"></div>`).join('');
+}
+$('#saveParams').onclick = async () => {
+  const params = {};
+  $$('#paramBox input').forEach(i => params[i.dataset.pk] = i.type === 'number' ? +i.value : i.value);
+  await api.post('/api/project/params', {project_root: PROJ, params});
+  log('#flowLog', '参数已保存');
+};
+
+// ---------- 环节
+function renderStages(done) {
+  $('#stageList').innerHTML = BOOT.stages.map(s => {
+    const isDone = done[s.id];
+    const kindTag = {llm:'LLM分析', image:'出图', video:'出片', local:'本地'}[s.kind];
+    const btn = s.kind === 'llm'
+      ? `<button class="btn sm" data-stage="${s.id}">${isDone ? '重跑' : '执行'}</button>`
+      : `<span class="muted">在「生产」页执行</span>`;
+    return `<div class="stage ${isDone ? 'done' : ''}">
+      <div class="no">${s.no}</div><div class="nm">${s.name}</div>
+      <span class="pill">${kindTag}</span>${btn}</div>`;
+  }).join('');
+  $$('#stageList button[data-stage]').forEach(b => b.onclick = () => runStage(b.dataset.stage));
+}
+
+async function runStage(id) {
+  if (!PROJ) return alert('先打开项目');
+  log('#flowLog', `环节 ${id} 提交…`);
+  const r = await api.post('/api/stage/run', {project_root: PROJ, stage: id});
+  if (r.error) return log('#flowLog', '错误: ' + r.error);
+  pollJob(r.job_id, '#flowLog', () => refreshProject());
+}
+
+// ---------- 生产
+const GEN_KINDS = [['asset','资产图','image'], ['storyboard','故事板','image'], ['video','分段视频','video']];
+function providerOptions(kind) {
+  return BOOT.capabilities.filter(c => c.supports.includes(kind))
+    .map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+}
+function renderGen(summary) {
+  $('#genRows').innerHTML = GEN_KINDS.map(([k, label, cap]) => {
+    const s = summary[k] || {total:0, done:0};
+    return `<tr data-k="${k}">
+      <td>${label}</td>
+      <td>${s.done}/${s.total}</td>
+      <td><select class="p-sel" data-cap="${cap}" style="min-width:150px">${providerOptions(cap)}</select></td>
+      <td><select class="m-sel" style="min-width:150px"></select></td>
+      <td><input class="c-in" type="number" value="${(BOOT.config.defaults||{}).concurrency||3}" min="1" max="16" style="width:70px"></td>
+      <td><button class="btn sm" data-run="${k}">开始</button></td></tr>`;
+  }).join('');
+  $$('#genRows tr').forEach(tr => {
+    const sel = tr.querySelector('.p-sel'), msel = tr.querySelector('.m-sel');
+    const fill = () => {
+      const cap = BOOT.capabilities.find(c => c.id === sel.value);
+      const block = cap[sel.dataset.cap] || {};
+      msel.innerHTML = (block.models || []).map(m =>
+        `<option${m === block.default_model ? ' selected' : ''}>${m}</option>`).join('');
+      msel.title = block.notes || '';
+    };
+    sel.onchange = fill; fill();
+    tr.querySelector('[data-run]').onclick = () => startGen(tr.dataset.k, sel.value, msel.value,
+                                                            +tr.querySelector('.c-in').value);
+  });
+}
+async function startGen(kind, provider, model, concurrency) {
+  if (!PROJ) return alert('先打开项目');
+  const r = await api.post('/api/generate', {
+    project_root: PROJ, kind, concurrency,
+    provider_sel: {provider, model},
+  });
+  if (r.error || r.ok === false) return alert(r.error || r.msg);
+  pollJob(r.job_id, '#jobLog', () => refreshProject());
+}
+$('#rebuildTasks').onclick = async () => {
+  const r = await api.post('/api/tasks/rebuild', {project_root: PROJ});
+  alert(r.error ? r.error : '已重建 tasks.json');
+  refreshProject();
+};
+$('#cancelJob').onclick = () => CURJOB && api.post('/api/job/cancel', {id: CURJOB});
+
+// ---------- job 轮询
+function pollJob(id, logSel, onDone) {
+  CURJOB = id;
+  clearInterval(POLL);
+  POLL = setInterval(async () => {
+    const j = await api.get('/api/job', {id});
+    if (j.status === 'none') return;
+    const c = j.counts || {};
+    const finished = (c.ok||0)+(c.skipped||0)+(c.failed||0)+(c.cancelled||0);
+    $('#jobTag').textContent = `${j.kind} · ${j.status} · ${finished}/${j.total} · ${j.elapsed}s`;
+    $('#jobBar').style.width = j.total ? (finished / j.total * 100) + '%' : '0';
+    $('#jobCounts').innerHTML = Object.entries(c).map(([k, v]) =>
+      `<span class="pill s-${({ok:'ok',failed:'fail',running:'run',skipped:'skip'})[k]||'pend'}">${k} ${v}</span>`).join('');
+    $('#jobItems').innerHTML = Object.entries(j.items || {}).map(([k, v]) =>
+      `<tr><td>${k}</td><td><span class="pill s-${({ok:'ok',failed:'fail',running:'run',skipped:'skip'})[v.state]||'pend'}">${v.state}</span></td>
+       <td class="muted">${(v.msg||'').slice(0,90)}</td></tr>`).join('');
+    const logs = (j.logs || []).join('\n') || '—';
+    $(logSel).textContent = logs;
+    $(logSel).scrollTop = 1e6;
+    if (['done','error','cancelled'].includes(j.status)) {
+      clearInterval(POLL); CURJOB = null; onDone && onDone();
+    }
+  }, 1200);
+}
+function log(sel, msg) { $(sel).textContent = msg; }
+
+// ---------- 产物
+async function loadFiles() {
+  if (!PROJ) return;
+  const sub = $('#outKind').value;
+  const d = await api.get('/api/files', {root: PROJ, sub});
+  $('#outPath').textContent = sub;
+  const cards = [];
+  for (const it of d.items) {
+    if (it.dir) {
+      const sd = await api.get('/api/files', {root: PROJ, sub: it.rel});
+      sd.items.forEach(x => !x.dir && cards.push(x));
+    } else cards.push(it);
+  }
+  $('#outGrid').innerHTML = cards.length ? cards.map(f => {
+    const url = `/file?root=${encodeURIComponent(PROJ)}&rel=${encodeURIComponent(f.rel)}`;
+    const media = /\.(png|jpe?g|webp)$/i.test(f.name) ? `<img src="${url}" loading="lazy">`
+      : /\.mp4$/i.test(f.name) ? `<video src="${url}" controls preload="metadata"></video>`
+      : `<div style="aspect-ratio:9/16;display:grid;place-items:center;color:var(--dim);font-size:11px">${f.name.split('.').pop()}</div>`;
+    return `<a class="thumb" href="${url}" target="_blank" style="text-decoration:none;color:inherit">
+      ${media}<div class="cap" title="${f.rel}">${f.name}</div></a>`;
+  }).join('') : '<p class="muted">该目录暂无文件</p>';
+}
+$('#outKind').onchange = loadFiles;
+$('#outRefresh').onclick = loadFiles;
+$('#mkReview').onclick = async () => {
+  const r = await api.post('/api/review', {project_root: PROJ});
+  log('#outLog', r.error ? r.error : `已生成复核清单：${(r.review.rows||[]).length} 段\n存于 01_剧本与分段/s11_review.json`);
+};
+$('#doAssemble').onclick = async () => {
+  log('#outLog', '拼接中…');
+  const r = await api.post('/api/assemble', {project_root: PROJ});
+  log('#outLog', r.error ? r.error : JSON.stringify(r.result, null, 2));
+  loadFiles();
+};
+
+// ---------- 设置
+function renderProviders() {
+  $('#provBox').innerHTML = BOOT.capabilities.map(c => {
+    const has = BOOT.providers_configured[c.id];
+    const blocks = ['image','video'].filter(k => c[k]).map(k =>
+      `<div class="muted" style="margin-top:4px"><b>${k === 'image' ? '出图' : '出片'}</b>：
+        ${(c[k].models||[]).slice(0,6).join(' / ')}${(c[k].models||[]).length>6?' …':''}<br>${c[k].notes||''}</div>`).join('');
+    return `<div class="card" style="background:var(--panel2);margin-bottom:10px">
+      <h2>${c.name} <span class="pill ${has?'s-ok':''}">${has?'已配置':'未配置'}</span></h2>
+      <div class="grid g2">
+        <div><label>Base URL</label><input data-pv="${c.id}" data-f="base_url" value="${c.default_base_url}"></div>
+        <div><label>API Key</label><input data-pv="${c.id}" data-f="api_key" type="password" placeholder="${has?'已保存，留空不改':'粘贴 key'}"></div>
+      </div>${blocks}
+      <div class="row" style="margin-top:8px"><button class="btn sm" data-save="${c.id}">保存</button></div></div>`;
+  }).join('');
+  $$('#provBox [data-save]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.save, obj = {};
+    $$(`#provBox [data-pv="${id}"]`).forEach(i => { if (i.value) obj[i.dataset.f] = i.value; });
+    await api.post('/api/config', {providers: {[id]: obj}});
+    BOOT = await api.get('/api/bootstrap'); renderProviders();
+  });
+}
+$('#saveLlm').onclick = async () => {
+  const llm = {base_url: $('#llmBase').value, model: $('#llmModel').value};
+  if ($('#llmKey').value) llm.api_key = $('#llmKey').value;
+  await api.post('/api/config', {llm});
+  BOOT = await api.get('/api/bootstrap'); alert('已保存');
+};
+function renderDefaults() {
+  const d = BOOT.config.defaults || {};
+  $('#defBox').innerHTML = PARAM_FIELDS.map(([k, label, t]) =>
+    `<div><label>${label}</label><input data-dk="${k}" type="${t}" value="${d[k] ?? ''}"></div>`).join('');
+}
+$('#saveDefs').onclick = async () => {
+  const defaults = {};
+  $$('#defBox input').forEach(i => defaults[i.dataset.dk] = i.type === 'number' ? +i.value : i.value);
+  await api.post('/api/config', {defaults});
+  BOOT = await api.get('/api/bootstrap'); alert('已保存');
+};
+$('#runSelftest').onclick = async () => {
+  log('#selftestOut', '自检中…');
+  const r = await api.post('/api/selftest', {});
+  log('#selftestOut', Object.entries(r.result || {}).map(([k, v]) =>
+    `${v.ok ? '✅' : '❌'} ${k.padEnd(12)} ${v.msg}`).join('\n'));
+};
+$('#npCreate').onclick = async () => {
+  const name = $('#npName').value.trim();
+  if (!name) return alert('填目录名');
+  const r = await api.post('/api/project/create', {
+    name, project_code: $('#npCode').value, episode: $('#npEp').value,
+    title: name, script: $('#npScript').value,
+    params: BOOT.config.defaults || {},
+  });
+  if (r.error) return alert(r.error);
+  BOOT = await api.get('/api/bootstrap'); renderProjects(); openProject(r.root);
+};
+
+boot();
+</script>
+</body>
+</html>
