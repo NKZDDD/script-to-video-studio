@@ -1,5 +1,9 @@
 # 第三环节｜状态时间线管理
 
+> **本次只处理 {{EPISODE}} 这一集。** 下面给的输入都是这一集的，所有段落 id 必须是 `{{EPISODE}}-SEGnn`；
+> 集号写错，后面的绑定、分镜、出图出片会全部对不上号。
+
+
 状态时间线是整个系统的连续性核心。**上一段退出状态 = 下一段进入状态**（指客观状态一致，不要求画面构图相同）。
 
 ## 状态分类
@@ -17,7 +21,7 @@
       "state_id": "ST001",
       "object": "对象名（人物/道具/场景/生物）",
       "parent_asset": "所属父资产的名称或 ID（如无填空）",
-      "first_seg": "EP01-SEG01",
+      "first_seg": "{{EPISODE}}-SEG01",
       "range": "持续范围，如 SEG01-SEG06 或 本集全程",
       "trigger": "触发事件",
       "entry_state": "",
@@ -30,7 +34,7 @@
   ],
   "segment_states": [
     {
-      "id": "EP01-SEG01",
+      "id": "{{EPISODE}}-SEG01",
       "entry": {"人物/道具/场景对象": "该对象在本段开始时的客观状态"},
       "persistent": ["跨段保留的状态"],
       "exit": {"对象": "本段结束后的客观状态"},
@@ -39,7 +43,7 @@
     }
   ],
   "continuity_check": [
-    {"pair": "EP01-SEG01 → EP01-SEG02", "consistent": true, "note": "不一致时说明差异"}
+    {"pair": "{{EPISODE}}-SEG01 → {{EPISODE}}-SEG02", "consistent": true, "note": "不一致时说明差异"}
   ]
 }
 ```
@@ -48,7 +52,7 @@
 
 ## 输入
 
-【段落表】
+【本集段落表】
 {{SEGMENTS}}
 
 【全局解析】

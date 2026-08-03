@@ -12,7 +12,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from core import diagnose, docparse, stages as S
+from core import diagnose, docparse, episodes, stages as S
 from core.executor import GATE, JobManager, run_batch
 from core.llm import LLM
 from core.providers import build as build_provider, list_capabilities
@@ -110,17 +110,26 @@ def api_get(path: str, q: dict) -> dict:
                 "done": sum(1 for t in items
                             if os.path.isfile(pj.p(*t["output"].split("/")))),
             }
+        ep = (q.get("episode") or [""])[0]
         stage_state = {}
         for st in S.STAGES:
             if st["kind"] == "llm" and st["out"]:
-                stage_state[st["id"]] = os.path.isfile(pj.stage_path(st["out"]))
+                # 逐集环节看的是「这一集做了没」；不指定集时看第一集，只为渲染流程图
+                sub = "" if st["id"] in S.SERIES_STAGES else (ep or (episodes.ids(pj) or [""])[0])
+                stage_state[st["id"]] = os.path.isfile(pj.stage_path(st["out"], sub))
         return {"meta": pj.meta(), "tasks_summary": done, "stages_done": stage_state,
-                "root": pj.root}
+                "root": pj.root, "episodes": episodes.summary(pj), "episode": ep}
+
+    if path == "/api/episodes":
+        """集清单：环节1 切出来的结果，含每集字数和切分时的问题。"""
+        return episodes.summary(Project(q["root"][0]))
 
     if path == "/api/diagnose":
         """项目体检：环节完成度 + 未解决的失败 + 下一步该干什么。磁盘为准，重启不丢。"""
         pj = Project(q["root"][0])
-        return S.health(pj)
+        h = S.health(pj, (q.get("episode") or [""])[0])
+        h["episodes"] = episodes.summary(pj)
+        return h
 
     if path == "/api/failures":
         pj = Project(q["root"][0])
@@ -128,7 +137,7 @@ def api_get(path: str, q: dict) -> dict:
 
     if path == "/api/stage_data":
         pj = Project(q["root"][0])
-        return {"data": pj.stage_data(q["name"][0])}
+        return {"data": pj.stage_data(q["name"][0], (q.get("episode") or [""])[0])}
 
     if path == "/api/job":
         job = JOBS.get(q["id"][0]) if q.get("id") else None
@@ -272,26 +281,64 @@ def api_post(path: str, body: dict) -> dict:
             from core.store import read_text
             params["script"] = read_text(script_path)
 
-        job = JOBS.create(f"stage:{stage_id}", 1, 1,
+        # 逐集环节可以只跑一集，也可以「全部集依次跑」。
+        # 依次跑做成一个 job、每集一个条目：进度看得见，中途失败只影响那一集，
+        # 重跑时已完成的集会被跳过（磁盘上有产物就算做过）。
+        req_ep = (body.get("episode") or "").strip()
+        eps = episodes.ids(pj)
+        if not S.is_per_episode(stage_id):
+            targets = [""]
+        elif body.get("all_episodes") and eps:
+            targets = [e for e in eps
+                       if body.get("redo") or pj.stage_data(S._LLM_SPEC[stage_id][0], e) is None]
+            if not targets:
+                return {"ok": True, "skipped": True,
+                        "msg": f"全部 {len(eps)} 集都已经跑过这个环节了。"
+                               f"想重做的话，去「产物」页删掉对应的产物再来。"}
+        else:
+            targets = [req_ep]
+
+        job = JOBS.create(f"stage:{stage_id}", len(targets), 1,
                           project_root=pj.root, project_name=os.path.basename(pj.root),
                           provider="llm")
 
         def go():
-            key = stage_id
-            job.set_item(key, state="running")
             try:
                 llm = build_llm(cfg, body.get("llm"))
                 job.model = llm.model
-                S.run_llm_stage(pj, stage_id, llm, params, log=lambda m: job.log(key, m))
-                job.set_item(key, state="ok")
-                job.status = "done"
-                diagnose.clear(pj.root, f"stage:{stage_id}")
+                failed = []
+                for tgt in targets:
+                    key = f"{stage_id}:{tgt}" if tgt else stage_id
+                    if job.cancelled:
+                        job.set_item(key, state="cancelled", msg="已取消")
+                        continue
+                    job.set_item(key, state="running")
+                    try:
+                        S.run_llm_stage(pj, stage_id, llm, params,
+                                        log=lambda m, k=key: job.log(k, m), episode=tgt)
+                        job.set_item(key, state="ok")
+                        diagnose.clear(pj.root, f"stage:{stage_id}", tgt)
+                    except Exception as exc:             # noqa: BLE001
+                        diag = diagnose.build(exc, stage=f"stage:{stage_id}",
+                                              target=tgt or stage_id,
+                                              model=getattr(job, "model", ""))
+                        diagnose.record(pj.root, diag)
+                        job.log(key, diagnose.one_line(diag))
+                        job.set_item(key, state="failed",
+                                     msg=diagnose.one_line(diag), diag=diag)
+                        job.abort_diag = diag
+                        failed.append(tgt or stage_id)
+                        if diag.get("scope") == "batch":
+                            # 余额、密钥这类：后面几十集撞的是同一堵墙，别再发了
+                            job.abort_with(diag)
+                            break
+                job.status = "error" if failed else "done"
             except Exception as exc:                     # noqa: BLE001
                 diag = diagnose.build(exc, stage=f"stage:{stage_id}", target=stage_id,
                                       model=getattr(job, "model", ""))
                 diagnose.record(pj.root, diag)
-                job.log(key, diagnose.one_line(diag))
-                job.set_item(key, state="failed", msg=diagnose.one_line(diag), diag=diag)
+                job.log(stage_id, diagnose.one_line(diag))
+                job.set_item(stage_id, state="failed", msg=diagnose.one_line(diag), diag=diag)
                 job.abort_diag = diag
                 job.status = "error"
             finally:
@@ -321,6 +368,11 @@ def api_post(path: str, body: dict) -> dict:
         tasks = pj.tasks()
         key_map = {"asset": "asset_tasks", "storyboard": "storyboard_tasks", "video": "video_tasks"}
         items = tasks.get(key_map[kind], [])
+        # 按集过滤：40 集的项目里只想出某一集的图/片。
+        # 资产任务不带集号（全剧共享），所以不参与过滤。
+        ep_sel = (body.get("episode") or "").strip()
+        if ep_sel and kind != "asset":
+            items = [t for t in items if t.get("episode", "") == ep_sel]
         if only:
             items = [t for t in items if t["key"] in only]
         if body.get("failed_only"):                     # 只补上次失败的
@@ -359,7 +411,8 @@ def api_post(path: str, body: dict) -> dict:
 
     if path == "/api/review":
         pj = proj_of(body)
-        return {"ok": True, "review": S.build_review_checklist(pj)}
+        return {"ok": True,
+                "review": S.build_review_checklist(pj, (body.get("episode") or "").strip())}
 
     if path == "/api/assemble":
         pj = proj_of(body)
@@ -368,7 +421,8 @@ def api_post(path: str, body: dict) -> dict:
         params.update(meta.get("params") or {})
         params.update({"project_code": meta.get("project_code", "PROJ-001"),
                        "episode": meta.get("episode", "EP01")})
-        return {"ok": True, "result": S.assemble(pj, params)}
+        return {"ok": True,
+                "result": S.assemble(pj, params, episode=(body.get("episode") or "").strip())}
 
     if path == "/api/selftest":
         out = {}

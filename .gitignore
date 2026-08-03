@@ -30,3 +30,10 @@ desktop.ini
 *~
 *.log
 *.tmp
+
+# 剧本原稿不入库：是客户资产，且体量大、变动频繁
+*.docx
+*.doc
+*.pdf
+*.txt
+!requirements.txt

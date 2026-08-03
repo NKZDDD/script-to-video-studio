@@ -119,6 +119,32 @@ CATALOG = {
         "resume": "前面的补齐之后，回来点「开始」",
         "resumable": True, "scope": "task", "level": "error",
     },
+    "EPISODE_REQUIRED": {
+        "title": "得先选一集，这个环节是按集跑的",
+        "why": "除了环节1，其它环节都是一集一集处理的。这部剧有好几集，"
+               "程序不知道你要跑哪一集，所以停下来问你。",
+        "where": "「流程」页最上面「当前操作的集」那个下拉框",
+        "fix": ["在「流程」页顶部的下拉框里选一集，再点这个环节的「执行」",
+                "想把所有集都跑一遍的话，点这个环节旁边的「全部集依次跑」——"
+                "它会从第1集开始挨个跑，已经跑过的自动跳过",
+                "如果下拉框里是空的，说明环节1 还没跑；先跑环节1，它会判断这部剧有几集"],
+        "resume": "选好集（或点「全部集依次跑」）之后，重新点这个环节的「执行」",
+        "resumable": True, "scope": "stage", "level": "error",
+    },
+    "EPISODE_SPLIT_FAILED": {
+        "title": "集没切出来，或者某一集是空的",
+        "why": "环节1 要给出每一集正文的第一行原文，程序拿它去剧本里定位、切分。"
+               "现在有的行在剧本里找不到，所以那几集切不出内容来。"
+               "常见原因：模型没照原文抄，自己改写或翻译了。",
+        "where": "「流程」页最上面的「这部剧有几集」，那里列出了具体是哪几集有问题",
+        "fix": ["先看「这部剧有几集」里的黄色提示，它写了具体哪一集、什么原因",
+                "重跑一次环节1——同一个模型换一次通常就好了",
+                "还不行就换个更强的模型再跑环节1（设置 → 分析引擎）",
+                "剧本里如果集与集之间完全没有可辨认的分隔（连标题都没有），"
+                "那就手动把剧本拆成一集一个文件，在「项目」页分别上传"],
+        "resume": "重跑环节1，切出来之后再往下跑",
+        "resumable": True, "scope": "stage", "level": "error",
+    },
     "PREREQ_MISSING": {
         "title": "前面的环节还没跑完",
         "why": "这个环节要用前面环节做出来的文件，但那些文件还不存在。",
@@ -219,6 +245,10 @@ _PATTERNS = [
     ("CONTENT_REJECTED", r"content policy|safety|violat|prohibited|sensitive|审核|违规|敏感"),
     ("PROMPT_INVALID", r"prompt too long|too long|invalid (prompt|param|size|request)|参数错误|不支持的?(尺寸|时长|比例)"),
     ("REF_MISSING", r"参考图文件不存在|固定故事板不存在|no such file|filenotfound"),
+    # 这两条要排在 PREREQ_MISSING 前面：它们的文案里也带「请先跑」，
+    # 但给的指引更具体（去哪个下拉框选集），别被通用的前置缺失兜走
+    ("EPISODE_REQUIRED", r"得指定跑哪一集|没有 EP\d+ 这一集|还没切集"),
+    ("EPISODE_SPLIT_FAILED", r"的正文是空的|一集都没切出来|找不到这一行"),
     ("PREREQ_MISSING", r"缺少前置产物|请先跑"),
     ("LLM_SCHEMA_FAIL", r"JSON 输出校验失败|输出缺少必需字段|未找到可解析的 JSON"),
     ("LLM_EMPTY", r"回复内容为空|无 choices"),

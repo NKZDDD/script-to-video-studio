@@ -94,14 +94,19 @@ class Project:
         write_json(self.meta_path, data)
 
     # -- 环节产物 -------------------------------------------------------
-    def stage_path(self, stage_id: str) -> str:
+    # 一个项目 = 一部剧。全剧共享的产物放 01_剧本与分段/ 下，
+    # 逐集的产物放 01_剧本与分段/EP01/ 这样的子目录里。
+    # episode 传空 = 全剧级，向后兼容单集项目（老项目目录结构不变）。
+    def stage_path(self, stage_id: str, episode: str = "") -> str:
+        if episode:
+            return self.p("01_剧本与分段", episode, f"{stage_id}.json")
         return self.p("01_剧本与分段", f"{stage_id}.json")
 
-    def stage_data(self, stage_id: str) -> Any:
-        return read_json(self.stage_path(stage_id))
+    def stage_data(self, stage_id: str, episode: str = "") -> Any:
+        return read_json(self.stage_path(stage_id, episode))
 
-    def save_stage(self, stage_id: str, data: Any) -> None:
-        write_json(self.stage_path(stage_id), data)
+    def save_stage(self, stage_id: str, data: Any, episode: str = "") -> None:
+        write_json(self.stage_path(stage_id, episode), data)
 
     # -- 任务清单 -------------------------------------------------------
     @property

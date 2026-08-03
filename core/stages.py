@@ -72,27 +72,115 @@ _LLM_SPEC = {
            ["compiled[]", "compiled[].storyboard_prompt", "compiled[].video_prompt"]),
 }
 
+# 一个项目 = 一部剧。环节1 吃整部剧本、只跑一次；环节2 往后逐集跑。
+# 之所以只有环节1 是全剧级：跨集要统一的东西（人物长相、视觉基调、伏笔、
+# 不可更改事实）都在它的产物里，往下每集都引用同一份，人物才不会换脸。
+SERIES_STAGES = {"s1"}
+
+
+def is_per_episode(stage_id: str) -> bool:
+    return stage_id not in SERIES_STAGES
+
 
 _STAGE_OF_OUT = {s["out"]: s for s in STAGES if s.get("out")}
 
 
-def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict, log: Callable = print) -> dict:
+def known_assets(pj: Project, upto_episode: str = "") -> list:
+    """把前面几集已经建好的资产汇总起来，喂给环节4 让它沿用编号。
+
+    资产库全剧共享：同一个角色在 EP01 和 EP07 必须是同一个 asset_id，
+    否则会各出一张脸。这里按集顺序累加，先出现的定义优先（后面的不许改写）。
+    """
+    from . import episodes as _eps
+    out, seen = [], set()
+    for ep in _eps.ids(pj):
+        if upto_episode and ep == upto_episode:
+            break
+        for a in (pj.stage_data("s4_assets", ep) or {}).get("assets", []):
+            aid = a.get("asset_id")
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            out.append({k: a.get(k, "") for k in
+                        ("asset_id", "category", "name", "parent_asset_id",
+                         "identity_anchors", "appearance")})
+    return out
+
+
+def _dep_data(pj: Project, deps: list, episode: str) -> dict:
+    """取前置产物：全剧级的从项目根取，逐集的从本集目录取。"""
+    out = {}
+    for d in deps:
+        owner = _STAGE_OF_OUT.get(d, {}).get("id", "")
+        out[d] = pj.stage_data(d, "" if owner in SERIES_STAGES else episode)
+    return out
+
+
+def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
+                  log: Callable = print, episode: str = "") -> dict:
+    from . import episodes as _eps
     tpl_name, deps, required = _LLM_SPEC[stage_id]
-    data = {d: pj.stage_data(d) for d in deps}
+    per_ep = is_per_episode(stage_id)
+
+    if per_ep:
+        avail = _eps.ids(pj)
+        if not episode:
+            if not avail:
+                raise RuntimeError("还没切集。请先跑环节1「整剧全局解析」——"
+                                   "它会判断这份剧本有几集、边界在哪。")
+            if len(avail) > 1:
+                raise RuntimeError(f"这个项目有 {len(avail)} 集，得指定跑哪一集"
+                                   f"（{avail[0]} … {avail[-1]}）。"
+                                   f"在「流程」页上方选集，或点「全部集依次跑」。")
+            episode = avail[0]
+        elif episode not in avail:
+            raise RuntimeError(f"没有 {episode} 这一集。当前项目里有：{'、'.join(avail) or '（还没切集）'}")
+    else:
+        episode = ""
+
+    data = _dep_data(pj, deps, episode)
     missing = [d for d, v in data.items() if v is None]
     if missing:
-        names = "、".join(f"环节{_STAGE_OF_OUT[m]['no']}「{_STAGE_OF_OUT[m]['name']}」"
-                          for m in missing if m in _STAGE_OF_OUT)
+        names = "、".join(
+            f"环节{_STAGE_OF_OUT[m]['no']}「{_STAGE_OF_OUT[m]['name']}」"
+            + ("" if _STAGE_OF_OUT[m]["id"] in SERIES_STAGES else f"（{episode} 这一集的）")
+            for m in missing if m in _STAGE_OF_OUT)
         raise RuntimeError(f"缺少前置产物，请先跑：{names or missing}")
 
     if stage_id == "s8":                       # s8 分段编译，天然可续跑
-        return run_s8_incremental(pj, llm, params, data, log)
+        return run_s8_incremental(pj, llm, params, data, log, episode)
 
     g = data.get("s1_global") or {}
     tone = (g.get("visual_tone") or {})
+    # 逐集环节只送本集正文。整部 40 集全文送进去，模型会按整部去切段，
+    # 而且每个环节都重发一遍全文，token 白烧。
+    script = _eps.script_of(pj, episode) if per_ep else params.get("script", "")
+
+    # 环节5 只给「还没写过提示词的资产」。资产提示词全剧共用一份文件，
+    # 不过滤的话 40 集会把同一个角色的提示词重写 40 遍：白花钱，还可能越写越飘。
+    if stage_id == "s5":
+        a4 = dict(data.get("s4_assets") or {})
+        todo, skipped = [], []
+        for a in a4.get("assets", []):
+            aid = a.get("asset_id", "")
+            f = pj.p("03_提示词", "资产生产提示词", f"{aid}_PROMPT.txt")
+            (skipped if os.path.isfile(f) else todo).append(aid)
+        a4["assets"] = [a for a in a4.get("assets", []) if a.get("asset_id") in set(todo)]
+        data["s4_assets"] = a4
+        if skipped:
+            log(f"{episode} 有 {len(skipped)} 个资产前面几集已经写过提示词，跳过："
+                f"{'、'.join(skipped[:8])}{'…' if len(skipped) > 8 else ''}")
+        if not a4["assets"]:
+            log(f"{episode} 没有新资产要写提示词，直接跳过（不调模型、不花钱）")
+            prev = pj.stage_data("s5_asset_prompts", episode) or {"asset_prompts": []}
+            pj.save_stage("s5_asset_prompts", prev, episode)
+            build_tasks(pj, params)
+            diagnose.clear(pj.root, "stage:s5", episode)
+            return prev
     mapping = {
-        "PARAMS": jd(params),
-        "SCRIPT": params.get("script", ""),
+        "PARAMS": jd(dict(params, episode=episode or params.get("episode", ""))),
+        "SCRIPT": script,
+        "EPISODE": episode or params.get("episode", "EP01"),
         "DURATION": params.get("duration", 15),
         "EPISODE_MINUTES": params.get("episode_minutes", 3),
         "IMAGE_SIZE": params.get("image_size", "1024x1536"),
@@ -107,24 +195,44 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict, log: Calla
         "ASSETS": jd(data.get("s4_assets", {})),
         "BINDINGS": jd(data.get("s6_binding", {})),
         "SHOTS": jd(data.get("s7_shots", {})),
+        "KNOWN_ASSETS": jd(known_assets(pj, episode) if stage_id == "s4" else []),
     }
     system = load_prompt("_common")
     user = render(load_prompt(tpl_name), mapping)
-    log(f"提示词 {len(user)} 字，调用 {llm.model}")
+    tag = f"{episode} " if episode else "全剧 "
+    log(f"{tag}提示词 {len(user)} 字，调用 {llm.model}")
     out = llm.json_call(system, user, required=required, log=log)
-    pj.save_stage(_LLM_SPEC[stage_id][0], out)
+    pj.save_stage(tpl_name, out, episode)
+
+    if stage_id == "s1":
+        # 环节1 一跑完立刻切集：边界由它判断，切割由代码按锚点做
+        res = _eps.build(pj, params.get("script", ""), out)
+        eps = res.get("episodes", [])
+        log(f"识别出 {len(eps)} 集"
+            + (f"（前 {res['preamble_chars']} 字是推介/说明，已排除在正文外）"
+               if res.get("preamble_chars") else ""))
+        for e in eps[:60]:
+            log(f"  {e['episode']}  {e['chars']:>6} 字  {e.get('title', '')[:34]}")
+        for it in res.get("issues", []):
+            log(f"  ⚠️ {it['episode']}：{it['reason']}")
 
     # s5 额外把提示词正文落成 txt，便于人工查看与执行器读取
     if stage_id == "s5":
         for ap in out.get("asset_prompts", []):
             write_text(pj.p("03_提示词", "资产生产提示词", ap.get("filename") or f"{ap['asset_id']}_PROMPT.txt"),
                        ap.get("prompt", ""))
-    diagnose.clear(pj.root, f"stage:{stage_id}")
+    if stage_id in ("s5", "s8"):
+        build_tasks(pj, params)
+    diagnose.clear(pj.root, f"stage:{stage_id}", episode)
     return out
 
 
-def s8_done_segments(pj: Project) -> set:
-    """已经编好两份提示词的段落（磁盘为准，重启也认）。"""
+def s8_done_segments(pj: Project, episode: str = "") -> set:
+    """已经编好两份提示词的段落（磁盘为准，重启也认）。
+
+    段落 id 自带 EPxx 前缀（EP01-SEG03），所以提示词目录不用按集分子目录，
+    传 episode 就按前缀过滤出本集的。
+    """
     done = set()
     sb_dir, vd_dir = pj.p("03_提示词", "故事板提示词"), pj.p("03_提示词", "视频提示词")
     if not os.path.isdir(sb_dir):
@@ -132,13 +240,15 @@ def s8_done_segments(pj: Project) -> set:
     for f in os.listdir(sb_dir):
         if f.endswith("_STORYBOARD_PROMPT.txt"):
             sid = f[: -len("_STORYBOARD_PROMPT.txt")]
+            if episode and not sid.startswith(f"{episode}-"):
+                continue
             if os.path.isfile(os.path.join(vd_dir, f"{sid}_VIDEO_PROMPT.txt")):
                 done.add(sid)
     return done
 
 
 def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
-                       log: Callable = print) -> dict:
+                       log: Callable = print, episode: str = "") -> dict:
     """环节8 逐段编译：一段一次 LLM 调用。
 
     整集一次调用的问题：17 段 × 2 份提示词输出太长，中途失败整批白跑。
@@ -154,14 +264,14 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
     assets = (data.get("s4_assets") or {}).get("assets", [])
 
-    prev = pj.stage_data("s8_compile") or {"compiled": []}
+    prev = pj.stage_data("s8_compile", episode) or {"compiled": []}
     by_id = {c["id"]: c for c in prev.get("compiled", [])}
-    done = s8_done_segments(pj)
+    done = s8_done_segments(pj, episode)
 
     system = load_prompt("_common")
     tpl = load_prompt("s8_compile")
     todo = [s for s in segs if s["id"] not in done]
-    log(f"共 {len(segs)} 段，已完成 {len(done)} 段，本次编译 {len(todo)} 段")
+    log(f"{episode or '本集'} 共 {len(segs)} 段，已完成 {len(done)} 段，本次编译 {len(todo)} 段")
 
     failed = []
     for i, seg in enumerate(todo, 1):
@@ -194,7 +304,9 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
             write_text(pj.p("03_提示词", "视频提示词", f"{sid}_VIDEO_PROMPT.txt"),
                        c.get("video_prompt", ""))
             # 每段都存盘：中途中断也不丢已完成的
-            pj.save_stage("s8_compile", {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]})
+            pj.save_stage("s8_compile",
+                          {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]},
+                          episode)
             diagnose.clear(pj.root, "stage:s8", sid)
         except Exception as exc:                            # noqa: BLE001
             d = diagnose.build(exc, stage="stage:s8", target=sid, model=llm.model)
@@ -203,14 +315,14 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
             log(f"    {diagnose.one_line(d)}")
 
     result = {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]}
-    pj.save_stage("s8_compile", result)
+    pj.save_stage("s8_compile", result, episode)
     build_tasks(pj, params)
 
     if failed:
-        raise RuntimeError(f"{len(failed)} 段编译失败：{'、'.join(failed[:8])}"
+        raise RuntimeError(f"{episode or '本集'} 有 {len(failed)} 段编译失败：{'、'.join(failed[:8])}"
                            f"{'…' if len(failed) > 8 else ''}。"
                            f"已完成的 {len(result['compiled'])} 段已保存，重跑环节8只会补失败的这些段。")
-    log(f"全部 {len(result['compiled'])} 段编译完成，tasks.json 已装配")
+    log(f"{episode or '本集'} 全部 {len(result['compiled'])} 段编译完成，tasks.json 已装配")
     return result
 
 
@@ -228,14 +340,33 @@ def asset_output_rel(asset: dict) -> str:
 
 
 def build_tasks(pj: Project, params: dict) -> dict:
-    """把 s4/s5/s6/s8 的产物装配成 tasks.json（执行器消费的机器可读清单）。"""
+    """把 s4/s5/s6/s8 的产物装配成 tasks.json（执行器消费的机器可读清单）。
+
+    一个项目可能有 40 集，所以要把所有集的产物合起来装配：
+      · 资产任务按 asset_id 去重 —— 同一个角色跨集只出一张图，
+        这既是省钱，更是跨集人脸一致的前提（输出路径不含集号，天生同一个文件）
+      · 故事板/视频任务按段落 id（自带 EPxx 前缀）天然不冲突
+    """
+    from . import episodes as _eps
     code = params.get("project_code", "PROJ-001")
-    ep = params.get("episode", "EP01")
-    assets = (pj.stage_data("s4_assets") or {}).get("assets", [])
-    aprompts = {a["asset_id"]: a for a in (pj.stage_data("s5_asset_prompts") or {}).get("asset_prompts", [])}
-    bindings = {b["id"]: b for b in (pj.stage_data("s6_binding") or {}).get("bindings", [])}
-    compiled = (pj.stage_data("s8_compile") or {}).get("compiled", [])
-    amap = {a["asset_id"]: a for a in assets}
+    eps = _eps.ids(pj) or [params.get("episode", "EP01")]
+
+    # ---- 资产：跨集合并去重 -------------------------------------------
+    assets, amap, aprompts = [], {}, {}
+    for ep in eps:
+        for a in (pj.stage_data("s4_assets", ep) or {}).get("assets", []):
+            aid = a.get("asset_id")
+            if aid and aid not in amap:          # 先出现的定义优先，后面的不覆盖
+                amap[aid] = a
+                assets.append(a)
+        for ap in (pj.stage_data("s5_asset_prompts", ep) or {}).get("asset_prompts", []):
+            aprompts.setdefault(ap["asset_id"], ap)
+    # 兼容老的单集项目：产物直接躺在项目根下，没有集子目录
+    if not assets:
+        assets = (pj.stage_data("s4_assets") or {}).get("assets", [])
+        amap = {a["asset_id"]: a for a in assets}
+        aprompts = {a["asset_id"]: a
+                    for a in (pj.stage_data("s5_asset_prompts") or {}).get("asset_prompts", [])}
 
     asset_tasks = []
     for a in assets:
@@ -253,37 +384,44 @@ def build_tasks(pj: Project, params: dict) -> dict:
             "output": asset_output_rel(a),
         })
 
+    # ---- 故事板 / 视频：逐集展开 ---------------------------------------
     sb_tasks, vd_tasks = [], []
-    for c in compiled:
-        sid = c["id"]
-        seg = sid.split("-")[-1]
-        b = bindings.get(sid, {})
-        refs = c.get("reference_order") or b.get("reference_images") or []
-        sb_out = f"04_故事板/{code}_{ep}_{seg}_STORYBOARD_V01_FIXED.png"
-        sb_tasks.append({
-            "key": sid,
-            "prompt_ref": f"03_提示词/故事板提示词/{sid}_STORYBOARD_PROMPT.txt",
-            "reference_images": [
-                {"image_n": r.get("image_n", i + 1), "asset_id": r.get("asset_id", ""),
-                 "file_ref": asset_output_rel(amap[r["asset_id"]]) if r.get("asset_id") in amap else ""}
-                for i, r in enumerate(refs)
-            ],
-            "params": {"size": params.get("image_size", "1024x1536"),
-                       "frames": params.get("frames", 4)},
-            "output": sb_out,
-        })
-        aux = c.get("aux_reference_asset_id") or ""
-        vd_tasks.append({
-            "key": sid,
-            "prompt_ref": f"03_提示词/视频提示词/{sid}_VIDEO_PROMPT.txt",
-            "storyboard_ref": sb_out,
-            "aux_reference": asset_output_rel(amap[aux]) if aux in amap else None,
-            "params": {"duration": params.get("duration", 15),
-                       "ratio": params.get("ratio", "9:16")},
-            "output": f"05_分段视频/{code}_{ep}_{seg}_VIDEO_V01_FIXED.mp4",
-        })
+    for ep in eps:
+        bindings = {b["id"]: b for b in (pj.stage_data("s6_binding", ep) or {}).get("bindings", [])}
+        compiled = (pj.stage_data("s8_compile", ep) or {}).get("compiled", [])
+        if not compiled and len(eps) == 1:       # 老单集项目
+            bindings = {b["id"]: b for b in (pj.stage_data("s6_binding") or {}).get("bindings", [])}
+            compiled = (pj.stage_data("s8_compile") or {}).get("compiled", [])
+        for c in compiled:
+            sid = c["id"]
+            seg = sid.split("-")[-1]
+            b = bindings.get(sid, {})
+            refs = c.get("reference_order") or b.get("reference_images") or []
+            sb_out = f"04_故事板/{code}_{ep}_{seg}_STORYBOARD_V01_FIXED.png"
+            sb_tasks.append({
+                "key": sid, "episode": ep,
+                "prompt_ref": f"03_提示词/故事板提示词/{sid}_STORYBOARD_PROMPT.txt",
+                "reference_images": [
+                    {"image_n": r.get("image_n", i + 1), "asset_id": r.get("asset_id", ""),
+                     "file_ref": asset_output_rel(amap[r["asset_id"]]) if r.get("asset_id") in amap else ""}
+                    for i, r in enumerate(refs)
+                ],
+                "params": {"size": params.get("image_size", "1024x1536"),
+                           "frames": params.get("frames", 4)},
+                "output": sb_out,
+            })
+            aux = c.get("aux_reference_asset_id") or ""
+            vd_tasks.append({
+                "key": sid, "episode": ep,
+                "prompt_ref": f"03_提示词/视频提示词/{sid}_VIDEO_PROMPT.txt",
+                "storyboard_ref": sb_out,
+                "aux_reference": asset_output_rel(amap[aux]) if aux in amap else None,
+                "params": {"duration": params.get("duration", 15),
+                           "ratio": params.get("ratio", "9:16")},
+                "output": f"05_分段视频/{code}_{ep}_{seg}_VIDEO_V01_FIXED.mp4",
+            })
 
-    tasks = {"project_code": code, "episode": ep,
+    tasks = {"project_code": code, "episodes": eps, "episode": eps[0],
              "asset_tasks": asset_tasks, "storyboard_tasks": sb_tasks, "video_tasks": vd_tasks}
     pj.save_tasks(tasks)
     return tasks
@@ -397,10 +535,18 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
 
 # ====================================================================== 环节 11 / 12
 
-def build_review_checklist(pj: Project) -> dict:
-    """环节11：产出人工复核清单。程序不判定内容质量，只把该看的点摆出来。"""
-    segs = (pj.stage_data("s2_segments") or {}).get("segments", [])
-    states = {s["id"]: s for s in (pj.stage_data("s3_states") or {}).get("segment_states", [])}
+def build_review_checklist(pj: Project, episode: str = "") -> dict:
+    """环节11：产出人工复核清单。程序不判定内容质量，只把该看的点摆出来。
+
+    不传 episode 就把全剧所有集的段落都列进来。
+    """
+    from . import episodes as _eps
+    eps = [episode] if episode else (_eps.ids(pj) or [""])
+    segs, states = [], {}
+    for ep in eps:
+        segs += (pj.stage_data("s2_segments", ep) or {}).get("segments", [])
+        states.update({s["id"]: s
+                       for s in (pj.stage_data("s3_states", ep) or {}).get("segment_states", [])})
     videos = {v.get("id"): v for v in pj.registry("video")}
     rows = []
     for s in segs:
@@ -424,7 +570,7 @@ def build_review_checklist(pj: Project) -> dict:
             "verdict": "",           # 人工填：pass / L1 / L2 / L3
             "note": "",
         })
-    out = {"episode": (pj.stage_data("s2_segments") or {}).get("episode", ""),
+    out = {"episodes": eps,
            "levels": {
                "L1 可接受偏差": "背景人物少量变化、非核心褶皱、特效形态、轻微机位偏移 → 直接固定",
                "L2 可定向修订": "节奏过慢、动作方向错、道具短暂消失、局部口型、短暂变脸 → 视频提示词V02，只改出错时间区间",
@@ -434,29 +580,49 @@ def build_review_checklist(pj: Project) -> dict:
     return out
 
 
-def health(pj: Project) -> dict:
+def health(pj: Project, episode: str = "") -> dict:
     """项目体检：每个环节做到哪、卡在哪、下一步该干什么。
 
     完全以磁盘为准 —— 重启服务、换电脑都能算出同样的结果。
+
+    episode 给了就只看这一集；不给则看全剧：逐集环节的 total/done 是所有集的合计，
+    这样 40 集的项目一眼能看出「环节2 做了 12/40 集」。
     """
+    from . import episodes as _eps
+    eps = _eps.ids(pj)
+    scope_eps = [episode] if episode else (eps or [""])
     steps = []
     tasks = pj.tasks()
-    seg_total = len((pj.stage_data("s2_segments") or {}).get("segments", []))
+
+    def seg_count(ep):
+        return len((pj.stage_data("s2_segments", ep) or {}).get("segments", []))
 
     for st in STAGES:
         item = {"id": st["id"], "no": st["no"], "name": st["name"], "kind": st["kind"],
-                "done": 0, "total": 0, "state": "pending", "action": ""}
+                "out": st.get("out", ""),
+                "done": 0, "total": 0, "state": "pending", "action": "",
+                "per_episode": st["kind"] == "llm" and is_per_episode(st["id"])}
         if st["kind"] == "llm":
-            if st["id"] == "s8":
-                item["total"] = seg_total
-                item["done"] = len(s8_done_segments(pj))
-            else:
+            if st["id"] in SERIES_STAGES:               # 全剧只跑一次
                 ok = pj.stage_data(st["out"]) is not None
                 item["total"], item["done"] = 1, (1 if ok else 0)
+                if ok and eps:
+                    item["note"] = f"识别出 {len(eps)} 集"
+            elif st["id"] == "s8":                      # 按段算，跨集累加
+                for ep in scope_eps:
+                    item["total"] += seg_count(ep)
+                    item["done"] += len(s8_done_segments(pj, ep))
+                item["unit"] = "段"
+            else:                                       # 按集算
+                item["total"] = len(scope_eps)
+                item["done"] = sum(1 for ep in scope_eps
+                                   if pj.stage_data(st["out"], ep) is not None)
+                item["unit"] = "集"
             item["action"] = "流程页 → 执行"
         elif st["kind"] in ("image", "video"):
             key = {"s5b": "asset_tasks", "s9": "storyboard_tasks", "s10": "video_tasks"}[st["id"]]
-            items = tasks.get(key, [])
+            items = [t for t in tasks.get(key, [])
+                     if not episode or t.get("episode", episode) == episode]
             item["total"] = len(items)
             item["done"] = sum(1 for t in items
                                if os.path.isfile(pj.p(*t["output"].split("/"))))
@@ -467,12 +633,16 @@ def health(pj: Project) -> dict:
                 item["done"] = 1 if pj.stage_data("s11_review") else 0
                 item["action"] = "产物页 → 生成人工复核清单"
             else:
+                # 一集一个成片：40 集就要 40 个，不能出了一个就算做完
                 masters = []
                 d = pj.p("06_成片")
                 if os.path.isdir(d):
                     masters = [f for f in os.listdir(d) if f.lower().endswith(".mp4")]
-                item["total"] = 1
-                item["done"] = 1 if masters else 0
+                item["total"] = len(scope_eps)
+                item["done"] = sum(1 for ep in scope_eps
+                                   if any(f"_{ep}_MASTER" in m for m in masters)) \
+                    if eps else (1 if masters else 0)
+                item["unit"] = "集"
                 item["action"] = "产物页 → 硬切拼接成片"
 
         if item["total"] == 0:
@@ -494,9 +664,16 @@ def health(pj: Project) -> dict:
     # 不能把下一步顶掉——否则用户处理完报错，又不知道接着干嘛了。
     if nxt:
         remain = nxt["total"] - nxt["done"]
+        unit = nxt.get("unit", "")
         nxt_tip = (f"下一步：环节{nxt['no']}「{nxt['name']}」"
-                   + (f"（还差 {remain}/{nxt['total']}）" if nxt["total"] > 1 else "")
+                   + (f"（还差 {remain}/{nxt['total']}{unit}）" if nxt["total"] > 1 else "")
                    + f" —— {nxt['action']}")
+        # 逐集环节要说清该跑哪一集，不然 40 集面前不知道从哪下手
+        if nxt.get("per_episode") and nxt.get("out") and len(scope_eps) > 1:
+            pend = [ep for ep in scope_eps if pj.stage_data(nxt["out"], ep) is None]
+            if pend:
+                nxt_tip += f"，先跑 {pend[0]}（还差 {len(pend)} 集：{'、'.join(pend[:6])}"
+                nxt_tip += "…）" if len(pend) > 6 else "）"
     else:
         nxt_tip = "所有环节都跑完了"
 
@@ -515,16 +692,38 @@ def find_ffmpeg() -> str:
     return probe.find_ffmpeg()          # 只保留一份查找逻辑，见 core/probe.py
 
 
-def assemble(pj: Project, params: dict, log: Callable = print) -> dict:
-    """环节12：按段号排序、硬切拼接、生成成片。"""
+def assemble(pj: Project, params: dict, log: Callable = print,
+             episode: str = "") -> dict:
+    """环节12：按段号排序、硬切拼接、生成成片。
+
+    一部剧有 40 集就出 40 个成片，绝不能把所有集拼成一个文件。
+    不指定 episode 时逐集拼接，返回 {"masters": [...]}。
+    """
+    from . import episodes as _eps
+    eps = _eps.ids(pj)
+    if not episode and len(eps) > 1:
+        outs, failed = [], []
+        for e in eps:
+            try:
+                outs.append(dict(assemble(pj, params, log, e), episode=e))
+            except RuntimeError as exc:
+                failed.append(f"{e}：{exc}")
+                log(f"{e} 跳过 —— {exc}")
+        if not outs:
+            raise RuntimeError("没有任何一集能拼接。" + ("；".join(failed[:4]) if failed else ""))
+        log(f"拼好 {len(outs)} 集" + (f"，{len(failed)} 集还不能拼" if failed else ""))
+        return {"masters": outs, "count": sum(o["count"] for o in outs),
+                "skipped": failed}
+
     code = params.get("project_code", "PROJ-001")
-    ep = params.get("episode", "EP01")
+    ep = episode or (eps[0] if eps else params.get("episode", "EP01"))
     vids = sorted(
-        (v for v in pj.registry("video") if v.get("file_ref")),
+        (v for v in pj.registry("video")
+         if v.get("file_ref") and (not episode or str(v.get("id", "")).startswith(f"{ep}-"))),
         key=lambda v: v.get("id", ""))
     exist = [v for v in vids if os.path.isfile(pj.p(*v["file_ref"].split("/")))]
     if not exist:
-        raise RuntimeError("没有可拼接的分段视频")
+        raise RuntimeError(f"{ep} 没有可拼接的分段视频")
     lines = ["file '" + os.path.relpath(pj.p(*v["file_ref"].split("/")),
                                         pj.p("06_成片")).replace("\\", "/") + "'" for v in exist]
     concat = pj.p("06_成片", f"{ep}_concat.txt")
@@ -548,6 +747,7 @@ def assemble(pj: Project, params: dict, log: Callable = print) -> dict:
         if r.returncode != 0:
             raise RuntimeError(f"ffmpeg 拼接失败: {r.stderr[:300]}")
     size = os.path.getsize(master)
-    pj.log_event({"stage": "assemble", "result": "ok", "count": len(exist), "size": size})
-    return {"concat": pj.rel(concat), "master": pj.rel(master),
+    pj.log_event({"stage": "assemble", "episode": ep, "result": "ok",
+                  "count": len(exist), "size": size})
+    return {"concat": pj.rel(concat), "master": pj.rel(master), "episode": ep,
             "count": len(exist), "size": size}
