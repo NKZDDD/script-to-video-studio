@@ -80,7 +80,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
   <h1>剧本 → AI视频 自动化生产台</h1>
   <span class="muted" id="projTag">未选择项目</span>
   <span class="sp"></span>
-  <div class="gauge" id="gauge" title="全局在途 API 调用 / 上限；多剧并行共享这个闸门">
+  <div class="gauge" id="gauge" title="此刻正在发给服务商的请求数 / 允许的上限。同时做几部剧也共用这一个上限。">
     <span class="dot" id="gDot"></span><span id="gText">并发 0/8 · 运行 0</span>
   </div>
   <nav>
@@ -222,13 +222,15 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <div class="row" style="margin-top:10px"><button class="btn" id="saveLlm">保存</button></div>
   </div>
   <div class="card">
-    <h2>并发闸门 <span class="tag">多剧并行时共享，防止把服务商打爆</span></h2>
+    <h2>同时最多跑几个 <span class="tag">同时做几部剧也共用这里的上限，免得把服务商发毛</span></h2>
     <div class="grid g3">
-      <div><label>全局在途上限</label><input id="limGlobal" type="number" min="1" max="64"></div>
+      <div><label>总上限（所有项目合计）</label><input id="limGlobal" type="number" min="1" max="64"></div>
       <div id="limProvBox" style="display:contents"></div>
     </div>
-    <p class="muted" style="margin:8px 0 0">批内并发（生产页每行的数字）只决定单批排多少；实际发请求前还要过
-      <b>服务商配额 → 全局总闸</b>。三个项目各设并发 5，全局上限 8 时，同时在途也只会有 8 个。</p>
+    <p class="muted" style="margin:8px 0 0">「生产」页每一行也有个并发数字，那个只管这一行自己排多少队。
+      真正发出去之前还要看两道关卡：<b>这家服务商的上限</b>，和<b>上面这个总上限</b>。
+      比如三个项目各填了 5，但总上限是 8，那么同一时刻发出去的最多还是 8 个。
+      被服务商拦（提示发得太快）的时候，就是把这里调小。</p>
     <div class="row" style="margin-top:10px"><button class="btn ghost sm" id="saveLimits">保存闸门</button></div>
   </div>
   <div class="card">
@@ -247,6 +249,9 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 <script>
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
+// 服务商返回的原始报错里什么都可能有，插进 innerHTML 前必须转义
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const api = {
   get: (p, q={}) => fetch(p + '?' + new URLSearchParams(q)).then(r => r.json()),
   post: (p, b={}) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'},
@@ -312,13 +317,13 @@ async function refreshProject() {
 }
 
 // ---------- 项目体检 / 续跑面板
-const STATE_LABEL = {done:'完成', partial:'部分完成', pending:'未开始', blocked:'待上游'};
+const STATE_LABEL = {done:'完成', partial:'做了一半', pending:'还没开始', blocked:'得先跑前面的'};
 async function renderHealth() {
   if (!PROJ) return;
   const h = await api.get('/api/diagnose', {root: PROJ});
   if (h.error) return;
 
-  $('#healthTip').className = 'alert ' + (h.failures.total ? 'err' : 'warn');
+  $('#healthTip').className = 'alert ' + (h.failures.errors ? 'err' : 'warn');
   $('#healthTip').innerHTML = `<b>${h.tip}</b>`;
 
   $('#healthSteps').innerHTML = h.steps.map(s => {
@@ -335,21 +340,28 @@ async function renderHealth() {
     </div>`;
   }).join('');
 
+  // 报错 = 没做出来，得处理；提醒 = 做出来了但可能不对，可以先放着
   const g = h.failures.groups || [];
   $('#healthFails').innerHTML = g.length ? `<h2 style="font-size:13px;margin:12px 0 8px">
-      未解决的失败 <span class="tag">修完对应项后，回相应页面点执行/开始即可续跑</span></h2>` +
-    g.map(x => `<div class="alert err" style="margin-bottom:8px">
-      <div style="margin-bottom:4px"><b>${x.title}</b>
-        <span class="pill">${x.code}</span>
-        <span class="muted">影响 ${x.targets.length} 项：${x.targets.slice(0,6).join('、')}${x.targets.length>6?'…':''}</span></div>
-      <div><b>改哪里：</b>${x.where}</div>
+      还没处理的问题 <span class="tag">照着做完，回对应页面点「开始」就接着跑，做好的不会重做</span></h2>` +
+    g.map(x => {
+      const warn = x.level === 'warn';
+      return `<div class="alert ${warn ? 'warn' : 'err'}" style="margin-bottom:8px">
+      <div style="margin-bottom:4px">${warn ? '⚠️' : '⛔'} <b>${x.title}</b>
+        <span class="muted">${warn ? '东西做出来了，但可能不对' : '这些没做出来'}：共 ${x.targets.length} 条
+          —— ${x.targets.slice(0,6).join('、')}${x.targets.length>6?' 等':''}</span></div>
+      ${x.why ? `<div><b>怎么回事：</b>${x.why}</div>` : ''}
+      <div><b>去哪改：</b>${x.where}</div>
       <div><b>怎么改：</b><ol style="margin:4px 0 4px 18px;padding:0">${
         x.fix.map(f => `<li>${f}</li>`).join('')}</ol></div>
-      <div><b>改完继续：</b>${x.resume}</div>
+      <div><b>改完怎么接着跑：</b>${x.resume}</div>
+      ${x.raw ? `<details style="margin-top:4px"><summary class="muted">原始报错（看不懂可以忽略，排查时用）</summary>
+        <pre style="white-space:pre-wrap;font-size:11px;margin:4px 0 0">${esc(x.raw)}</pre></details>` : ''}
       <div class="row" style="margin-top:6px">
-        <button class="btn ghost sm" data-clearfail="${x.code}">标记已处理</button>
+        <button class="btn ghost sm" data-clearfail="${x.code}">${
+          warn ? '知道了，不用管' : '这个我已经处理了'}</button>
       </div>
-    </div>`).join('') : '';
+    </div>`;}).join('') : '';
   $$('#healthFails [data-clearfail]').forEach(b => b.onclick = async () => {
     const grp = g.find(x => x.code === b.dataset.clearfail);
     for (const t of grp.targets) await api.post('/api/failures/clear', {project_root: PROJ, target: t});
@@ -488,16 +500,14 @@ async function tick() {
     const banner = dg
       ? `<div class="alert err">
            <div style="margin-bottom:4px">⛔ <b>${dg.title}</b>
-             <span class="pill">${dg.code}</span>
-             ${j.aborted ? '<span class="muted">已熔断，剩余任务未提交，没有浪费额度</span>' : ''}</div>
-           <div><b>为什么：</b>${dg.why}</div>
-           <div><b>改哪里：</b>${dg.where}</div>
+             ${j.aborted ? '<span class="muted">剩下的任务一个都没发出去，没有白花钱</span>' : ''}</div>
+           <div><b>怎么回事：</b>${dg.why}</div>
+           <div><b>去哪改：</b>${dg.where}</div>
            <div><b>怎么改：</b><ol style="margin:4px 0 4px 18px;padding:0">${
              dg.fix.map(f => `<li>${f}</li>`).join('')}</ol></div>
-           <div><b>改完继续：</b>${dg.resume}</div>
-           <details style="margin-top:4px"><summary class="muted">原始报错</summary>
-             <pre class="log" style="max-height:120px;margin-top:4px">${
-               (dg.raw||'').replace(/</g,'&lt;')}</pre></details>
+           <div><b>改完怎么接着跑：</b>${dg.resume}</div>
+           <details style="margin-top:4px"><summary class="muted">原始报错（看不懂可以忽略，排查时用）</summary>
+             <pre class="log" style="max-height:120px;margin-top:4px">${esc(dg.raw)}</pre></details>
          </div>`
       : (failed && !active
           ? `<div class="alert warn">⚠ ${failed} 个任务失败。点该行的「补失败」只重跑它们，

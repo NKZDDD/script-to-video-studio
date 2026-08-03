@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from typing import Any, Callable, Optional
 
-from . import diagnose
+from . import diagnose, probe
 from .llm import LLM
 from .providers import ImageTask, VideoTask, build as build_provider
 from .apiutil import resolve_ref
@@ -291,6 +291,32 @@ def build_tasks(pj: Project, params: dict) -> dict:
 
 # ====================================================================== 出图/出片 worker
 
+def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
+                provider_cfg: dict, model: str, media: str):
+    """出完东西量一下真实尺寸，比例不对就挂一条提醒。
+
+    这类问题接口不会报错——200、文件也正常下载，只是画面躺倒了。
+    不主动量，就得等人工验收才发现，那时候钱早花完了。
+    量不到（缺 ffprobe、格式不认识）就当没这回事，不能反过来卡住主流程。
+    """
+    try:
+        bad = probe.check(path, want, kind=media)
+    except Exception:                                  # noqa: BLE001
+        return None
+    if not bad:
+        return None
+    flip = ("你要的是竖屏，出来的是横屏。"
+            if bad["portrait_wanted"] and not bad["portrait_got"] else
+            "你要的是横屏，出来的是竖屏。"
+            if not bad["portrait_wanted"] and bad["portrait_got"] else "")
+    pj.log_event({"stage": stage, "id": key, "result": "ratio_mismatch", **bad})
+    return diagnose.warn(
+        "WRONG_RATIO",
+        f"要的是 {bad['want']}，实际出来 {bad['got']}（约 {bad['got_ratio']}）。{flip}",
+        stage=stage, target=key, provider=provider_cfg.get("provider", ""), model=model,
+        extra_fix=[f"这个文件在：{pj.rel(path)}"])
+
+
 def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
     """kind: asset | storyboard。返回 worker(task, log, cancel)。"""
     prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
@@ -302,8 +328,13 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
+        want = (task.get("params") or {}).get("size", "1024x1536")
         if os.path.isfile(out):
-            return {"skipped": True, "msg": "已存在，跳过（生成即固定）"}
+            # 跳过也要重新量一遍：不然「比例不对」的提醒会被这次跳过悄悄清掉，
+            # 而文件其实还是那个躺倒的文件。以磁盘上的东西为准。
+            return {"skipped": True, "msg": "已经有了，跳过（做出来的就不再动）",
+                    "warn": _ratio_warn(pj, out, want, kind, task["key"],
+                                        provider_cfg, model, "image")}
         prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
         refs = []
         for r in sorted(task.get("reference_images", []), key=lambda x: x.get("image_n", 0)):
@@ -312,13 +343,14 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
                 refs.append(resolve_ref(src, pj.root, max_side=ref_side))
         log(f"参考图×{len(refs)}")
         meta = prov.generate_image(
-            ImageTask(prompt=prompt, refs=refs, size=(task.get("params") or {}).get("size", "1024x1536"),
-                      model=model),
+            ImageTask(prompt=prompt, refs=refs, size=want, model=model),
             out, log=log, cancel=cancel, poll_interval=interval, poll_timeout=timeout)
         pj.upsert_registry(kind, {"id": task["key"], "file_ref": task["output"],
                                   "status": "generated", **meta})
         pj.log_event({"stage": kind, "id": task["key"], "result": "ok", **meta})
-        return {"output": task["output"]}
+        return {"output": task["output"],
+                "warn": _ratio_warn(pj, out, want, kind, task["key"],
+                                    provider_cfg, model, "image")}
 
     return worker
 
@@ -333,8 +365,13 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
+        p = task.get("params") or {}
+        want = p.get("ratio", "9:16")
         if os.path.isfile(out):
-            return {"skipped": True, "msg": "已存在，跳过"}
+            # 同上：跳过时也重新量，别把「比例不对」的提醒清没了
+            return {"skipped": True, "msg": "已经有了，跳过",
+                    "warn": _ratio_warn(pj, out, want, "video", task["key"],
+                                        provider_cfg, model, "video")}
         sb = task["storyboard_ref"]
         if not (sb.startswith("http") or os.path.isfile(pj.p(*sb.split("/")))):
             raise RuntimeError(f"固定故事板不存在，请先跑环节9: {sb}")
@@ -342,17 +379,18 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
         refs = [resolve_ref(sb, pj.root, max_side=ref_side)]
         if task.get("aux_reference"):
             refs.append(resolve_ref(task["aux_reference"], pj.root, max_side=ref_side))
-        p = task.get("params") or {}
-        log(f"model={model} {p.get('duration', 15)}s {p.get('ratio', '9:16')} 参考图×{len(refs)}")
+        log(f"model={model} {p.get('duration', 15)}s {want} 参考图×{len(refs)}")
         meta = prov.generate_video(
             VideoTask(prompt=prompt, refs=refs, duration=int(p.get("duration", 15)),
-                      ratio=p.get("ratio", "9:16"), model=model,
+                      ratio=want, model=model,
                       resolution=provider_cfg.get("resolution", "")),
             out, log=log, cancel=cancel, poll_interval=interval, poll_timeout=timeout)
         pj.upsert_registry("video", {"id": task["key"], "file_ref": task["output"],
                                      "storyboard_ref": sb, "status": "generated", **meta})
         pj.log_event({"stage": "video", "id": task["key"], "result": "ok", **meta})
-        return {"output": task["output"]}
+        return {"output": task["output"],
+                "warn": _ratio_warn(pj, out, want, "video", task["key"],
+                                    provider_cfg, model, "video")}
 
     return worker
 
@@ -452,30 +490,29 @@ def health(pj: Project) -> dict:
     if nxt is None:
         nxt = next((s for s in steps if s["state"] == "blocked"), None)
 
-    tip = ""
-    if fails["total"]:
-        tip = f"有 {fails['total']} 条未解决的失败，先按下方指引处理，再点对应环节继续"
-    elif nxt:
+    # 「下一步做什么」永远要说出来。报错只是插在前面提醒你先处理，
+    # 不能把下一步顶掉——否则用户处理完报错，又不知道接着干嘛了。
+    if nxt:
         remain = nxt["total"] - nxt["done"]
-        tip = (f"下一步：环节{nxt['no']}「{nxt['name']}」"
-               + (f"（还差 {remain}/{nxt['total']}）" if nxt["total"] > 1 else "")
-               + f" —— {nxt['action']}")
+        nxt_tip = (f"下一步：环节{nxt['no']}「{nxt['name']}」"
+                   + (f"（还差 {remain}/{nxt['total']}）" if nxt["total"] > 1 else "")
+                   + f" —— {nxt['action']}")
     else:
-        tip = "全部环节已完成"
+        nxt_tip = "所有环节都跑完了"
+
+    if fails.get("errors"):
+        tip = f"有 {fails['errors']} 条没做出来。先照下面的说明处理，再点「开始」补上。{nxt_tip}"
+    elif fails.get("warns"):
+        tip = f"{nxt_tip}（另外有 {fails['warns']} 条做出来了但可能不对，看下面，不着急处理也行）"
+    else:
+        tip = nxt_tip
 
     return {"steps": steps, "failures": fails, "next": nxt, "tip": tip,
             "resumable": True}
 
 
 def find_ffmpeg() -> str:
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
-    try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return ""
+    return probe.find_ffmpeg()          # 只保留一份查找逻辑，见 core/probe.py
 
 
 def assemble(pj: Project, params: dict, log: Callable = print) -> dict:

@@ -119,7 +119,7 @@ class Job:
         self.finished_at: Optional[float] = None
         self.status = "running"
         self.cancelled = False
-        self.aborted = False              # 熔断（账户级错误）
+        self.aborted = False              # 遇到账户级问题，主动停掉整批
         self.abort_reason = ""
         self.abort_diag: Optional[dict] = None
         self.items: dict = {}
@@ -127,7 +127,11 @@ class Job:
         self._lock = threading.RLock()
 
     def abort_with(self, diag: dict) -> None:
-        """账户级错误熔断：停掉本批剩余任务，并把诊断挂到 job 上。"""
+        """碰到余额、密钥这类整批都过不去的问题：立刻停掉剩下的任务。
+
+        不这么做的话，10 个任务会挨个撞同一堵墙、报 10 遍一样的错，
+        有些服务商失败也照样计费。停在第一个，剩下的一个都不发。
+        """
         with self._lock:
             if self.aborted:
                 return
@@ -135,7 +139,7 @@ class Job:
             self.cancelled = True
             self.abort_diag = diag
             self.abort_reason = f"{diag['title']}：{diag['raw'][:200]}"
-        self.log("熔断", f"{diag['title']} —— 已停止本批剩余任务，未浪费额度")
+        self.log("已停止", f"{diag['title']} —— 剩下的任务一个都没发出去，没有白花钱")
 
     def set_item(self, key: str, **kw) -> None:
         with self._lock:
@@ -233,7 +237,7 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
         key = key_of(task)
         if job.cancelled:
             job.set_item(key, state="aborted" if job.aborted else "cancelled",
-                         msg="熔断，未提交" if job.aborted else "已取消")
+                         msg="前面出错停了，这条还没开始" if job.aborted else "已取消")
             return
         job.set_item(key, state="queued")
 
@@ -251,17 +255,22 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                     return
                 try:
                     if attempt:
-                        log(f"技术重试 {attempt}/{max_retry}")
+                        log(f"第 {attempt} 次重试（最多 {max_retry} 次）")
                         job.set_item(key, attempts=attempt)
-                    result = worker(task, log, lambda: job.cancelled)
+                    result = worker(task, log, lambda: job.cancelled) or {}
+                    warn = result.get("warn") if isinstance(result, dict) else None
                     if isinstance(result, dict) and result.get("skipped"):
                         job.set_item(key, state="skipped", msg=result.get("msg", "已存在，跳过"))
                     else:
-                        job.set_item(key, state="ok",
-                                     output=(result or {}).get("output", ""),
-                                     msg=(result or {}).get("msg", ""))
-                        log("完成")
-                    diagnose.clear(job.project_root, job.kind, key)   # 成功即销账
+                        job.set_item(key, state="ok", output=result.get("output", ""),
+                                     msg=result.get("msg", "") or (warn or {}).get("title", ""))
+                        log("完成" if not warn else f"完成，但要注意：{warn['title']}")
+                    # 先销账再记提醒：这一条这次是做成了，上一次的失败记录该清掉；
+                    # 但如果做出来的东西有毛病（比如比例不对），得留一条提醒。
+                    diagnose.clear(job.project_root, job.kind, key)
+                    if warn:
+                        job.set_item(key, warn=True, diag=warn)
+                        diagnose.record(job.project_root, warn)
                     return
                 except Exception as exc:               # noqa: BLE001
                     kind = getattr(exc, "kind", RETRYABLE)
@@ -273,17 +282,18 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                                      kind=kind, diag=diag)
                         diagnose.record(job.project_root, diag)
 
-                    if kind == BATCH_FATAL:            # 余额/密钥 → 熔断整批
+                    if kind == BATCH_FATAL:            # 余额/密钥：整批都过不去，立刻停
                         log(diagnose.one_line(diag))
                         fail()
                         job.abort_with(diag)
                         return
-                    if kind == TASK_FATAL:             # 本任务的问题 → 不重试，继续别的
-                        log(diagnose.one_line(diag) + "（不重试）")
+                    if kind == TASK_FATAL:             # 只是这一条的问题，别的接着跑
+                        log(diagnose.one_line(diag) + "（这条不再重试）")
                         fail()
                         return
 
-                    log(f"失败: {diag['raw'][:160]}")    # 可重试
+                    # 这类错误多半是临时的（网络抖动、服务商忙），等下再试一次
+                    log(f"这次没成功: {diag['raw'][:160]}")
                     if attempt >= max_retry:
                         fail()
 
