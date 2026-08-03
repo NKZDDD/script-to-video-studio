@@ -11,8 +11,8 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from core import stages as S
-from core.executor import JobManager, run_batch
+from core import docparse, stages as S
+from core.executor import GATE, JobManager, run_batch
 from core.llm import LLM
 from core.providers import build as build_provider, list_capabilities
 from core.store import Project, list_projects, read_json, write_json
@@ -36,6 +36,10 @@ def load_config() -> dict:
         "frames_min": 4, "frames_max": 6, "episode_minutes": 3,
         "concurrency": 3, "max_retry": 2,
     })
+    # 多剧并行的并发闸门：全局总上限 + 按服务商配额
+    cfg.setdefault("limits", {"global": 8, "per_provider": {"lingganya": 4, "paisio": 6}})
+    GATE.configure(cfg["limits"].get("global", 8),
+                   cfg["limits"].get("per_provider", {}))
     return cfg
 
 
@@ -117,8 +121,14 @@ def api_get(path: str, q: dict) -> dict:
         return {"data": pj.stage_data(q["name"][0])}
 
     if path == "/api/job":
-        job = JOBS.get(q["id"][0]) if q.get("id") else JOBS.latest()
+        job = JOBS.get(q["id"][0]) if q.get("id") else None
         return job.snapshot() if job else {"status": "none"}
+
+    if path == "/api/jobs":
+        return {"jobs": JOBS.list(project_root=q.get("root", [""])[0],
+                                  active_only=q.get("active", ["0"])[0] == "1"),
+                "active": JOBS.active_count(),
+                "gate": GATE.snapshot()}
 
     if path == "/api/models":
         pid = q["provider"][0]
@@ -159,6 +169,18 @@ def api_post(path: str, body: dict) -> dict:
         save_config(cur)
         return {"ok": True}
 
+    if path == "/api/script/parse":
+        """上传剧本文件（base64）→ 解析为纯文本。支持 txt/md/docx/pdf。"""
+        import base64
+        name = body.get("filename", "")
+        raw = base64.b64decode(body.get("content_b64", ""))
+        if len(raw) > 40 * 1024 * 1024:
+            raise ValueError("文件超过 40MB")
+        text = docparse.parse_bytes(name, raw)
+        if not text.strip():
+            raise ValueError("解析结果为空（PDF 可能是扫描件，需要 OCR）")
+        return {"ok": True, "filename": name, "text": text, **docparse.stats(text)}
+
     if path == "/api/project/create":
         base = cfg["projects_dir"]
         name = body["name"].strip()
@@ -168,12 +190,20 @@ def api_post(path: str, body: dict) -> dict:
         meta = {"title": body.get("title") or name,
                 "project_code": body.get("project_code", "PROJ-001"),
                 "episode": body.get("episode", "EP01"),
-                "params": body.get("params", {})}
+                "params": body.get("params", {}),
+                "source_file": body.get("source_file", "")}
         pj.save_meta(meta)
         if body.get("script"):
             from core.store import write_text
             write_text(pj.p("01_剧本与分段", "原始剧本.txt"), body["script"])
         return {"ok": True, "root": root}
+
+    if path == "/api/project/script":
+        """给已存在的项目更新剧本正文。"""
+        pj = proj_of(body)
+        from core.store import write_text
+        write_text(pj.p("01_剧本与分段", "原始剧本.txt"), body.get("script", ""))
+        return {"ok": True, **docparse.stats(body.get("script", ""))}
 
     if path == "/api/project/params":
         pj = proj_of(body)
@@ -195,7 +225,9 @@ def api_post(path: str, body: dict) -> dict:
             from core.store import read_text
             params["script"] = read_text(script_path)
 
-        job = JOBS.create(f"stage:{stage_id}", 1, 1)
+        job = JOBS.create(f"stage:{stage_id}", 1, 1,
+                          project_root=pj.root, project_name=os.path.basename(pj.root),
+                          provider="llm")
 
         def go():
             key = stage_id
@@ -243,11 +275,14 @@ def api_post(path: str, body: dict) -> dict:
 
         worker = (S.make_video_worker(pj, pcfg) if kind == "video"
                   else S.make_image_worker(pj, pcfg, kind))
-        job = JOBS.create(kind, len(items), conc)
+        job = JOBS.create(kind, len(items), conc,
+                          project_root=pj.root, project_name=os.path.basename(pj.root),
+                          provider=pcfg["provider"])
         threading.Thread(
             target=run_batch,
             args=(job, items, worker),
-            kwargs={"key_of": lambda t: t["key"], "max_retry": retry},
+            kwargs={"key_of": lambda t: t["key"], "max_retry": retry,
+                    "provider": pcfg["provider"]},
             daemon=True).start()
         return {"ok": True, "job_id": job.id, "total": len(items)}
 

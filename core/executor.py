@@ -1,20 +1,96 @@
 # -*- coding: utf-8 -*-
-"""多线程任务执行器。
+"""多线程任务执行器 + 三层并发闸门。
 
 纪律（与 skill 一致）：
   · 输出已存在 → 跳过不覆盖（生成即固定）
-  · 技术失败同参重试 ≤ N
+  · 技术失败同参重试 ≤ N（重试在同一 worker 内串行，不额外占槽）
   · 内容质量不判断，只记录
-可配置并发度；视频/图片本质都是 API 调用，天然适合并行。
+
+并发三层（多剧并行时防止把服务商打爆）：
+  1. 批内并发    ThreadPoolExecutor(max_workers=job.concurrency)
+  2. 服务商配额  每个 provider 一个信号量（跨项目、跨 job 共享）
+  3. 全局总闸    所有在途 API 调用的总上限
+真正发请求前依次获取 [服务商配额 → 全局总闸]，拿不到就排队等待。
 """
 
 from __future__ import annotations
 
 import threading
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Callable, Optional
+
+
+class Gate:
+    """全局 + 按服务商的并发闸门。可热更新上限。"""
+
+    def __init__(self, global_limit: int = 8, per_provider: Optional[dict] = None):
+        self._lock = threading.RLock()
+        self._global_limit = max(1, global_limit)
+        self._global = threading.BoundedSemaphore(self._global_limit)
+        self._per_conf = dict(per_provider or {})
+        self._sems: dict = {}
+        self._inflight: dict = {}
+        self._inflight_total = 0
+
+    def configure(self, global_limit: int, per_provider: dict) -> None:
+        """上限变化时重建信号量；在途任务不受影响，新任务按新上限。"""
+        with self._lock:
+            gl = max(1, int(global_limit or 1))
+            if gl != self._global_limit:
+                self._global_limit = gl
+                self._global = threading.BoundedSemaphore(gl)
+            new_conf = {k: int(v) for k, v in (per_provider or {}).items() if v}
+            for k, v in list(self._sems.items()):
+                if new_conf.get(k) != getattr(v, "limit", None):
+                    self._sems.pop(k, None)
+            self._per_conf = new_conf
+
+    def _sem_for(self, provider: str):
+        limit = self._per_conf.get(provider)
+        if not limit:
+            return None
+        with self._lock:
+            sem = self._sems.get(provider)
+            if sem is None:
+                sem = threading.BoundedSemaphore(max(1, int(limit)))
+                sem.limit = int(limit)               # type: ignore[attr-defined]
+                self._sems[provider] = sem
+            return sem
+
+    @contextmanager
+    def slot(self, provider: str):
+        sem = self._sem_for(provider)
+        if sem:
+            sem.acquire()
+        self._global.acquire()
+        with self._lock:
+            self._inflight[provider] = self._inflight.get(provider, 0) + 1
+            self._inflight_total += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._inflight[provider] = max(0, self._inflight.get(provider, 1) - 1)
+                self._inflight_total = max(0, self._inflight_total - 1)
+            self._global.release()
+            if sem:
+                sem.release()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"global_limit": self._global_limit,
+                    "global_inflight": self._inflight_total,
+                    "per_provider_limit": dict(self._per_conf),
+                    "per_provider_inflight": {k: v for k, v in self._inflight.items() if v}}
+
+
+GATE = Gate()
+
+
+def _is_final(job: "Job") -> bool:
+    return job.status in ("done", "error", "cancelled")
 
 
 class Job:
@@ -23,22 +99,25 @@ class Job:
     _seq = 0
     _seq_lock = threading.Lock()
 
-    def __init__(self, kind: str, total: int, concurrency: int):
+    def __init__(self, kind: str, total: int, concurrency: int,
+                 project_root: str = "", project_name: str = "", provider: str = ""):
         with Job._seq_lock:
             Job._seq += 1
             self.id = f"job{Job._seq}_{int(time.time())}"
         self.kind = kind
         self.total = total
         self.concurrency = concurrency
+        self.project_root = project_root
+        self.project_name = project_name
+        self.provider = provider
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
-        self.status = "running"          # running | done | cancelled | error
+        self.status = "running"
         self.cancelled = False
-        self.items: dict = {}            # task_key -> {state, msg, output, attempts}
-        self.logs: list = []             # 最近日志
+        self.items: dict = {}
+        self.logs: list = []
         self._lock = threading.RLock()
 
-    # -- 状态更新 -------------------------------------------------------
     def set_item(self, key: str, **kw) -> None:
         with self._lock:
             cur = self.items.setdefault(key, {"state": "pending", "msg": "", "attempts": 0})
@@ -58,19 +137,22 @@ class Job:
                 c[it["state"]] = c.get(it["state"], 0) + 1
             return c
 
+    def brief(self) -> dict:
+        """列表用的轻量快照（不含 items/logs）。"""
+        c = self.counts()
+        finished = c.get("ok", 0) + c.get("skipped", 0) + c.get("failed", 0) + c.get("cancelled", 0)
+        return {"id": self.id, "kind": self.kind, "status": self.status,
+                "total": self.total, "finished": finished, "counts": c,
+                "concurrency": self.concurrency, "provider": self.provider,
+                "project_root": self.project_root, "project_name": self.project_name,
+                "elapsed": int((self.finished_at or time.time()) - self.started_at)}
+
     def snapshot(self) -> dict:
         with self._lock:
-            return {
-                "id": self.id,
-                "kind": self.kind,
-                "status": self.status,
-                "total": self.total,
-                "concurrency": self.concurrency,
-                "counts": self.counts(),
-                "items": {k: dict(v) for k, v in self.items.items()},
-                "logs": self.logs[-120:],
-                "elapsed": int((self.finished_at or time.time()) - self.started_at),
-            }
+            d = self.brief()
+            d["items"] = {k: dict(v) for k, v in self.items.items()}
+            d["logs"] = self.logs[-120:]
+            return d
 
     def cancel(self) -> None:
         with self._lock:
@@ -79,37 +161,50 @@ class Job:
 
 
 class JobManager:
-    """全局运行记录（内存态）。"""
+    """全局运行记录（内存态）。支持多项目并行。"""
 
     def __init__(self):
         self.jobs: dict = {}
         self._lock = threading.RLock()
 
-    def create(self, kind: str, total: int, concurrency: int) -> Job:
-        job = Job(kind, total, concurrency)
+    def create(self, kind: str, total: int, concurrency: int, **kw) -> Job:
+        job = Job(kind, total, concurrency, **kw)
         with self._lock:
             self.jobs[job.id] = job
-            if len(self.jobs) > 50:                       # 只留最近 50 次
-                for k in sorted(self.jobs)[:10]:
-                    self.jobs.pop(k, None)
+            if len(self.jobs) > 80:                   # 只回收已结束的
+                done = [j for j in sorted(self.jobs.values(), key=lambda x: x.started_at)
+                        if _is_final(j)][:20]
+                for j in done:
+                    self.jobs.pop(j.id, None)
         return job
 
     def get(self, job_id: str) -> Optional[Job]:
         return self.jobs.get(job_id)
 
-    def latest(self) -> Optional[Job]:
+    def list(self, project_root: str = "", active_only: bool = False, limit: int = 40) -> list:
         with self._lock:
-            if not self.jobs:
-                return None
-            return max(self.jobs.values(), key=lambda j: j.started_at)
+            out = []
+            for j in sorted(self.jobs.values(), key=lambda x: x.started_at, reverse=True):
+                if project_root and j.project_root != project_root:
+                    continue
+                if active_only and _is_final(j):
+                    continue
+                out.append(j.brief())
+                if len(out) >= limit:
+                    break
+            return out
+
+    def active_count(self) -> int:
+        return sum(1 for j in self.jobs.values() if not _is_final(j))
 
 
 def run_batch(job: Job, tasks: list, worker: Callable, *,
-              key_of: Callable, max_retry: int = 2) -> None:
+              key_of: Callable, max_retry: int = 2, provider: str = "") -> None:
     """并发跑 tasks。worker(task, log_fn, cancel_fn) 成功返回 dict，失败抛异常。
 
-    在后台线程里调用；worker 内部只做「一个任务」的事，重试逻辑在这里统一。
+    每个任务在真正发请求前经过 GATE（服务商配额 + 全局总闸）。
     """
+    provider = provider or job.provider
     for t in tasks:
         job.set_item(key_of(t), state="pending")
 
@@ -118,37 +213,38 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
         if job.cancelled:
             job.set_item(key, state="cancelled")
             return
-        job.set_item(key, state="running")
+        job.set_item(key, state="queued")
 
         def log(msg):
             job.log(key, msg)
 
-        last_err = ""
-        for attempt in range(1 + max_retry):
+        with GATE.slot(provider):                      # ← 并发闸门
             if job.cancelled:
                 job.set_item(key, state="cancelled")
                 return
-            try:
-                if attempt:
-                    log(f"技术重试 {attempt}/{max_retry}")
-                    job.set_item(key, attempts=attempt)
-                result = worker(task, log, lambda: job.cancelled)
-                if isinstance(result, dict) and result.get("skipped"):
-                    job.set_item(key, state="skipped", msg=result.get("msg", "已存在，跳过"))
-                else:
-                    job.set_item(key, state="ok",
-                                 output=(result or {}).get("output", ""),
-                                 msg=(result or {}).get("msg", ""))
-                    log("完成")
-                return
-            except Exception as exc:                       # noqa: BLE001 全部按技术失败处理
-                last_err = str(exc)[:300]
-                log(f"失败: {last_err}")
-                if attempt >= max_retry:
-                    job.set_item(key, state="failed", msg=last_err)
-                    job.log(key, "重试耗尽" if max_retry else "失败")
-                    if "--debug" in str(getattr(job, "_debug", "")):
-                        traceback.print_exc()
+            job.set_item(key, state="running")
+            for attempt in range(1 + max_retry):
+                if job.cancelled:
+                    job.set_item(key, state="cancelled")
+                    return
+                try:
+                    if attempt:
+                        log(f"技术重试 {attempt}/{max_retry}")
+                        job.set_item(key, attempts=attempt)
+                    result = worker(task, log, lambda: job.cancelled)
+                    if isinstance(result, dict) and result.get("skipped"):
+                        job.set_item(key, state="skipped", msg=result.get("msg", "已存在，跳过"))
+                    else:
+                        job.set_item(key, state="ok",
+                                     output=(result or {}).get("output", ""),
+                                     msg=(result or {}).get("msg", ""))
+                        log("完成")
+                    return
+                except Exception as exc:               # noqa: BLE001 全按技术失败处理
+                    err = str(exc)[:300]
+                    log(f"失败: {err}")
+                    if attempt >= max_retry:
+                        job.set_item(key, state="failed", msg=err)
 
     with ThreadPoolExecutor(max_workers=max(1, job.concurrency)) as pool:
         list(pool.map(one, tasks))
@@ -157,5 +253,4 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
     if job.cancelled:
         job.status = "cancelled"
     else:
-        counts = job.counts()
-        job.status = "error" if counts.get("failed") else "done"
+        job.status = "error" if job.counts().get("failed") else "done"

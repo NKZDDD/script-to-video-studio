@@ -17,6 +17,16 @@ body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-seri
 header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:10}
 header h1{font-size:15px;margin:0;font-weight:600}
 header .sp{flex:1}
+.gauge{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
+.gauge b{color:var(--fg);font-weight:600}
+.gauge .dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+.gauge .dot.busy{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.drop{border:1.5px dashed var(--line);border-radius:8px;padding:18px;text-align:center;
+  color:var(--dim);font-size:13px;cursor:pointer;transition:.15s}
+.drop:hover,.drop.over{border-color:var(--accent);color:var(--accent);background:var(--panel2)}
+.jobcard{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;background:var(--panel2)}
+.jobcard .top{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.jobcard .top b{font-size:13px}
 nav{display:flex;gap:4px}
 nav button{background:none;border:1px solid transparent;color:var(--dim);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px}
 nav button.on{background:var(--panel2);color:var(--fg);border-color:var(--line)}
@@ -66,6 +76,9 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
   <h1>剧本 → AI视频 自动化生产台</h1>
   <span class="muted" id="projTag">未选择项目</span>
   <span class="sp"></span>
+  <div class="gauge" id="gauge" title="全局在途 API 调用 / 上限；多剧并行共享这个闸门">
+    <span class="dot" id="gDot"></span><span id="gText">并发 0/8 · 运行 0</span>
+  </div>
   <nav>
     <button data-t="proj" class="on">项目</button>
     <button data-t="flow">流程</button>
@@ -84,13 +97,19 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <tbody id="projList"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody></table>
   </div>
   <div class="card">
-    <h2>新建项目</h2>
+    <h2>新建项目 <span class="tag">多个项目可同时开工，互不影响</span></h2>
     <div class="grid g3">
       <div><label>目录名</label><input id="npName" placeholder="XYQY-002_新剧"></div>
       <div><label>项目编号</label><input id="npCode" value="PROJ-001"></div>
       <div><label>集数</label><input id="npEp" value="EP01"></div>
     </div>
-    <div style="margin-top:10px"><label>完整剧本（粘贴正文）</label>
+    <div style="margin-top:10px">
+      <label>剧本文件（.docx / .pdf / .txt / .md）</label>
+      <div class="drop" id="npDrop">点击选择文件，或把文件拖到这里</div>
+      <input type="file" id="npFile" accept=".docx,.pdf,.txt,.md,.markdown" class="hide">
+      <div class="muted" id="npFileInfo" style="margin-top:6px"></div>
+    </div>
+    <div style="margin-top:10px"><label>剧本正文（可直接粘贴，或由上方文件自动填充）</label>
       <textarea id="npScript" placeholder="粘贴剧本全文…"></textarea></div>
     <div class="row" style="margin-top:10px">
       <button class="btn" id="npCreate">创建项目</button>
@@ -125,10 +144,14 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     </div>
   </div>
   <div class="card">
-    <h2>当前运行 <span class="tag" id="jobTag">空闲</span></h2>
-    <div class="bar" style="margin-bottom:10px"><i id="jobBar" style="width:0"></i></div>
-    <div id="jobCounts" class="row" style="margin-bottom:10px"></div>
-    <div class="row" style="margin-bottom:10px"><button class="btn ghost sm" id="cancelJob">取消运行</button></div>
+    <h2>运行中的任务 <span class="tag">全局视图 · 含其它项目；切项目不会中断</span></h2>
+    <div class="row" style="margin-bottom:10px">
+      <label style="margin:0"><input type="checkbox" id="jobOnlyMine" style="width:auto"> 只看当前项目</label>
+    </div>
+    <div id="jobCards"><p class="muted">空闲</p></div>
+  </div>
+  <div class="card">
+    <h2>任务明细 <span class="tag" id="detailTag">点上方任务卡查看</span></h2>
     <table><thead><tr><th>任务</th><th>状态</th><th>信息</th></tr></thead><tbody id="jobItems"></tbody></table>
     <pre class="log" id="jobLog" style="margin-top:10px">—</pre>
   </div>
@@ -180,6 +203,16 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <div class="row" style="margin-top:10px"><button class="btn" id="saveLlm">保存</button></div>
   </div>
   <div class="card">
+    <h2>并发闸门 <span class="tag">多剧并行时共享，防止把服务商打爆</span></h2>
+    <div class="grid g3">
+      <div><label>全局在途上限</label><input id="limGlobal" type="number" min="1" max="64"></div>
+      <div id="limProvBox" style="display:contents"></div>
+    </div>
+    <p class="muted" style="margin:8px 0 0">批内并发（生产页每行的数字）只决定单批排多少；实际发请求前还要过
+      <b>服务商配额 → 全局总闸</b>。三个项目各设并发 5，全局上限 8 时，同时在途也只会有 8 个。</p>
+    <div class="row" style="margin-top:10px"><button class="btn ghost sm" id="saveLimits">保存闸门</button></div>
+  </div>
+  <div class="card">
     <h2>默认参数</h2>
     <div class="grid g3" id="defBox"></div>
     <div class="row" style="margin-top:10px"><button class="btn ghost sm" id="saveDefs">保存默认值</button></div>
@@ -200,7 +233,7 @@ const api = {
   post: (p, b={}) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'},
                               body: JSON.stringify(b)}).then(r => r.json()),
 };
-let BOOT = null, PROJ = null, POLL = null, CURJOB = null;
+let BOOT = null, PROJ = null, DETAIL = null;   // DETAIL = 正在看明细的 job id
 
 const PARAM_FIELDS = [
   ['duration','单段时长(秒)','number'], ['ratio','画幅','text'],
@@ -227,6 +260,7 @@ async function boot() {
   renderProjects();
   renderProviders();
   renderDefaults();
+  renderLimits();
   const l = BOOT.config.llm || {};
   $('#llmBase').value = l.base_url || 'https://api.paisio.online';
   $('#llmModel').value = l.model || 'claude-sonnet-5';
@@ -291,10 +325,24 @@ function renderStages(done) {
 
 async function runStage(id) {
   if (!PROJ) return alert('先打开项目');
-  log('#flowLog', `环节 ${id} 提交…`);
+  log('#flowLog', `环节 ${id} 已提交，进度见「生产」页或下方…`);
   const r = await api.post('/api/stage/run', {project_root: PROJ, stage: id});
   if (r.error) return log('#flowLog', '错误: ' + r.error);
-  pollJob(r.job_id, '#flowLog', () => refreshProject());
+  DETAIL = r.job_id;
+  watchStage(r.job_id);
+}
+async function watchStage(id) {
+  const t = setInterval(async () => {
+    const j = await api.get('/api/job', {id});
+    if (j.status === 'none') return clearInterval(t);
+    $('#flowLog').textContent = (j.logs || []).join('\n') || '运行中…';
+    $('#flowLog').scrollTop = 1e6;
+    if (['done','error','cancelled'].includes(j.status)) {
+      clearInterval(t);
+      refreshProject();
+      $('#flowLog').textContent += `\n\n=== ${j.status === 'done' ? '完成' : j.status} ===`;
+    }
+  }, 1500);
 }
 
 // ---------- 生产
@@ -335,39 +383,73 @@ async function startGen(kind, provider, model, concurrency) {
     provider_sel: {provider, model},
   });
   if (r.error || r.ok === false) return alert(r.error || r.msg);
-  pollJob(r.job_id, '#jobLog', () => refreshProject());
+  DETAIL = r.job_id;
 }
 $('#rebuildTasks').onclick = async () => {
   const r = await api.post('/api/tasks/rebuild', {project_root: PROJ});
   alert(r.error ? r.error : '已重建 tasks.json');
   refreshProject();
 };
-$('#cancelJob').onclick = () => CURJOB && api.post('/api/job/cancel', {id: CURJOB});
+// ---------- 全局轮询：一个 timer 拉全部 job + 闸门状态（支持多剧并行）
+const PILL = s => ({ok:'ok',failed:'fail',running:'run',queued:'run',skipped:'skip'})[s] || 'pend';
+let lastActive = 0;
 
-// ---------- job 轮询
-function pollJob(id, logSel, onDone) {
-  CURJOB = id;
-  clearInterval(POLL);
-  POLL = setInterval(async () => {
-    const j = await api.get('/api/job', {id});
-    if (j.status === 'none') return;
-    const c = j.counts || {};
-    const finished = (c.ok||0)+(c.skipped||0)+(c.failed||0)+(c.cancelled||0);
-    $('#jobTag').textContent = `${j.kind} · ${j.status} · ${finished}/${j.total} · ${j.elapsed}s`;
-    $('#jobBar').style.width = j.total ? (finished / j.total * 100) + '%' : '0';
-    $('#jobCounts').innerHTML = Object.entries(c).map(([k, v]) =>
-      `<span class="pill s-${({ok:'ok',failed:'fail',running:'run',skipped:'skip'})[k]||'pend'}">${k} ${v}</span>`).join('');
-    $('#jobItems').innerHTML = Object.entries(j.items || {}).map(([k, v]) =>
-      `<tr><td>${k}</td><td><span class="pill s-${({ok:'ok',failed:'fail',running:'run',skipped:'skip'})[v.state]||'pend'}">${v.state}</span></td>
-       <td class="muted">${(v.msg||'').slice(0,90)}</td></tr>`).join('');
-    const logs = (j.logs || []).join('\n') || '—';
-    $(logSel).textContent = logs;
-    $(logSel).scrollTop = 1e6;
-    if (['done','error','cancelled'].includes(j.status)) {
-      clearInterval(POLL); CURJOB = null; onDone && onDone();
-    }
-  }, 1200);
+async function tick() {
+  let d;
+  try { d = await api.get('/api/jobs', $('#jobOnlyMine')?.checked && PROJ ? {root: PROJ} : {}); }
+  catch { return; }
+
+  // 顶栏并发仪表
+  const g = d.gate || {};
+  $('#gText').textContent = `并发 ${g.global_inflight||0}/${g.global_limit||0} · 运行 ${d.active||0}`;
+  $('#gDot').classList.toggle('busy', (g.global_inflight||0) > 0);
+
+  // 任务卡列表
+  const jobs = d.jobs || [];
+  $('#jobCards').innerHTML = jobs.length ? jobs.map(j => {
+    const pct = j.total ? Math.round(j.finished / j.total * 100) : 0;
+    const cnt = Object.entries(j.counts||{}).map(([k,v]) =>
+      `<span class="pill s-${PILL(k)}">${k} ${v}</span>`).join(' ');
+    const active = !['done','error','cancelled'].includes(j.status);
+    const mine = j.project_root === PROJ;
+    return `<div class="jobcard" data-jid="${j.id}">
+      <div class="top">
+        <b>${j.kind}</b>
+        <span class="pill ${mine?'s-run':''}">${j.project_name||'—'}</span>
+        <span class="muted">${j.provider||''} · 并发${j.concurrency} · ${j.elapsed}s</span>
+        <span class="sp" style="flex:1"></span>
+        ${cnt}
+        <button class="btn ghost sm" data-detail="${j.id}">明细</button>
+        ${active ? `<button class="btn ghost sm" data-cancel="${j.id}">取消</button>` : ''}
+      </div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+    </div>`;
+  }).join('') : '<p class="muted">空闲</p>';
+
+  $$('#jobCards [data-detail]').forEach(b => b.onclick = () => { DETAIL = b.dataset.detail; loadDetail(); });
+  $$('#jobCards [data-cancel]').forEach(b => b.onclick = () => api.post('/api/job/cancel', {id: b.dataset.cancel}));
+
+  if (DETAIL) loadDetail();
+
+  // 有任务刚跑完 → 刷新项目进度
+  if (lastActive > 0 && (d.active||0) === 0) refreshProject();
+  lastActive = d.active || 0;
 }
+
+async function loadDetail() {
+  const j = await api.get('/api/job', {id: DETAIL});
+  if (j.status === 'none') { DETAIL = null; return; }
+  $('#detailTag').textContent = `${j.project_name||''} · ${j.kind} · ${j.status} · ${j.finished}/${j.total}`;
+  $('#jobItems').innerHTML = Object.entries(j.items || {}).map(([k, v]) =>
+    `<tr><td>${k}</td><td><span class="pill s-${PILL(v.state)}">${v.state}</span></td>
+     <td class="muted">${(v.msg||'').slice(0,90)}</td></tr>`).join('');
+  const el = $('#jobLog');
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  el.textContent = (j.logs || []).join('\n') || '—';
+  if (atBottom) el.scrollTop = 1e6;
+}
+
+setInterval(tick, 1500);
 function log(sel, msg) { $(sel).textContent = msg; }
 
 // ---------- 产物
@@ -450,15 +532,60 @@ $('#runSelftest').onclick = async () => {
   log('#selftestOut', Object.entries(r.result || {}).map(([k, v]) =>
     `${v.ok ? '✅' : '❌'} ${k.padEnd(12)} ${v.msg}`).join('\n'));
 };
+// ---------- 剧本文件上传（docx / pdf / txt / md）
+let SRCFILE = '';
+async function handleFile(file) {
+  if (!file) return;
+  const info = $('#npFileInfo');
+  info.textContent = `解析中… ${file.name} (${(file.size/1024).toFixed(0)} KB)`;
+  const b64 = await new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result.split(',')[1]);
+    fr.onerror = rej;
+    fr.readAsDataURL(file);
+  });
+  const r = await api.post('/api/script/parse', {filename: file.name, content_b64: b64});
+  if (r.error) { info.innerHTML = `<span style="color:var(--err)">解析失败：${r.error}</span>`; return; }
+  SRCFILE = file.name;
+  $('#npScript').value = r.text;
+  info.innerHTML = `✅ <b>${r.filename}</b> → ${r.chars.toLocaleString()} 字 / ${r.lines} 行`;
+  if (!$('#npName').value.trim())
+    $('#npName').value = file.name.replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_');
+}
+$('#npDrop').onclick = () => $('#npFile').click();
+$('#npFile').onchange = e => handleFile(e.target.files[0]);
+['dragenter','dragover'].forEach(ev => $('#npDrop').addEventListener(ev, e => {
+  e.preventDefault(); $('#npDrop').classList.add('over'); }));
+['dragleave','drop'].forEach(ev => $('#npDrop').addEventListener(ev, e => {
+  e.preventDefault(); $('#npDrop').classList.remove('over'); }));
+$('#npDrop').addEventListener('drop', e => handleFile(e.dataTransfer.files[0]));
+
+// ---------- 并发闸门
+function renderLimits() {
+  const L = BOOT.config.limits || {global: 8, per_provider: {}};
+  $('#limGlobal').value = L.global;
+  $('#limProvBox').innerHTML = BOOT.capabilities.map(c =>
+    `<div><label>${c.name} 配额</label><input data-lim="${c.id}" type="number" min="1" max="32"
+       value="${(L.per_provider||{})[c.id] ?? 4}"></div>`).join('');
+}
+$('#saveLimits').onclick = async () => {
+  const per_provider = {};
+  $$('#limProvBox input').forEach(i => per_provider[i.dataset.lim] = +i.value);
+  await api.post('/api/config', {limits: {global: +$('#limGlobal').value, per_provider}});
+  BOOT = await api.get('/api/bootstrap'); alert('闸门已更新（对新任务生效）');
+};
+
 $('#npCreate').onclick = async () => {
   const name = $('#npName').value.trim();
   if (!name) return alert('填目录名');
+  if (!$('#npScript').value.trim()) return alert('先上传剧本文件或粘贴正文');
   const r = await api.post('/api/project/create', {
     name, project_code: $('#npCode').value, episode: $('#npEp').value,
-    title: name, script: $('#npScript').value,
+    title: name, script: $('#npScript').value, source_file: SRCFILE,
     params: BOOT.config.defaults || {},
   });
   if (r.error) return alert(r.error);
+  $('#npScript').value = ''; $('#npFileInfo').textContent = ''; SRCFILE = '';
   BOOT = await api.get('/api/bootstrap'); renderProjects(); openProject(r.root);
 };
 
