@@ -20,10 +20,51 @@ MEDIA_IMAGE = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 URL_KEYS = ("url", "video_url", "download_url", "file_url", "result_url", "image_url")
 
 
+# ---------------------------------------------------------------- 错误分级
+#
+# retryable   —— 网络抖动/限流/网关错误：值得同参重试
+# task_fatal  —— 这一个任务本身的问题（提示词违规、参数不合法）：重试无意义，跳过它继续跑别的
+# batch_fatal —— 账户级问题（余额不足、密钥失效、封禁）：重试和继续都无意义，立即熔断整批
+RETRYABLE, TASK_FATAL, BATCH_FATAL = "retryable", "task_fatal", "batch_fatal"
+
+# 余额/鉴权类关键词（各中转站措辞不一，做宽匹配）
+_BATCH_FATAL_KW = (
+    "insufficient", "quota", "balance", "billing", "payment", "credit",
+    "exceeded your current", "no more credit", "out of credit",
+    "invalid api key", "invalid_api_key", "incorrect api key", "unauthorized",
+    "authentication", "token 不正确", "令牌", "余额", "额度", "欠费",
+    "无可用渠道", "账户", "已封禁", "禁用", "过期",
+)
+_TASK_FATAL_KW = (
+    "content policy", "safety", "violat", "prohibited", "sensitive",
+    "invalid prompt", "prompt too long", "unsupported", "违规", "敏感", "审核",
+)
+
+
+def classify(status: int, text: str = "") -> str:
+    """把 HTTP 状态 + 响应体分成三级。"""
+    low = (text or "").lower()
+    if status in (401, 402, 403):
+        return BATCH_FATAL
+    if any(k in low for k in _BATCH_FATAL_KW):
+        return BATCH_FATAL
+    if status == 429:
+        return RETRYABLE
+    if status in (408, 409, 425, 500, 502, 503, 504, 0):
+        return RETRYABLE
+    if status == 400 or status == 422:
+        return TASK_FATAL if any(k in low for k in _TASK_FATAL_KW) else TASK_FATAL
+    if any(k in low for k in _TASK_FATAL_KW):
+        return TASK_FATAL
+    return RETRYABLE
+
+
 class ApiError(RuntimeError):
-    def __init__(self, message: str, status: int = 0):
+    def __init__(self, message: str, status: int = 0, kind: str = "", retry_after: float = 0):
         super().__init__(message)
         self.status = status
+        self.kind = kind or classify(status, message)
+        self.retry_after = retry_after
 
 
 # ---------------------------------------------------------------- 响应解析
@@ -166,8 +207,31 @@ def resolve_ref(ref: str, project_root: str, max_side: int = 1024) -> str:
 
 # ---------------------------------------------------------------- HTTP
 
+def _retry_after(resp) -> float:
+    """读 Retry-After 头（秒或 HTTP 日期，只处理秒）。"""
+    v = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _body_error(data: Any) -> str:
+    """HTTP 200 但 body 里藏错误的情况：提取错误文案，没有则返回空串。"""
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("code") or "")
+    if isinstance(err, str) and err:
+        return err
+    if data.get("code") not in (None, 0, "0", "success", "ok") and data.get("message"):
+        return str(data.get("message"))
+    return ""
+
+
 class HttpSession:
-    """带鉴权/重试的轻量会话。"""
+    """带鉴权/分级重试的轻量会话。"""
 
     def __init__(self, api_key: str, base_url: str, timeout: int = 600, proxy: str = ""):
         self.api_key = (api_key or "").strip()
@@ -196,14 +260,28 @@ class HttpSession:
                     method, url, headers=self._headers(), json=json_body, params=params,
                     timeout=timeout or self.timeout, proxies=self._proxies(),
                 )
-                if resp.status_code in (429, 502, 503, 504) and attempt < retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
                 if resp.status_code >= 400:
                     if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "latin-1"):
                         resp.encoding = "utf-8"
-                    raise ApiError(f"HTTP {resp.status_code}: {resp.text[:400]}", resp.status_code)
-                return resp.json() if resp.content else {}
+                    body = resp.text[:400]
+                    kind = classify(resp.status_code, body)
+                    # 账户级问题（余额/密钥）立刻抛，不浪费重试次数
+                    if kind == BATCH_FATAL:
+                        raise ApiError(f"HTTP {resp.status_code}: {body}", resp.status_code, kind)
+                    if kind == RETRYABLE and attempt < retries - 1:
+                        wait = _retry_after(resp) or (2 ** attempt)
+                        time.sleep(min(wait, 30))
+                        continue
+                    raise ApiError(f"HTTP {resp.status_code}: {body}", resp.status_code, kind,
+                                   _retry_after(resp))
+                data = resp.json() if resp.content else {}
+                # 有的中转站 HTTP 200 但 body 里带业务错误（余额不足最常见）
+                err = _body_error(data)
+                if err:
+                    kind = classify(200, err)
+                    if kind == BATCH_FATAL:
+                        raise ApiError(f"接口返回错误: {err[:400]}", 200, kind)
+                return data
             except ApiError:
                 raise
             except requests.RequestException as exc:
@@ -211,8 +289,8 @@ class HttpSession:
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)
                     continue
-                raise ApiError(f"网络错误: {exc}") from exc
-        raise ApiError(f"网络错误: {last}")
+                raise ApiError(f"网络错误: {exc}", 0, RETRYABLE) from exc
+        raise ApiError(f"网络错误: {last}", 0, RETRYABLE)
 
     def poll(self, path_tpl: str, task_id: str, *, picker, interval: int = 8,
              timeout: int = 1800, content_path_tpl: str = "", log=print, cancel=None) -> Any:

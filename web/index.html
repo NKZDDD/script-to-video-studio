@@ -27,6 +27,10 @@ header .sp{flex:1}
 .jobcard{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;background:var(--panel2)}
 .jobcard .top{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
 .jobcard .top b{font-size:13px}
+.alert{margin-top:8px;padding:8px 10px;border-radius:6px;font-size:12.5px;line-height:1.7}
+.alert.err{background:rgba(255,95,86,.10);border:1px solid var(--err);color:var(--fg)}
+.alert.warn{background:rgba(245,166,35,.10);border:1px solid var(--warn);color:var(--fg)}
+.s-aborted{color:var(--err);border-color:var(--err)}
 nav{display:flex;gap:4px}
 nav button{background:none;border:1px solid transparent;color:var(--dim);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px}
 nav button.on{background:var(--panel2);color:var(--fg);border-color:var(--line)}
@@ -97,24 +101,33 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <tbody id="projList"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody></table>
   </div>
   <div class="card">
-    <h2>新建项目 <span class="tag">多个项目可同时开工，互不影响</span></h2>
-    <div class="grid g3">
-      <div><label>目录名</label><input id="npName" placeholder="XYQY-002_新剧"></div>
-      <div><label>项目编号</label><input id="npCode" value="PROJ-001"></div>
+    <h2>批量建剧 <span class="tag">一次拖多个剧本 = 一次建多个项目，之后可并行生产</span></h2>
+    <div style="margin-bottom:10px">
+      <div class="drop" id="npDrop">点击选择<b>一个或多个</b>剧本文件，或整批拖进来<br>
+        <span style="font-size:12px">.docx / .pdf / .txt / .md — 每个文件建一个项目</span></div>
+      <input type="file" id="npFile" accept=".docx,.pdf,.txt,.md,.markdown" multiple class="hide">
+    </div>
+    <div id="npList"></div>
+    <div class="grid g3" style="margin-top:10px">
+      <div><label>项目编号前缀</label><input id="npCode" value="PROJ"
+        title="批量建剧时自动编号 PROJ-001 / PROJ-002 …"></div>
       <div><label>集数</label><input id="npEp" value="EP01"></div>
     </div>
-    <div style="margin-top:10px">
-      <label>剧本文件（.docx / .pdf / .txt / .md）</label>
-      <div class="drop" id="npDrop">点击选择文件，或把文件拖到这里</div>
-      <input type="file" id="npFile" accept=".docx,.pdf,.txt,.md,.markdown" class="hide">
-      <div class="muted" id="npFileInfo" style="margin-top:6px"></div>
-    </div>
-    <div style="margin-top:10px"><label>剧本正文（可直接粘贴，或由上方文件自动填充）</label>
-      <textarea id="npScript" placeholder="粘贴剧本全文…"></textarea></div>
     <div class="row" style="margin-top:10px">
-      <button class="btn" id="npCreate">创建项目</button>
-      <span class="muted">创建后在「流程」页逐环节执行</span>
+      <button class="btn" id="npCreate" disabled>创建项目</button>
+      <button class="btn ghost sm" id="npClear">清空</button>
+      <span class="muted" id="npSummary"></span>
     </div>
+  </div>
+  <div class="card">
+    <h2>单个项目 · 粘贴正文 <span class="tag">没有文件时用这个</span></h2>
+    <div class="grid g3">
+      <div><label>目录名</label><input id="spName" placeholder="XYQY-002_新剧"></div>
+      <div><label>项目编号</label><input id="spCode" value="PROJ-001"></div>
+      <div><label>集数</label><input id="spEp" value="EP01"></div>
+    </div>
+    <div style="margin-top:10px"><textarea id="spScript" placeholder="粘贴剧本全文…"></textarea></div>
+    <div class="row" style="margin-top:10px"><button class="btn ghost" id="spCreate">创建</button></div>
   </div>
 </section>
 
@@ -391,7 +404,8 @@ $('#rebuildTasks').onclick = async () => {
   refreshProject();
 };
 // ---------- 全局轮询：一个 timer 拉全部 job + 闸门状态（支持多剧并行）
-const PILL = s => ({ok:'ok',failed:'fail',running:'run',queued:'run',skipped:'skip'})[s] || 'pend';
+const PILL = s => ({ok:'ok',failed:'fail',aborted:'fail',running:'run',
+                    queued:'run',skipped:'skip'})[s] || 'pend';
 let lastActive = 0;
 
 async function tick() {
@@ -410,8 +424,16 @@ async function tick() {
     const pct = j.total ? Math.round(j.finished / j.total * 100) : 0;
     const cnt = Object.entries(j.counts||{}).map(([k,v]) =>
       `<span class="pill s-${PILL(k)}">${k} ${v}</span>`).join(' ');
-    const active = !['done','error','cancelled'].includes(j.status);
+    const active = !['done','error','cancelled','aborted'].includes(j.status);
     const mine = j.project_root === PROJ;
+    const failed = (j.counts||{}).failed || 0;
+    const banner = j.aborted
+      ? `<div class="alert err">⛔ <b>已熔断</b>（账户级错误，剩余任务未提交，没有浪费额度）<br>
+           ${j.abort_reason||''}<br>
+           <span class="muted">处理完（充值 / 换 key / 换服务商）后重新点「开始」，已完成的会自动跳过，只补未完成的。</span></div>`
+      : (failed && !active
+          ? `<div class="alert warn">⚠ ${failed} 个任务失败。修复后重新点「开始」即可只补失败的（成功的会跳过）。</div>`
+          : '');
     return `<div class="jobcard" data-jid="${j.id}">
       <div class="top">
         <b>${j.kind}</b>
@@ -423,6 +445,7 @@ async function tick() {
         ${active ? `<button class="btn ghost sm" data-cancel="${j.id}">取消</button>` : ''}
       </div>
       <div class="bar"><i style="width:${pct}%"></i></div>
+      ${banner}
     </div>`;
   }).join('') : '<p class="muted">空闲</p>';
 
@@ -532,33 +555,58 @@ $('#runSelftest').onclick = async () => {
   log('#selftestOut', Object.entries(r.result || {}).map(([k, v]) =>
     `${v.ok ? '✅' : '❌'} ${k.padEnd(12)} ${v.msg}`).join('\n'));
 };
-// ---------- 剧本文件上传（docx / pdf / txt / md）
-let SRCFILE = '';
-async function handleFile(file) {
-  if (!file) return;
-  const info = $('#npFileInfo');
-  info.textContent = `解析中… ${file.name} (${(file.size/1024).toFixed(0)} KB)`;
-  const b64 = await new Promise((res, rej) => {
-    const fr = new FileReader();
-    fr.onload = () => res(fr.result.split(',')[1]);
-    fr.onerror = rej;
-    fr.readAsDataURL(file);
-  });
-  const r = await api.post('/api/script/parse', {filename: file.name, content_b64: b64});
-  if (r.error) { info.innerHTML = `<span style="color:var(--err)">解析失败：${r.error}</span>`; return; }
-  SRCFILE = file.name;
-  $('#npScript').value = r.text;
-  info.innerHTML = `✅ <b>${r.filename}</b> → ${r.chars.toLocaleString()} 字 / ${r.lines} 行`;
-  if (!$('#npName').value.trim())
-    $('#npName').value = file.name.replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_');
+// ---------- 批量剧本上传（docx / pdf / txt / md）
+let QUEUE = [];        // [{filename, text, chars, lines, error}]
+
+function renderQueue() {
+  const ok = QUEUE.filter(q => !q.error).length;
+  $('#npCreate').disabled = ok === 0;
+  $('#npSummary').textContent = QUEUE.length
+    ? `${QUEUE.length} 个文件，可建 ${ok} 个项目` : '';
+  $('#npList').innerHTML = QUEUE.length ? `<table><thead><tr>
+      <th>文件</th><th>项目名</th><th>解析结果</th><th></th></tr></thead><tbody>` +
+    QUEUE.map((q, i) => `<tr>
+      <td>${q.filename}</td>
+      <td>${q.error ? '—' : `<input data-qn="${i}" value="${q.name}" style="width:180px">`}</td>
+      <td>${q.error ? `<span style="color:var(--err)">${q.error}</span>`
+                    : `<span class="pill s-ok">${q.chars.toLocaleString()} 字 / ${q.lines} 行</span>`}</td>
+      <td><button class="btn ghost sm" data-qdel="${i}">移除</button></td></tr>`).join('') +
+    '</tbody></table>' : '';
+  $$('#npList [data-qdel]').forEach(b => b.onclick = () => {
+    QUEUE.splice(+b.dataset.qdel, 1); renderQueue(); });
+  $$('#npList [data-qn]').forEach(i => i.onchange = () => QUEUE[+i.dataset.qn].name = i.value.trim());
+}
+
+async function addFiles(files) {
+  for (const file of [...files]) {
+    const idx = QUEUE.push({filename: file.name, name: '解析中…', chars: 0, lines: 0}) - 1;
+    renderQueue();
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result.split(',')[1]);
+        fr.onerror = rej;
+        fr.readAsDataURL(file);
+      });
+      const r = await api.post('/api/script/parse', {filename: file.name, content_b64: b64});
+      QUEUE[idx] = r.error
+        ? {filename: file.name, error: r.error}
+        : {filename: file.name, name: file.name.replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_'),
+           text: r.text, chars: r.chars, lines: r.lines};
+    } catch (e) {
+      QUEUE[idx] = {filename: file.name, error: String(e).slice(0, 120)};
+    }
+    renderQueue();
+  }
 }
 $('#npDrop').onclick = () => $('#npFile').click();
-$('#npFile').onchange = e => handleFile(e.target.files[0]);
+$('#npFile').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
 ['dragenter','dragover'].forEach(ev => $('#npDrop').addEventListener(ev, e => {
   e.preventDefault(); $('#npDrop').classList.add('over'); }));
 ['dragleave','drop'].forEach(ev => $('#npDrop').addEventListener(ev, e => {
   e.preventDefault(); $('#npDrop').classList.remove('over'); }));
-$('#npDrop').addEventListener('drop', e => handleFile(e.dataTransfer.files[0]));
+$('#npDrop').addEventListener('drop', e => addFiles(e.dataTransfer.files));
+$('#npClear').onclick = () => { QUEUE = []; renderQueue(); };
 
 // ---------- 并发闸门
 function renderLimits() {
@@ -576,16 +624,34 @@ $('#saveLimits').onclick = async () => {
 };
 
 $('#npCreate').onclick = async () => {
-  const name = $('#npName').value.trim();
+  const files = QUEUE.filter(q => !q.error).map(q => ({
+    filename: q.filename, text: q.text, name: q.name}));
+  if (!files.length) return;
+  $('#npCreate').disabled = true;
+  const r = await api.post('/api/project/create_batch', {
+    files, code_prefix: $('#npCode').value.trim() || 'PROJ',
+    episode: $('#npEp').value, params: BOOT.config.defaults || {},
+  });
+  $('#npCreate').disabled = false;
+  if (r.error) return alert(r.error);
+  const fails = (r.results || []).filter(x => !x.ok);
+  alert(`已创建 ${r.created} 个项目` + (fails.length
+    ? `\n失败 ${fails.length} 个：\n` + fails.map(f => `· ${f.filename}：${f.error}`).join('\n') : ''));
+  QUEUE = QUEUE.filter(q => fails.some(f => f.filename === q.filename));
+  renderQueue();
+  BOOT = await api.get('/api/bootstrap'); renderProjects();
+};
+
+$('#spCreate').onclick = async () => {
+  const name = $('#spName').value.trim();
   if (!name) return alert('填目录名');
-  if (!$('#npScript').value.trim()) return alert('先上传剧本文件或粘贴正文');
+  if (!$('#spScript').value.trim()) return alert('粘贴剧本正文');
   const r = await api.post('/api/project/create', {
-    name, project_code: $('#npCode').value, episode: $('#npEp').value,
-    title: name, script: $('#npScript').value, source_file: SRCFILE,
-    params: BOOT.config.defaults || {},
+    name, project_code: $('#spCode').value, episode: $('#spEp').value,
+    title: name, script: $('#spScript').value, params: BOOT.config.defaults || {},
   });
   if (r.error) return alert(r.error);
-  $('#npScript').value = ''; $('#npFileInfo').textContent = ''; SRCFILE = '';
+  $('#spScript').value = '';
   BOOT = await api.get('/api/bootstrap'); renderProjects(); openProject(r.root);
 };
 

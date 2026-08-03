@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -180,6 +181,43 @@ def api_post(path: str, body: dict) -> dict:
         if not text.strip():
             raise ValueError("解析结果为空（PDF 可能是扫描件，需要 OCR）")
         return {"ok": True, "filename": name, "text": text, **docparse.stats(text)}
+
+    if path == "/api/project/create_batch":
+        """批量建项目：一个文件一个项目。返回逐条结果，单条失败不影响其它。"""
+        import base64
+        base = cfg["projects_dir"]
+        defaults = body.get("params") or cfg.get("defaults") or {}
+        code_prefix = (body.get("code_prefix") or "PROJ").strip() or "PROJ"
+        episode = body.get("episode") or "EP01"
+        results = []
+        seq = 0
+        for it in body.get("files", []):
+            seq += 1
+            fname = it.get("filename", f"script{seq}")
+            stem = re.sub(r'[\\/:*?"<>|]', "_", os.path.splitext(fname)[0]).strip() or f"script{seq}"
+            try:
+                text = it.get("text")
+                if text is None:
+                    text = docparse.parse_bytes(fname, base64.b64decode(it.get("content_b64", "")))
+                if not text.strip():
+                    raise ValueError("解析结果为空（PDF 可能是扫描件）")
+                root = os.path.join(base, stem)
+                if os.path.exists(root):
+                    raise ValueError("同名项目目录已存在")
+                pj = Project(root)
+                pj.init_dirs()
+                pj.save_meta({"title": stem,
+                              "project_code": f"{code_prefix}-{seq:03d}",
+                              "episode": episode, "params": defaults,
+                              "source_file": fname})
+                from core.store import write_text
+                write_text(pj.p("01_剧本与分段", "原始剧本.txt"), text)
+                results.append({"ok": True, "filename": fname, "name": stem,
+                                "root": root, **docparse.stats(text)})
+            except Exception as exc:                     # noqa: BLE001
+                results.append({"ok": False, "filename": fname, "error": str(exc)[:200]})
+        return {"ok": True, "results": results,
+                "created": sum(1 for r in results if r.get("ok"))}
 
     if path == "/api/project/create":
         base = cfg["projects_dir"]

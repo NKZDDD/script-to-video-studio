@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Callable, Optional
 
+from .apiutil import BATCH_FATAL, RETRYABLE, TASK_FATAL, ApiError
+
 
 class Gate:
     """全局 + 按服务商的并发闸门。可热更新上限。"""
@@ -90,7 +92,7 @@ GATE = Gate()
 
 
 def _is_final(job: "Job") -> bool:
-    return job.status in ("done", "error", "cancelled")
+    return job.status in ("done", "error", "cancelled", "aborted")
 
 
 class Job:
@@ -114,9 +116,21 @@ class Job:
         self.finished_at: Optional[float] = None
         self.status = "running"
         self.cancelled = False
+        self.aborted = False              # 熔断（账户级错误）
+        self.abort_reason = ""
         self.items: dict = {}
         self.logs: list = []
         self._lock = threading.RLock()
+
+    def abort(self, reason: str) -> None:
+        """账户级错误熔断：停掉本批剩余任务。"""
+        with self._lock:
+            if self.aborted:
+                return
+            self.aborted = True
+            self.cancelled = True
+            self.abort_reason = reason[:400]
+        self.log("熔断", f"检测到账户级错误，已停止本批剩余任务 → {reason[:200]}")
 
     def set_item(self, key: str, **kw) -> None:
         with self._lock:
@@ -145,6 +159,7 @@ class Job:
                 "total": self.total, "finished": finished, "counts": c,
                 "concurrency": self.concurrency, "provider": self.provider,
                 "project_root": self.project_root, "project_name": self.project_name,
+                "aborted": self.aborted, "abort_reason": self.abort_reason,
                 "elapsed": int((self.finished_at or time.time()) - self.started_at)}
 
     def snapshot(self) -> dict:
@@ -211,7 +226,8 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
     def one(task):
         key = key_of(task)
         if job.cancelled:
-            job.set_item(key, state="cancelled")
+            job.set_item(key, state="aborted" if job.aborted else "cancelled",
+                         msg="熔断，未提交" if job.aborted else "已取消")
             return
         job.set_item(key, state="queued")
 
@@ -220,12 +236,12 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
 
         with GATE.slot(provider):                      # ← 并发闸门
             if job.cancelled:
-                job.set_item(key, state="cancelled")
+                job.set_item(key, state="aborted" if job.aborted else "cancelled")
                 return
             job.set_item(key, state="running")
             for attempt in range(1 + max_retry):
                 if job.cancelled:
-                    job.set_item(key, state="cancelled")
+                    job.set_item(key, state="aborted" if job.aborted else "cancelled")
                     return
                 try:
                     if attempt:
@@ -240,17 +256,31 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                                      msg=(result or {}).get("msg", ""))
                         log("完成")
                     return
-                except Exception as exc:               # noqa: BLE001 全按技术失败处理
+                except Exception as exc:               # noqa: BLE001
                     err = str(exc)[:300]
-                    log(f"失败: {err}")
+                    kind = getattr(exc, "kind", RETRYABLE)
+
+                    if kind == BATCH_FATAL:            # 余额/密钥 → 熔断整批
+                        log(f"账户级错误: {err}")
+                        job.set_item(key, state="failed", msg=err, kind=kind)
+                        job.abort(err)
+                        return
+                    if kind == TASK_FATAL:             # 本任务的问题 → 不重试，继续别的
+                        log(f"任务级错误(不重试): {err}")
+                        job.set_item(key, state="failed", msg=err, kind=kind)
+                        return
+
+                    log(f"失败: {err}")                 # 可重试
                     if attempt >= max_retry:
-                        job.set_item(key, state="failed", msg=err)
+                        job.set_item(key, state="failed", msg=err, kind=kind)
 
     with ThreadPoolExecutor(max_workers=max(1, job.concurrency)) as pool:
         list(pool.map(one, tasks))
 
     job.finished_at = time.time()
-    if job.cancelled:
+    if job.aborted:
+        job.status = "aborted"
+    elif job.cancelled:
         job.status = "cancelled"
     else:
         job.status = "error" if job.counts().get("failed") else "done"
