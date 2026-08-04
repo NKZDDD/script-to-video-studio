@@ -12,8 +12,9 @@ from __future__ import annotations
 from .base import ImageTask, Provider, VideoTask   # noqa: F401  对外导出
 from .lingganya import LingganyaProvider
 from .paisio import PaisioProvider
+from .zeroapi import ZeroApiProvider
 
-_CLASSES = [LingganyaProvider, PaisioProvider]
+_CLASSES = [PaisioProvider, LingganyaProvider, ZeroApiProvider]
 
 REGISTRY = {c.id: c for c in _CLASSES}
 

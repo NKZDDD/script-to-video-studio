@@ -145,6 +145,29 @@ CATALOG = {
         "resume": "重跑环节1，切出来之后再往下跑",
         "resumable": True, "scope": "stage", "level": "error",
     },
+    "REF_URL_ONLY": {
+        "title": "这个模型只收公网图片链接，喂不了本地图",
+        "why": "有些接口的参考素材必须是能公开访问的 https 链接，不接受把图片本身发过去。"
+               "本程序的资产图和故事板都是本机文件，只能转成内嵌数据发送，所以过不了这一关。",
+        "where": "「生产」页这一行的「模型」下拉框",
+        "fix": ["换一个能直接吃本地图的模型——报错里已经列出了同一家里可用的那几个",
+                "或者整行换一家服务商（派系、灵感鸭都能直接收本地图）",
+                "非要用这个模型的话，得先把图传到一个公网图床/对象存储再填链接，"
+                "本程序目前没有上传功能，这条路得手工做"],
+        "resume": "换完模型点「开始」，只会重跑这些没做成的",
+        "resumable": True, "scope": "batch", "level": "error",
+    },
+    "MODEL_NEEDS_REF": {
+        "title": "这个模型必须给参考图，但这一条一张都没有",
+        "why": "有些模型只能做图生视频，不能凭一句话从零生成，所以没有参考图就直接拒了。",
+        "where": "先看环节6「段落资产绑定」的产物；或者「生产」页这一行的模型",
+        "fix": ["去「流程」页看环节6 的结果，这一段是不是真的没绑上任何参考图",
+                "正常流程里视频是拿故事板当参考的——确认环节9 的故事板出来了没",
+                "换一个能纯文字生成的模型（同一家一般都有）",
+                "如果这一段本来就打算纯文字生成，那就必须换模型，这个模型做不到"],
+        "resume": "补齐参考图或换完模型，点「开始」",
+        "resumable": True, "scope": "task", "level": "error",
+    },
     "PREREQ_MISSING": {
         "title": "前面的环节还没跑完",
         "why": "这个环节要用前面环节做出来的文件，但那些文件还不存在。",
@@ -244,6 +267,9 @@ _PATTERNS = [
     ("RATE_LIMITED", r"429|rate limit|too many request|限流|请求过于频繁"),
     ("CONTENT_REJECTED", r"content policy|safety|violat|prohibited|sensitive|审核|违规|敏感"),
     ("PROMPT_INVALID", r"prompt too long|too long|invalid (prompt|param|size|request)|参数错误|不支持的?(尺寸|时长|比例)"),
+    # 这两条要排在 REF_MISSING 前面：都跟参考图有关，但原因和改法完全不同
+    ("REF_URL_ONLY", r"只收公网|只收 ?HTTPS|must be a (public )?url|不接受本地图片"),
+    ("MODEL_NEEDS_REF", r"必须给至少 ?\d* ?张参考图|必须提供 ?\d* ?张参考图|need_image"),
     ("REF_MISSING", r"参考图文件不存在|固定故事板不存在|no such file|filenotfound"),
     # 这两条要排在 PREREQ_MISSING 前面：它们的文案里也带「请先跑」，
     # 但给的指引更具体（去哪个下拉框选集），别被通用的前置缺失兜走

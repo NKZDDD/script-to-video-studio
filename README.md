@@ -175,7 +175,7 @@ python run.py                        # 浏览器自动打开 http://127.0.0.1:87
 | `level` | `error` 没做出来 ／ `warn` 做出来了但可能不对 |
 | `code` | 给程序用的错误码，**不显示给用户** |
 
-18 类：`QUOTA_EXHAUSTED` `AUTH_INVALID` `ACCOUNT_BANNED` `RATE_LIMITED` `CONTENT_REJECTED` `PROMPT_INVALID` `MODEL_NOT_FOUND` `REF_MISSING` `EPISODE_REQUIRED` `EPISODE_SPLIT_FAILED` `PREREQ_MISSING` `LLM_SCHEMA_FAIL` `LLM_EMPTY` `NETWORK` `TIMEOUT` `DISK` `WRONG_RATIO` `UNKNOWN`
+20 类：`QUOTA_EXHAUSTED` `AUTH_INVALID` `ACCOUNT_BANNED` `RATE_LIMITED` `CONTENT_REJECTED` `PROMPT_INVALID` `MODEL_NOT_FOUND` `REF_MISSING` `REF_URL_ONLY` `MODEL_NEEDS_REF` `EPISODE_REQUIRED` `EPISODE_SPLIT_FAILED` `PREREQ_MISSING` `LLM_SCHEMA_FAIL` `LLM_EMPTY` `NETWORK` `TIMEOUT` `DISK` `WRONG_RATIO` `UNKNOWN`
 
 存放位置：`07_检查与记录/failures.json`（结构化）+ `execution_log.jsonl`（流水）。
 
@@ -275,14 +275,31 @@ python run.py                        # 浏览器自动打开 http://127.0.0.1:87
 1. `core/providers/` 下新建 `xxx.py`，继承 `Provider`，实现 `capabilities()` 和 `generate_image/generate_video`
 2. `core/providers/__init__.py` 的 `_CLASSES` 加一行
 
-`capabilities()` 返回的模型列表、时长、画幅、备注会**自动出现在前端下拉框**。已内置：
+`capabilities()` 返回的模型列表、时长、画幅、备注会**自动出现在前端下拉框**；并发配额也会自动补上默认值，不用改 `config.json`。已内置：
 
 | 服务商 | 出图 | 出片 | 实测备注 |
 | --- | --- | --- | --- |
-| 灵感鸭 lingganyaapi.com | ✅ gpt-image-2 | ⚠️ sora-2 通道随机失败 | 图片稳定，视频建议换家 |
-| 派系 api.paisio.online | ✅ | ✅ sd2-pro-720p | 视频首选（实测 17/17 一次过）；也提供 claude/gpt 系 chat 模型 |
+| 派系 api.paisio.online | ✅ | ✅ sd2-pro-720p | **视频首选**（实测 17/17 一次过）；也提供 claude/gpt 系 chat 模型可当分析引擎 |
+| 灵感鸭 lingganyaapi.com | ✅ gpt-image-2 / nano_banana | ⚠️ sora-2 通道随机失败 | 图片稳定；视频模型多但时长限制严（见下） |
+| 零视工坊 zeroapi.ai-ren.cn | ✅ | ✅ seedance / vad3 / veo / sora | 与 ComfyUI 里的「零视工坊」四个节点同源 |
 
 参考图统一用**压缩 data URI**（1024px JPEG q80）直传，绕开图床白名单问题。
+
+### 每家的坑不一样，封装层负责吃掉
+
+这些都是实测踩出来的，写在 provider 里而不是让用户去记：
+
+**时长不是随便填的。** 灵感鸭每个模型有固定档位——`sora-2` 只收 4/8/12、`veo` 只收 8、`gemini` 只收 10、SD 系 4-15 随意。程序默认 `duration=15`，直接发给 veo 就是一个 400。现在会**自动吸附到最近的合法值并记一行日志**（`灵感鸭 veo_3_1_fast 的时长只能是 [8] 秒，已把 15 纠正为 8`），不会让你为了一个参数错误白等一轮。
+
+**该带的字段带、不该带的去掉。** SD 系 `resolution` 顶层必填、其余模型不该带；SD 系带参考图时 `extra.reference_mode` 必填（2 张自动判为首尾帧 `frame`、多张为素材参考 `media`，`frame` 模式还会把参考图裁到 2 张）。
+
+**画面比例必须显式发。** 零视只给 `size` 让服务端推断的话，推断失败会**静默回落成横屏 16:9**——接口不报错，就是画面躺倒了。所以 `aspect_ratio` 和 `ratio` 两个别名都发。这也是[出图后量尺寸](#做出来了但可能不对出图后量一遍尺寸)那道检查存在的原因。
+
+**同名字段不同类型。** 零视的 `seconds` 要**字符串**（发数字会 400 `invalid_json`），而它 SD2 新接口用的是 `duration` 且要 int。
+
+**有些模型硬性要求参考图。** 灵感鸭 grok 系没图直接拒，程序会在发请求前就拦住并告诉你去查环节6 的资产绑定（错误码 `MODEL_NEEDS_REF`）。
+
+**零视 `sd2-fast` 用不了。** 它的参考素材只收公网 HTTPS 链接，而本程序的故事板是本机文件。选了它会**在发请求前**被拦住，并直接告诉你换成 `seedance_2_fast_480p` 之类能吃本地图的模型（错误码 `REF_URL_ONLY`）——不会白花一次调用去换一个 400。
 
 ## 目录
 
@@ -295,7 +312,7 @@ script-to-video-studio/
 │   └── s1..s8_*.md       每环节的规则 + JSON schema + 输入占位符
 ├── core/
 │   ├── apiutil.py        HTTP/轮询/解析/data URI/存文件
-│   ├── providers/        ★ 服务商可插拔层
+│   ├── providers/        ★ 服务商可插拔层（派系 / 灵感鸭 / 零视，各家的坑封装在各自文件里）
 │   ├── llm.py            OpenAI 兼容 chat + JSON 校验重试
 │   ├── stages.py         ★ 12 环节确定性编排 + tasks.json 装配
 │   ├── episodes.py       ★ 按环节1 给的锚点切集（模型定边界，代码做切割）

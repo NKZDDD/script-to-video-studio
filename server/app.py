@@ -15,13 +15,18 @@ from urllib.parse import parse_qs, unquote, urlparse
 from core import diagnose, docparse, episodes, stages as S
 from core.executor import GATE, JobManager, run_batch
 from core.llm import LLM
-from core.providers import build as build_provider, list_capabilities
+from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provider,
+                            list_capabilities)
 from core.store import Project, list_projects, read_json, write_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(ROOT, "web")
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 DEFAULT_PROJECTS = os.path.abspath(os.path.join(ROOT, "..", "projects"))
+
+# 按服务商的默认并发配额。只列实测确认能扛的；没列的走兜底 4。
+# 用户在设置页改过的值优先，这里只补缺项。
+PROVIDER_QUOTA = {"paisio": 6, "lingganya": 4}
 
 JOBS = JobManager()
 
@@ -37,10 +42,16 @@ def load_config() -> dict:
         "frames_min": 4, "frames_max": 6, "episode_minutes": 3,
         "concurrency": 3, "max_retry": 2,
     })
-    # 多剧并行的并发闸门：全局总上限 + 按服务商配额
-    cfg.setdefault("limits", {"global": 8, "per_provider": {"lingganya": 4, "paisio": 6}})
-    GATE.configure(cfg["limits"].get("global", 8),
-                   cfg["limits"].get("per_provider", {}))
+    # 多剧并行的并发闸门：全局总上限 + 按服务商配额。
+    # 缺项从注册表补齐——新接一家服务商就自动有配额，不用手动改 config.json。
+    # 实测给过更高配额的那几家保留原值（paisio 是最稳的出片通道），
+    # 没数的一律给 4：宁可慢一点，也别一上来就把新通道打出限流。
+    lim = cfg.setdefault("limits", {})
+    lim.setdefault("global", 8)
+    per = lim.setdefault("per_provider", {})
+    for pid in PROVIDER_REGISTRY:
+        per.setdefault(pid, PROVIDER_QUOTA.get(pid, 4))
+    GATE.configure(lim.get("global", 8), per)
     return cfg
 
 
