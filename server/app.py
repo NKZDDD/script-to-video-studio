@@ -101,7 +101,7 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
         raise ValueError("LLM 未配置 api_key（在「分析引擎」页签保存）")
     return LLM(c["api_key"], c.get("base_url", "https://api.paisio.online"),
                c.get("model", "claude-sonnet-5"), timeout=int(c.get("timeout", 900)),
-               proxy=c.get("proxy", ""))
+               proxy=c.get("proxy", ""), max_tokens=int(c.get("max_tokens", 16000)))
 
 
 # ====================================================================== 路由
@@ -229,6 +229,52 @@ def api_post(path: str, body: dict) -> dict:
                 cur[k] = v
         save_config(cur)
         return {"ok": True}
+
+    if path == "/api/pipeline/preview":
+        """先看清这一次会做什么、跳过什么，再决定点不点「开始」。"""
+        from core import pipeline
+        pj = proj_of(body)
+        return pipeline.preview(pj,
+                               include_produce=body.get("include_produce", True),
+                               include_deliver=body.get("include_deliver", True))
+
+    if path == "/api/pipeline/run":
+        """一键跑到底。中断后再点一次就是续跑——做过的自动跳过。"""
+        from core import pipeline
+        pj = proj_of(body)
+        meta = pj.meta()
+        params = dict(cfg.get("defaults") or {})
+        params.update(meta.get("params") or {})
+        params.update({"project_code": meta.get("project_code", "PROJ-001"),
+                       "episode": meta.get("episode", "EP01")})
+        script_path = pj.p("01_剧本与分段", "原始剧本.txt")
+        if os.path.isfile(script_path):
+            from core.store import read_text
+            params["script"] = read_text(script_path)
+
+        # 出图/出片各自的服务商+模型，点「开始」时就定下来
+        sel = body.get("provider_sel") or {}
+        for kind in ("asset", "storyboard", "video"):
+            if not (sel.get(kind) or {}).get("provider"):
+                raise ValueError(f"还没选「{kind}」用哪家服务商和模型")
+        # 提前校验一遍凭据，别等跑到第 300 步才发现 key 没填
+        for kind in ("asset", "storyboard", "video"):
+            resolve_provider_cfg(cfg, sel[kind])
+
+        job = JOBS.create("pipeline", 1, 1, project_root=pj.root,
+                          project_name=os.path.basename(pj.root), provider="pipeline")
+        pipeline.start(
+            job, pj,
+            llm_factory=lambda: build_llm(cfg, body.get("llm")),
+            provider_factory=lambda kind: resolve_provider_cfg(cfg, sel[kind]),
+            params=params, jobs=JOBS,
+            concurrency=int(body.get("concurrency")
+                            or (cfg.get("defaults") or {}).get("concurrency", 3)),
+            max_retry=int(body.get("max_retry")
+                          or (cfg.get("defaults") or {}).get("max_retry", 2)),
+            include_produce=body.get("include_produce", True),
+            include_deliver=body.get("include_deliver", True))
+        return {"ok": True, "job_id": job.id}
 
     if path == "/api/upload/selftest":
         """传一个小文件再用普通 HTTP 取回来，确认服务商真的能读到。

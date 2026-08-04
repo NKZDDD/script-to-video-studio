@@ -137,6 +137,37 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <h2>这部剧有几集 <span class="tag">环节1 判断集边界，之后每集单独跑</span></h2>
     <div id="epBox" class="muted">还没跑环节1</div>
   </div>
+  <div class="card" id="autoCard">
+    <h2>一键跑到底 <span class="tag">中断后再点一次就是续跑，做过的自动跳过、不重复花钱</span></h2>
+    <p class="muted" style="margin:0 0 8px">
+      从环节1 一路跑到成片：解析 → 切集 → 逐集分镜编译 → 出资产图 → 出故事板 →
+      出视频 → 复核清单 → 逐集拼接。<b>出问题会停下并告诉你改哪里</b>，
+      改完回来再点这个按钮，它从断的地方接着跑。
+    </p>
+    <div class="grid g3">
+      <div><label>资产图 用哪家</label>
+        <select class="ap-sel" data-cap="image" data-k="asset"></select>
+        <select class="am-sel" data-k="asset" style="margin-top:4px"></select></div>
+      <div><label>故事板 用哪家</label>
+        <select class="ap-sel" data-cap="image" data-k="storyboard"></select>
+        <select class="am-sel" data-k="storyboard" style="margin-top:4px"></select></div>
+      <div><label>分段视频 用哪家</label>
+        <select class="ap-sel" data-cap="video" data-k="video"></select>
+        <select class="am-sel" data-k="video" style="margin-top:4px"></select></div>
+    </div>
+    <div class="row" style="margin-top:10px;gap:10px;flex-wrap:wrap">
+      <label style="margin:0">并发 <input id="autoConc" type="number" min="1" max="16"
+        style="width:64px" value="3"></label>
+      <label style="margin:0"><input id="autoProduce" type="checkbox" checked> 包含出图出片</label>
+      <label style="margin:0"><input id="autoDeliver" type="checkbox" checked> 包含复核+拼接</label>
+      <span class="sp"></span>
+      <button class="btn ghost sm" id="autoPreview">先看会做什么（不花钱）</button>
+      <button class="btn" id="autoRun">开始 / 继续</button>
+      <button class="btn ghost sm" id="autoStop" style="display:none">停下</button>
+    </div>
+    <div id="autoPlan" style="margin-top:8px"></div>
+    <pre class="log" id="autoLog" style="max-height:220px;margin-top:8px;display:none"></pre>
+  </div>
   <div class="card" id="healthCard">
     <h2>项目进度与续跑 <span class="tag">以磁盘为准，重启服务也不丢</span></h2>
     <div id="healthTip" class="alert warn" style="margin-bottom:12px">加载中…</div>
@@ -325,6 +356,7 @@ async function boot() {
   renderDefaults();
   renderLimits();
   renderUpload();
+  renderAuto();
   const l = BOOT.config.llm || {};
   $('#llmBase').value = l.base_url || 'https://api.paisio.online';
   $('#llmModel').value = l.model || 'claude-sonnet-5';
@@ -391,6 +423,97 @@ function renderEpisodes() {
       切集时有 ${iss.length} 处可疑，建议点开看一眼：
       ${iss.map(i => `<div>· ${esc(i.episode)}：${esc(i.reason)}</div>`).join('')}</div>` : ''}`;
   $('#epSel').onchange = e => { EP = e.target.value; refreshProject(); };
+}
+
+// ---------- 一键跑到底
+let AUTO = null;                       // 正在跑的流水线 job id
+function renderAuto() {
+  $$('#autoCard .ap-sel').forEach(sel => {
+    const cap = sel.dataset.cap;
+    if (!sel.options.length) sel.innerHTML = providerOptions(cap);
+    const fill = () => {
+      const c = BOOT.capabilities.find(x => x.id === sel.value) || {};
+      const block = c[cap] || {};
+      const msel = $(`#autoCard .am-sel[data-k="${sel.dataset.k}"]`);
+      msel.innerHTML = (block.models || []).map(m =>
+        `<option${m === block.default_model ? ' selected' : ''}>${esc(m)}</option>`).join('');
+      msel.title = block.notes || '';
+    };
+    sel.onchange = fill;
+    fill();
+  });
+  $('#autoConc').value = (BOOT.config.defaults || {}).concurrency || 3;
+}
+function autoSel() {
+  const sel = {};
+  $$('#autoCard .ap-sel').forEach(s => {
+    sel[s.dataset.k] = {provider: s.value,
+      model: $(`#autoCard .am-sel[data-k="${s.dataset.k}"]`).value};
+  });
+  return sel;
+}
+function autoBody() {
+  return {project_root: PROJ, provider_sel: autoSel(),
+          concurrency: +$('#autoConc').value,
+          include_produce: $('#autoProduce').checked,
+          include_deliver: $('#autoDeliver').checked};
+}
+$('#autoPreview').onclick = async () => {
+  if (!PROJ) return alert('先打开项目');
+  $('#autoPlan').innerHTML = '<div class="alert warn">算一下…</div>';
+  const r = await api.post('/api/pipeline/preview', autoBody());
+  if (r.error) return $('#autoPlan').innerHTML = `<div class="alert err">${esc(r.error)}</div>`;
+  const prod = Object.entries(r.produce || {})
+    .map(([k, v]) => `${({asset:'资产图',storyboard:'故事板',video:'分段视频'})[k]} ${v}`).join(' · ');
+  $('#autoPlan').innerHTML = `<div class="alert warn">
+    <b>${r.episodes} 集，共 ${r.total_steps} 步</b>：这次要做 ${r.todo.length} 步，
+      跳过 ${r.skip.length} 步（已经做过的）<br>
+    <b>至少 ${r.llm_calls_at_least} 次</b>剧本分析调用；出图出片：${prod || '无'}<br>
+    <span class="muted">${esc(r.note)}</span>
+    ${r.todo.length ? `<details style="margin-top:6px"><summary class="muted">这次会做的 ${r.todo.length} 步</summary>
+      <div class="muted" style="font-size:11px;margin-top:4px">${r.todo.map(esc).join('<br>')}</div></details>` : ''}
+    ${r.skip.length ? `<details style="margin-top:4px"><summary class="muted">跳过的 ${r.skip.length} 步</summary>
+      <div class="muted" style="font-size:11px;margin-top:4px">${r.skip.map(esc).join('<br>')}</div></details>` : ''}
+  </div>`;
+};
+$('#autoRun').onclick = async () => {
+  if (!PROJ) return alert('先打开项目');
+  $('#autoRun').disabled = true;
+  const r = await api.post('/api/pipeline/run', autoBody());
+  $('#autoRun').disabled = false;
+  if (r.error) return $('#autoPlan').innerHTML = `<div class="alert err">${esc(r.error)}</div>`;
+  AUTO = r.job_id; DETAIL = r.job_id;
+  $('#autoStop').style.display = ''; $('#autoLog').style.display = '';
+  $('#autoPlan').innerHTML = '<div class="alert warn">跑起来了。可以关页面，后台继续跑。</div>';
+};
+$('#autoStop').onclick = async () => {
+  if (AUTO) await api.post('/api/job/cancel', {id: AUTO});
+};
+async function pollAuto() {
+  if (!AUTO) return;
+  const j = await api.get('/api/job', {id: AUTO});
+  if (j.status === 'none') { AUTO = null; return; }
+  const c = j.counts || {};
+  const done = (c.ok || 0) + (c.skipped || 0);
+  const cur = Object.entries(j.items || {}).find(([, v]) => v.state === 'running');
+  $('#autoLog').textContent =
+    `进度 ${done}/${j.total}  完成${c.ok||0} 跳过${c.skipped||0} 失败${c.failed||0}\n`
+    + (cur ? `正在做：${cur[0]}  ${cur[1].msg || ''}\n` : '')
+    + '\n' + (j.logs || []).slice(-40).join('\n');
+  $('#autoLog').scrollTop = 1e6;
+  if (['done','error','cancelled','aborted'].includes(j.status)) {
+    $('#autoStop').style.display = 'none';
+    const bad = Object.entries(j.items || {}).filter(([, v]) => v.state === 'failed');
+    $('#autoPlan').innerHTML = j.status === 'done'
+      ? '<div class="alert warn">✅ 全部跑完了。去「产物」页看成片。</div>'
+      : `<div class="alert err"><b>${j.status === 'aborted' ? '已停下' : '有步骤没做成'}</b>
+          —— ${bad.length} 步失败。照下面「还没处理的问题」改完，回来再点「开始 / 继续」，
+          做过的不会重做。
+          ${bad.slice(0,6).map(([k,v]) => `<div>· ${esc(k)}：${esc(v.msg||'')}</div>`).join('')}
+        </div>`;
+    AUTO = null;
+    refreshProject();
+  }
 }
 
 // ---------- 项目体检 / 续跑面板
@@ -590,6 +713,7 @@ async function tick() {
   let d;
   try { d = await api.get('/api/jobs', $('#jobOnlyMine')?.checked && PROJ ? {root: PROJ} : {}); }
   catch { return; }
+  pollAuto().catch(() => {});      // 流水线进度跟着同一个 timer，不另开
 
   // 顶栏并发仪表
   const g = d.gate || {};

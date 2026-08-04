@@ -86,7 +86,7 @@ def check_keys(data: Any, required: list) -> list:
 
 class LLM:
     def __init__(self, api_key: str, base_url: str, model: str,
-                 timeout: int = 600, proxy: str = ""):
+                 timeout: int = 600, proxy: str = "", max_tokens: int = 16000):
         if not api_key:
             raise LLMError("缺少 llm_api_key")
         self.api_key = api_key
@@ -94,6 +94,10 @@ class LLM:
         self.model = model
         self.timeout = timeout
         self.proxy = proxy
+        # 不显式给上限的话走服务商默认值（常见 4k）。环节1 要为整部剧输出
+        # 人物/场景/道具/伏笔 + 每一集的边界锚点，4k 根本不够 —— 输出被截断
+        # 表现为 JSON 不完整，会白重试两次再报错。给足了就是一次成功。
+        self.max_tokens = int(max_tokens or 0)
 
     def chat(self, system: str, user: str, retries: int = 3) -> str:
         body = {
@@ -102,6 +106,8 @@ class LLM:
                         + [{"role": "user", "content": user}],
             "stream": False,
         }
+        if self.max_tokens > 0:
+            body["max_tokens"] = self.max_tokens
         last = None
         for attempt in range(retries):
             try:
@@ -126,6 +132,12 @@ class LLM:
                 content = (choices[0].get("message") or {}).get("content") or ""
                 if not content.strip():
                     raise LLMError("回复内容为空")
+                # 被 max_tokens 截断时报清楚，别让上层去猜「为什么 JSON 不完整」
+                if (choices[0].get("finish_reason") or "") == "length":
+                    raise LLMError(
+                        f"模型输出被长度上限截断了（max_tokens={self.max_tokens}），"
+                        f"所以 JSON 不完整。去「设置 → 分析引擎」把「单次输出上限」调大，"
+                        f"或者把剧本拆成更少的集数分批处理。")
                 return content
             except (requests.RequestException, ValueError) as exc:
                 last = exc
