@@ -105,6 +105,46 @@ def resolve_chain(cfg: dict, kind: str, override=None) -> list:
     return out
 
 
+def preflight_models(chains: dict) -> list:
+    """开跑前核对每条链里的模型在对应服务商那边真的存在。
+
+    这一步很值：各家的模型命名不统一，同一个模型在不同家写法不同 ——
+    paisio 是 gpt-image-2-1k（带分辨率后缀）、灵感鸭是 gpt-image-2（不带）；
+    nano banana 一家用下划线一家用连字符；veo 也是。照抄另一家的写法就会
+    在跑到那一步时报「找不到这个模型」，而那可能是几百步之后的事。
+    只拉模型列表，零生成费用。
+    """
+    problems = []
+    cache: dict = {}
+    for kind, chain in (chains or {}).items():
+        for i, pcfg in enumerate(chain):
+            pid, model = pcfg.get("provider", ""), pcfg.get("model", "")
+            if not model:
+                continue
+            if pid not in cache:
+                try:
+                    cache[pid] = set(build_provider(
+                        pid, pcfg.get("api_key", ""), pcfg.get("base_url", ""),
+                        pcfg.get("proxy", "")).list_models())
+                except Exception:                       # noqa: BLE001
+                    cache[pid] = set()                  # 拉不到就不判，别误伤
+            avail = cache[pid]
+            if not avail or model in avail:
+                continue
+            # 给出最接近的几个，多半就是后缀或连字符/下划线的差别
+            base = re.sub(r"[-_]", "", model.lower())
+            near = [m for m in sorted(avail)
+                    if base[:8] and base[:8] in re.sub(r"[-_]", "", m.lower())][:5]
+            problems.append({
+                "kind": kind, "slot": "首选" if i == 0 else f"备选{i}",
+                "provider": pid, "model": model, "near": near,
+                "msg": f"「{kind}」的{'首选' if i == 0 else f'备选{i}'} "
+                       f"{pid}/{model} 在这家不存在。"
+                       + (f"是不是想用：{'、'.join(near)}？" if near
+                          else "去「设置 → 出图出片优先级」换一个。")})
+    return problems
+
+
 def resolve_provider_cfg(cfg: dict, sel: dict) -> dict:
     """页面选择 + config 里保存的凭据 → 完整服务商配置。"""
     pid = sel.get("provider") or ""
@@ -266,7 +306,9 @@ def api_post(path: str, body: dict) -> dict:
         pj = proj_of(body)
         return pipeline.preview(pj,
                                include_produce=body.get("include_produce", True),
-                               include_deliver=body.get("include_deliver", True))
+                               include_deliver=body.get("include_deliver", True),
+                               only_episodes=body.get("only_episodes"),
+                               produce_episodes=body.get("produce_episodes"))
 
     if path == "/api/pipeline/run":
         """一键跑到底。中断后再点一次就是续跑——做过的自动跳过。"""
@@ -287,6 +329,13 @@ def api_post(path: str, body: dict) -> dict:
         sel = body.get("provider_sel") or {}
         chains = {k: resolve_chain(cfg, k, sel.get(k)) for k in
                   ("asset", "storyboard", "video")}
+        # 核对模型名是否真的存在（零费用）。各家命名不统一，照抄别家写法就会
+        # 在跑到那一步时报「找不到这个模型」——那可能是几百步之后的事。
+        if not body.get("skip_model_check"):
+            bad = preflight_models(chains)
+            if bad:
+                raise ValueError("模型名对不上，先改了再跑：\n"
+                                 + "\n".join("· " + b["msg"] for b in bad))
 
         job = JOBS.create("pipeline", 1, 1, project_root=pj.root,
                           project_name=os.path.basename(pj.root), provider="pipeline")
@@ -300,7 +349,9 @@ def api_post(path: str, body: dict) -> dict:
             max_retry=int(body.get("max_retry")
                           or (cfg.get("defaults") or {}).get("max_retry", 2)),
             include_produce=body.get("include_produce", True),
-            include_deliver=body.get("include_deliver", True))
+            include_deliver=body.get("include_deliver", True),
+            only_episodes=body.get("only_episodes"),
+            produce_episodes=body.get("produce_episodes"))
         return {"ok": True, "job_id": job.id}
 
     if path == "/api/upload/selftest":
@@ -374,11 +425,17 @@ def api_post(path: str, body: dict) -> dict:
                 "episode": body.get("episode", "EP01"),
                 "params": body.get("params", {}),
                 "source_file": body.get("source_file", "")}
+        # script / text 两个名字都收：批量建剧那个接口用的是 text，
+        # 之前这里只认 script，传 text 会被静默丢掉，建出一个没有剧本的空项目，
+        # 直到跑环节1 才报「剧本是空的」，根本看不出是建项目时丢的。
+        script = body.get("script") or body.get("text") or ""
+        if not script.strip():
+            raise ValueError("没有剧本正文。建项目时必须带 script（或 text）字段，"
+                             "否则建出来的项目跑不了任何环节。")
         pj.save_meta(meta)
-        if body.get("script"):
-            from core.store import write_text
-            write_text(pj.p("01_剧本与分段", "原始剧本.txt"), body["script"])
-        return {"ok": True, "root": root}
+        from core.store import write_text
+        write_text(pj.p("01_剧本与分段", "原始剧本.txt"), script)
+        return {"ok": True, "root": root, "chars": len(script)}
 
     if path == "/api/project/script":
         """给已存在的项目更新剧本正文。"""
@@ -648,7 +705,16 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         try:
             n = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+            raw = self.rfile.read(n) if n else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except UnicodeDecodeError as exc:
+                # 浏览器一定发 UTF-8；能走到这里的是脚本/命令行客户端编码错了。
+                # 直接说清是编码问题，不要甩一句 codec can't decode。
+                raise ValueError(
+                    f"请求体不是 UTF-8 编码（第 {exc.start} 字节 0x{raw[exc.start]:02x} 解不开）。"
+                    f"如果你是用脚本调这个接口，把 body 显式编成 UTF-8 再发；"
+                    f"网页端不会出这个问题。") from exc
             return self._json(api_post(unquote(u.path), body))
         except Exception as exc:                          # noqa: BLE001
             traceback.print_exc()

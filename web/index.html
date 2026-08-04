@@ -150,6 +150,10 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
         style="width:64px" value="3"></label>
       <label style="margin:0"><input id="autoProduce" type="checkbox" checked> 包含出图出片</label>
       <label style="margin:0"><input id="autoDeliver" type="checkbox" checked> 包含复核+拼接</label>
+      <label style="margin:0" title="留空=全部集。环节1 永远读整部剧本；这里限制的是逐集分析（环节2-8）">
+        分析这几集 <input id="autoOnly" placeholder="留空=全部 40 集" style="width:150px"></label>
+      <label style="margin:0" title="留空=跟分析范围一致。资产表始终是全剧的，这里只限制出图出片的范围">
+        只出这几集的图/片 <input id="autoProd" placeholder="留空=同分析范围，如 EP01" style="width:170px"></label>
       <span class="sp"></span>
       <button class="btn ghost sm" id="autoPreview">先看会做什么（不花钱）</button>
       <button class="btn" id="autoRun">开始 / 继续</button>
@@ -463,10 +467,14 @@ function renderAuto() {
 }
 function autoBody() {
   // 不传 provider_sel，让后端直接用 config 里存的链（单一真相源）
+  const eps = el => el.value.split(/[,，\s]+/).map(x => x.trim().toUpperCase()).filter(Boolean);
+  const only = eps($('#autoOnly')), prod = eps($('#autoProd'));
   return {project_root: PROJ,
           concurrency: +$('#autoConc').value,
           include_produce: $('#autoProduce').checked,
-          include_deliver: $('#autoDeliver').checked};
+          include_deliver: $('#autoDeliver').checked,
+          only_episodes: only.length ? only : null,
+          produce_episodes: prod.length ? prod : null};
 }
 $('#autoPreview').onclick = async () => {
   if (!PROJ) return alert('先打开项目');

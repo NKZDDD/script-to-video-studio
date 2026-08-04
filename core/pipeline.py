@@ -36,7 +36,9 @@ PRODUCE = [("s5b", "asset_tasks", "asset"),
            ("s10", "video_tasks", "video")]
 
 
-def plan(pj, *, include_produce: bool = True, include_deliver: bool = True) -> list:
+def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
+         only_episodes: Optional[list] = None,
+         produce_episodes: Optional[list] = None) -> list:
     """算出要做哪些步骤（含已完成的，执行时再跳过）。
 
     顺序是有讲究的：
@@ -48,23 +50,37 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True) -> l
     """
     steps = [{"kind": "llm", "stage": "s1", "episode": "",
               "label": "环节1 整剧全局解析（含切集）"}]
+    # 环节1 永远吃整部剧本 —— 人物长相、视觉基调、伏笔、集边界都得看全篇才准。
+    # only_episodes 只限制「往下逐集加工哪几集」，不影响全局解析的范围。
     eps = _eps.ids(pj)
+    if only_episodes:
+        want = set(only_episodes)
+        eps = [e for e in eps if e in want]
     for ep in eps:
         for sid in PER_EP:
             st = next(s for s in S.STAGES if s["id"] == sid)
             steps.append({"kind": "llm", "stage": sid, "episode": ep,
                           "label": f"{ep} 环节{st['no']} {st['name']}"})
+    # eps 为空说明环节1 还没跑、集还没切出来，这时候别显示「（只 ）」
+    # 生产范围默认跟分析范围一致；给了 produce_episodes 就只出那几集的东西。
+    # 这两件事本来就该分开：资产**表**要全剧（否则资产库中途返工），
+    # 但资产**图**、故事板、视频只出这次要的那几集就够了。
+    prod = [e for e in (produce_episodes or eps) if not eps or e in eps] or eps
+    ptag = f"（只 {'、'.join(prod)}）" if prod and prod != _eps.ids(pj) else ""
     if include_produce:
         for sid, key, kind in PRODUCE:
             st = next(s for s in S.STAGES if s["id"] == sid)
             steps.append({"kind": "produce", "stage": sid, "task_key": key,
                           "produce": kind, "episode": "",
-                          "label": f"环节{st['no']} {st['name']}"})
+                          "only": list(prod) if prod else None,
+                          "label": f"环节{st['no']} {st['name']}{ptag}"})
     if include_deliver:
         steps.append({"kind": "review", "stage": "s11", "episode": "",
-                      "label": "环节11 生成人工复核清单"})
+                      "only": list(prod) if prod else None,
+                      "label": f"环节11 生成人工复核清单{ptag}"})
         steps.append({"kind": "assemble", "stage": "s12", "episode": "",
-                      "label": "环节12 逐集拼接成片"})
+                      "only": list(prod) if prod else None,
+                      "label": f"环节12 拼接成片{ptag}"})
     return steps
 
 
@@ -77,14 +93,25 @@ def _llm_done(pj, stage: str, episode: str) -> bool:
     return pj.stage_data(out, episode) is not None
 
 
-def _produce_todo(pj, task_key: str) -> list:
+def _produce_todo(pj, task_key: str, only: Optional[list] = None) -> list:
     items = pj.tasks().get(task_key, [])
+    if only:
+        want = set(only)
+        if task_key == "asset_tasks":
+            # 资产表是全剧的，但只出这几集用得到的图（含状态资产的父资产）。
+            # 其余资产的编号和外观已经在表里定死，跑到那几集时再补图，仍是同一张脸。
+            used = S.assets_used_by(pj, only)
+            items = [t for t in items if t["key"] in used] if used else items
+        else:
+            items = [t for t in items if not t.get("episode") or t["episode"] in want]
     return [t for t in items if not os.path.isfile(pj.p(*t["output"].split("/")))]
 
 
 def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         params: dict, jobs=None, concurrency: int = 3, max_retry: int = 2,
-        include_produce: bool = True, include_deliver: bool = True) -> dict:
+        include_produce: bool = True, include_deliver: bool = True,
+        only_episodes: Optional[list] = None,
+        produce_episodes: Optional[list] = None) -> dict:
     """跑完整条流水线。job 用来向前端汇报进度，每一步是一个 item。
 
     llm_factory() → LLM 实例（延迟构造，密钥错就在第一步暴露）
@@ -92,7 +119,8 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         kind ∈ asset/storyboard/video。首选挂了会自动换下一家补剩下的。
     jobs: JobManager，给出图出片开子 job，好让「生产」页也能看到细节
     """
-    steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver)
+    steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver,
+                 only_episodes=only_episodes, produce_episodes=produce_episodes)
     job.total = len(steps)
     for s in steps:
         job.set_item(s["label"], state="pending")
@@ -133,17 +161,21 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 # 环节1 跑完才知道有几集，把后面的步骤补进计划
                 if s["stage"] == "s1":
                     rest = plan(pj, include_produce=include_produce,
-                                include_deliver=include_deliver)[1:]
+                                include_deliver=include_deliver,
+                                only_episodes=only_episodes,
+                                produce_episodes=produce_episodes)[1:]
                     steps = steps[:i] + rest
                     job.total = len(steps)
                     for r in rest:
                         job.set_item(r["label"], state="pending")
                     n = len(_eps.ids(pj))
-                    log(f"识别出 {n} 集，接下来逐集跑，共 {len(steps)} 步")
+                    ana = "、".join(only_episodes) if only_episodes else f"全部 {n} 集"
+                    pro = "、".join(produce_episodes) if produce_episodes else "同上"
+                    log(f"识别出 {n} 集；分析范围={ana}；出图出片范围={pro}；共 {len(steps)} 步")
 
             # ---- 出图 / 出片 -----------------------------------------------
             elif s["kind"] == "produce":
-                todo = _produce_todo(pj, s["task_key"])
+                todo = _produce_todo(pj, s["task_key"], s.get("only"))
                 if not todo:
                     job.set_item(key, state="skipped", msg="产物都齐了，跳过")
                     continue
@@ -202,13 +234,16 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             # ---- 复核清单 --------------------------------------------------
             elif s["kind"] == "review":
                 job.set_item(key, state="running")
-                r = S.build_review_checklist(pj)
+                only = s.get("only") or []
+                r = S.build_review_checklist(pj, only[0] if len(only) == 1 else "")
                 job.set_item(key, state="ok", msg=f"{len(r.get('rows', []))} 段待人工验收")
 
             # ---- 拼接 ------------------------------------------------------
             else:
                 job.set_item(key, state="running")
-                r = S.assemble(pj, params, log=log)
+                only = s.get("only") or []
+                r = S.assemble(pj, params, log=log,
+                               episode=only[0] if len(only) == 1 else "")
                 n = len(r.get("masters", [])) or (1 if r.get("master") else 0)
                 job.set_item(key, state="ok", msg=f"出了 {n} 个成片")
 
@@ -244,22 +279,25 @@ def start(job: Job, pj, **kw) -> None:
     threading.Thread(target=run, args=(job, pj), kwargs=kw, daemon=True).start()
 
 
-def preview(pj, *, include_produce: bool = True, include_deliver: bool = True) -> dict:
+def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
+            only_episodes: Optional[list] = None,
+            produce_episodes: Optional[list] = None) -> dict:
     """不跑，只说清「这一次会做什么、跳过什么」。点之前先看一眼，别花冤枉钱。"""
-    steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver)
+    steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver,
+                 only_episodes=only_episodes, produce_episodes=produce_episodes)
     todo, skip = [], []
     for s in steps:
         if s["kind"] == "llm":
             (skip if _llm_done(pj, s["stage"], s.get("episode", "")) else todo).append(s["label"])
         elif s["kind"] == "produce":
-            n = len(_produce_todo(pj, s["task_key"]))
+            n = len(_produce_todo(pj, s["task_key"], s.get("only")))
             (todo if n else skip).append(f"{s['label']}（{n} 项）" if n else s["label"])
         else:
             todo.append(s["label"])
     eps = _eps.ids(pj)
     calls = sum(1 for s in steps if s["kind"] == "llm"
                 and not _llm_done(pj, s["stage"], s.get("episode", "")))
-    produce = {s["produce"]: len(_produce_todo(pj, s["task_key"]))
+    produce = {s["produce"]: len(_produce_todo(pj, s["task_key"], s.get("only")))
                for s in steps if s["kind"] == "produce"}
     return {"episodes": len(eps), "total_steps": len(steps),
             "todo": todo, "skip": skip,

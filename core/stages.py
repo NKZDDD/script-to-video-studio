@@ -339,6 +339,43 @@ def asset_output_rel(asset: dict) -> str:
     return f"02_固定资产/{d}/{asset['asset_id']}.png"
 
 
+def assets_used_by(pj: Project, episodes_wanted: list) -> set:
+    """这几集实际用到哪些资产（含状态资产的父资产）。
+
+    资产**表**是全剧的（skill：第 8 集才砸毁的房间也要在环节1 进演化图，
+    否则资产库中途返工）。但**出图**没必要一上来就出全剧几十张 ——
+    只出这几集用得到的，其余留着，跑到那几集时再出。
+    编号和外观在表里已经定死，所以后面补图仍是同一张脸。
+    """
+    from . import episodes as _eps
+    want_ep = set(episodes_wanted or [])
+    all_assets, used = {}, set()
+    for ep in (_eps.ids(pj) or [""]):
+        for a in (pj.stage_data("s4_assets", ep) or {}).get("assets", []):
+            all_assets.setdefault(a.get("asset_id"), a)
+    if not all_assets:                          # 老单集项目
+        for a in (pj.stage_data("s4_assets") or {}).get("assets", []):
+            all_assets.setdefault(a.get("asset_id"), a)
+
+    for aid, a in all_assets.items():
+        segs = a.get("used_by_segs") or []
+        if any(str(s).split("-")[0] in want_ep for s in segs):
+            used.add(aid)
+    # 状态资产要连父资产一起出，否则没有身份基准
+    for aid in list(used):
+        p = (all_assets.get(aid) or {}).get("parent_asset_id")
+        while p and p in all_assets and p not in used:
+            used.add(p)
+            p = (all_assets.get(p) or {}).get("parent_asset_id")
+    # 环节6 的绑定里出现过的也算（有些资产 used_by_segs 可能没填全）
+    for ep in want_ep:
+        for b in (pj.stage_data("s6_binding", ep) or {}).get("bindings", []):
+            for r in (b.get("reference_images") or []):
+                if r.get("asset_id") in all_assets:
+                    used.add(r["asset_id"])
+    return used
+
+
 def build_tasks(pj: Project, params: dict) -> dict:
     """把 s4/s5/s6/s8 的产物装配成 tasks.json（执行器消费的机器可读清单）。
 
@@ -375,6 +412,10 @@ def build_tasks(pj: Project, params: dict) -> dict:
         ap = aprompts[a["asset_id"]]
         asset_tasks.append({
             "key": a["asset_id"],
+            # 哪几集用到它 —— 「只出第一集的资产图」靠这个字段过滤
+            "episodes": sorted({str(s).split("-")[0]
+                                for s in (a.get("used_by_segs") or [])
+                                if str(s).startswith("EP")}),
             "prompt_ref": f"03_提示词/资产生产提示词/{ap.get('filename') or a['asset_id'] + '_PROMPT.txt'}",
             "reference_images": [
                 {"image_n": i + 1, "asset_id": rid, "file_ref": asset_output_rel(amap[rid])}

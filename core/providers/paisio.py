@@ -26,19 +26,44 @@ class PaisioProvider(Provider):
             "default_base_url": self.default_base_url,
             "supports": list(self.supports),
             "image": {
-                "models": ["gpt-image-2", "gpt-image-2-4k"],
-                "default_model": "gpt-image-2",
+                "models": ["gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k",
+                           "gpt-image2-low", "gpt-image2-medium", "gpt-image2-high",
+                           "nano-banana-2-1k", "nano-banana-2-2k", "nano-banana-2-4k",
+                           "nano-banana-pro-1k", "nano-banana-pro-2k", "nano-banana-pro-4k",
+                           "gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview",
+                           "image-2-1K", "image-2-2K"],
+                "default_model": "gpt-image-2-1k",
                 "sizes": ["1024x1536", "1024x1024", "1536x1024"],
                 "default_size": "1024x1536",
                 "max_refs": 9,
                 "ref_mode": "data_uri",
-                "notes": "模型清单以 /v1/models 实际返回为准。",
+                "notes": "⚠ 这家的名字带分辨率后缀：是 gpt-image-2-1k / -2k / -4k，"
+                         "**没有**不带后缀的 gpt-image-2（那是灵感鸭的写法，"
+                         "填错会报「找不到这个模型」）。1k 最便宜，试跑用它。",
             },
             "video": {
-                "models": ["sd2-pro-720p", "sd2-pro1-720p", "sd2-720p", "sd2-1080p",
-                           "sd2-fast-720p", "sd2-fast-480p",
-                           "seedance2.0-official2-720p", "seedance2.0-fast2-720p",
-                           "video-pro-1080p", "video-pro-480p"],
+                # 分辨率写在模型名里，所以不用也不能传 resolution。
+                # 名字里带 fast 的便宜、带 480p 的更便宜 —— 调试和试跑用它们。
+                "models": [
+                    # sd3 系（新）
+                    "sd3-fast-480p", "sd3-fast-720p", "sd3-480p", "sd3-720p", "sd3-1080p",
+                    # sd2 系（实测过的一档在这里）
+                    "sd2-pro-720p", "sd2-pro1-720p",
+                    "sd2-fast-480p", "sd2-fast-720p", "sd2-fast-1080p",
+                    "sd2-480p", "sd2-720p", "sd2-1080p",
+                    # seedance 系
+                    "seedance2.0-official2-480p", "seedance2.0-official2-720p",
+                    "seedance2.0-official2-1080p", "seedance2.0-official1-720p",
+                    "seedance2.0-fast2-480p", "seedance2.0-fast2-720p",
+                    "seedance-discount-720p", "seedance-discount-fast-720p",
+                    "seedance-2-0-fast", "seedance-2-0-mini",
+                    # video 系
+                    "video-fast-480p", "video-fast-720p",
+                    "video-pro-480p", "video-pro-1080p",
+                    "video431-fast-480p", "video431-fast-720p",
+                    # grok
+                    "grok-imagine-video-1.5-fast", "grok-imagine-video-1.5",
+                ],
                 "default_model": "sd2-pro-720p",
                 "ratios": ["9:16", "16:9", "1:1"],
                 "durations": [4, 5, 8, 10, 12, 15],
@@ -46,7 +71,10 @@ class PaisioProvider(Provider):
                 "resolutions": [""],
                 "max_refs": 9,
                 "ref_mode": "data_uri",
-                "notes": "✅ 实测稳定（17/17 一次通过）。分辨率含在模型名里；"
+                "notes": "分辨率写在模型名里，不用也不能单独传。名字带 fast 的便宜、"
+                         "带 480p 的更便宜 —— 试跑和调提示词用 sd3-fast-480p / "
+                         "sd2-fast-480p，定稿再换 720p/1080p。"
+                         "sd2-pro-720p 实测稳定（17/17 一次通过），sd3 系较新未实测。"
                          "参考图用压缩 data URI 直传（本站无上传端点）。",
             },
             "notes": "视频首选。也提供 chat 模型（claude/gpt 系）可作 LLM 分析引擎。",
