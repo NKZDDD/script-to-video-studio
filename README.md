@@ -361,7 +361,7 @@ for 每一集：环节2 → 3 → 4 → 5 → 6 → 7 → 8
 
 | 服务商 | 出图 | 出片 | 实测备注 |
 | --- | --- | --- | --- |
-| 派系 api.paisio.online | ✅ | ✅ sd2-pro-720p | **视频首选**（实测 17/17 一次过）；也提供 claude/gpt 系 chat 模型可当分析引擎 |
+| 鹤 api.paisio.online | ✅ | ✅ sd2/sd3 全系 | **视频首选**（sd2-pro-720p 实测 17/17 一次过）；也提供 claude/gpt 系 chat 模型可当分析引擎。<br>「鹤」「派系」「pis」是同一家的不同叫法，配置里写哪个都认（内部 id 是 `paisio`） |
 | 灵感鸭 lingganyaapi.com | ✅ gpt-image-2 / nano_banana | ⚠️ sora-2 通道随机失败 | 图片稳定；视频模型多但时长限制严（见下） |
 | 零视工坊 zeroapi.ai-ren.cn | ✅ | ✅ seedance / vad3 / veo / sora | 与 ComfyUI 里的「零视工坊」四个节点同源；`sd2-fast` 需配对象存储 |
 
@@ -432,7 +432,7 @@ script-to-video-studio/
 │   └── s1..s8_*.md       每环节的规则 + JSON schema + 输入占位符
 ├── core/
 │   ├── apiutil.py        HTTP/轮询/解析/data URI/存文件
-│   ├── providers/        ★ 服务商可插拔层（派系 / 灵感鸭 / 零视，各家的坑封装在各自文件里）
+│   ├── providers/        ★ 服务商可插拔层（鹤/灵感鸭/零视/小裴/坤鸡/章鱼哥，各家的坑封装在各自文件里）
 │   ├── llm.py            OpenAI 兼容 chat + JSON 校验重试
 │   ├── pipeline.py       ★ 一键跑到底：把 12 环节串成流水线，中断原地续跑
 │   ├── stages.py         ★ 12 环节各自的实现 + tasks.json 装配

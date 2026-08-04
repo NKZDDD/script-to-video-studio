@@ -16,7 +16,7 @@ from core import diagnose, docparse, episodes, stages as S
 from core.executor import GATE, JobManager, run_batch, run_chain
 from core.llm import LLM
 from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provider,
-                            list_capabilities)
+                            list_capabilities, resolve_id as resolve_provider_id)
 from core.store import Project, list_projects, read_json, write_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -90,7 +90,7 @@ def resolve_chain(cfg: dict, kind: str, override=None) -> list:
         raw = [raw]
     out, skipped = [], []
     for sel in raw:
-        pid = (sel or {}).get("provider") or ""
+        pid = resolve_provider_id((sel or {}).get("provider") or "")
         if not pid:
             continue
         if not ((cfg.get("providers") or {}).get(pid, {}) or {}).get("api_key"):
@@ -147,8 +147,11 @@ def preflight_models(chains: dict) -> list:
 
 def resolve_provider_cfg(cfg: dict, sel: dict) -> dict:
     """页面选择 + config 里保存的凭据 → 完整服务商配置。"""
-    pid = sel.get("provider") or ""
-    saved = (cfg.get("providers") or {}).get(pid, {})
+    # 别名归一：同一家常有几个叫法（鹤 / 派系 / pis 都是 api.paisio.online），
+    # 老配置里写的可能是别名，认了才不会报「未知服务商」。
+    pid = resolve_provider_id(sel.get("provider") or "")
+    saved = ((cfg.get("providers") or {}).get(pid)
+             or (cfg.get("providers") or {}).get(sel.get("provider") or "", {}))
     out = dict(saved)
     out.update({k: v for k, v in sel.items() if v not in (None, "")})
     out["provider"] = pid

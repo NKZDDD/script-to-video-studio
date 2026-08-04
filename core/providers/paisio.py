@@ -1,8 +1,17 @@
 # -*- coding: utf-8 -*-
-"""派系 / SD2·Seedance 系（api.paisio.online 风格）。
+"""鹤（api.paisio.online）。SD2 / SD3 / Seedance 全系。
+
+「鹤」和「派系」是同一个网关的两个叫法 —— ComfyUI 侧 he_nodes.py 的 base_url
+就是 api.paisio.online，文档是 y5dprsil1i.apifox.cn。之前这里显示成「派系」，
+现在统一叫「鹤」。
 
 视频：POST /v1/videos，body 带 metadata{modeType,ratio,enableSound} + images[]，提示词补 @图N。
 图片：OpenAI 兼容 /v1/images/generations（同步或异步都兼容）。
+
+这家还有两个能力本程序没实现，需要时再补：
+  · POST /v1/images/edits —— 最多 16 张图 + mask，能做局部重绘（定向修订用得上）
+  · POST /v1/virtual-assets —— 官方的参考**视频/音频**上传途径（→ va_xxx，
+    再 /sync 轮询到 active）。参考图用 data URI 就够了，所以现在没接。
 """
 
 from __future__ import annotations
@@ -14,8 +23,12 @@ from .base import ImageTask, Provider, VideoTask
 
 
 class PaisioProvider(Provider):
+    # id 保持 "paisio" 不动：它是 config.json 里 providers / chains /
+    # limits.per_provider 的键，改了等于让已保存的 key 和优先级链全部失效。
+    # 显示名叫「鹤」，内部键叫 paisio —— 这是两回事。
     id = "paisio"
-    name = "派系 api.paisio.online（SD2/Seedance）"
+    name = "鹤 api.paisio.online（SD2/SD3/Seedance）"
+    aliases = ("he", "pis", "派系")      # 认这些别名，指到同一家
     default_base_url = "https://api.paisio.online"
     supports = ("image", "video")
 

@@ -23,6 +23,15 @@ _CLASSES = [PaisioProvider, LingganyaProvider, ZeroApiProvider,
 
 REGISTRY = {c.id: c for c in _CLASSES}
 
+# 别名 → 正式 id。同一家网关常有好几个叫法（「鹤」「派系」「pis」都是
+# api.paisio.online），配置里写了哪个都该认，不然会报「未知服务商」。
+ALIASES = {a: c.id for c in _CLASSES for a in getattr(c, "aliases", ())}
+
+
+def resolve_id(provider_id: str) -> str:
+    pid = (provider_id or "").strip()
+    return pid if pid in REGISTRY else ALIASES.get(pid, pid)
+
 
 def list_capabilities() -> list:
     """所有服务商的能力声明（前端渲染用）。"""
@@ -31,7 +40,9 @@ def list_capabilities() -> list:
 
 def build(provider_id: str, api_key: str, base_url: str = "",
           proxy: str = "", timeout: int = 900) -> Provider:
-    cls = REGISTRY.get(provider_id)
+    cls = REGISTRY.get(resolve_id(provider_id))
     if not cls:
-        raise ValueError(f"未知服务商: {provider_id}（可用: {list(REGISTRY)}）")
+        raise ValueError(f"未知服务商: {provider_id}"
+                         f"（可用: {'、'.join(REGISTRY)}；"
+                         f"别名: {'、'.join(ALIASES) or '无'}）")
     return cls(api_key=api_key, base_url=base_url, proxy=proxy, timeout=timeout)
