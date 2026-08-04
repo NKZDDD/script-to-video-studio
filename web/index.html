@@ -362,6 +362,37 @@ const PARAM_FIELDS = [
   ['max_retry','技术重试上限','number'],
 ];
 
+// 尺寸/比例/时长的候选：取「这条链上每一家都支持」的交集 ——
+// 只有交集里的值才保证自动换家时不会因为参数不支持而挂掉。
+// 交集为空（各家完全不重叠）就退回首选那家的清单，并标出来提醒。
+function paramChoices() {
+  const cross = (kind, block, field) => {
+    const chain = (BOOT.config.chains || {})[kind] || [];
+    const lists = chain.map(x => {
+      const c = BOOT.capabilities.find(y => y.id === x.provider);
+      return ((c && c[block]) || {})[field] || null;
+    }).filter(Boolean).map(l => l.map(String));
+    if (!lists.length) return {list: [], note: '（这一类还没排服务商）'};
+    const inter = lists.reduce((a, b) => a.filter(x => b.includes(x)));
+    if (inter.length) return {list: inter, note: chain.length > 1 ? chain.length + ' 家都支持' : ''};
+    return {list: lists[0], note: '⚠ 各家支持的不一致，这里按首选那家；换家时可能不被接受'};
+  };
+  return {image_size: cross('asset', 'image', 'sizes'),
+          ratio: cross('video', 'video', 'ratios'),
+          duration: cross('video', 'video', 'durations')};
+}
+// 有候选就渲染成下拉，没有就退回输入框（免得把人锁死在空列表里）
+function paramField(k, label, t, val, attr) {
+  const s = paramChoices()[k];
+  if (s && s.list.length) {
+    return `<div><label>${label} <span class="muted" style="font-size:11px">${esc(s.note)}</span></label>
+      <select ${attr}="${k}" data-num="${t === 'number' ? 1 : 0}">${
+      s.list.map(x => `<option${String(x) === String(val) ? ' selected' : ''}>${esc(x)}</option>`).join('')
+      }</select></div>`;
+  }
+  return `<div><label>${label}</label><input ${attr}="${k}" type="${t}" value="${val ?? ''}"></div>`;
+}
+
 // ---------- tabs
 $$('nav button').forEach(b => b.onclick = () => {
   $$('nav button').forEach(x => x.classList.toggle('on', x === b));
@@ -622,13 +653,16 @@ function currentParams() {
 function renderParams() {
   const p = currentParams();
   $('#paramBox').innerHTML = PARAM_FIELDS.map(([k, label, t]) =>
-    `<div><label>${label}</label><input data-pk="${k}" type="${t}" value="${p[k] ?? ''}"></div>`).join('');
+    paramField(k, label, t, p[k], 'data-pk')).join('');
 }
 $('#saveParams').onclick = async () => {
   const params = {};
   $$('#paramBox input').forEach(i => params[i.dataset.pk] = i.type === 'number' ? +i.value : i.value);
+  // 尺寸/比例/时长现在是 select，别漏了
+  $$('#paramBox select').forEach(s => params[s.dataset.pk] = s.dataset.num === '1' ? +s.value : s.value);
   await api.post('/api/project/params', {project_root: PROJ, params});
-  log('#flowLog', '参数已保存');
+  renderAuto();                       // 一键跑到底那三个下拉跟着刷新
+  log('#flowLog', '参数已保存（只作用于当前项目；「设置 → 默认参数」是新建项目的初值）');
 };
 
 // ---------- 环节
@@ -949,6 +983,7 @@ function chainRow(kind, cap, i, sel) {
         BOOT.providers_configured[c.id] ? '' : '（未填key）'}</option>`).join('')}
     </select>
     <select class="c-model" style="min-width:190px"></select>
+    <span class="c-hint muted" style="font-size:11px"></span>
   </div>`;
 }
 function renderChains() {
@@ -966,15 +1001,26 @@ function renderChains() {
     const kind = row.dataset.crow;
     const saved = (BOOT.config.chains || {})[kind] || [];
     const idx = [...$$(`#chainBox [data-crow="${kind}"]`)].indexOf(row);
+    const hint = row.querySelector('.c-hint');
     const fill = () => {
       const c = BOOT.capabilities.find(x => x.id === ps.value);
-      if (!c) { ms.innerHTML = ''; ms.disabled = true; return; }
-      ms.disabled = false;
+      // 没选服务商时把模型下拉藏起来 —— 留一个空框在那里看着像坏了
+      if (!c) {
+        ms.innerHTML = ''; ms.style.display = 'none';
+        hint.textContent = idx === 0 ? '（不排的话这一类跑不了）' : '';
+        return;
+      }
+      ms.style.display = ''; ms.disabled = false;
       const block = c[ps.dataset.cap] || {};
       const want = (saved[idx] || {}).model;
       ms.innerHTML = (block.models || []).map(m =>
         `<option${m === (want || block.default_model) ? ' selected' : ''}>${esc(m)}</option>`).join('');
       ms.title = block.notes || '';
+      // 这家支持的尺寸/比例，直接标出来 —— 免得在「默认参数」里填了它不认的值
+      const sizes = (block.sizes || []).join(' ');
+      const ratios = (block.ratios || []).join(' ');
+      hint.textContent = sizes ? `支持 ${sizes}` : (ratios ? `支持 ${ratios}` : '');
+      hint.title = block.notes || '';
     };
     ps.onchange = fill; fill();
   });
@@ -996,11 +1042,12 @@ $('#saveChains').onclick = async () => {
 function renderDefaults() {
   const d = BOOT.config.defaults || {};
   $('#defBox').innerHTML = PARAM_FIELDS.map(([k, label, t]) =>
-    `<div><label>${label}</label><input data-dk="${k}" type="${t}" value="${d[k] ?? ''}"></div>`).join('');
+    paramField(k, label, t, d[k], 'data-dk')).join('');
 }
 $('#saveDefs').onclick = async () => {
   const defaults = {};
   $$('#defBox input').forEach(i => defaults[i.dataset.dk] = i.type === 'number' ? +i.value : i.value);
+  $$('#defBox select').forEach(sl => defaults[sl.dataset.dk] = sl.dataset.num === '1' ? +sl.value : sl.value);
   await api.post('/api/config', {defaults});
   BOOT = await api.get('/api/bootstrap'); alert('已保存');
 };
