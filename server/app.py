@@ -319,6 +319,12 @@ def api_post(path: str, body: dict) -> dict:
         params.update(meta.get("params") or {})
         params.update({"project_code": meta.get("project_code", "PROJ-001"),
                        "episode": meta.get("episode", "EP01")})
+        # 出图尺寸/画面比例/单段时长：点「开始」时给的值优先于「默认参数」。
+        # 这些会被环节8 装配进 tasks.json，所以要在跑之前就定下来。
+        for k, v in (body.get("params_override") or {}).items():
+            if k in ("image_size", "ratio", "duration", "frames", "episode_minutes",
+                     "shots_min", "shots_max") and str(v).strip():
+                params[k] = int(v) if k not in ("image_size", "ratio") else v
         script_path = pj.p("01_剧本与分段", "原始剧本.txt")
         if os.path.isfile(script_path):
             from core.store import read_text
@@ -565,6 +571,21 @@ def api_post(path: str, body: dict) -> dict:
                 return {"ok": False, "msg": "没有记录在案的失败任务"}
         if not items:
             return {"ok": False, "msg": "没有匹配的任务（先跑环节8生成 tasks.json）"}
+
+        # 尺寸/比例/时长的运行时覆盖。
+        # tasks.json 里的值是环节8 装配时按「默认参数」烧进去的；换了服务商之后
+        # 那个尺寸可能这家不支持（坤鸡有 2048x2048、paisio 没有），所以生产页
+        # 要能当场改。这里只改内存里的这一批任务，不动 tasks.json ——
+        # 免得一次试跑把装配结果永久改掉。
+        allow = {"video": ("ratio", "duration"), "asset": ("size",),
+                 "storyboard": ("size", "frames")}[kind]
+        ov = {}
+        for k, v in (body.get("params_override") or {}).items():
+            if k not in allow or str(v).strip() in ("", "None"):
+                continue
+            ov[k] = int(v) if k in ("duration", "frames") else v
+        if ov:
+            items = [dict(t, params=dict(t.get("params") or {}, **ov)) for t in items]
         # 未完成数（已存在的会在 worker 里跳过，这里只用于提示）
         todo = sum(1 for t in items if not os.path.isfile(pj.p(*t["output"].split("/"))))
 

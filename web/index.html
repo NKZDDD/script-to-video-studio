@@ -148,6 +148,11 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <div class="row" style="margin-top:10px;gap:10px;flex-wrap:wrap">
       <label style="margin:0">并发 <input id="autoConc" type="number" min="1" max="16"
         style="width:64px" value="3"></label>
+      <label style="margin:0" title="资产图和故事板的出图尺寸">出图尺寸
+        <select id="autoSize"></select></label>
+      <label style="margin:0" title="视频画面比例">比例 <select id="autoRatio"></select></label>
+      <label style="margin:0" title="每段视频多少秒">单段秒数
+        <select id="autoDur"></select></label>
       <label style="margin:0"><input id="autoProduce" type="checkbox" checked> 包含出图出片</label>
       <label style="margin:0"><input id="autoDeliver" type="checkbox" checked> 包含复核+拼接</label>
       <label style="margin:0" title="留空=全部集。环节1 永远读整部剧本；这里限制的是逐集分析（环节2-8）">
@@ -184,8 +189,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 <section id="t-gen" class="hide">
   <div class="card">
     <h2>生产任务 <span class="tag">读 tasks.json；已存在的输出自动跳过</span></h2>
-    <table><thead><tr><th>类型</th><th>进度</th><th>服务商</th><th>模型</th><th>并发</th><th></th></tr></thead>
+    <table><thead><tr><th>类型</th><th>进度</th><th>服务商</th><th>模型</th>
+      <th>尺寸 / 比例 · 时长</th><th>并发</th><th></th></tr></thead>
       <tbody id="genRows"></tbody></table>
+    <p class="muted" style="margin:6px 0 0">尺寸和比例的候选来自你选的那家<b>自己声明支持的值</b>——
+      各家不一样（坤鸡有 2048x2048、派系没有），换服务商时候选会跟着变。
+      这里改只影响这一次运行，不会改掉环节8 装配好的 tasks.json。</p>
     <div class="row" style="margin-top:10px">
       <button class="btn ghost sm" id="rebuildTasks">重建 tasks.json</button>
       <span class="muted">环节 4/5/6/8 产物变化后点这里</span>
@@ -460,7 +469,19 @@ function renderAuto() {
   }).join('');
   $('#autoChains').innerHTML = rows
     + `<div style="margin-top:4px">按上面的顺序用，前一家挂了自动换下一家补剩下的。</div>`;
-  $('#autoConc').value = (BOOT.config.defaults || {}).concurrency || 3;
+  const d = BOOT.config.defaults || {};
+  $('#autoConc').value = d.concurrency || 3;
+  // 候选取「资产图链的首选那家」和「视频链的首选那家」各自声明支持的值
+  const capOf = (kind, block) => {
+    const first = (ch[kind] || [])[0];
+    const c = first && BOOT.capabilities.find(x => x.id === first.provider);
+    return (c && c[block]) || {};
+  };
+  const opt = (list, cur) => (list || []).map(x =>
+    `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`).join('');
+  $('#autoSize').innerHTML  = opt(capOf('asset','image').sizes || ['1024x1536'], d.image_size);
+  $('#autoRatio').innerHTML = opt(capOf('video','video').ratios || ['9:16'], d.ratio);
+  $('#autoDur').innerHTML   = opt(capOf('video','video').durations || [15], d.duration);
   const bad = CHAIN_KINDS.some(([k]) => !(ch[k] || []).length);
   $('#autoRun').disabled = bad;
   $('#autoRun').title = bad ? '先去「设置 → 出图出片优先级」把三类活各排一条队' : '';
@@ -474,7 +495,10 @@ function autoBody() {
           include_produce: $('#autoProduce').checked,
           include_deliver: $('#autoDeliver').checked,
           only_episodes: only.length ? only : null,
-          produce_episodes: prod.length ? prod : null};
+          produce_episodes: prod.length ? prod : null,
+          params_override: {image_size: $('#autoSize').value,
+                            ratio: $('#autoRatio').value,
+                            duration: +$('#autoDur').value}};
 }
 $('#autoPreview').onclick = async () => {
   if (!PROJ) return alert('先打开项目');
@@ -686,32 +710,58 @@ function renderGen(summary) {
       <td>${s.done}/${s.total}</td>
       <td><select class="p-sel" data-cap="${cap}" style="min-width:150px">${providerOptions(cap)}</select></td>
       <td><select class="m-sel" style="min-width:150px"></select></td>
+      <td class="pbox" style="white-space:nowrap"></td>
       <td><input class="c-in" type="number" value="${(BOOT.config.defaults||{}).concurrency||3}" min="1" max="16" style="width:70px"></td>
       <td><button class="btn sm" data-run="${k}">开始</button>
           <button class="btn ghost sm" data-retry="${k}" title="只重跑记录在案的失败任务">补失败</button></td></tr>`;
   }).join('');
+  const d = BOOT.config.defaults || {};
   $$('#genRows tr').forEach(tr => {
     const sel = tr.querySelector('.p-sel'), msel = tr.querySelector('.m-sel');
+    const pbox = tr.querySelector('.pbox'), kind = tr.dataset.k;
+    // 尺寸/比例/时长的候选来自「这家自己声明支持的值」，换服务商就跟着变 ——
+    // 各家支持的不一样，给全集合只会让人选到一个这家不认的值然后吃 400。
     const fill = () => {
-      const cap = BOOT.capabilities.find(c => c.id === sel.value);
+      const cap = BOOT.capabilities.find(c => c.id === sel.value) || {};
       const block = cap[sel.dataset.cap] || {};
       msel.innerHTML = (block.models || []).map(m =>
-        `<option${m === block.default_model ? ' selected' : ''}>${m}</option>`).join('');
+        `<option${m === block.default_model ? ' selected' : ''}>${esc(m)}</option>`).join('');
       msel.title = block.notes || '';
+      const opt = (list, cur) => (list || []).map(x =>
+        `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`).join('');
+      if (kind === 'video') {
+        pbox.innerHTML =
+          `<select class="v-ratio" title="画面比例">${opt(block.ratios, d.ratio)}</select>
+           <select class="v-dur" title="单段时长（秒）">${opt(block.durations, d.duration)}</select>`;
+        if (!(block.durations || []).length || String(block.durations) === '0')
+          pbox.innerHTML = `<select class="v-ratio">${opt(block.ratios, d.ratio)}</select>
+            <span class="muted" style="font-size:11px">时长写在模型名里</span>`;
+      } else {
+        pbox.innerHTML = `<select class="i-size" title="出图尺寸">${
+          opt(block.sizes, d.image_size)}</select>`;
+      }
     };
     sel.onchange = fill; fill();
-    const go = failedOnly => startGen(tr.dataset.k, sel.value, msel.value,
-                                      +tr.querySelector('.c-in').value, failedOnly);
+    const go = failedOnly => {
+      const ov = {};
+      const size = tr.querySelector('.i-size'), ratio = tr.querySelector('.v-ratio'),
+            dur = tr.querySelector('.v-dur');
+      if (size) ov.size = size.value;
+      if (ratio) ov.ratio = ratio.value;
+      if (dur) ov.duration = +dur.value;
+      startGen(kind, sel.value, msel.value, +tr.querySelector('.c-in').value, failedOnly, ov);
+    };
     tr.querySelector('[data-run]').onclick = () => go(false);
     tr.querySelector('[data-retry]').onclick = () => go(true);
   });
 }
-async function startGen(kind, provider, model, concurrency, failedOnly) {
+async function startGen(kind, provider, model, concurrency, failedOnly, paramsOverride) {
   if (!PROJ) return alert('先打开项目');
   const r = await api.post('/api/generate', {
     project_root: PROJ, kind, concurrency, failed_only: !!failedOnly,
     episode: kind === 'asset' ? '' : EP,        // 资产全剧共享，不按集筛
     provider_sel: {provider, model},
+    params_override: paramsOverride || {},      // 尺寸/比例/时长，只影响这一次
   });
   if (r.error || r.ok === false) return alert(r.error || r.msg);
   if (r.todo === 0) alert('这批任务的产物都已存在，全部会跳过（生成即固定，不覆盖）');
