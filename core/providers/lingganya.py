@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
-"""灵感鸭（www.lingganyaapi.com）。三步式异步：提交?async=true → 查询 → 取成品。"""
+"""灵感鸭（www.lingganyaapi.com）。提交 → 查询 → 取成品。
+
+注意两个端点的 async 参数不一样：**图片带 `?async=true`、视频不带**。
+这家的统一文档写明所有任务默认异步、async 非必需；但图片那页文档标了必填。
+"""
 
 from __future__ import annotations
 
+import json
 from typing import Callable, Optional
 
 from ..apiutil import ApiError, extract_image_items, extract_task_id, extract_video_url
@@ -46,6 +51,57 @@ VIDEO_SPECS: dict = {
 
 IMAGE_MODELS = ["gpt-image-2", "gpt-image-2-special", "gpt-image-2-4k",
                 "nano_banana_2", "nano_banana_pro"]
+
+
+def brief_body(body: dict) -> str:
+    """把请求体压成一行：base64 和长串截断。出 400 时对着这个查参数。"""
+    def shrink(v):
+        if isinstance(v, str):
+            if v.startswith("data:"):
+                return f"<{v.split(',', 1)[0]} {len(v)}字符>"
+            return v if len(v) <= 80 else v[:77] + "…"
+        if isinstance(v, list):
+            return [shrink(x) for x in v]
+        if isinstance(v, dict):
+            return {k: shrink(x) for k, x in v.items()}
+        return v
+    return json.dumps({k: shrink(v) for k, v in body.items()}, ensure_ascii=False)
+
+
+def self_check(body: dict) -> list:
+    """按真实模型表逐条自检，生成「该查什么」清单。
+
+    这家的 400 只回一句「生成内容或参数不符合要求」，什么都看不出来。
+    与其让人干瞪眼，不如把我们知道的硬约束逐条比一遍，指出到底哪一项不合。
+    """
+    model = str(body.get("model") or "")
+    spec = VIDEO_SPECS.get(model)
+    tips = []
+    if model and spec is None:
+        tips.append(f"model={model} 不在这家的模型表里。视频可用的是："
+                    f"{'、'.join(list(VIDEO_SPECS)[:8])} 等")
+    elif spec:
+        if str(body.get("seconds")) not in [str(s) for s in spec["seconds"]]:
+            tips.append(f"时长 {body.get('seconds')} 不是 {model} 的合法档位，只能 {spec['seconds']}")
+        imgs = body.get("images") or []
+        if len(imgs) > spec["max_images"]:
+            tips.append(f"参考图 {len(imgs)} 张超上限：{model} 最多 {spec['max_images']} 张")
+        if spec.get("need_image") and not imgs:
+            tips.append(f"{model} 必须带至少 1 张参考图")
+        if not spec.get("resolution") and body.get("resolution"):
+            tips.append(f"{model} 不该带 resolution 字段（只有 sd-* 系需要）")
+        if spec.get("ref_mode") and imgs:
+            mode = str((body.get("extra") or {}).get("reference_mode") or "")
+            if mode not in ("media", "frame"):
+                tips.append(f"{model} 有参考图时必须说明参考方式："
+                            f"media（素材参考）或 frame（首尾帧）")
+            elif mode == "frame" and len(imgs) != 2:
+                tips.append(f"参考方式选了 frame（首尾帧）就要正好 2 张图，当前 {len(imgs)} 张")
+    tips.append("也可能是提示词或参考图被内容审核拦下了（报错里「生成内容」排在最前面就是）"
+                "——把露骨的词换成中性说法，或换一张参考图")
+    tips.append("模型名的写法各家不同：这家是 veo_3_1_fast（下划线）、gemini_omni_flash，"
+                "别照抄别家网关的写法")
+    return tips
 
 
 def fit_video(body: dict, log=print) -> dict:
@@ -189,8 +245,16 @@ class LingganyaProvider(Provider):
             body.setdefault("extra", {})["reference_mode"] = task.extra["reference_mode"]
         # 按模型规格纠正：时长吸附档位、参考图裁到上限、该带的字段补上、不该带的去掉
         body = fit_video(body, log=log)
-        data = self.session.request("POST", "/v1/videos", json_body=body,
-                                    params={"async": "true"}, retries=2, timeout=300)
+        log(f"提交 {brief_body(body)}")
+        try:
+            # 视频不带 ?async=true：这家统一文档写明所有任务默认异步、async 非必需。
+            # 图片那页文档标了必填，所以图片仍然带 —— 两个端点不一样，别统一。
+            data = self.session.request("POST", "/v1/videos", json_body=body,
+                                        retries=2, timeout=300)
+        except ApiError as exc:
+            # 这家的 400 只回一句笼统话，把自检清单挂上去，诊断卡里直接能看到
+            exc.extra_fix = self_check(body)
+            raise
         url = extract_video_url(data)
         task_id = extract_task_id(data)
         if not url:

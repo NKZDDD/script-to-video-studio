@@ -333,11 +333,17 @@ def _entry(code: str, *, stage: str, target: str, provider: str, model: str,
 
 def build(exc: Any, *, stage: str = "", target: str = "", provider: str = "",
           model: str = "", extra_fix: Optional[list] = None) -> dict:
-    """异常 → 结构化诊断。这是给人看的那一份。"""
+    """异常 → 结构化诊断。这是给人看的那一份。
+
+    服务商可以在抛异常时挂 `exc.extra_fix = [...]`，把只有它自己知道的
+    「该查什么」补进「怎么改」里。有些家的 400 只回一句笼统话，
+    通用错误码给不出具体指引，只能靠各家自己逐条自检。
+    """
     msg = str(exc)
     status = getattr(exc, "status", 0) or 0
+    extra = list(extra_fix or []) + list(getattr(exc, "extra_fix", None) or [])
     return _entry(code_of(msg, status), stage=stage, target=target, provider=provider,
-                  model=model, status=status, raw=msg, extra_fix=extra_fix)
+                  model=model, status=status, raw=msg, extra_fix=extra)
 
 
 def warn(code: str, raw: str, *, stage: str = "", target: str = "", provider: str = "",

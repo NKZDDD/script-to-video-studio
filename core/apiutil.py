@@ -65,6 +65,10 @@ class ApiError(RuntimeError):
         self.status = status
         self.kind = kind or classify(status, message)
         self.retry_after = retry_after
+        # 服务商可以往这里塞「该查什么」的清单：有些家的 400 只回一句笼统话，
+        # 通用错误码给不出具体指引，只有各家自己知道该逐条比对哪些约束。
+        # diagnose.build() 会把它并进「怎么改」。
+        self.extra_fix: list = []
 
 
 # ---------------------------------------------------------------- 响应解析
