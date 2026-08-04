@@ -226,6 +226,31 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <div class="row" style="margin-top:10px"><button class="btn" id="saveLlm">保存</button></div>
   </div>
   <div class="card">
+    <h2>参考图上传 <span class="tag">只收公网链接的那些模型要用；不配也能跑，只是那类模型用不了</span></h2>
+    <p class="muted" style="margin:0 0 8px">
+      有些接口的参考图<b>只收公网 https 链接</b>，不接受把图片本身发过去
+      （零视 <code>sd2-fast</code>、seedance 系都是这类）。而资产图和故事板都在你本机，
+      所以要先传到一个能公开访问的地方换成链接。<br>
+      填一个 S3 兼容的对象存储就行——<b>R2 / 阿里云 OSS / 腾讯云 COS / AWS S3 / MinIO</b> 都是这一套。
+      需要先 <code>pip install boto3</code>。同一张图全剧只传一次（按内容缓存），不会反复上传。
+    </p>
+    <div class="grid g2">
+      <div><label>Endpoint <span class="muted">（R2: https://&lt;账号id&gt;.r2.cloudflarestorage.com；AWS 留空）</span></label>
+        <input id="upEndpoint" placeholder="https://xxx.r2.cloudflarestorage.com"></div>
+      <div><label>Region <span class="muted">（R2 填 auto）</span></label><input id="upRegion" placeholder="auto"></div>
+      <div><label>Bucket</label><input id="upBucket" placeholder="桶名"></div>
+      <div><label>路径前缀</label><input id="upPrefix" placeholder="respect"></div>
+      <div><label>Access Key</label><input id="upAccess" placeholder="留空=不改"></div>
+      <div><label>Secret Key</label><input id="upSecret" type="password" placeholder="留空=不改"></div>
+      <div style="grid-column:1/-1"><label>公开访问域名 <span class="muted">（你的 CDN / 公开域名，强烈建议填；不填则拼 endpoint）</span></label>
+        <input id="upPublic" placeholder="https://cdn.example.com"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn sm" id="saveUpload">保存</button>
+      <span class="muted" id="upState"></span>
+    </div>
+  </div>
+  <div class="card">
     <h2>同时最多跑几个 <span class="tag">同时做几部剧也共用这里的上限，免得把服务商发毛</span></h2>
     <div class="grid g3">
       <div><label>总上限（所有项目合计）</label><input id="limGlobal" type="number" min="1" max="64"></div>
@@ -289,6 +314,7 @@ async function boot() {
   renderProviders();
   renderDefaults();
   renderLimits();
+  renderUpload();
   const l = BOOT.config.llm || {};
   $('#llmBase').value = l.base_url || 'https://api.paisio.online';
   $('#llmModel').value = l.model || 'claude-sonnet-5';
@@ -776,7 +802,35 @@ $('#saveLimits').onclick = async () => {
   const per_provider = {};
   $$('#limProvBox input').forEach(i => per_provider[i.dataset.lim] = +i.value);
   await api.post('/api/config', {limits: {global: +$('#limGlobal').value, per_provider}});
-  BOOT = await api.get('/api/bootstrap'); alert('闸门已更新（对新任务生效）');
+  BOOT = await api.get('/api/bootstrap'); alert('已更新（对新任务生效）');
+};
+
+// ---------- 参考图上传（对象存储）
+const UP_FIELDS = {upEndpoint:'endpoint', upRegion:'region', upBucket:'bucket',
+                   upPrefix:'prefix', upAccess:'access_key', upSecret:'secret_key',
+                   upPublic:'public_base_url'};
+function renderUpload() {
+  const u = BOOT.config.upload || {};
+  for (const [el, key] of Object.entries(UP_FIELDS)) {
+    // 密钥回传的是掩码，别塞回输入框——留空表示不改
+    $('#' + el).value = (key === 'secret_key') ? '' : (u[key] ?? '');
+  }
+  const ready = u.bucket && u.access_key_set && u.secret_key_set;
+  $('#upState').textContent = ready
+    ? `已配置（${u.bucket}）—— 只收公网链接的模型现在可用`
+    : (u.bucket ? '还缺密钥' : '未配置 —— 只收公网链接的模型暂时用不了');
+}
+$('#saveUpload').onclick = async () => {
+  const upload = {};
+  for (const [el, key] of Object.entries(UP_FIELDS)) {
+    const v = $('#' + el).value.trim();
+    // 密钥留空 = 不改；其余字段允许清空
+    if (key === 'secret_key' || key === 'access_key') { if (v) upload[key] = v; }
+    else upload[key] = v;
+  }
+  await api.post('/api/config', {upload});
+  BOOT = await api.get('/api/bootstrap'); renderUpload();
+  alert('已保存。要用只收公网链接的模型，记得先 pip install boto3');
 };
 
 $('#npCreate').onclick = async () => {

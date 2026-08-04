@@ -46,6 +46,17 @@ class Provider:
     default_base_url: str = ""
     supports: tuple = ()   # ("image",) / ("video",) / ("image", "video")
 
+    # 参考图怎么给：
+    #   data_uri —— 能直接吃图片内容（省事，默认）
+    #   url      —— 只收公网链接，本机文件必须先上传（core/uploader.py）
+    # 同一家不同模型可能不一样（零视图生视频吃 base64、SD2 只收 URL），
+    # 所以还有 url_only_models 这个逃生口，按模型名细分。
+    ref_mode: str = "data_uri"
+    url_only_models: tuple = ()
+
+    def needs_url(self, model: str = "") -> bool:
+        return self.ref_mode == "url" or (model or "") in self.url_only_models
+
     def __init__(self, api_key: str = "", base_url: str = "", proxy: str = "", timeout: int = 900):
         self.session = HttpSession(api_key, base_url or self.default_base_url, timeout, proxy)
 

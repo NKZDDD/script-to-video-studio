@@ -281,9 +281,38 @@ python run.py                        # 浏览器自动打开 http://127.0.0.1:87
 | --- | --- | --- | --- |
 | 派系 api.paisio.online | ✅ | ✅ sd2-pro-720p | **视频首选**（实测 17/17 一次过）；也提供 claude/gpt 系 chat 模型可当分析引擎 |
 | 灵感鸭 lingganyaapi.com | ✅ gpt-image-2 / nano_banana | ⚠️ sora-2 通道随机失败 | 图片稳定；视频模型多但时长限制严（见下） |
-| 零视工坊 zeroapi.ai-ren.cn | ✅ | ✅ seedance / vad3 / veo / sora | 与 ComfyUI 里的「零视工坊」四个节点同源 |
+| 零视工坊 zeroapi.ai-ren.cn | ✅ | ✅ seedance / vad3 / veo / sora | 与 ComfyUI 里的「零视工坊」四个节点同源；`sd2-fast` 需配对象存储 |
 
-参考图统一用**压缩 data URI**（1024px JPEG q80）直传，绕开图床白名单问题。
+### 参考图怎么给：data URI 还是公网链接
+
+这是**接新服务商时最容易卡住的一件事**，所以单独说。
+
+能直接吃图片内容的家，参考图统一用**压缩 data URI**（1024px JPEG q80）直传，绕开图床白名单问题。但越来越多接口（尤其新接口）**只收公网 https 链接**，不接受把图片本身发过去——零视 `sd2-fast`、seedance 系全家族都是这样。而本程序的资产图和故事板全是本机文件。
+
+所以 provider 要声明自己的口味，`core/uploader.py` 负责把本机文件变成链接：
+
+```python
+class MyProvider(Provider):
+    ref_mode = "data_uri"              # 默认：能直接吃图片内容
+    # ref_mode = "url"                 # 整家都只收链接
+    url_only_models = ("sd2-fast",)    # 或者只有某几个模型挑食
+```
+
+上传三级策略，从便宜到通用：
+
+| 顺序 | 方式 | 代价 | 适用 |
+| --- | --- | --- | --- |
+| 1 | 服务商自己的上传端点（`/v1/uploads` → `/v1/upload` 兜底） | 免费，key 现成 | **跨站不通**：各家端点只认自己签发的 key |
+| 2 | 自己的 S3 兼容对象存储（R2/OSS/COS/S3/MinIO） | 要 `boto3` + 一次性配置 | **通用**，对所有服务商都有效 |
+| 3 | 都没有 | — | 明确报错说清去哪配，**绝不悄悄退回 data URI** 让服务商拒一遍 |
+
+在「设置 → 参考图上传」配对象存储。密钥只进 `config.json`（已 gitignore），**不回传前端**：读回来时 `secret_key` 恒为空、`access_key` 只显示前 4 位，留空保存 = 不改。
+
+几个必需的细节：
+
+- **按内容哈希缓存，并持久化到 `07_检查与记录/upload_cache.json`。** 40 集 466 段视频、每段 1-2 张参考图接近 900 次上传，但参考的是反复出现的那几十张资产图 —— 缓存后同一张全剧只传一次，重跑/续跑也不重传。缓存 key 带服务商 id：A 家的链接不能给 B 家用。
+- **端点不通就记住。** 零视根本没有 `/v1/uploads`，不记住的话 466 段会白试近 2000 次。第一次失败后本次运行不再重试它。
+- **配置写错判死不重试。** `NoSuchBucket` / `InvalidAccessKeyId` / 域名打错，重试多少次都一样；只有真的网络抖动才重试。
 
 ### 每家的坑不一样，封装层负责吃掉
 
@@ -299,7 +328,7 @@ python run.py                        # 浏览器自动打开 http://127.0.0.1:87
 
 **有些模型硬性要求参考图。** 灵感鸭 grok 系没图直接拒，程序会在发请求前就拦住并告诉你去查环节6 的资产绑定（错误码 `MODEL_NEEDS_REF`）。
 
-**零视 `sd2-fast` 用不了。** 它的参考素材只收公网 HTTPS 链接，而本程序的故事板是本机文件。选了它会**在发请求前**被拦住，并直接告诉你换成 `seedance_2_fast_480p` 之类能吃本地图的模型（错误码 `REF_URL_ONLY`）——不会白花一次调用去换一个 400。
+**零视 `sd2-fast` 要先配对象存储。** 它的参考素材只收公网 HTTPS 链接。配了「参考图上传」程序会自动把故事板传上去换链接；没配的话会**在发请求前**被拦住，并告诉你两条出路：配上传，或换成 `seedance_2_fast_480p` 之类能直接吃本地图的模型（错误码 `REF_URL_ONLY`）——不会白花一次调用去换一个 400。
 
 ## 目录
 
@@ -318,6 +347,7 @@ script-to-video-studio/
 │   ├── episodes.py       ★ 按环节1 给的锚点切集（模型定边界，代码做切割）
 │   ├── diagnose.py       ★ 错误 → 人话指引（改哪里/怎么改/怎么接着跑）
 │   ├── probe.py          出图后量真实宽高，核对画面比例
+│   ├── uploader.py       ★ 本机文件 → 公网链接（给只收 URL 的接口用，带内容哈希缓存）
 │   ├── docparse.py       docx/pdf/txt 解析（docx 零依赖）
 │   ├── executor.py       线程池 + 三层并发闸门 + 重试纪律
 │   └── store.py          项目目录读写 + 注册表 + 日志
@@ -343,7 +373,7 @@ projects/血脉契约/
 ├── 03_提示词/                段落 id 自带 EPxx 前缀，天然不冲突
 ├── 04_故事板/ 05_分段视频/    文件名含 {code}_{EPxx}_{SEGnn}
 ├── 06_成片/                  一集一个 MASTER
-└── 07_检查与记录/failures.json + execution_log.jsonl
+└── 07_检查与记录/failures.json + execution_log.jsonl + upload_cache.json
 ```
 
 ## skill ↔ 程序 的同步方式

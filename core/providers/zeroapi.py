@@ -64,6 +64,8 @@ class ZeroApiProvider(Provider):
     name = "零视工坊 zeroapi.ai-ren.cn"
     default_base_url = "https://zeroapi.ai-ren.cn"
     supports = ("image", "video")
+    # 只有 SD2 新接口挑食：只收公网链接。其余模型直接吃图片内容。
+    url_only_models = tuple(SD2_MODELS)
 
     def capabilities(self) -> dict:
         return {
@@ -189,12 +191,14 @@ class ZeroApiProvider(Provider):
 
     def _sd2_body(self, model, prompt, dur, ratio, refs, log) -> dict:
         if refs and any(r.startswith("data:") for r in refs):
-            # 与其发出去等 400，不如现在就说清为什么、该换成什么
+            # 走到这里说明上传层没生效（没配对象存储、或上传失败后被降级）。
+            # 与其发出去等 400，不如现在就说清为什么、两条出路各是什么。
             raise ApiError(
                 f"零视 {model}（SD2 新接口）的参考素材只收公网 HTTPS 链接，"
-                f"不接受本地图片。本程序的故事板是本地文件，转成 data URI 发过去会被拒。"
-                f"请在「生产」页把这一类任务的模型改成 "
-                f"{' / '.join(I2V_MODELS[:3])} 之一（这些能直接吃本地图）。",
+                f"不接受本地图片。要用它，得先在「设置 → 参考图上传」配一个对象存储"
+                f"（R2/OSS/COS/MinIO 都行），程序会自动把故事板传上去换成链接。"
+                f"不想配的话，把这一类任务的模型换成 "
+                f"{' / '.join(I2V_MODELS[:3])} 之一——这些能直接吃本地图。",
                 kind=TASK_FATAL)
         body = {"model": model, "prompt": prompt,
                 "duration": _snap(dur, SD2_DURATIONS, log, model, "duration"),

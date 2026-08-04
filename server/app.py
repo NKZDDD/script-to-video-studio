@@ -36,6 +36,12 @@ def load_config() -> dict:
     cfg.setdefault("projects_dir", DEFAULT_PROJECTS)
     cfg.setdefault("providers", {})
     cfg.setdefault("llm", {})
+    # 参考图上传：给只收公网链接的接口用（零视 SD2、seedance 系都是这类）。
+    # 不配也能跑，只是那类模型用不了。
+    cfg.setdefault("upload", {"endpoint": "", "region": "auto", "bucket": "",
+                              "access_key": "", "secret_key": "",
+                              "public_base_url": "", "prefix": "respect",
+                              "public_acl": False})
     cfg.setdefault("defaults", {
         "duration": 15, "ratio": "9:16", "image_size": "1024x1536",
         "frames": 4, "shots_min": 5, "shots_max": 8,
@@ -75,6 +81,10 @@ def resolve_provider_cfg(cfg: dict, sel: dict) -> dict:
     out["provider"] = pid
     if not out.get("api_key"):
         raise ValueError(f"服务商 {pid} 未配置 api_key（在「服务商」页签保存）")
+    # 参考图上传配置是全局共用的（一个对象存储服务所有服务商），
+    # 但某家自己的上传端点能不能用是按家配的
+    out["upload"] = dict(cfg.get("upload") or {})
+    out.setdefault("provider_upload", saved.get("provider_upload", True))
     return out
 
 
@@ -98,7 +108,16 @@ def api_get(path: str, q: dict) -> dict:
     cfg = load_config()
 
     if path == "/api/bootstrap":
-        return {"config": {k: v for k, v in cfg.items() if k != "providers"},
+        # 凭据一律不回前端：providers 整块剔掉，upload 里的密钥只回「配了没」
+        pub = {k: v for k, v in cfg.items() if k != "providers"}
+        up = dict(pub.get("upload") or {})
+        up["secret_key"] = ""
+        up["access_key_set"] = bool((cfg.get("upload") or {}).get("access_key"))
+        up["secret_key_set"] = bool((cfg.get("upload") or {}).get("secret_key"))
+        if up.get("access_key"):
+            up["access_key"] = up["access_key"][:4] + "…"
+        pub["upload"] = up
+        return {"config": pub,
                 "providers_configured": {k: bool(v.get("api_key"))
                                          for k, v in (cfg.get("providers") or {}).items()},
                 "capabilities": list_capabilities(),
@@ -187,12 +206,22 @@ def api_post(path: str, body: dict) -> dict:
 
     if path == "/api/config":
         cur = load_config()
+        # 密钥类字段「留空 = 不改」。前端拿到的是掩码后的值，
+        # 直接 update 会把已保存的密钥覆盖成空。
+        SECRET = ("api_key", "secret_key", "access_key")
         for k, v in body.items():
             if k == "providers" and isinstance(v, dict):
                 cur.setdefault("providers", {})
                 for pid, pv in v.items():
+                    pv = {kk: vv for kk, vv in pv.items()
+                          if not (kk in SECRET and not str(vv).strip())}
                     cur["providers"].setdefault(pid, {}).update(pv)
             elif isinstance(v, dict):
+                v = {kk: vv for kk, vv in v.items()
+                     if not (kk in SECRET and not str(vv).strip())}
+                # 这几个是只读回显字段，不该被存进 config
+                v.pop("access_key_set", None)
+                v.pop("secret_key_set", None)
                 cur.setdefault(k, {}).update(v)
             else:
                 cur[k] = v

@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from typing import Any, Callable, Optional
 
-from . import diagnose, probe
+from . import diagnose, probe, uploader
 from .llm import LLM
 from .providers import ImageTask, VideoTask, build as build_provider
 from .apiutil import resolve_ref
@@ -429,6 +429,32 @@ def build_tasks(pj: Project, params: dict) -> dict:
 
 # ====================================================================== 出图/出片 worker
 
+def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
+                      ref_side: int) -> Callable:
+    """按服务商的口味把参考图引用变成它能吃的形式。
+
+    能吃图片内容的就直接转 data URI（省事、不依赖外部存储）；
+    只收公网链接的先上传换 URL（内容哈希缓存，同一张资产图全剧只传一次）。
+    """
+    need_url = prov.needs_url(model)
+    s3_cfg = provider_cfg.get("upload") or {}
+    # 有的家自己有上传端点（免费、key 现成）；没有就只能走自己的对象存储
+    session = prov.session if provider_cfg.get("provider_upload", True) else None
+
+    def resolve(src: str, log: Callable = print) -> str:
+        src = (src or "").strip()
+        if not src or src.startswith("http"):
+            return src
+        if not need_url:
+            return resolve_ref(src, pj.root, max_side=ref_side)
+        path = src if os.path.isabs(src) else os.path.join(pj.root, src)
+        return uploader.to_url(path, project_root=pj.root, session=session,
+                               s3_cfg=s3_cfg, max_side=ref_side,
+                               provider_id=prov.id, log=log)
+
+    return resolve
+
+
 def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
                 provider_cfg: dict, model: str, media: str):
     """出完东西量一下真实尺寸，比例不对就挂一条提醒。
@@ -463,6 +489,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
     interval = int(provider_cfg.get("poll_interval", 5))
     timeout = int(provider_cfg.get("poll_timeout", 900))
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
+    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side)
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -478,7 +505,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
         for r in sorted(task.get("reference_images", []), key=lambda x: x.get("image_n", 0)):
             src = r.get("url") or r.get("file_ref") or ""
             if src:
-                refs.append(resolve_ref(src, pj.root, max_side=ref_side))
+                refs.append(to_ref(src, log))
         log(f"参考图×{len(refs)}")
         meta = prov.generate_image(
             ImageTask(prompt=prompt, refs=refs, size=want, model=model),
@@ -500,6 +527,7 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
     interval = int(provider_cfg.get("poll_interval", 10))
     timeout = int(provider_cfg.get("poll_timeout", 2400))
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
+    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side)
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -514,9 +542,9 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
         if not (sb.startswith("http") or os.path.isfile(pj.p(*sb.split("/")))):
             raise RuntimeError(f"固定故事板不存在，请先跑环节9: {sb}")
         prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
-        refs = [resolve_ref(sb, pj.root, max_side=ref_side)]
+        refs = [to_ref(sb, log)]
         if task.get("aux_reference"):
-            refs.append(resolve_ref(task["aux_reference"], pj.root, max_side=ref_side))
+            refs.append(to_ref(task["aux_reference"], log))
         log(f"model={model} {p.get('duration', 15)}s {want} 参考图×{len(refs)}")
         meta = prov.generate_video(
             VideoTask(prompt=prompt, refs=refs, duration=int(p.get("duration", 15)),

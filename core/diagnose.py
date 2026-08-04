@@ -146,15 +146,19 @@ CATALOG = {
         "resumable": True, "scope": "stage", "level": "error",
     },
     "REF_URL_ONLY": {
-        "title": "这个模型只收公网图片链接，喂不了本地图",
+        "title": "这个模型只收公网图片链接，本机图没传上去",
         "why": "有些接口的参考素材必须是能公开访问的 https 链接，不接受把图片本身发过去。"
-               "本程序的资产图和故事板都是本机文件，只能转成内嵌数据发送，所以过不了这一关。",
-        "where": "「生产」页这一行的「模型」下拉框",
-        "fix": ["换一个能直接吃本地图的模型——报错里已经列出了同一家里可用的那几个",
-                "或者整行换一家服务商（派系、灵感鸭都能直接收本地图）",
-                "非要用这个模型的话，得先把图传到一个公网图床/对象存储再填链接，"
-                "本程序目前没有上传功能，这条路得手工做"],
-        "resume": "换完模型点「开始」，只会重跑这些没做成的",
+               "程序会自动把本机的资产图/故事板传上去换成链接，但现在没传成功——"
+               "要么还没配上传用的对象存储，要么上传本身失败了。",
+        "where": "设置 → 参考图上传；或者「生产」页这一行的「模型」",
+        "fix": ["最省事：换一个能直接吃本地图的模型（报错里列了同一家可用的那几个），"
+                "或者整行换一家服务商——派系、灵感鸭都能直接收本地图",
+                "想用这个模型：去「设置 → 参考图上传」填一个 S3 兼容的对象存储，"
+                "R2 / 阿里云 OSS / 腾讯云 COS / MinIO 都是这一套",
+                "填完记得先装依赖：pip install boto3，然后重启程序",
+                "已经配了还失败的，看下面原始报错——常见是桶不是公开可读、"
+                "或者「公开访问域名」没填导致拼出来的链接打不开"],
+        "resume": "配好上传、或换完模型，回「生产」页点「开始」，只会重跑没做成的",
         "resumable": True, "scope": "batch", "level": "error",
     },
     "MODEL_NEEDS_REF": {
@@ -268,7 +272,8 @@ _PATTERNS = [
     ("CONTENT_REJECTED", r"content policy|safety|violat|prohibited|sensitive|审核|违规|敏感"),
     ("PROMPT_INVALID", r"prompt too long|too long|invalid (prompt|param|size|request)|参数错误|不支持的?(尺寸|时长|比例)"),
     # 这两条要排在 REF_MISSING 前面：都跟参考图有关，但原因和改法完全不同
-    ("REF_URL_ONLY", r"只收公网|只收 ?HTTPS|must be a (public )?url|不接受本地图片"),
+    ("REF_URL_ONLY", r"只收公网|只收 ?HTTPS|must be a (public )?url|不接受本地图片"
+                     r"|没能传上去|上传到对象存储失败|上传端点没能用上|先装 boto3"),
     ("MODEL_NEEDS_REF", r"必须给至少 ?\d* ?张参考图|必须提供 ?\d* ?张参考图|need_image"),
     ("REF_MISSING", r"参考图文件不存在|固定故事板不存在|no such file|filenotfound"),
     # 这两条要排在 PREREQ_MISSING 前面：它们的文案里也带「请先跑」，

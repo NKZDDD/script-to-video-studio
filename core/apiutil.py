@@ -239,25 +239,30 @@ class HttpSession:
         self.timeout = timeout
         self.proxy = (proxy or "").strip()
 
-    def _headers(self) -> dict:
-        return {
+    def _headers(self, multipart: bool = False) -> dict:
+        h = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
-            "Content-Type": "application/json",
             "User-Agent": "ScriptToVideoRunner/2.0",
         }
+        # 传文件时不能自己写 Content-Type：requests 要在里面填 multipart 的 boundary，
+        # 手写死 application/json 会让服务端解不出 form 字段。
+        if not multipart:
+            h["Content-Type"] = "application/json"
+        return h
 
     def _proxies(self) -> Optional[dict]:
         return {"http": self.proxy, "https": self.proxy} if self.proxy else None
 
     def request(self, method: str, path: str, *, json_body: Any = None, params: Any = None,
-                retries: int = 3, timeout: Optional[int] = None) -> Any:
+                files: Any = None, retries: int = 3, timeout: Optional[int] = None) -> Any:
         url = path if path.startswith("http") else self.base_url + path
         last: Optional[Exception] = None
         for attempt in range(max(1, retries)):
             try:
                 resp = requests.request(
-                    method, url, headers=self._headers(), json=json_body, params=params,
+                    method, url, headers=self._headers(multipart=bool(files)),
+                    json=json_body, params=params, files=files,
                     timeout=timeout or self.timeout, proxies=self._proxies(),
                 )
                 if resp.status_code >= 400:
