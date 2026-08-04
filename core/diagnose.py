@@ -347,6 +347,41 @@ def warn(code: str, raw: str, *, stage: str = "", target: str = "", provider: st
                   status=0, raw=raw, extra_fix=extra_fix)
 
 
+# 换一家服务商能解决的问题 —— 都是「这家不行」而不是「这个活有问题」
+FAILOVER_CODES = {
+    "QUOTA_EXHAUSTED",     # 这家没钱了，别家有
+    "AUTH_INVALID",         # 这家 key 不对
+    "ACCOUNT_BANNED",       # 这家账号/线路不可用
+    "MODEL_NOT_FOUND",      # 这家没这个模型
+    "RATE_LIMITED",         # 这家在限流，换一家能继续
+    "NETWORK",              # 这家连不上
+    "TIMEOUT",              # 这家太慢
+    "REF_URL_ONLY",         # 这家只收链接而我们没配存储 → 换能吃本地图的
+}
+
+# 换家也一样的 —— 得改内容或改流程，自动切换只会把同一个错误重复一遍
+NO_FAILOVER_CODES = {
+    "CONTENT_REJECTED",     # 提示词本身要改。换家碰运气有可能过，但那是在赌，
+                            # 而且各家审核尺度不同会导致同一部剧风格不一致
+    "PROMPT_INVALID",       # 参数不合法
+    "REF_MISSING",          # 参考图还没生成，是流程顺序问题
+    "PREREQ_MISSING", "EPISODE_REQUIRED", "EPISODE_SPLIT_FAILED",
+    "LLM_SCHEMA_FAIL", "LLM_EMPTY",
+    "DISK", "WRONG_RATIO",
+}
+
+
+def should_failover(diag: Optional[dict]) -> bool:
+    """这个错误值不值得换下一家再试。"""
+    if not diag:
+        return False
+    code = diag.get("code", "")
+    if code in NO_FAILOVER_CODES:
+        return False
+    # 没见过的错误也给一次换家的机会：多半是某家自己的毛病
+    return code in FAILOVER_CODES or code == "UNKNOWN"
+
+
 def one_line(d: dict) -> str:
     """给日志和任务卡用的一行摘要。不带错误码——那是给我排查用的，不是给用户看的。"""
     where = d.get("where") or ""

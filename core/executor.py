@@ -223,6 +223,61 @@ class JobManager:
         return sum(1 for j in self.jobs.values() if not _is_final(j))
 
 
+def run_chain(tasks: list, *, chain: list, worker_of: Callable, job_of: Callable,
+              key_of: Callable, done_of: Callable, max_retry: int = 2,
+              log: Callable = print) -> dict:
+    """按优先级依次尝试各家服务商：上一家因为「这家不行」挂了就换下一家补剩下的。
+
+    chain 是有序的 [{provider, model, ...}, ...]，第一个是首选。
+
+    什么时候换家由 diagnose.should_failover 说话：余额不足、密钥失效、没这个模型、
+    限流、连不上 —— 换家能解决。而提示词被审核挡下、参数不合法、参考图还没生成 ——
+    换家也一样，那是内容或流程问题，自动切只会把同一个错误重复几遍还多花钱。
+
+    每一家一个独立子 job（生产面板上能分别看到），已经做出来的产物一律跳过，
+    所以换家时只补没做完的那些。
+    """
+    attempts = []
+    for idx, pcfg in enumerate(chain):
+        todo = [t for t in tasks if not done_of(t)]
+        if not todo:
+            break
+        who = f"{pcfg.get('provider','')} {pcfg.get('model','')}".strip()
+        if idx:
+            log(f"改用第 {idx + 1} 家「{who}」补剩下的 {len(todo)} 项")
+        sub = job_of(pcfg, len(todo))
+        run_batch(sub, todo, worker_of(pcfg), key_of=key_of, max_retry=max_retry,
+                  provider=pcfg.get("provider", ""))
+        c = sub.counts()
+        attempts.append({"provider": pcfg.get("provider", ""), "model": pcfg.get("model", ""),
+                         "job_id": sub.id, "counts": c, "aborted": sub.aborted,
+                         "diag": sub.abort_diag})
+        left = [t for t in tasks if not done_of(t)]
+        if not left:
+            return {"attempts": attempts, "left": 0, "switched": idx}
+
+        # 这一家没做完 —— 值不值得换下一家？
+        diag = sub.abort_diag
+        if not diag:
+            # 没整批熔断，看失败任务里的诊断（取第一条有 diag 的）
+            for it in sub.items.values():
+                if it.get("state") == "failed" and it.get("diag"):
+                    diag = it["diag"]
+                    break
+        if idx + 1 >= len(chain):
+            log(f"「{who}」还有 {len(left)} 项没做成，而且没有下一家可换了")
+            break
+        if not diagnose.should_failover(diag):
+            log(f"「{who}」失败原因是「{(diag or {}).get('title','未知')}」——"
+                f"换一家也一样，不自动切换。照面板上的说明处理后再点一次。")
+            break
+        log(f"⚠️ 「{who}」不行了（{(diag or {}).get('title','未知')}），"
+            f"自动换下一家继续，还剩 {len(left)} 项")
+    left = [t for t in tasks if not done_of(t)]
+    return {"attempts": attempts, "left": len(left),
+            "switched": max(0, len(attempts) - 1)}
+
+
 def run_batch(job: Job, tasks: list, worker: Callable, *,
               key_of: Callable, max_retry: int = 2, provider: str = "") -> None:
     """并发跑 tasks。worker(task, log_fn, cancel_fn) 成功返回 dict，失败抛异常。

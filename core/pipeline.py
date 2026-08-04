@@ -26,7 +26,7 @@ from typing import Callable, Optional
 
 from . import diagnose, episodes as _eps, stages as S
 from .apiutil import BATCH_FATAL
-from .executor import Job, run_batch
+from .executor import Job, run_chain
 
 # 逐集要跑的 LLM 环节，按顺序
 PER_EP = ["s2", "s3", "s4", "s5", "s6", "s7", "s8"]
@@ -88,7 +88,8 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     """跑完整条流水线。job 用来向前端汇报进度，每一步是一个 item。
 
     llm_factory() → LLM 实例（延迟构造，密钥错就在第一步暴露）
-    provider_factory(kind) → (provider_cfg, )  kind ∈ asset/storyboard/video
+    provider_factory(kind) → 按优先级排好的服务商列表 [{provider, model, ...}, ...]
+        kind ∈ asset/storyboard/video。首选挂了会自动换下一家补剩下的。
     jobs: JobManager，给出图出片开子 job，好让「生产」页也能看到细节
     """
     steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver)
@@ -146,37 +147,57 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 if not todo:
                     job.set_item(key, state="skipped", msg="产物都齐了，跳过")
                     continue
-                pcfg = provider_factory(s["produce"])
+                chain = provider_factory(s["produce"])      # 按优先级排好的服务商列表
+                if isinstance(chain, dict):                 # 兼容只给一家的写法
+                    chain = [chain]
+                first = chain[0]
                 job.set_item(key, state="running",
-                             msg=f"{len(todo)} 项待做 · {pcfg['provider']} {pcfg.get('model','')}")
-                worker = (S.make_video_worker(pj, pcfg) if s["produce"] == "video"
-                          else S.make_image_worker(pj, pcfg, s["produce"]))
-                sub = (jobs.create(s["produce"], len(todo), concurrency,
-                                   project_root=pj.root,
-                                   project_name=os.path.basename(pj.root),
-                                   provider=pcfg["provider"], model=pcfg.get("model", ""))
-                       if jobs else Job(s["produce"], len(todo), concurrency,
-                                        project_root=pj.root, provider=pcfg["provider"],
-                                        model=pcfg.get("model", "")))
-                log(f"交给「生产」面板的任务 {sub.id}，{len(todo)} 项，并发 {concurrency}")
-                run_batch(sub, todo, worker, key_of=lambda t: t["key"],
-                          max_retry=max_retry, provider=pcfg["provider"])
-                c = sub.counts()
-                nfail = c.get("failed", 0)
-                if sub.aborted:                     # 余额/密钥 → 整条流水线停
-                    job.set_item(key, state="failed",
-                                 msg=diagnose.one_line(sub.abort_diag or {}) or "已停止")
-                    job.abort_with(sub.abort_diag or {})
-                    failed.append(key)
+                             msg=f"{len(todo)} 项待做 · 首选 {first['provider']} "
+                                 f"{first.get('model','')}"
+                                 + (f"（备选 {len(chain)-1} 家）" if len(chain) > 1 else ""))
+
+                def mk_worker(pcfg, kind=s["produce"]):
+                    return (S.make_video_worker(pj, pcfg) if kind == "video"
+                            else S.make_image_worker(pj, pcfg, kind))
+
+                def mk_job(pcfg, n, kind=s["produce"]):
+                    return (jobs.create(kind, n, concurrency, project_root=pj.root,
+                                        project_name=os.path.basename(pj.root),
+                                        provider=pcfg["provider"], model=pcfg.get("model", ""))
+                            if jobs else Job(kind, n, concurrency, project_root=pj.root,
+                                             provider=pcfg["provider"],
+                                             model=pcfg.get("model", "")))
+
+                r = run_chain(todo, chain=chain, worker_of=mk_worker, job_of=mk_job,
+                              key_of=lambda t: t["key"],
+                              done_of=lambda t: os.path.isfile(pj.p(*t["output"].split("/"))),
+                              max_retry=max_retry, log=log)
+                used = " → ".join(f"{a['provider']}/{a['model']}" for a in r["attempts"])
+                if r["left"] == 0:
+                    job.set_item(key, state="ok",
+                                 msg=f"{len(todo)} 项完成"
+                                     + (f"（换了 {r['switched']} 次家：{used}）"
+                                        if r["switched"] else ""))
+                    continue
+                # 还有没做成的：把最后一次的诊断挂上去
+                last = r["attempts"][-1] if r["attempts"] else {}
+                diag = last.get("diag")
+                if not diag:
+                    for f in diagnose.load(pj.root):
+                        if f.get("stage") == s["produce"]:
+                            diag = f
+                            break
+                job.set_item(key, state="failed", diag=diag,
+                             msg=f"还有 {r['left']} 项没做成"
+                                 + (f"，已试过 {used}" if len(r["attempts"]) > 1 else "")
+                                 + "；照面板上的说明处理后再点一次「开始」")
+                failed.append(key)
+                # 所有家都因为账户级问题挂了 → 整条流水线没有继续的意义
+                if diag and diag.get("scope") == "batch" and r["switched"] + 1 >= len(chain):
+                    job.abort_diag = diag
+                    job.abort_with(diag)
                     break
-                if nfail:
-                    job.set_item(key, state="failed",
-                                 msg=f"{nfail} 项没做成，其余已完成；照面板上的说明处理后再点一次")
-                    failed.append(key)
-                    # 出图没齐就别急着出片：故事板缺了，视频拿什么当参考
-                    log(f"{nfail} 项失败，后面依赖它的步骤会只做能做的部分")
-                else:
-                    job.set_item(key, state="ok", msg=f"{c.get('ok', 0)} 项完成")
+                log(f"{r['left']} 项没做成，后面依赖它的步骤只做能做的部分")
 
             # ---- 复核清单 --------------------------------------------------
             elif s["kind"] == "review":

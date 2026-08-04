@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from core import diagnose, docparse, episodes, stages as S
-from core.executor import GATE, JobManager, run_batch
+from core.executor import GATE, JobManager, run_batch, run_chain
 from core.llm import LLM
 from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provider,
                             list_capabilities)
@@ -36,6 +36,9 @@ def load_config() -> dict:
     cfg.setdefault("projects_dir", DEFAULT_PROJECTS)
     cfg.setdefault("providers", {})
     cfg.setdefault("llm", {})
+    # 出图出片的服务商优先级：一次配好，之后每次跑都按这个顺序，
+    # 首选挂了自动换下一家。空的话「设置」页会提示去配。
+    cfg.setdefault("chains", {"asset": [], "storyboard": [], "video": []})
     # 参考图上传：给只收公网链接的接口用（零视 SD2、seedance 系都是这类）。
     # 不配也能跑，只是那类模型用不了。
     # mode: always=配了就全部走链接（推荐，请求体小）｜when_required=只在模型必须时传
@@ -73,6 +76,33 @@ def proj_of(body: dict) -> Project:
     if not root:
         raise ValueError("缺少 project_root")
     return Project(root)
+
+
+def resolve_chain(cfg: dict, kind: str, override=None) -> list:
+    """某一类活（asset/storyboard/video）按优先级用哪几家。
+
+    先用本次请求给的 override，否则用「设置」页存下来的 chains[kind]。
+    只保留已经填了 key 的那些家 —— 没配 key 的排在链里毫无意义，
+    真跑到它才报「未配置」等于白等一轮。
+    """
+    raw = override or ((cfg.get("chains") or {}).get(kind) or [])
+    if isinstance(raw, dict):
+        raw = [raw]
+    out, skipped = [], []
+    for sel in raw:
+        pid = (sel or {}).get("provider") or ""
+        if not pid:
+            continue
+        if not ((cfg.get("providers") or {}).get(pid, {}) or {}).get("api_key"):
+            skipped.append(pid)
+            continue
+        out.append(resolve_provider_cfg(cfg, sel))
+    if not out:
+        extra = f"（{'、'.join(skipped)} 没填 key，已跳过）" if skipped else ""
+        raise ValueError(f"「{kind}」还没有可用的服务商{extra}。"
+                         f"去「设置 → 出图出片优先级」把这一类要用哪几家排好，"
+                         f"并确认对应的 key 都填了。")
+    return out
 
 
 def resolve_provider_cfg(cfg: dict, sel: dict) -> dict:
@@ -252,21 +282,18 @@ def api_post(path: str, body: dict) -> dict:
             from core.store import read_text
             params["script"] = read_text(script_path)
 
-        # 出图/出片各自的服务商+模型，点「开始」时就定下来
+        # 出图/出片各自按优先级用哪几家，点「开始」时就定下来。
+        # 提前解析一遍：key 没填、链是空的，现在就报，别等跑到第 300 步才发现。
         sel = body.get("provider_sel") or {}
-        for kind in ("asset", "storyboard", "video"):
-            if not (sel.get(kind) or {}).get("provider"):
-                raise ValueError(f"还没选「{kind}」用哪家服务商和模型")
-        # 提前校验一遍凭据，别等跑到第 300 步才发现 key 没填
-        for kind in ("asset", "storyboard", "video"):
-            resolve_provider_cfg(cfg, sel[kind])
+        chains = {k: resolve_chain(cfg, k, sel.get(k)) for k in
+                  ("asset", "storyboard", "video")}
 
         job = JOBS.create("pipeline", 1, 1, project_root=pj.root,
                           project_name=os.path.basename(pj.root), provider="pipeline")
         pipeline.start(
             job, pj,
             llm_factory=lambda: build_llm(cfg, body.get("llm")),
-            provider_factory=lambda kind: resolve_provider_cfg(cfg, sel[kind]),
+            provider_factory=lambda kind: chains[kind],
             params=params, jobs=JOBS,
             concurrency=int(body.get("concurrency")
                             or (cfg.get("defaults") or {}).get("concurrency", 3)),
@@ -484,18 +511,42 @@ def api_post(path: str, body: dict) -> dict:
         # 未完成数（已存在的会在 worker 里跳过，这里只用于提示）
         todo = sum(1 for t in items if not os.path.isfile(pj.p(*t["output"].split("/"))))
 
-        worker = (S.make_video_worker(pj, pcfg) if kind == "video"
-                  else S.make_image_worker(pj, pcfg, kind))
-        job = JOBS.create(kind, len(items), conc,
-                          project_root=pj.root, project_name=os.path.basename(pj.root),
-                          provider=pcfg["provider"], model=pcfg.get("model", ""))
-        threading.Thread(
-            target=run_batch,
-            args=(job, items, worker),
-            kwargs={"key_of": lambda t: t["key"], "max_retry": retry,
-                    "provider": pcfg["provider"]},
-            daemon=True).start()
-        return {"ok": True, "job_id": job.id, "total": len(items), "todo": todo}
+        # 手动跑也走优先级链：首选挂了自动换下一家补剩下的
+        chain = resolve_chain(cfg, kind, body.get("chain") or [pcfg])
+        parent = JOBS.create(kind, len(items), conc,
+                             project_root=pj.root, project_name=os.path.basename(pj.root),
+                             provider=chain[0]["provider"], model=chain[0].get("model", ""))
+
+        def go():
+            try:
+                r = run_chain(
+                    items, chain=chain,
+                    worker_of=lambda p: (S.make_video_worker(pj, p) if kind == "video"
+                                         else S.make_image_worker(pj, p, kind)),
+                    job_of=lambda p, n: JOBS.create(
+                        kind, n, conc, project_root=pj.root,
+                        project_name=os.path.basename(pj.root),
+                        provider=p["provider"], model=p.get("model", "")),
+                    key_of=lambda t: t["key"],
+                    done_of=lambda t: os.path.isfile(pj.p(*t["output"].split("/"))),
+                    max_retry=retry, log=lambda m: parent.log(kind, m))
+                for a in r["attempts"]:
+                    parent.set_item(f"{a['provider']}/{a['model']}", state=
+                                   "failed" if a["counts"].get("failed") else "ok",
+                                   msg=str(a["counts"]))
+                parent.status = "error" if r["left"] else "done"
+            except Exception as exc:                 # noqa: BLE001
+                d = diagnose.build(exc, stage=kind, target=kind)
+                parent.log(kind, diagnose.one_line(d))
+                parent.abort_diag = d
+                parent.status = "error"
+            finally:
+                import time as _t
+                parent.finished_at = _t.time()
+
+        threading.Thread(target=go, daemon=True).start()
+        return {"ok": True, "job_id": parent.id, "total": len(items), "todo": todo,
+                "chain": [f"{c['provider']}/{c.get('model','')}" for c in chain]}
 
     if path == "/api/failures/clear":
         pj = proj_of(body)
