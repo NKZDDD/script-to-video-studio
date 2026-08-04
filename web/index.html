@@ -226,29 +226,39 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <div class="row" style="margin-top:10px"><button class="btn" id="saveLlm">保存</button></div>
   </div>
   <div class="card">
-    <h2>参考图上传 <span class="tag">只收公网链接的那些模型要用；不配也能跑，只是那类模型用不了</span></h2>
+    <h2>参考图上传（对象存储） <span class="tag">配好之后参考图统一走链接，请求体从几 MB 缩成一行</span></h2>
     <p class="muted" style="margin:0 0 8px">
-      有些接口的参考图<b>只收公网 https 链接</b>，不接受把图片本身发过去
-      （零视 <code>sd2-fast</code>、seedance 系都是这类）。而资产图和故事板都在你本机，
-      所以要先传到一个能公开访问的地方换成链接。<br>
-      填一个 S3 兼容的对象存储就行——<b>R2 / 阿里云 OSS / 腾讯云 COS / AWS S3 / MinIO</b> 都是这一套。
-      需要先 <code>pip install boto3</code>。同一张图全剧只传一次（按内容缓存），不会反复上传。
+      资产图和故事板都在你本机，而不少接口的参考图<b>只收公网 https 链接</b>
+      （零视 <code>sd2-fast</code>、seedance 系都是这类）。填一个 S3 兼容的对象存储，
+      程序会自动把图传上去换链接——<b>R2 / 阿里云 OSS / 腾讯云 COS / AWS S3 / MinIO</b> 都是这一套。
+      先 <code>pip install boto3</code>。同一张图全剧只传一次（按内容缓存），重跑也不重传。
     </p>
     <div class="grid g2">
-      <div><label>Endpoint <span class="muted">（R2: https://&lt;账号id&gt;.r2.cloudflarestorage.com；AWS 留空）</span></label>
+      <div><label>Endpoint <span class="muted">R2: https://&lt;账号id&gt;.r2.cloudflarestorage.com；AWS 留空</span></label>
         <input id="upEndpoint" placeholder="https://xxx.r2.cloudflarestorage.com"></div>
-      <div><label>Region <span class="muted">（R2 填 auto）</span></label><input id="upRegion" placeholder="auto"></div>
+      <div><label>Region <span class="muted">R2 填 auto</span></label><input id="upRegion" placeholder="auto"></div>
       <div><label>Bucket</label><input id="upBucket" placeholder="桶名"></div>
       <div><label>路径前缀</label><input id="upPrefix" placeholder="respect"></div>
       <div><label>Access Key</label><input id="upAccess" placeholder="留空=不改"></div>
       <div><label>Secret Key</label><input id="upSecret" type="password" placeholder="留空=不改"></div>
-      <div style="grid-column:1/-1"><label>公开访问域名 <span class="muted">（你的 CDN / 公开域名，强烈建议填；不填则拼 endpoint）</span></label>
-        <input id="upPublic" placeholder="https://cdn.example.com"></div>
+      <div style="grid-column:1/-1">
+        <label>公开访问域名 <b style="color:var(--warn,#d98)">必填</b>
+          <span class="muted">R2 要填自定义域或 pub-xxx.r2.dev。
+          <b>别填上面那个 r2.cloudflarestorage.com</b>——那是 S3 API 域名，不对外，
+          服务商拿它取图会 403</span></label>
+        <input id="upPublic" placeholder="https://pub-xxxx.r2.dev  或  https://cdn.你的域名"></div>
+      <div style="grid-column:1/-1"><label>什么时候上传</label>
+        <select id="upMode">
+          <option value="always">全部参考图都走链接（推荐：请求体小、所有服务商通用）</option>
+          <option value="when_required">只在模型必须要链接时才传（省一点存储流量）</option>
+        </select></div>
     </div>
     <div class="row" style="margin-top:10px">
       <button class="btn sm" id="saveUpload">保存</button>
+      <button class="btn ghost sm" id="testUpload" title="传一个小文件再用浏览器同样的方式取回来，确认服务商真能读到">测试连接</button>
       <span class="muted" id="upState"></span>
     </div>
+    <div id="upResult" style="margin-top:8px"></div>
   </div>
   <div class="card">
     <h2>同时最多跑几个 <span class="tag">同时做几部剧也共用这里的上限，免得把服务商发毛</span></h2>
@@ -815,12 +825,14 @@ function renderUpload() {
     // 密钥回传的是掩码，别塞回输入框——留空表示不改
     $('#' + el).value = (key === 'secret_key') ? '' : (u[key] ?? '');
   }
+  $('#upMode').value = u.mode || 'always';
   const ready = u.bucket && u.access_key_set && u.secret_key_set;
   $('#upState').textContent = ready
-    ? `已配置（${u.bucket}）—— 只收公网链接的模型现在可用`
+    ? (u.public_base_url ? `已配置（${u.bucket}）——建议点一次「测试连接」`
+                         : '⚠️ 缺「公开访问域名」，服务商很可能取不到图')
     : (u.bucket ? '还缺密钥' : '未配置 —— 只收公网链接的模型暂时用不了');
 }
-$('#saveUpload').onclick = async () => {
+function collectUpload() {
   const upload = {};
   for (const [el, key] of Object.entries(UP_FIELDS)) {
     const v = $('#' + el).value.trim();
@@ -828,9 +840,26 @@ $('#saveUpload').onclick = async () => {
     if (key === 'secret_key' || key === 'access_key') { if (v) upload[key] = v; }
     else upload[key] = v;
   }
-  await api.post('/api/config', {upload});
+  upload.mode = $('#upMode').value;
+  return upload;
+}
+$('#saveUpload').onclick = async () => {
+  await api.post('/api/config', {upload: collectUpload()});
   BOOT = await api.get('/api/bootstrap'); renderUpload();
-  alert('已保存。要用只收公网链接的模型，记得先 pip install boto3');
+  $('#upResult').innerHTML = '<div class="alert warn">已保存。建议点一次「测试连接」'
+    + '——桶没开公开读、或公开域名填错的话，上传会成功但服务商取不到图，'
+    + '不测出来就是一整批任务白跑。</div>';
+};
+$('#testUpload').onclick = async () => {
+  $('#upResult').innerHTML = '<div class="alert warn">测试中…</div>';
+  // 用页面上当前填的值测（还没保存也能测），密钥留空则用已保存的
+  const r = await api.post('/api/upload/selftest', {upload: collectUpload()});
+  if (r.error) return $('#upResult').innerHTML = `<div class="alert err">${esc(r.error)}</div>`;
+  $('#upResult').innerHTML = `<div class="alert ${r.ok ? 'warn' : 'err'}">
+    ${r.ok ? '✅' : '⛔'} <b>${esc(r.step)}</b>：${esc(r.msg)}
+    ${r.url ? `<div class="muted" style="margin-top:4px">测试链接：
+      <a href="${esc(r.url)}" target="_blank">${esc(r.url)}</a>
+      —— 在新标签里能直接打开才算真的通</div>` : ''}</div>`;
 };
 
 $('#npCreate').onclick = async () => {

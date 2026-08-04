@@ -38,10 +38,13 @@ def load_config() -> dict:
     cfg.setdefault("llm", {})
     # 参考图上传：给只收公网链接的接口用（零视 SD2、seedance 系都是这类）。
     # 不配也能跑，只是那类模型用不了。
-    cfg.setdefault("upload", {"endpoint": "", "region": "auto", "bucket": "",
-                              "access_key": "", "secret_key": "",
-                              "public_base_url": "", "prefix": "respect",
-                              "public_acl": False})
+    # mode: always=配了就全部走链接（推荐，请求体小）｜when_required=只在模型必须时传
+    # 逐项 setdefault：老 config.json 里已有 upload 时，新加的字段也能补上
+    up = cfg.setdefault("upload", {})
+    for k, v in (("endpoint", ""), ("region", "auto"), ("bucket", ""),
+                 ("access_key", ""), ("secret_key", ""), ("public_base_url", ""),
+                 ("prefix", "respect"), ("public_acl", False), ("mode", "always")):
+        up.setdefault(k, v)
     cfg.setdefault("defaults", {
         "duration": 15, "ratio": "9:16", "image_size": "1024x1536",
         "frames": 4, "shots_min": 5, "shots_max": 8,
@@ -83,8 +86,7 @@ def resolve_provider_cfg(cfg: dict, sel: dict) -> dict:
         raise ValueError(f"服务商 {pid} 未配置 api_key（在「服务商」页签保存）")
     # 参考图上传配置是全局共用的（一个对象存储服务所有服务商），
     # 但某家自己的上传端点能不能用是按家配的
-    out["upload"] = dict(cfg.get("upload") or {})
-    out.setdefault("provider_upload", saved.get("provider_upload", True))
+    out["upload"] = dict(cfg.get("upload") or {})   # 上传配置全局共用一份
     return out
 
 
@@ -227,6 +229,17 @@ def api_post(path: str, body: dict) -> dict:
                 cur[k] = v
         save_config(cur)
         return {"ok": True}
+
+    if path == "/api/upload/selftest":
+        """传一个小文件再用普通 HTTP 取回来，确认服务商真的能读到。
+
+        只测「上传成功」不够：桶没开公开读、或公开域名填了 R2 的 S3 API 域名，
+        上传都会成功但服务商取图 403。这两秒的自检能省掉一整批任务的失败。
+        """
+        from core import uploader
+        up = dict(cfg.get("upload") or {})
+        up.update({k: v for k, v in (body.get("upload") or {}).items() if str(v).strip()})
+        return uploader.selftest(up)
 
     if path == "/api/script/parse":
         """上传剧本文件（base64）→ 解析为纯文本。支持 txt/md/docx/pdf。"""

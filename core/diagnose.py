@@ -273,7 +273,8 @@ _PATTERNS = [
     ("PROMPT_INVALID", r"prompt too long|too long|invalid (prompt|param|size|request)|参数错误|不支持的?(尺寸|时长|比例)"),
     # 这两条要排在 REF_MISSING 前面：都跟参考图有关，但原因和改法完全不同
     ("REF_URL_ONLY", r"只收公网|只收 ?HTTPS|must be a (public )?url|不接受本地图片"
-                     r"|没能传上去|上传到对象存储失败|上传端点没能用上|先装 boto3"),
+                     r"|传不上去|没能传上去|上传到对象存储失败|还没配对象存储"
+                     r"|对象存储没填|先装 boto3"),
     ("MODEL_NEEDS_REF", r"必须给至少 ?\d* ?张参考图|必须提供 ?\d* ?张参考图|need_image"),
     ("REF_MISSING", r"参考图文件不存在|固定故事板不存在|no such file|filenotfound"),
     # 这两条要排在 PREREQ_MISSING 前面：它们的文案里也带「请先跑」，

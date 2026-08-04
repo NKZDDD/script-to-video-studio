@@ -431,26 +431,25 @@ def build_tasks(pj: Project, params: dict) -> dict:
 
 def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
                       ref_side: int) -> Callable:
-    """按服务商的口味把参考图引用变成它能吃的形式。
+    """把参考图引用变成能发出去的形式。
 
-    能吃图片内容的就直接转 data URI（省事、不依赖外部存储）；
-    只收公网链接的先上传换 URL（内容哈希缓存，同一张资产图全剧只传一次）。
+    配了对象存储 → 一律传上去换公网链接。不只是为了那些只收 URL 的接口：
+    能吃 data URI 的家，请求体也从几 MB 的 base64 缩成一行链接，快且稳。
+    没配 → 转 data URI；碰上只收 URL 的模型就明确报错说去哪配。
     """
+    up = provider_cfg.get("upload") or {}
+    use_url = uploader.configured(up) and up.get("mode", "always") != "when_required"
     need_url = prov.needs_url(model)
-    s3_cfg = provider_cfg.get("upload") or {}
-    # 有的家自己有上传端点（免费、key 现成）；没有就只能走自己的对象存储
-    session = prov.session if provider_cfg.get("provider_upload", True) else None
 
     def resolve(src: str, log: Callable = print) -> str:
         src = (src or "").strip()
         if not src or src.startswith("http"):
             return src
-        if not need_url:
+        if not (use_url or need_url):
             return resolve_ref(src, pj.root, max_side=ref_side)
         path = src if os.path.isabs(src) else os.path.join(pj.root, src)
-        return uploader.to_url(path, project_root=pj.root, session=session,
-                               s3_cfg=s3_cfg, max_side=ref_side,
-                               provider_id=prov.id, log=log)
+        return uploader.to_url(path, up, project_root=pj.root,
+                               max_side=ref_side, log=log)
 
     return resolve
 
