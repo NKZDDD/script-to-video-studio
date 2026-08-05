@@ -346,6 +346,20 @@ def api_post(path: str, body: dict) -> dict:
                 raise ValueError("模型名对不上，先改了再跑：\n"
                                  + "\n".join("· " + b["msg"] for b in bad))
 
+        # 同一个项目不许同时跑两条流水线：两条都会写同一批产物文件，
+        # 白花两份钱（同一个环节调两次模型），后写的还会覆盖先写的。
+        # 想重来先点「停下」，或者传 force。
+        if not body.get("force"):
+            live = [j for j in JOBS.list(project_root=pj.root, active_only=True)
+                    if j["kind"] == "pipeline"]
+            if live:
+                raise ValueError(
+                    f"这个项目已经有一条流水线在跑了（{live[0]['id']}，"
+                    f"已跑 {live[0]['elapsed']} 秒，进度 {live[0]['finished']}/{live[0]['total']}）。"
+                    f"两条一起跑会写同一批文件、把钱花两遍。"
+                    f"要么等它跑完（做过的步骤下次会自动跳过），"
+                    f"要么先点那条的「停下」再来。")
+
         job = JOBS.create("pipeline", 1, 1, project_root=pj.root,
                           project_name=os.path.basename(pj.root), provider="pipeline")
         pipeline.start(

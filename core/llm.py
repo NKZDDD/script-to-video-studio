@@ -27,6 +27,10 @@ class LLMFatal(LLMError):
     """
 
 
+class LLMCancelled(LLMError):
+    """用户点了取消。不是失败，不要重试，也不该记进 failures。"""
+
+
 class _Retryable(RuntimeError):
     """429 / 5xx —— 值得等一会儿再试。"""
 
@@ -132,7 +136,8 @@ class LLM:
         # 表现为 JSON 不完整，会白重试两次再报错。给足了就是一次成功。
         self.max_tokens = int(max_tokens or 0)
 
-    def chat(self, system: str, user: str, retries: int = 3, log=None) -> str:
+    def chat(self, system: str, user: str, retries: int = 3, log=None,
+             cancel=None) -> str:
         """一次对话。默认走流式。
 
         为什么必须流式：非流式时，整个生成要在「timeout 秒内一个字节都没来」
@@ -170,7 +175,8 @@ class LLM:
                     # 对不上后台账单时没法查
                     body["stream_options"] = {"include_usage": True}
                 if use_stream:
-                    return self._stream_once(url, headers, body, proxies, tmo, log)
+                    return self._stream_once(url, headers, body, proxies, tmo,
+                                             log, cancel)
                 return self._plain_once(url, headers, body, proxies, tmo, log)
             except _Retryable as exc:                 # 429/5xx，值得重试
                 last = exc
@@ -235,7 +241,7 @@ class LLM:
                 f"或者把剧本拆成更少的集数分批处理。")
         return content
 
-    def _stream_once(self, url, headers, body, proxies, tmo, log) -> str:
+    def _stream_once(self, url, headers, body, proxies, tmo, log, cancel=None) -> str:
         started = time.time()
         parts, reason, ticks = [], "", 0
         closed = False              # 有没有正常收到 [DONE] / finish_reason
@@ -251,6 +257,14 @@ class LLM:
                 return self._finish((ch.get("message") or {}).get("content") or "",
                                     ch.get("finish_reason") or "")
             for raw in r.iter_lines(decode_unicode=False):
+                # 每收到一块就看一眼有没有被取消。不看的话「取消」只是设了个
+                # 标志位，这边照样把整次生成读完 —— 钱照花、人照等。
+                # 退出 with 会关掉连接，上游那边也就停了。
+                if cancel and cancel():
+                    n = sum(len(p) for p in parts)
+                    raise LLMCancelled(
+                        f"已按取消停止接收（收到 {n} 字就断开了，"
+                        f"用了 {int(time.time()-started)} 秒）")
                 if not raw:
                     continue
                 line = raw.decode("utf-8", "replace").strip()
@@ -315,7 +329,7 @@ class LLM:
                             choices[0].get("finish_reason") or "")
 
     def json_call(self, system: str, user: str, required: Optional[list] = None,
-                  json_retries: int = 2, log=print) -> Any:
+                  json_retries: int = 2, log=print, cancel=None) -> Any:
         """要求 JSON 输出；解析失败或缺键时把错误反馈给模型重试（≤json_retries）。
 
         只有「模型这次答得不合格」才重试 —— 反馈具体哪里不对，让它再答一次。
@@ -324,15 +338,17 @@ class LLM:
         """
         attempt_user = user
         for attempt in range(1 + json_retries):
-            text = self.chat(system, attempt_user, log=log)
+            if cancel and cancel():
+                raise LLMCancelled("已按取消停止")
+            text = self.chat(system, attempt_user, log=log, cancel=cancel)
             try:
                 data = extract_json(text)
                 missing = check_keys(data, required or [])
                 if missing:
                     raise LLMError(f"输出缺少必需字段: {missing}")
                 return data
-            except LLMFatal:
-                raise                                  # 超时/截断，重试无意义
+            except (LLMFatal, LLMCancelled):
+                raise                                  # 超时/截断/取消，重试无意义
             except (json.JSONDecodeError, LLMError) as exc:
                 if attempt >= json_retries:
                     raise LLMError(f"JSON 输出校验失败（已重试{json_retries}次）: {exc}") from exc

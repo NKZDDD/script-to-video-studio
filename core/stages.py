@@ -117,7 +117,8 @@ def _dep_data(pj: Project, deps: list, episode: str) -> dict:
 
 
 def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
-                  log: Callable = print, episode: str = "") -> dict:
+                  log: Callable = print, episode: str = "",
+                  cancel: Optional[Callable] = None) -> dict:
     from . import episodes as _eps
     tpl_name, deps, required = _LLM_SPEC[stage_id]
     per_ep = is_per_episode(stage_id)
@@ -148,7 +149,7 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         raise RuntimeError(f"缺少前置产物，请先跑：{names or missing}")
 
     if stage_id == "s8":                       # s8 分段编译，天然可续跑
-        return run_s8_incremental(pj, llm, params, data, log, episode)
+        return run_s8_incremental(pj, llm, params, data, log, episode, cancel)
 
     g = data.get("s1_global") or {}
     tone = (g.get("visual_tone") or {})
@@ -207,7 +208,7 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     user = render(load_prompt(tpl_name), mapping)
     tag = f"{episode} " if episode else "全剧 "
     log(f"{tag}提示词 {len(user)} 字，调用 {llm.model}")
-    out = llm.json_call(system, user, required=required, log=log)
+    out = llm.json_call(system, user, required=required, log=log, cancel=cancel)
     pj.save_stage(tpl_name, out, episode)
 
     if stage_id == "s1":
@@ -254,7 +255,8 @@ def s8_done_segments(pj: Project, episode: str = "") -> set:
 
 
 def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
-                       log: Callable = print, episode: str = "") -> dict:
+                       log: Callable = print, episode: str = "",
+                       cancel: Optional[Callable] = None) -> dict:
     """环节8 逐段编译：一段一次 LLM 调用。
 
     整集一次调用的问题：17 段 × 2 份提示词输出太长，中途失败整批白跑。
@@ -281,6 +283,9 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
 
     failed = []
     for i, seg in enumerate(todo, 1):
+        if cancel and cancel():
+            log(f"已取消，剩下 {len(todo) - i + 1} 段没编（已编好的都存了盘）")
+            break
         sid = seg["id"]
         used = set((binds.get(sid, {}).get("reference_images") or [])
                    and [r.get("asset_id") for r in binds[sid]["reference_images"]] or [])
@@ -301,7 +306,7 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
             out = llm.json_call(system, user,
                                 required=["compiled[]", "compiled[].storyboard_prompt",
                                           "compiled[].video_prompt"],
-                                log=lambda m: log(f"    {m}"))
+                                log=lambda m: log(f"    {m}"), cancel=cancel)
             c = out["compiled"][0]
             c["id"] = sid
             by_id[sid] = c

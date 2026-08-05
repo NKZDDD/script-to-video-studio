@@ -26,6 +26,7 @@ from typing import Callable, Optional
 
 from . import diagnose, episodes as _eps, stages as S
 from .apiutil import BATCH_FATAL
+from .llm import LLMCancelled
 from .executor import Job, run_chain
 
 # 逐集要跑的 LLM 环节，按顺序
@@ -155,7 +156,8 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 if llm is None:
                     llm = llm_factory()
                     job.model = llm.model
-                S.run_llm_stage(pj, s["stage"], llm, params, log=log, episode=ep)
+                S.run_llm_stage(pj, s["stage"], llm, params, log=log, episode=ep,
+                                cancel=lambda: job.cancelled)
                 job.set_item(key, state="ok")
                 diagnose.clear(pj.root, f"stage:{s['stage']}", ep)
                 # 环节1 跑完才知道有几集，把后面的步骤补进计划
@@ -247,6 +249,10 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 n = len(r.get("masters", [])) or (1 if r.get("master") else 0)
                 job.set_item(key, state="ok", msg=f"出了 {n} 个成片")
 
+        except LLMCancelled as exc:                  # 用户点了取消：不算失败
+            job.set_item(key, state="cancelled", msg=str(exc))
+            job.log(key, str(exc))
+            continue
         except Exception as exc:                     # noqa: BLE001
             kind = getattr(exc, "kind", "")
             diag = diagnose.build(exc, stage=f"stage:{s['stage']}", target=ep or s["stage"],
