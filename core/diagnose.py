@@ -208,6 +208,21 @@ CATALOG = {
         "resume": "调大上限后回「流程」页重跑这个环节；已经做好的环节不受影响",
         "resumable": True, "scope": "stage", "level": "error",
     },
+    "SEG_COUNT_OFF": {
+        "title": "这一集的段数和环节1 定的对不上",
+        "why": "每集切几段是环节1 看完全篇后按剧情事件数定的，环节2 只该照着划。"
+               "对不上就意味着这一集的成片时长和别的集不一致 —— "
+               "40 集里有几集 3 分钟、有几集 1 分钟，交付时会很难看。"
+               "段落表本身是可用的，所以流程没停，但这条得处理。",
+        "where": "「产物 → 按段看」核对段数；或「流程」页重跑环节2",
+        "fix": ["先看这一集的正文是不是本来就装不下那么多段 —— "
+                "环节2 的 segments_note 里可能写了原因",
+                "确实是环节1 定错了（比如把两集并成一集）→ 改集边界，重跑环节1",
+                "只是模型没听话 → 重跑环节2（删掉这一集的 s2_segments.json 再点开始）",
+                "接受现状也行：成片能出，只是这一集时长和别的集不一样"],
+        "resume": "重跑环节2 只影响这一集；后面的环节会跟着新段落表重做",
+        "resumable": True, "scope": "stage", "level": "warn",
+    },
     "SEG_PARTIAL": {
         "title": "这一集有几段没做成，其余的都好了",
         "why": "环节7、环节8 是一段一次调用的，所以一段失败只影响那一段。"
@@ -410,7 +425,7 @@ NO_FAILOVER_CODES = {
     "PROMPT_INVALID",       # 参数不合法
     "REF_MISSING",          # 参考图还没生成，是流程顺序问题
     "PREREQ_MISSING", "EPISODE_REQUIRED", "EPISODE_SPLIT_FAILED",
-    "LLM_SCHEMA_FAIL", "LLM_EMPTY", "SEG_PARTIAL",
+    "LLM_SCHEMA_FAIL", "LLM_EMPTY", "SEG_PARTIAL", "SEG_COUNT_OFF",
     "DISK", "WRONG_RATIO",
 }
 

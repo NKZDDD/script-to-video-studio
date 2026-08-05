@@ -65,6 +65,9 @@ def jd(obj: Any, limit: int = 0) -> str:
 _LLM_SPEC = {
     # stage_id: (模板名, 依赖的已存产物, 必需字段)
     "s1": ("s1_global", [], ["project_name", "characters[]", "visual_tone"]),
+    # 注：episode_ranges[].segments（每集切几段）没列进必需字段 ——
+    # 老项目的产物里没有它，列了会让重跑老项目直接失败。缺了就退回按
+    # 「单集分钟 ÷ 单段秒数」算，见 _seg_target()。
     "s2": ("s2_segments", ["s1_global"], ["segments[]", "segments[].id", "segments[].exit_state"]),
     "s3": ("s3_states", ["s1_global", "s2_segments"], ["segment_states[]"]),
     "s4": ("s4_assets", ["s1_global", "s2_segments", "s3_states"], ["assets[]", "assets[].asset_id"]),
@@ -227,12 +230,19 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     # 其余字段（尺寸/时长/镜头数）都是几十字节的小值，留着有用。
     slim = {k: v for k, v in params.items() if k != "script"}
     slim["episode"] = episode or params.get("episode", "")
+    # 本集切几段：环节1 逐集定的优先，老项目没这个字段就退回全局参数折算
+    seg_n, seg_why = _eps.seg_target(pj, episode, params) if per_ep else (0, "")
+    if stage_id == "s2":
+        log(f"{episode} 目标 {seg_n} 段（{seg_why}）→ 成片约 "
+            f"{seg_n * int(params.get('duration') or 15)} 秒")
     mapping = {
         "PARAMS": jd(slim),
         "SCRIPT": script,
         "EPISODE": episode or params.get("episode", "EP01"),
         "DURATION": params.get("duration", 15),
         "EPISODE_MINUTES": params.get("episode_minutes", 3),
+        "SEGMENTS_TARGET": seg_n,
+        "SEGMENTS_WHY": seg_why,
         "IMAGE_SIZE": params.get("image_size", "1024x1536"),
         "SHOTS_MIN": params.get("shots_min", 5), "SHOTS_MAX": params.get("shots_max", 8),
         "FRAMES_MIN": params.get("frames_min", 4), "FRAMES_MAX": params.get("frames_max", 6),
@@ -279,13 +289,39 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         # 环节1 一跑完立刻切集：边界由它判断，切割由代码按锚点做
         res = _eps.build(pj, params.get("script", ""), out)
         eps = res.get("episodes", [])
+        dur = int(params.get("duration") or 15) or 15
         log(f"识别出 {len(eps)} 集"
             + (f"（前 {res['preamble_chars']} 字是推介/说明，已排除在正文外）"
                if res.get("preamble_chars") else ""))
+        no_seg = [e["episode"] for e in eps if not e.get("segments")]
         for e in eps[:60]:
-            log(f"  {e['episode']}  {e['chars']:>6} 字  {e.get('title', '')[:34]}")
+            n = e.get("segments") or 0
+            log(f"  {e['episode']}  {e['chars']:>6} 字  "
+                + (f"{n:>3} 段 / {n * dur:>4} 秒  " if n else "  段数未给  ")
+                + (e.get('title', '') or '')[:30])
+        if eps:
+            tot = sum((e.get("segments") or 0) for e in eps)
+            log(f"  合计 {tot} 段 ≈ {tot * dur / 60:.0f} 分钟"
+                + (f"；{len(no_seg)} 集没给段数，会按「单集分钟」折算" if no_seg else ""))
         for it in res.get("issues", []):
-            log(f"  ⚠️ {it['episode']}：{it['reason']}")
+            log(f"  {'⚠️' if it.get('level') == 'warn' else '❌'} {it['episode']}：{it['reason']}")
+
+    if stage_id == "s2":
+        got = len(out.get("segments") or [])
+        if seg_n and got != seg_n:
+            # 不抛错：段落表本身是可用的，硬失败会把整集卡住。但必须记成
+            # 待办，否则各集时长悄悄不一致，要到拼完成片才发现。
+            log(f"⚠️ {episode} 要求 {seg_n} 段，实际切了 {got} 段"
+                f"（成片会变成 {got * int(params.get('duration') or 15)} 秒，"
+                f"目标是 {seg_n * int(params.get('duration') or 15)} 秒）")
+            diagnose.record(pj.root, diagnose.warn(
+                "SEG_COUNT_OFF",
+                f"{episode} 要求 {seg_n} 段，模型切了 {got} 段 —— "
+                f"成片会是 {got * int(params.get('duration') or 15)} 秒而不是 "
+                f"{seg_n * int(params.get('duration') or 15)} 秒",
+                stage="stage:s2", target=episode))
+        if out.get("segments_note"):
+            log(f"环节2 的说明：{out['segments_note']}")
 
     # s5 额外把提示词正文落成 txt，便于人工查看与执行器读取
     if stage_id == "s5":

@@ -80,6 +80,12 @@ def split(script: str, ranges: list) -> dict:
                       "range": (r.get("range") or "").strip(),
                       "entry_state": r.get("entry_state", ""),
                       "exit_state": r.get("exit_state", ""),
+                      # 每集切几段由环节1 定（它是唯一看得到全篇的环节）。
+                      # 环节2 只按这个数去划边界，不再自己判断该切几段 ——
+                      # 否则同样体量的两集可能一个 12 段一个 4 段，成片时长差三倍。
+                      "segments": _seg_count(r.get("segments")),
+                      "key_events": r.get("key_events") or [],
+                      "pacing_note": (r.get("pacing_note") or "").strip(),
                       "start_line": at, "anchor": anchor})
         cursor = at + 1
 
@@ -96,11 +102,50 @@ def split(script: str, ranges: list) -> dict:
             issues.append({"episode": e["episode"],
                            "reason": f"切出来只有 {e['chars']} 字，可能锚点落在了目录或简介上，"
                                      f"不是正文"})
+        # 段数和正文体量差太远时提醒一句。不拦 —— 事件密度确实可能和字数不成比例，
+        # 但差到 3 倍以上通常是环节1 没认真数事件，值得人看一眼。
+        if e["segments"] and e["chars"] >= 120:
+            per = e["chars"] / e["segments"]
+            if per < 40 or per > 500:
+                issues.append({
+                    "episode": e["episode"], "level": "warn",
+                    "reason": f"正文 {e['chars']} 字切 {e['segments']} 段 = "
+                              f"每段 {per:.0f} 字（常态 120-180 字）。"
+                              f"{'段数偏多，可能会注水' if per < 40 else '段数偏少，可能塞不下剧情'}；"
+                              f"环节1 给的理由：{e.get('pacing_note') or '（没写）'}"})
 
     head = "\n".join(lines[:found[0]["start_line"]]).strip() if found else script.strip()
     return {"episodes": found, "issues": issues,
             "preamble": head, "preamble_chars": len(head),
             "total_chars": len(script)}
+
+
+SEG_MIN, SEG_MAX = 4, 40
+
+
+def _seg_count(v) -> int:
+    """环节1 给的段数。给了就用，没给或明显不合理就返回 0（由调用方退回全局参数）。"""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 0
+    return n if SEG_MIN <= n <= SEG_MAX else 0
+
+
+def seg_target(pj: Project, episode: str, params: dict) -> tuple:
+    """这一集该切几段，以及这个数是哪来的。
+
+    优先环节1 逐集定的数 —— 它是唯一看得到全篇的环节，知道这一集有几个剧情事件。
+    老项目的产物里没有这个字段，退回按「单集分钟 ÷ 单段秒数」算（就是以前的行为），
+    这样老项目重跑不会炸。
+    """
+    dur = int(params.get("duration") or 15) or 15
+    for e in load(pj).get("episodes", []):
+        if e.get("episode") == episode and e.get("segments"):
+            n = int(e["segments"])
+            return n, f"环节1 按本集剧情事件定的（{e.get('pacing_note') or '没写理由'}）"
+    mins = float(params.get("episode_minutes") or 3)
+    return max(1, round(mins * 60 / dur)), f"环节1 没给，按单集 {mins} 分钟 ÷ {dur} 秒折算"
 
 
 # ---------------------------------------------------------------- 落盘 / 读取
