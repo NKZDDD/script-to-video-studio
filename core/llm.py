@@ -35,6 +35,23 @@ class _NoStream(RuntimeError):
     """这家不接受 stream 参数 —— 退回普通请求，不算失败。"""
 
 
+class _NoStreamOptions(RuntimeError):
+    """这家不认 stream_options（要 usage 回传的那个）—— 去掉它重试。"""
+
+
+# 约 2 字/token。实测（paisio + gpt-5.6-sol，中文+印尼语混排的剧本）：
+#   10022 字 → prompt_tokens 8440，减去网关固定注入的 3840 缓存前缀 = 4600 → 2.18
+#    5033 字 → prompt_tokens 6454，同样减 3840 = 2614 → 1.93
+# 注意那个 3840：**每次调用都有**，是网关自己的前缀，不是我们发的内容。
+# 直接用 prompt_tokens 除字数会把比值算低近一倍（我第一版就错在这）。
+# 这个常数只用来在发请求前给个量级提示，真实数字一律以回传的 usage 为准。
+CHARS_PER_TOKEN = 2.0
+
+
+def rough_tokens(text: str) -> int:
+    return int(len(text or "") / CHARS_PER_TOKEN)
+
+
 def extract_json(text: str) -> Any:
     """从 LLM 回复中提取 JSON：```json 围栏优先，其次首个 {..} / [..] 平衡块。"""
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
@@ -140,18 +157,33 @@ class LLM:
         # 不是整次生成的总时长 —— 这正是我们要的语义。
         tmo = (30, max(60, int(self.timeout)))
 
-        use_stream = True
+        use_stream, want_usage = True, True
         last = None
+        if log:
+            log(f"发出 {len(user)} 字（约 {rough_tokens(user)} token），"
+                f"上限 {self.max_tokens} token，流式")
         for attempt in range(retries):
             try:
                 body = dict(base, stream=use_stream)
+                if use_stream and want_usage:
+                    # 让服务商在最后一个块里回传 usage —— 不然只能靠估算，
+                    # 对不上后台账单时没法查
+                    body["stream_options"] = {"include_usage": True}
                 if use_stream:
                     return self._stream_once(url, headers, body, proxies, tmo, log)
-                return self._plain_once(url, headers, body, proxies, tmo)
+                return self._plain_once(url, headers, body, proxies, tmo, log)
             except _Retryable as exc:                 # 429/5xx，值得重试
                 last = exc
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt * 2)
+                    continue
+                raise LLMError(str(exc)) from exc
+            except _NoStreamOptions as exc:           # 这家不认 stream_options，去掉再试
+                if want_usage:
+                    (log or (lambda m: None))(
+                        f"这家不认 stream_options（{str(exc)[:60]}），"
+                        f"去掉它重试；token 数只能靠估算了")
+                    want_usage = False
                     continue
                 raise LLMError(str(exc)) from exc
             except _NoStream as exc:                  # 这家不支持流式，退回普通请求
@@ -185,8 +217,11 @@ class LLM:
             if not r.encoding or r.encoding.lower() in ("iso-8859-1", "latin-1"):
                 r.encoding = "utf-8"
             txt = r.text[:400]
-            # 有的站是「参数不支持 stream」，那就退回普通请求再试
-            if "stream" in txt.lower():
+            low = txt.lower()
+            # 先判 stream_options（更具体），再判 stream —— 顺序反了会误退化成非流式
+            if "stream_options" in low or "include_usage" in low:
+                raise _NoStreamOptions(f"HTTP {r.status_code}: {txt}")
+            if "stream" in low:
                 raise _NoStream(f"HTTP {r.status_code}: {txt}")
             raise LLMError(f"HTTP {r.status_code}: {txt}")
 
@@ -204,6 +239,7 @@ class LLM:
         started = time.time()
         parts, reason, ticks = [], "", 0
         closed = False              # 有没有正常收到 [DONE] / finish_reason
+        usage = None                # 服务商回传的真实 token 数（可能没有）
         with requests.post(url, headers=headers, json=body, timeout=tmo,
                            proxies=proxies, stream=True) as r:
             self._check_status(r)
@@ -236,6 +272,8 @@ class LLM:
                 if ch.get("finish_reason"):
                     reason = ch["finish_reason"]
                     closed = True
+                if d.get("usage"):
+                    usage = d["usage"]
                 # 每 15 秒报一次，让人知道它在吐字而不是卡死
                 if log and time.time() - started > (ticks + 1) * 15:
                     ticks += 1
@@ -251,13 +289,25 @@ class LLM:
                 f"（等了 {int(time.time()-started)} 秒，没有收到正常的结束标记）。"
                 f"这是传输中断，不是模型答错，会自动重试。")
         if log:
-            log(f"生成完成，共 {n} 字，用了 {int(time.time()-started)} 秒")
+            secs = int(time.time() - started)
+            if usage:
+                log(f"生成完成：输出 {n} 字，用了 {secs} 秒。"
+                    f"服务商记账 输入 {usage.get('prompt_tokens', '?')} token"
+                    f"（其中缓存 {(usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0)}）"
+                    f"／输出 {usage.get('completion_tokens', '?')} token")
+            else:
+                log(f"生成完成：输出 {n} 字（约 {rough_tokens(''.join(parts))} token），"
+                    f"用了 {secs} 秒。这家没回传 usage，以上是估算")
         return self._finish("".join(parts), reason)
 
-    def _plain_once(self, url, headers, body, proxies, tmo) -> str:
+    def _plain_once(self, url, headers, body, proxies, tmo, log=None) -> str:
         r = requests.post(url, headers=headers, json=body, timeout=tmo, proxies=proxies)
         self._check_status(r)
         data = r.json()
+        u = data.get("usage") or {}
+        if log and u:
+            log(f"服务商记账 输入 {u.get('prompt_tokens', '?')} token"
+                f"／输出 {u.get('completion_tokens', '?')} token")
         choices = data.get("choices") or []
         if not choices:
             raise LLMError(f"无 choices: {json.dumps(data, ensure_ascii=False)[:300]}")

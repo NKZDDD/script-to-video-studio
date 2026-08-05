@@ -177,8 +177,14 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
             build_tasks(pj, params)
             diagnose.clear(pj.root, "stage:s5", episode)
             return prev
+    # PARAMS 里绝不能带 script：它已经在 {{SCRIPT}} 里送了一份。
+    # 之前没剔，等于把 8 万字的剧本发两遍 —— 环节1 的输入从 72K token 涨到
+    # 141K token，一半是重复内容，钱翻倍、首字延迟翻倍，也是上次超时的主因。
+    # 其余字段（尺寸/时长/镜头数）都是几十字节的小值，留着有用。
+    slim = {k: v for k, v in params.items() if k != "script"}
+    slim["episode"] = episode or params.get("episode", "")
     mapping = {
-        "PARAMS": jd(dict(params, episode=episode or params.get("episode", ""))),
+        "PARAMS": jd(slim),
         "SCRIPT": script,
         "EPISODE": episode or params.get("episode", "EP01"),
         "DURATION": params.get("duration", 15),
