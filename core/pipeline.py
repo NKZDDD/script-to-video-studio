@@ -10,6 +10,11 @@
   · 改完某段提示词 → 再点一次，只补那一段
   · 换台电脑、重启服务 → 一样
 
+并发：集与集之间除了环节4 没有依赖，所以逐集环节按集并行跑；环节8 内部段与段
+也没有依赖，段之间再并行一层。环节4 例外 —— 它要沿用前面几集已建好的资产编号，
+必须按集号排队，否则两集会各自给同一个新对象编号。**并发只改调度，产物和串行
+跑逐字一致。**
+
 出错策略是分层的，因为「继续跑」和「赶紧停」在不同情况下各是对的：
   · 余额不足 / 密钥失效  → 立刻停整条流水线。继续只是烧钱撞同一堵墙。
   · 某一集的某个环节失败 → 跳过这一集剩下的环节，**其它集照常跑**。
@@ -22,12 +27,13 @@ from __future__ import annotations
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from . import diagnose, episodes as _eps, stages as S
 from .apiutil import BATCH_FATAL
 from .llm import LLMCancelled
-from .executor import Job, run_chain
+from .executor import LLM_GATE, Job, run_chain
 
 # 逐集要跑的 LLM 环节，按顺序
 PER_EP = ["s2", "s3", "s4", "s5", "s6", "s7", "s8"]
@@ -112,36 +118,74 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         params: dict, jobs=None, concurrency: int = 3, max_retry: int = 2,
         include_produce: bool = True, include_deliver: bool = True,
         only_episodes: Optional[list] = None,
-        produce_episodes: Optional[list] = None) -> dict:
+        produce_episodes: Optional[list] = None,
+        ep_concurrency: int = 1, seg_concurrency: int = 1,
+        llm_concurrency: int = 0) -> dict:
     """跑完整条流水线。job 用来向前端汇报进度，每一步是一个 item。
 
     llm_factory() → LLM 实例（延迟构造，密钥错就在第一步暴露）
     provider_factory(kind) → 按优先级排好的服务商列表 [{provider, model, ...}, ...]
         kind ∈ asset/storyboard/video。首选挂了会自动换下一家补剩下的。
     jobs: JobManager，给出图出片开子 job，好让「生产」页也能看到细节
+
+    并发（只影响调度，产物和串行跑逐字一致）：
+      ep_concurrency   同时处理几集。集与集之间除了环节4 没有依赖。
+      seg_concurrency  环节8 里同时编几段。段与段之间完全独立。
+      llm_concurrency  LLM 在途请求总上限（真正的天花板，防止把网关打限流）。
     """
+    S.reset_claims()
+    LLM_GATE.configure(llm_concurrency or max(1, ep_concurrency, seg_concurrency))
+    LLM_GATE.reset_peak()
     steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver,
                  only_episodes=only_episodes, produce_episodes=produce_episodes)
     job.total = len(steps)
     for s in steps:
         job.set_item(s["label"], state="pending")
 
+    st_lock = threading.Lock()
     bad_eps: set = set()          # 这些集已经卡住了，后续环节别再试
     failed: list = []
-    llm = None
-    i = 0
+    box: dict = {"llm": None}     # LLM 实例只造一次，多集共用
 
-    while i < len(steps):
-        s = steps[i]
-        key = s["label"]
-        i += 1
+    def get_llm():
+        with st_lock:
+            if box["llm"] is None:
+                box["llm"] = llm_factory()
+                job.model = box["llm"].model
+            return box["llm"]
+
+    def stop_now() -> bool:
+        return bool(job.cancelled or job.aborted)
+
+    def halt(s: dict) -> bool:
+        """要停了吗。
+
+        两种停法在面板上要看得出区别：
+          · 整批熔断（余额/密钥）→ **原地留 pending**，因为它压根没发出去，
+            标成取消会让人以为是自己点的。abort_with 已经说明了原因。
+          · 用户点取消 → 这一步标「已取消」，是人的决定
+
+        先判 aborted：abort_with 会连带把 cancelled 也置真（好让在途的 worker
+        赶紧收手），所以反过来判就会把熔断误显示成「已取消」。
+        """
+        if job.aborted:
+            return True
         if job.cancelled:
-            job.set_item(key, state="cancelled", msg="已取消")
-            continue
+            job.set_item(s["label"], state="cancelled", msg="已取消")
+            return True
+        return False
+
+    def do_step(s: dict) -> str:
+        """跑一步。返回 ok/skipped/failed/cancelled/aborted。异常都在里面消化掉。"""
+        key = s["label"]
         ep = s.get("episode", "")
-        if ep and ep in bad_eps:
+        if halt(s):
+            return "cancelled" if job.cancelled else "aborted"
+        with st_lock:
+            blocked = ep and ep in bad_eps
+        if blocked:
             job.set_item(key, state="skipped", msg=f"{ep} 前面的环节没成，这一步跳过")
-            continue
+            return "skipped"
 
         def log(m, k=key):
             job.log(k, m)
@@ -151,39 +195,19 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             if s["kind"] == "llm":
                 if _llm_done(pj, s["stage"], ep):
                     job.set_item(key, state="skipped", msg="已经做过了，跳过")
-                    continue
+                    return "skipped"
                 job.set_item(key, state="running")
-                if llm is None:
-                    llm = llm_factory()
-                    job.model = llm.model
-                S.run_llm_stage(pj, s["stage"], llm, params, log=log, episode=ep,
-                                cancel=lambda: job.cancelled)
+                S.run_llm_stage(pj, s["stage"], get_llm(), params, log=log, episode=ep,
+                                cancel=stop_now, seg_concurrency=seg_concurrency)
                 job.set_item(key, state="ok")
                 diagnose.clear(pj.root, f"stage:{s['stage']}", ep)
-                # 环节1 跑完才知道有几集，把后面的步骤补进计划
-                if s["stage"] == "s1":
-                    rest = plan(pj, include_produce=include_produce,
-                                include_deliver=include_deliver,
-                                only_episodes=only_episodes,
-                                produce_episodes=produce_episodes)[1:]
-                    steps = steps[:i] + rest
-                    job.total = len(steps)
-                    for r in rest:
-                        job.set_item(r["label"], state="pending")
-                    # 按新计划重排，否则页面上「出图出片/交付」会显示在
-                    # 「逐集环节」前面（字典按插入顺序），看着像顺序反了
-                    job.reorder_items([x["label"] for x in steps])
-                    n = len(_eps.ids(pj))
-                    ana = "、".join(only_episodes) if only_episodes else f"全部 {n} 集"
-                    pro = "、".join(produce_episodes) if produce_episodes else "同上"
-                    log(f"识别出 {n} 集；分析范围={ana}；出图出片范围={pro}；共 {len(steps)} 步")
 
             # ---- 出图 / 出片 -----------------------------------------------
             elif s["kind"] == "produce":
                 todo = _produce_todo(pj, s["task_key"], s.get("only"))
                 if not todo:
                     job.set_item(key, state="skipped", msg="产物都齐了，跳过")
-                    continue
+                    return "skipped"
                 chain = provider_factory(s["produce"])      # 按优先级排好的服务商列表
                 if isinstance(chain, dict):                 # 兼容只给一家的写法
                     chain = [chain]
@@ -215,7 +239,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                                  msg=f"{len(todo)} 项完成"
                                      + (f"（换了 {r['switched']} 次家：{used}）"
                                         if r["switched"] else ""))
-                    continue
+                    return "ok"
                 # 还有没做成的：把最后一次的诊断挂上去
                 last = r["attempts"][-1] if r["attempts"] else {}
                 diag = last.get("diag")
@@ -228,13 +252,15 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                              msg=f"还有 {r['left']} 项没做成"
                                  + (f"，已试过 {used}" if len(r["attempts"]) > 1 else "")
                                  + "；照面板上的说明处理后再点一次「开始」")
-                failed.append(key)
+                with st_lock:
+                    failed.append(key)
                 # 所有家都因为账户级问题挂了 → 整条流水线没有继续的意义
                 if diag and diag.get("scope") == "batch" and r["switched"] + 1 >= len(chain):
                     job.abort_diag = diag
                     job.abort_with(diag)
-                    break
+                    return "aborted"
                 log(f"{r['left']} 项没做成，后面依赖它的步骤只做能做的部分")
+                return "failed"
 
             # ---- 复核清单 --------------------------------------------------
             elif s["kind"] == "review":
@@ -255,23 +281,109 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         except LLMCancelled as exc:                  # 用户点了取消：不算失败
             job.set_item(key, state="cancelled", msg=str(exc))
             job.log(key, str(exc))
-            continue
+            return "cancelled"
         except Exception as exc:                     # noqa: BLE001
             kind = getattr(exc, "kind", "")
             diag = diagnose.build(exc, stage=f"stage:{s['stage']}", target=ep or s["stage"],
-                                  model=getattr(llm, "model", ""))
+                                  model=getattr(box["llm"], "model", ""))
             diagnose.record(pj.root, diag)
             job.set_item(key, state="failed", msg=diagnose.one_line(diag), diag=diag)
             job.log(key, diagnose.one_line(diag))
-            failed.append(key)
+            with st_lock:
+                failed.append(key)
             if kind == BATCH_FATAL or diag.get("scope") == "batch":
                 # 余额、密钥这类：后面几百步撞的是同一堵墙，立刻停
                 job.abort_diag = diag
                 job.abort_with(diag)
-                break
+                return "aborted"
             if ep:
-                bad_eps.add(ep)
+                with st_lock:
+                    bad_eps.add(ep)
                 job.log(key, f"{ep} 卡在这一步，这一集后面的环节跳过；其它集继续")
+            return "failed"
+        return "ok"
+
+    # ---- 驱动：环节1 → 逐集（可并行）→ 出图出片/交付（串行） -------------
+    r1 = do_step(steps[0])                              # 环节1，全剧一次
+    if r1 not in ("ok", "skipped"):
+        # 环节1 没成就别往下走：人物表、视觉基调、集边界全在它的产物里，
+        # 后面每一步都要读。硬跑下去只是把同一个错误重复几百遍。
+        job.log(steps[0]["label"], "环节1 没成，后面的步骤全部不发 —— 它是所有环节的输入")
+        for s in steps[1:]:
+            job.set_item(s["label"], state="skipped", msg="等环节1 先跑通")
+    elif not stop_now():
+        rest = plan(pj, include_produce=include_produce,
+                    include_deliver=include_deliver,
+                    only_episodes=only_episodes,
+                    produce_episodes=produce_episodes)[1:]
+        steps = steps[:1] + rest
+        job.total = len(steps)
+        for r in rest:
+            job.set_item(r["label"], state="pending")
+        # 按新计划重排，否则页面上「出图出片/交付」会显示在「逐集环节」
+        # 前面（字典按插入顺序），看着像顺序反了
+        job.reorder_items([x["label"] for x in steps])
+        n = len(_eps.ids(pj))
+        ana = "、".join(only_episodes) if only_episodes else f"全部 {n} 集"
+        pro = "、".join(produce_episodes) if produce_episodes else "同上"
+        job.log(steps[0]["label"],
+                f"识别出 {n} 集；分析范围={ana}；出图出片范围={pro}；共 {len(steps)} 步")
+
+        # 逐集分组，组内保持 s2→s8 的顺序（同一集内部有硬依赖）
+        chains: dict = {}
+        tail: list = []
+        for s in steps[1:]:
+            ep = s.get("episode", "")
+            if s["kind"] == "llm" and ep:
+                chains.setdefault(ep, []).append(s)
+            else:
+                tail.append(s)
+        eps_order = list(chains)
+        # 环节4 必须按集号顺序跑：它的输入里有「前面几集已建好的资产」，
+        # 先出现的定义优先。并行时若 EP05 抢在 EP03 前头做环节4，两集会各自
+        # 给同一个新对象编号 —— 同一个编号指两个东西，出图就张冠李戴。
+        # 所以只给环节4 加一道按集排队的闸门，其余环节自由并行。
+        gates = [threading.Event() for _ in eps_order]
+
+        def run_episode(k: int, ep: str) -> None:
+            try:
+                for s in chains[ep]:
+                    if halt(s):
+                        continue
+                    if s["stage"] == "s4" and k > 0:
+                        while not gates[k - 1].wait(0.2):
+                            if halt(s):
+                                return
+                        job.log(s["label"], f"{eps_order[k-1]} 的环节4 已完成，开始本集")
+                    do_step(s)
+                    if s["stage"] == "s4":
+                        gates[k].set()
+            finally:
+                # 没跑到环节4 就挂了也要放行，否则后面所有集永远等在这儿
+                gates[k].set()
+
+        workers = max(1, min(int(ep_concurrency or 1), len(eps_order) or 1))
+        if eps_order:
+            job.log(steps[0]["label"],
+                    f"逐集环节并发 {workers} 集"
+                    + (f"，环节8 段内并发 {seg_concurrency}" if seg_concurrency > 1 else "")
+                    + f"，LLM 在途上限 {LLM_GATE.snapshot()['llm_limit']}"
+                    + ("；环节4 按集号排队（跨集资产编号要沿用）" if workers > 1 else ""))
+        if workers > 1 and len(eps_order) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(lambda a: run_episode(*a), list(enumerate(eps_order))))
+        else:
+            for a in enumerate(eps_order):
+                run_episode(*a)
+
+        # 出图出片前把 tasks.json 再装配一次：并行下最后一次装配可能读到的是
+        # 别的集还没存盘时的状态，这里补一遍，确保清单是完整的
+        if tail and not stop_now():
+            S.build_tasks(pj, params)
+        for s in tail:
+            if halt(s):
+                continue
+            do_step(s)
 
     job.finished_at = __import__("time").time()
     if job.aborted:
@@ -281,7 +393,8 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     else:
         job.status = "error" if failed else "done"
     return {"steps": len(steps), "failed": failed,
-            "stuck_episodes": sorted(bad_eps), "status": job.status}
+            "stuck_episodes": sorted(bad_eps), "status": job.status,
+            "llm_peak": LLM_GATE.snapshot().get("llm_peak", 0)}
 
 
 def start(job: Job, pj, **kw) -> None:

@@ -146,8 +146,14 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     </p>
     <div id="autoChains" class="muted" style="margin-bottom:8px"></div>
     <div class="row" style="margin-top:10px;gap:10px;flex-wrap:wrap">
-      <label style="margin:0">并发 <input id="autoConc" type="number" min="1" max="16"
-        style="width:64px" value="3"></label>
+      <label style="margin:0" title="出图/出片的并发。只管环节5b/9/10，管不到文字环节">出图并发
+        <input id="autoConc" type="number" min="1" max="16" style="width:60px" value="3"></label>
+      <label style="margin:0" title="同时处理几集。集与集之间除了环节4 没有依赖；环节4 会自动按集号排队，保证跨集资产编号沿用">分析·集并发
+        <input id="autoEpConc" type="number" min="1" max="16" style="width:60px" value="4"></label>
+      <label style="margin:0" title="环节8 里同时编几段。段与段完全独立，这一步占单集耗时四成多">分析·段并发
+        <input id="autoSegConc" type="number" min="1" max="16" style="width:60px" value="4"></label>
+      <label style="margin:0" title="分析引擎在途请求的总上限。上面两个乘起来可能很大，真正的天花板是这个 —— 调高了容易被网关限流">分析·总上限
+        <input id="autoLlmConc" type="number" min="1" max="32" style="width:60px" value="6"></label>
       <label style="margin:0" title="资产图和故事板的出图尺寸">出图尺寸
         <select id="autoSize"></select></label>
       <label style="margin:0" title="视频画面比例">比例 <select id="autoRatio"></select></label>
@@ -528,6 +534,9 @@ function renderAuto() {
     + `<div style="margin-top:4px">按上面的顺序用，前一家挂了自动换下一家补剩下的。</div>`;
   const d = BOOT.config.defaults || {};
   $('#autoConc').value = d.concurrency || 3;
+  $('#autoEpConc').value  = d.llm_episodes    || 4;
+  $('#autoSegConc').value = d.llm_segments    || 4;
+  $('#autoLlmConc').value = d.llm_concurrency || 6;
   // 候选取「资产图链的首选那家」和「视频链的首选那家」各自声明支持的值
   const capOf = (kind, block) => {
     const first = (ch[kind] || [])[0];
@@ -549,6 +558,9 @@ function autoBody() {
   const only = eps($('#autoOnly')), prod = eps($('#autoProd'));
   return {project_root: PROJ,
           concurrency: +$('#autoConc').value,
+          llm_episodes: +$('#autoEpConc').value,
+          llm_segments: +$('#autoSegConc').value,
+          llm_concurrency: +$('#autoLlmConc').value,
           include_produce: $('#autoProduce').checked,
           include_deliver: $('#autoDeliver').checked,
           only_episodes: only.length ? only : null,
@@ -907,8 +919,11 @@ async function tick() {
 
   // 顶栏并发仪表
   const g = d.gate || {};
-  $('#gText').textContent = `并发 ${g.global_inflight||0}/${g.global_limit||0} · 运行 ${d.active||0}`;
-  $('#gDot').classList.toggle('busy', (g.global_inflight||0) > 0);
+  $('#gText').textContent =
+    `出图 ${g.global_inflight||0}/${g.global_limit||0}`
+    + ` · 分析 ${g.llm_inflight||0}/${g.llm_limit||0}`
+    + ` · 运行 ${d.active||0}`;
+  $('#gDot').classList.toggle('busy', (g.global_inflight||0) + (g.llm_inflight||0) > 0);
 
   // 任务卡列表
   const jobs = d.jobs || [];

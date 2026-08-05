@@ -13,10 +13,13 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
 from . import diagnose, ledger, probe, uploader
-from .llm import LLM
+from .executor import LLM_GATE
+from .llm import LLM, LLMCancelled
 from .providers import ImageTask, VideoTask, build as build_provider
 from .apiutil import resolve_ref
 from .store import Project, read_text, write_text
@@ -82,6 +85,36 @@ def is_per_episode(stage_id: str) -> bool:
     return stage_id not in SERIES_STAGES
 
 
+# ---- 并行跑多集时必须串起来的三处共享状态 ------------------------------
+# 环节5 判断「这个资产的提示词写过没有」是看磁盘上的 txt 在不在。多集并行时
+# 两集可能同时看到 C007 还没写 → 各写一遍，钱花两份，后写的还覆盖先写的。
+# 所以在进程内先「领走」：领了就算写了，别的集不再碰。失败再放回去。
+_CLAIM_LOCK = threading.Lock()
+_CLAIMED: set = set()
+# tasks.json 是整体重写的（读全部集 → 写一份）。并行时读-改-写会互相盖掉，
+# 整段加锁后每次调用都能看到之前所有已保存的产物。
+_TASKS_LOCK = threading.Lock()
+
+
+def _claim(ids: list) -> list:
+    """领走还没被别的集领走的那些，返回真正归自己写的。"""
+    with _CLAIM_LOCK:
+        mine = [i for i in ids if i not in _CLAIMED]
+        _CLAIMED.update(mine)
+        return mine
+
+
+def _unclaim(ids: list) -> None:
+    with _CLAIM_LOCK:
+        _CLAIMED.difference_update(ids)
+
+
+def reset_claims() -> None:
+    """一趟流水线开跑前清空。上一趟失败留下的领取记录不该影响这一趟。"""
+    with _CLAIM_LOCK:
+        _CLAIMED.clear()
+
+
 _STAGE_OF_OUT = {s["out"]: s for s in STAGES if s.get("out")}
 
 
@@ -118,7 +151,8 @@ def _dep_data(pj: Project, deps: list, episode: str) -> dict:
 
 def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
                   log: Callable = print, episode: str = "",
-                  cancel: Optional[Callable] = None) -> dict:
+                  cancel: Optional[Callable] = None,
+                  seg_concurrency: int = 1) -> dict:
     from . import episodes as _eps
     tpl_name, deps, required = _LLM_SPEC[stage_id]
     per_ep = is_per_episode(stage_id)
@@ -149,7 +183,8 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         raise RuntimeError(f"缺少前置产物，请先跑：{names or missing}")
 
     if stage_id == "s8":                       # s8 分段编译，天然可续跑
-        return run_s8_incremental(pj, llm, params, data, log, episode, cancel)
+        return run_s8_incremental(pj, llm, params, data, log, episode, cancel,
+                                  seg_concurrency=seg_concurrency)
 
     g = data.get("s1_global") or {}
     tone = (g.get("visual_tone") or {})
@@ -161,11 +196,14 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     # 不过滤的话 40 集会把同一个角色的提示词重写 40 遍：白花钱，还可能越写越飘。
     if stage_id == "s5":
         a4 = dict(data.get("s4_assets") or {})
-        todo, skipped = [], []
+        free, skipped = [], []
         for a in a4.get("assets", []):
             aid = a.get("asset_id", "")
             f = pj.p("03_提示词", "资产生产提示词", f"{aid}_PROMPT.txt")
-            (skipped if os.path.isfile(f) else todo).append(aid)
+            (skipped if os.path.isfile(f) else free).append(aid)
+        # 多集并行时，别的集可能刚好也在写这几个资产的提示词 —— 领得到才算自己的
+        todo = _claim(free)
+        skipped += [i for i in free if i not in set(todo)]
         a4["assets"] = [a for a in a4.get("assets", []) if a.get("asset_id") in set(todo)]
         data["s4_assets"] = a4
         if skipped:
@@ -217,8 +255,16 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
                       completion_tokens=u.get("completion_tokens") or 0,
                       seconds=u.get("seconds") or 0,
                       estimated=bool(u.get("estimated")))
-    out = llm.json_call(system, user, required=required, log=log, cancel=cancel,
-                        on_usage=_usage)
+    try:
+        with LLM_GATE.slot():
+            out = llm.json_call(system, user, required=required, log=log,
+                                cancel=cancel, on_usage=_usage)
+    except BaseException:
+        if stage_id == "s5":
+            # 没写成，把领走的资产放回去，让下一集或重跑能接手
+            _unclaim([a.get("asset_id", "") for a in
+                      (data.get("s4_assets") or {}).get("assets", [])])
+        raise
     pj.save_stage(tpl_name, out, episode)
 
     if stage_id == "s1":
@@ -266,11 +312,16 @@ def s8_done_segments(pj: Project, episode: str = "") -> set:
 
 def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
                        log: Callable = print, episode: str = "",
-                       cancel: Optional[Callable] = None) -> dict:
-    """环节8 逐段编译：一段一次 LLM 调用。
+                       cancel: Optional[Callable] = None,
+                       seg_concurrency: int = 1) -> dict:
+    """环节8 逐段编译：一段一次 LLM 调用，段之间并发。
 
     整集一次调用的问题：17 段 × 2 份提示词输出太长，中途失败整批白跑。
     逐段调用后，已完成的段落跳过，失败只影响那一段 —— 天然支持续跑。
+
+    段与段之间没有依赖（每段只吃自己那段的 seg/state/binding/shots），
+    所以可以并发。实测这一步占单集耗时的四成多，并发 4 能砍掉七成。
+    真正的上限由 LLM_GATE 兜着，这里的 seg_concurrency 只是本集内的排队数。
     """
     segs = (data.get("s2_segments") or {}).get("segments", [])
     if not segs:
@@ -291,11 +342,14 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     todo = [s for s in segs if s["id"] not in done]
     log(f"{episode or '本集'} 共 {len(segs)} 段，已完成 {len(done)} 段，本次编译 {len(todo)} 段")
 
-    failed = []
-    for i, seg in enumerate(todo, 1):
-        if cancel and cancel():
-            log(f"已取消，剩下 {len(todo) - i + 1} 段没编（已编好的都存了盘）")
-            break
+    failed: list = []
+    cancelled: list = []
+    save_lock = threading.Lock()
+    n = len(todo)
+
+    def one(i: int, seg: dict) -> None:
+        if (cancel and cancel()) or cancelled:
+            return
         sid = seg["id"]
         used = set((binds.get(sid, {}).get("reference_images") or [])
                    and [r.get("asset_id") for r in binds[sid]["reference_images"]] or [])
@@ -311,44 +365,67 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
             "BINDINGS": jd(binds.get(sid, {})),
             "SHOTS": jd(shots.get(sid, {})),
         }) + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
-        log(f"[{i}/{len(todo)}] 编译 {sid}")
+        log(f"[{i}/{n}] 编译 {sid}")
         try:
-            out = llm.json_call(
-                system, user,
-                required=["compiled[]", "compiled[].storyboard_prompt",
-                          "compiled[].video_prompt"],
-                log=lambda m: log(f"    {m}"), cancel=cancel,
-                on_usage=lambda u, _s=sid: ledger.record(
-                    pj.root, kind="llm", stage="s8", episode=episode, target=_s,
-                    provider="llm", model=u.get("model", ""),
-                    prompt_tokens=u.get("prompt_tokens") or 0,
-                    cached_tokens=(u.get("prompt_tokens_details") or {})
-                    .get("cached_tokens", 0),
-                    completion_tokens=u.get("completion_tokens") or 0,
-                    seconds=u.get("seconds") or 0,
-                    estimated=bool(u.get("estimated"))))
+            with LLM_GATE.slot():
+                out = llm.json_call(
+                    system, user,
+                    required=["compiled[]", "compiled[].storyboard_prompt",
+                              "compiled[].video_prompt"],
+                    log=lambda m, _s=sid: log(f"    {_s}: {m}"), cancel=cancel,
+                    on_usage=lambda u, _s=sid: ledger.record(
+                        pj.root, kind="llm", stage="s8", episode=episode, target=_s,
+                        provider="llm", model=u.get("model", ""),
+                        prompt_tokens=u.get("prompt_tokens") or 0,
+                        cached_tokens=(u.get("prompt_tokens_details") or {})
+                        .get("cached_tokens", 0),
+                        completion_tokens=u.get("completion_tokens") or 0,
+                        seconds=u.get("seconds") or 0,
+                        estimated=bool(u.get("estimated"))))
             c = out["compiled"][0]
             c["id"] = sid
-            by_id[sid] = c
             write_text(pj.p("03_提示词", "故事板提示词", f"{sid}_STORYBOARD_PROMPT.txt"),
                        c.get("storyboard_prompt", ""))
             write_text(pj.p("03_提示词", "视频提示词", f"{sid}_VIDEO_PROMPT.txt"),
                        c.get("video_prompt", ""))
-            # 每段都存盘：中途中断也不丢已完成的
-            pj.save_stage("s8_compile",
-                          {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]},
-                          episode)
+            # 每段都存盘：中途中断也不丢已完成的。并发下读-改-写必须串行，
+            # 否则两段同时保存，后写的会把先写的那段从数组里挤掉。
+            with save_lock:
+                by_id[sid] = c
+                pj.save_stage("s8_compile",
+                              {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]},
+                              episode)
             diagnose.clear(pj.root, "stage:s8", sid)
+        except LLMCancelled:
+            # 用户点了取消：不算失败，也别再往下派活
+            with save_lock:
+                cancelled.append(sid)
         except Exception as exc:                            # noqa: BLE001
             d = diagnose.build(exc, stage="stage:s8", target=sid, model=llm.model)
             diagnose.record(pj.root, d)
-            failed.append(sid)
+            with save_lock:
+                failed.append(sid)
             log(f"    {diagnose.one_line(d)}")
+
+    workers = max(1, min(int(seg_concurrency or 1), n or 1))
+    if workers > 1 and n > 1:
+        log(f"{episode or '本集'} 环节8 段内并发 {workers}")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda a: one(*a), list(enumerate(todo, 1))))
+    else:
+        for a in enumerate(todo, 1):
+            one(*a)
+    if cancelled:
+        log(f"已取消，{len(cancelled)} 段没编完（已编好的都存了盘）")
 
     result = {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]}
     pj.save_stage("s8_compile", result, episode)
     build_tasks(pj, params)
 
+    if cancelled and not failed:
+        raise LLMCancelled(
+            f"{episode or '本集'} 环节8 已按取消停下，编好的 {len(result['compiled'])} 段都存了盘；"
+            f"再点一次「开始」只补没编的那些段。")
     if failed:
         raise RuntimeError(f"{episode or '本集'} 有 {len(failed)} 段编译失败：{'、'.join(failed[:8])}"
                            f"{'…' if len(failed) > 8 else ''}。"
@@ -414,7 +491,15 @@ def build_tasks(pj: Project, params: dict) -> dict:
       · 资产任务按 asset_id 去重 —— 同一个角色跨集只出一张图，
         这既是省钱，更是跨集人脸一致的前提（输出路径不含集号，天生同一个文件）
       · 故事板/视频任务按段落 id（自带 EPxx 前缀）天然不冲突
+
+    整段加锁：多集并行时每集跑完环节5/8 都会来重装一次，读-改-写不串行的话
+    后写的那份会漏掉别的集刚存的产物，tasks.json 就少任务。
     """
+    with _TASKS_LOCK:
+        return _build_tasks(pj, params)
+
+
+def _build_tasks(pj: Project, params: dict) -> dict:
     from . import episodes as _eps
     code = params.get("project_code", "PROJ-001")
     eps = _eps.ids(pj) or [params.get("episode", "EP01")]

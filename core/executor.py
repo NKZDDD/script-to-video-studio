@@ -92,6 +92,56 @@ class Gate:
 GATE = Gate()
 
 
+class LlmGate:
+    """分析引擎（LLM）的并发上限。
+
+    为什么不复用上面的 GATE：那道闸门是按「出图出片服务商的配额」算的，
+    LLM 走的是另一个网关、另一套限流规则。混在一条闸门里，出图一忙就把
+    分析饿死，反过来也一样。所以单独一道，上限单独配。
+    """
+
+    def __init__(self, limit: int = 4):
+        self._lock = threading.RLock()
+        self._limit = max(1, int(limit))
+        self._sem = threading.BoundedSemaphore(self._limit)
+        self._inflight = 0
+        self._peak = 0
+
+    def configure(self, limit: int) -> None:
+        with self._lock:
+            n = max(1, int(limit or 1))
+            if n != self._limit:
+                self._limit = n
+                self._sem = threading.BoundedSemaphore(n)
+
+    @contextmanager
+    def slot(self):
+        with self._lock:
+            sem = self._sem          # 取一次；期间改上限也不影响已在排队的
+        sem.acquire()
+        with self._lock:
+            self._inflight += 1
+            self._peak = max(self._peak, self._inflight)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._inflight = max(0, self._inflight - 1)
+            sem.release()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"llm_limit": self._limit, "llm_inflight": self._inflight,
+                    "llm_peak": self._peak}
+
+    def reset_peak(self) -> None:
+        with self._lock:
+            self._peak = self._inflight
+
+
+LLM_GATE = LlmGate()
+
+
 def _is_final(job: "Job") -> bool:
     return job.status in ("done", "error", "cancelled", "aborted")
 

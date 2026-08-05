@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from core import diagnose, docparse, episodes, stages as S
-from core.executor import GATE, JobManager, run_batch, run_chain
+from core.executor import GATE, LLM_GATE, JobManager, run_batch, run_chain
 from core.llm import LLM
 from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provider,
                             list_capabilities, resolve_id as resolve_provider_id)
@@ -260,10 +260,12 @@ def api_get(path: str, q: dict) -> dict:
         return job.snapshot() if job else {"status": "none"}
 
     if path == "/api/jobs":
+        gate = dict(GATE.snapshot())
+        gate.update(LLM_GATE.snapshot())        # 分析引擎的在途数也要能看见
         return {"jobs": JOBS.list(project_root=q.get("root", [""])[0],
                                   active_only=q.get("active", ["0"])[0] == "1"),
                 "active": JOBS.active_count(),
-                "gate": GATE.snapshot()}
+                "gate": gate}
 
     if path == "/api/models":
         pid = q["provider"][0]
@@ -385,7 +387,15 @@ def api_post(path: str, body: dict) -> dict:
             include_produce=body.get("include_produce", True),
             include_deliver=body.get("include_deliver", True),
             only_episodes=body.get("only_episodes"),
-            produce_episodes=body.get("produce_episodes"))
+            produce_episodes=body.get("produce_episodes"),
+            # 分析引擎的并发。和出图出片的 concurrency 是两回事：那是按服务商
+            # 配额算的，这是另一个网关、另一套限流。混一起用出图一忙就把分析饿死。
+            ep_concurrency=int(body.get("llm_episodes")
+                               or (cfg.get("defaults") or {}).get("llm_episodes", 4)),
+            seg_concurrency=int(body.get("llm_segments")
+                                or (cfg.get("defaults") or {}).get("llm_segments", 4)),
+            llm_concurrency=int(body.get("llm_concurrency")
+                                or (cfg.get("defaults") or {}).get("llm_concurrency", 6)))
         return {"ok": True, "job_id": job.id}
 
     if path == "/api/upload/selftest":
