@@ -547,6 +547,32 @@ def asset_output_rel(asset: dict) -> str:
     return f"02_固定资产/{d}/{asset['asset_id']}.png"
 
 
+def asset_layers(tasks: list) -> list:
+    """把资产任务按参考图依赖分层：第 0 层没有参考图，第 N 层的参考图都在前面几层。
+
+    为什么必须分层：状态资产 ST007 的参考图是 ST006，而任务是按环节4 的输出顺序
+    排的、并发跑的。ST006 还在生成时 ST007 就被派出去，读不到 ST006.png 就直接
+    失败（实测：ST007 重试两次全报「参考图文件不存在」）。
+    分层之后层内并发、层间串行，父资产必然先出完，竞态从根上没了。
+
+    成环（互相引用）时把剩下的全塞最后一层 —— 那是数据问题，不该让调度死循环。
+    """
+    by_key = {t["key"]: t for t in tasks}
+    layers, placed = [], set()
+    rest = list(tasks)
+    while rest:
+        cur = [t for t in rest
+               if all(r.get("asset_id") in placed or r.get("asset_id") not in by_key
+                      for r in (t.get("reference_images") or []))]
+        if not cur:                       # 成环，别卡死
+            layers.append(rest)
+            break
+        layers.append(cur)
+        placed.update(t["key"] for t in cur)
+        rest = [t for t in rest if t["key"] not in placed]
+    return layers
+
+
 def assets_used_by(pj: Project, episodes_wanted: list) -> set:
     """这几集实际用到哪些资产（含状态资产的父资产）。
 
@@ -693,15 +719,23 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
     配了对象存储 → 一律传上去换公网链接。不只是为了那些只收 URL 的接口：
     能吃 data URI 的家，请求体也从几 MB 的 base64 缩成一行链接，快且稳。
     没配 → 转 data URI；碰上只收 URL 的模型就明确报错说去哪配。
+
+    例外：声明了 needs_bytes 的家（multipart 接口）必须给本机路径。
+    给链接它只能丢掉 —— 图照样出，但没有父资产参考，状态资产的脸就飘了，
+    而且不报错。所以这里按服务商的声明给对形式，不能一刀切上传。
     """
     up = provider_cfg.get("upload") or {}
     use_url = uploader.configured(up) and up.get("mode", "always") != "when_required"
     need_url = prov.needs_url(model)
+    need_bytes = prov.needs_bytes(model)
 
     def resolve(src: str, log: Callable = print) -> str:
         src = (src or "").strip()
         if not src or src.startswith("http"):
             return src
+        if need_bytes:
+            # 本机绝对路径，provider 自己读字节塞 multipart
+            return src if os.path.isabs(src) else os.path.join(pj.root, src)
         if not (use_url or need_url):
             return resolve_ref(src, pj.root, max_side=ref_side)
         path = src if os.path.isabs(src) else os.path.join(pj.root, src)

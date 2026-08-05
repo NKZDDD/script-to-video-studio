@@ -16,6 +16,7 @@ base_url 不一样，所以这里不声明 video 能力 —— 硬凑只会让�
 from __future__ import annotations
 
 import base64
+import os
 from typing import Callable, Optional
 
 from ..apiutil import ApiError, extract_image_items
@@ -26,7 +27,7 @@ SIZES = ["1024x1536", "1024x1024", "1536x1024", "2048x2048", "1792x1024", "1024x
 
 
 def _to_bytes(ref: str, idx: int) -> Optional[tuple]:
-    """data URI → (文件名, 字节, MIME)。公网 URL 这家吃不了，跳过并告知。"""
+    """data URI / 本机路径 → (文件名, 字节, MIME)。公网 URL 这家吃不了。"""
     if ref.startswith("data:"):
         head, _, b64 = ref.partition(",")
         mime = head[5:].split(";")[0] or "image/png"
@@ -35,6 +36,11 @@ def _to_bytes(ref: str, idx: int) -> Optional[tuple]:
             return (f"ref_{idx}.{ext}", base64.b64decode(b64), mime)
         except Exception:                       # noqa: BLE001
             return None
+    if not ref.startswith("http") and os.path.isfile(ref):
+        ext = os.path.splitext(ref)[1].lstrip(".").lower() or "png"
+        mime = "image/png" if ext == "png" else "image/jpeg"
+        with open(ref, "rb") as f:
+            return (f"ref_{idx}.{ext}", f.read(), mime)
     return None
 
 
@@ -43,6 +49,9 @@ class KunjiProvider(Provider):
     name = "坤鸡 img.yunfei.best（只出图）"
     default_base_url = "https://img.yunfei.best"
     supports = ("image",)
+    # multipart 接口：只收文件字节。声明出来，参考图解析器才不会先上传成链接
+    # 再被这里丢掉（那是静默降级，脸会飘）。
+    ref_mode = "bytes"
 
     def capabilities(self) -> dict:
         return {
@@ -72,13 +81,23 @@ class KunjiProvider(Provider):
         if not (task.prompt or "").strip():
             raise ApiError("提示词是空的")
 
-        files = []
+        files, dropped = [], []
         for i, r in enumerate(task.refs[:9], 1):
             got = _to_bytes(r, i)
             if got:
                 files.append(("image", got))
             else:
-                log(f"参考图{i} 不是本地图片（这家的 edits 只收文件字节，不收链接），已跳过")
+                dropped.append(i)
+        if dropped:
+            # 以前是 log 一句然后照着出图 —— 那是静默降级：图有了，但没有父资产
+            # 参考，状态资产的脸不认识本人，而且任务标 ok 没人知道。
+            # 报错走失败路径，优先级链会自动换下一家（收链接的那种）补上。
+            raise ApiError(
+                f"这家的 edits 只收文件字节，不收链接，第 {dropped} 张参考图给的是链接。"
+                f"本该有 {len(task.refs)} 张参考图，能用的只有 {len(files)} 张 —— "
+                f"少了参考图出来的就不是同一个人/同一个东西，所以不出这张图。"
+                f"要么把这一类活排给收链接的服务商，要么关掉对象存储让参考图走本机文件。",
+                status=0, kind="task_fatal")
 
         if files:
             form = [("model", (None, model)), ("prompt", (None, task.prompt)),

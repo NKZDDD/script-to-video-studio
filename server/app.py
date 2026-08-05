@@ -635,17 +635,32 @@ def api_post(path: str, body: dict) -> dict:
 
         def go():
             try:
-                r = run_chain(
-                    items, chain=chain,
-                    worker_of=lambda p: (S.make_video_worker(pj, p) if kind == "video"
-                                         else S.make_image_worker(pj, p, kind)),
-                    job_of=lambda p, n: JOBS.create(
-                        kind, n, conc, project_root=pj.root,
-                        project_name=os.path.basename(pj.root),
-                        provider=p["provider"], model=p.get("model", "")),
-                    key_of=lambda t: t["key"],
-                    done_of=lambda t: os.path.isfile(pj.p(*t["output"].split("/"))),
-                    max_retry=retry, log=lambda m: parent.log(kind, m))
+                # 资产图按参考图依赖分层，和「一键跑到底」同一套：状态资产的参考图
+                # 是它的父资产，不分层就会父子并发，子任务读不到父资产的 png。
+                layers = S.asset_layers(items) if kind == "asset" else [items]
+                if len(layers) > 1:
+                    parent.log(kind, f"按参考图依赖分 {len(layers)} 层："
+                               + "、".join(f"第{i}层 {len(g)} 项"
+                                          for i, g in enumerate(layers, 1)))
+                r = {"attempts": [], "left": 0}
+                for gi, grp in enumerate(layers, 1):
+                    if parent.cancelled:
+                        break
+                    if len(layers) > 1:
+                        parent.log(kind, f"—— 第 {gi}/{len(layers)} 层，{len(grp)} 项")
+                    one = run_chain(
+                        grp, chain=chain,
+                        worker_of=lambda p: (S.make_video_worker(pj, p) if kind == "video"
+                                             else S.make_image_worker(pj, p, kind)),
+                        job_of=lambda p, n: JOBS.create(
+                            kind, n, conc, project_root=pj.root,
+                            project_name=os.path.basename(pj.root),
+                            provider=p["provider"], model=p.get("model", "")),
+                        key_of=lambda t: t["key"],
+                        done_of=lambda t: os.path.isfile(pj.p(*t["output"].split("/"))),
+                        max_retry=retry, log=lambda m: parent.log(kind, m))
+                    r["attempts"] += one["attempts"]
+                    r["left"] += one["left"]
                 for a in r["attempts"]:
                     parent.set_item(f"{a['provider']}/{a['model']}", state=
                                    "failed" if a["counts"].get("failed") else "ok",

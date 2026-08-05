@@ -249,10 +249,31 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                                              provider=pcfg["provider"],
                                              model=pcfg.get("model", "")))
 
-                r = run_chain(todo, chain=chain, worker_of=mk_worker, job_of=mk_job,
-                              key_of=lambda t: t["key"],
-                              done_of=lambda t: os.path.isfile(pj.p(*t["output"].split("/"))),
-                              max_retry=max_retry, log=log)
+                # 资产图按参考图依赖分层：状态资产的参考图是它的父资产，
+                # 不分层的话父子会并发，子任务读不到父资产的 png 直接失败。
+                layers = (S.asset_layers(todo) if s["task_key"] == "asset_tasks"
+                          else [todo])
+                if len(layers) > 1:
+                    log(f"按参考图依赖分 {len(layers)} 层："
+                        + "、".join(f"第{i}层 {len(g)} 项" for i, g in enumerate(layers, 1))
+                        + "。上一层出完才跑下一层，否则状态资产读不到父资产的图")
+                r = {"attempts": [], "left": 0, "switched": 0}
+                for gi, grp in enumerate(layers, 1):
+                    if stop_now():
+                        break
+                    if len(layers) > 1:
+                        log(f"—— 第 {gi}/{len(layers)} 层，{len(grp)} 项")
+                    one = run_chain(grp, chain=chain, worker_of=mk_worker, job_of=mk_job,
+                                    key_of=lambda t: t["key"],
+                                    done_of=lambda t: os.path.isfile(
+                                        pj.p(*t["output"].split("/"))),
+                                    max_retry=max_retry, log=log)
+                    r["attempts"] += one["attempts"]
+                    r["left"] += one["left"]
+                    r["switched"] = max(r["switched"], one["switched"])
+                    if one["left"] and gi < len(layers):
+                        log(f"第 {gi} 层还有 {one['left']} 项没成 —— 下一层依赖它们的"
+                            f"那些会因为缺参考图失败，先把这一层修好再点一次")
                 used = " → ".join(f"{a['provider']}/{a['model']}" for a in r["attempts"])
                 if r["left"] == 0:
                     job.set_item(key, state="ok",

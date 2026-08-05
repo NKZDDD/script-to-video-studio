@@ -51,11 +51,22 @@ class Provider:
     #   url      —— 只收公网链接，本机文件必须先上传（core/uploader.py）
     # 同一家不同模型可能不一样（零视图生视频吃 base64、SD2 只收 URL），
     # 所以还有 url_only_models 这个逃生口，按模型名细分。
+    #   bytes    —— 走 multipart，只收真的文件字节，**给链接会被丢掉**
     ref_mode: str = "data_uri"
     url_only_models: tuple = ()
 
     def needs_url(self, model: str = "") -> bool:
         return self.ref_mode == "url" or (model or "") in self.url_only_models
+
+    def needs_bytes(self, model: str = "") -> bool:
+        """这家的参考图只收文件字节。
+
+        为什么必须单独声明：配了对象存储之后，解析器默认把本机文件一律上传换成
+        公网链接（体积小、通用）。可 multipart 的接口拿到链接只能丢掉 ——
+        图照样出，但没有父资产参考，状态资产的脸就飘了，而且**不报错**。
+        这种静默降级比直接失败危险得多，所以解析器要按这个声明给对形式。
+        """
+        return self.ref_mode == "bytes"
 
     def __init__(self, api_key: str = "", base_url: str = "", proxy: str = "", timeout: int = 900):
         self.session = HttpSession(api_key, base_url or self.default_base_url, timeout, proxy)
