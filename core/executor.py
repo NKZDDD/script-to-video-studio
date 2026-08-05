@@ -146,6 +146,25 @@ class Job:
             cur = self.items.setdefault(key, {"state": "pending", "msg": "", "attempts": 0})
             cur.update(kw)
 
+    def reorder_items(self, keys: list) -> None:
+        """按给定顺序重排 items，已有的状态原样保留。
+
+        为什么需要：环节1 跑完才知道有几集，之后才能把逐集步骤补进计划。
+        而 items 是字典，按插入顺序显示 —— 先插的「出图出片/交付」会排在
+        后补的「逐集环节」前面，页面上看着像要先出图再分镜，顺序完全反了。
+        执行顺序一直是对的（steps 列表重建过），这里只修显示。
+        """
+        with self._lock:
+            fresh = {}
+            for k in keys:
+                fresh[k] = self.items.get(
+                    k, {"state": "pending", "msg": "", "attempts": 0})
+            # 计划外的（比如已取消的旧步骤）挂到末尾，不丢
+            for k, v in self.items.items():
+                if k not in fresh:
+                    fresh[k] = v
+            self.items = fresh
+
     def log(self, key: str, msg: str) -> None:
         line = f"[{time.strftime('%H:%M:%S')}] {key}: {msg}"
         with self._lock:

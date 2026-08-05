@@ -170,6 +170,9 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                     job.total = len(steps)
                     for r in rest:
                         job.set_item(r["label"], state="pending")
+                    # 按新计划重排，否则页面上「出图出片/交付」会显示在
+                    # 「逐集环节」前面（字典按插入顺序），看着像顺序反了
+                    job.reorder_items([x["label"] for x in steps])
                     n = len(_eps.ids(pj))
                     ana = "、".join(only_episodes) if only_episodes else f"全部 {n} 集"
                     pro = "、".join(produce_episodes) if produce_episodes else "同上"
