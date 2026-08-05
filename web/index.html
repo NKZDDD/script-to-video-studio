@@ -73,6 +73,15 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 .thumb img,.thumb video{width:100%;display:block;aspect-ratio:9/16;object-fit:cover;background:#000}
 .thumb .cap{padding:5px 7px;font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hide{display:none}
+/* 生产任务表：视频那一行的「比例 + 时长」是两个下拉挤在一个格子里。
+   全局 input,select{width:100%} 会让它们各要 100% → 撑破格子、把并发和按钮挤歪，
+   第二个下拉被推出可视区。这里改成按内容宽。 */
+.pbox{white-space:nowrap}
+.pbox select{width:auto;min-width:88px;display:inline-block}
+.pbox select+select{margin-left:6px}
+#genRows td{vertical-align:middle}
+#genRows .c-in{width:64px}
+#genRows button{white-space:nowrap}
 
 /* ---- 资产库 / 按段看 ---- */
 .acards{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:10px}
@@ -1008,15 +1017,23 @@ function renderGen(summary) {
     const scope = !multi ? '' : (k === 'asset'
       ? '<span class="tag" title="同一个角色跨集只出一张图，跨集人脸才一致">全剧共享</span>'
       : `<span class="tag">${EP || '全部集'}</span>`);
-    return `<tr data-k="${k}">
+    // 没有任务时别摆一个点了没反应的「开始」：0/0 的原因是前置环节还没产出清单，
+    // 说清楚是哪一步、点不动的原因，比让人点三次再来问强。
+    const why = {asset: '环节5 还没编出资产生产提示词',
+                 storyboard: '环节8 还没编出故事板提示词',
+                 video: '环节8 还没编出视频提示词'}[k] || '前置环节还没产出';
+    const empty = !s.total;
+    const dis = empty ? ` disabled title="${esc(why)}，所以没有任务可跑"` : '';
+    return `<tr data-k="${k}"${empty ? ' style="opacity:.62"' : ''}>
       <td>${label} ${scope}</td>
-      <td>${s.done}/${s.total}</td>
+      <td>${empty ? `<span class="muted" title="${esc(why)}">0　没有任务</span>`
+                  : `${s.done}/${s.total}`}</td>
       <td><select class="p-sel" data-cap="${cap}" style="min-width:150px">${providerOptions(cap)}</select></td>
       <td><select class="m-sel" style="min-width:150px"></select></td>
-      <td class="pbox" style="white-space:nowrap"></td>
-      <td><input class="c-in" type="number" value="${(BOOT.config.defaults||{}).concurrency||3}" min="1" max="16" style="width:70px"></td>
-      <td><button class="btn sm" data-run="${k}">开始</button>
-          <button class="btn ghost sm" data-retry="${k}" title="只重跑记录在案的失败任务">补失败</button></td></tr>`;
+      <td class="pbox"></td>
+      <td><input class="c-in" type="number" value="${(BOOT.config.defaults||{}).concurrency||3}" min="1" max="16"></td>
+      <td><button class="btn sm" data-run="${k}"${dis}>开始</button>
+          <button class="btn ghost sm" data-retry="${k}"${dis || ' title="只重跑记录在案的失败任务"'}>补失败</button></td></tr>`;
   }).join('');
   const d = BOOT.config.defaults || {};
   $$('#genRows tr').forEach(tr => {
