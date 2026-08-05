@@ -273,6 +273,12 @@ def api_get(path: str, q: dict) -> dict:
         prov = build_provider(pid, pc.get("api_key", ""), pc.get("base_url", ""))
         return {"models": prov.list_models()}
 
+    if path == "/api/explorer":
+        """资产库 + 按段看。把散在各处的产物拼成能看懂的两个视图。"""
+        from core import explorer
+        pj = Project(q["root"][0])
+        return explorer.view(pj, (q.get("episode") or [""])[0])
+
     if path == "/api/files":
         pj = Project(q["root"][0])
         sub = q.get("sub", [""])[0]
