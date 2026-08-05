@@ -293,16 +293,20 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         log(f"识别出 {len(eps)} 集"
             + (f"（前 {res['preamble_chars']} 字是推介/说明，已排除在正文外）"
                if res.get("preamble_chars") else ""))
-        no_seg = [e["episode"] for e in eps if not e.get("segments")]
+        no_sec = [e["episode"] for e in eps if not e.get("duration_sec")]
         for e in eps[:60]:
-            n = e.get("segments") or 0
+            sec = e.get("duration_sec") or 0
+            n = _eps.segs_from_sec(sec, dur) if sec else 0
             log(f"  {e['episode']}  {e['chars']:>6} 字  "
-                + (f"{n:>3} 段 / {n * dur:>4} 秒  " if n else "  段数未给  ")
+                + (f"{sec:>4} 秒 → {n:>3} 段  " if sec else "  秒数未给  ")
                 + (e.get('title', '') or '')[:30])
         if eps:
-            tot = sum((e.get("segments") or 0) for e in eps)
-            log(f"  合计 {tot} 段 ≈ {tot * dur / 60:.0f} 分钟"
-                + (f"；{len(no_seg)} 集没给段数，会按「单集分钟」折算" if no_seg else ""))
+            tot_sec = sum((e.get("duration_sec") or 0) for e in eps)
+            tot_seg = sum(_eps.segs_from_sec(e.get("duration_sec") or 0, dur)
+                          for e in eps if e.get("duration_sec"))
+            log(f"  合计 {tot_sec} 秒 ≈ {tot_sec / 60:.0f} 分钟 → {tot_seg} 段"
+                f"（段数 = 秒数 ÷ 单段 {dur} 秒，换视频模型时自动跟着变）"
+                + (f"；{len(no_sec)} 集没给秒数，会按「单集分钟」折算" if no_sec else ""))
         for it in res.get("issues", []):
             log(f"  {'⚠️' if it.get('level') == 'warn' else '❌'} {it['episode']}：{it['reason']}")
 

@@ -604,22 +604,26 @@ function renderEpisodes() {
       : '<span class="muted">还没跑环节1。它会判断这份剧本有几集、边界在哪 —— 不管剧本用「第N集」「EP1」还是别的写法。</span>';
     return;
   }
-  // 段数是环节1 逐集定的（它是唯一看得到全篇的环节），时长 = 段数 × 单段秒数
+  // 环节1 给的是**秒数**（按剧情事件定）；段数 = 秒数 ÷ 单段秒数，是算出来的。
+  // 换成一次出 10 秒的视频模型，段数自动跟着变，不用重跑环节1。
   const du = ((BOOT.config.defaults || {}).duration) || 15;
-  const secs = e => (e.segments || 0) * du;
-  const totSeg = eps.reduce((a, e) => a + (e.segments || 0), 0);
+  const nSeg = e => e.duration_sec ? Math.ceil(e.duration_sec / du) : 0;
+  const realSec = e => nSeg(e) * du;
+  const totSec = eps.reduce((a, e) => a + (e.duration_sec || 0), 0);
+  const totSeg = eps.reduce((a, e) => a + nSeg(e), 0);
   const opts = eps.map(e =>
     `<option value="${esc(e.episode)}"${EP === e.episode ? ' selected' : ''}>${
       esc(e.episode)}${e.title ? ' · ' + esc(e.title) : ''}（${e.chars}字${
-      e.segments ? ` · ${e.segments}段 · ${secs(e)}秒` : ''}）</option>`).join('');
+      e.duration_sec ? ` · ${realSec(e)}秒 · ${nSeg(e)}段` : ''}）</option>`).join('');
   $('#epBox').innerHTML = `
     <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap">
       <b>共 ${eps.length} 集</b>
       <span class="muted">正文合计 ${eps.reduce((a, e) => a + e.chars, 0)} 字${
         EPS.preamble_chars ? `；另有 ${EPS.preamble_chars} 字是推介/说明，已排除在正文外` : ''}</span>
-      ${totSeg ? `<span class="muted">· 环节1 定了合计 <b>${totSeg}</b> 段 ≈ ${
-        Math.round(totSeg * du / 60)} 分钟（每集时长按剧情事件数走，不是固定值）</span>`
-        : '<span class="muted">· 环节1 没给每集段数，会按「单集分钟」折算</span>'}
+      ${totSec ? `<span class="muted">· 环节1 按剧情定了合计 <b>${
+        Math.round(totSec / 60)}</b> 分钟 → ${totSeg} 段（段数 = 秒数 ÷ 单段 ${du} 秒，
+        换视频模型时自动跟着变）</span>`
+        : '<span class="muted">· 环节1 没给每集秒数，会按「单集分钟」折算</span>'}
       <span class="sp"></span>
       <label style="margin:0">当前操作的集</label>
       <select id="epSel" style="min-width:230px">
@@ -629,20 +633,28 @@ function renderEpisodes() {
     ${iss.length ? `<div class="alert warn" style="margin-top:8px">
       切集时有 ${iss.length} 处可疑，建议点开看一眼：
       ${iss.map(i => `<div>· ${esc(i.episode)}：${esc(i.reason)}</div>`).join('')}</div>` : ''}
-    ${totSeg ? `<details style="margin-top:8px"><summary class="muted">
-      每集的段数和理由（环节1 定的）</summary>
+    ${totSec ? `<details style="margin-top:8px"><summary class="muted">
+      每集的时长和理由（环节1 按剧情事件定的）</summary>
       <table style="font-size:12px;margin-top:6px"><thead><tr>
-        <th>集</th><th>字数</th><th>段数</th><th>时长</th><th>每段字数</th><th>为什么是这个段数</th>
+        <th>集</th><th>字数</th><th title="环节1 按剧情事件定的">时长</th>
+        <th title="时长 ÷ 单段秒数，上取整">段数</th>
+        <th title="段不可分，所以实际时长是单段秒数的整数倍">实际</th>
+        <th title="只是体检，不是定时长的依据">字/分</th>
+        <th>为什么是这个时长</th>
       </tr></thead><tbody>${eps.map(e => {
-        const per = e.segments ? Math.round(e.chars / e.segments) : 0;
-        const odd = per && (per < 40 || per > 500);
+        const pm = e.duration_sec ? Math.round(e.chars / (e.duration_sec / 60)) : 0;
+        const odd = pm && (pm < 100 || pm > 2000);
         return `<tr><td>${esc(e.episode)}</td><td>${e.chars}</td>
-          <td>${e.segments || '—'}</td><td>${e.segments ? secs(e) + 's' : '—'}</td>
-          <td${odd ? ' style="color:#c0392b"' : ''}>${per || '—'}</td>
+          <td>${e.duration_sec ? e.duration_sec + 's' : '—'}</td>
+          <td>${nSeg(e) || '—'}</td>
+          <td class="muted">${e.duration_sec ? realSec(e) + 's' : '—'}</td>
+          <td${odd ? ' style="color:#c0392b"' : ''}>${pm || '—'}</td>
           <td class="muted">${esc(e.pacing_note || '')}</td></tr>`;
       }).join('')}</tbody></table>
-      <p class="muted" style="margin:6px 0 0">每段字数常态 120-180；红字的偏离较大，
-        点「产物 → 按段看」核对一下那一集装得下装不下。</p></details>` : ''}`;
+      <p class="muted" style="margin:6px 0 0">
+        <b>时长按剧情事件定，字数不参与</b> —— 正文里大半是场景描写不是台词，
+        字数和屏幕时间没有稳定比例。「字/分」只是事后体检：红字说明内容可能撑不满
+        或塞不下，点「产物 → 按段看」核对那一集。</p></details>` : ''}`;
   $('#epSel').onchange = e => { EP = e.target.value; refreshProject(); };
 }
 

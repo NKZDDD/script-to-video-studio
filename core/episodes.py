@@ -80,10 +80,10 @@ def split(script: str, ranges: list) -> dict:
                       "range": (r.get("range") or "").strip(),
                       "entry_state": r.get("entry_state", ""),
                       "exit_state": r.get("exit_state", ""),
-                      # 每集切几段由环节1 定（它是唯一看得到全篇的环节）。
-                      # 环节2 只按这个数去划边界，不再自己判断该切几段 ——
-                      # 否则同样体量的两集可能一个 12 段一个 4 段，成片时长差三倍。
-                      "segments": _seg_count(r.get("segments")),
+                      # 每集多长由环节1 定（它是唯一看得到全篇的环节），
+                      # 它给的是**秒数**；段数 = 秒数 ÷ 单段秒数，另算。
+                      # 这样换视频模型（一次出 10 秒 / 20 秒）段数自动跟着变。
+                      "duration_sec": _duration_sec(r.get("duration_sec")),
                       "key_events": r.get("key_events") or [],
                       "pacing_note": (r.get("pacing_note") or "").strip(),
                       "start_line": at, "anchor": anchor})
@@ -102,17 +102,19 @@ def split(script: str, ranges: list) -> dict:
             issues.append({"episode": e["episode"],
                            "reason": f"切出来只有 {e['chars']} 字，可能锚点落在了目录或简介上，"
                                      f"不是正文"})
-        # 段数和正文体量差太远时提醒一句。不拦 —— 事件密度确实可能和字数不成比例，
-        # 但差到 3 倍以上通常是环节1 没认真数事件，值得人看一眼。
-        if e["segments"] and e["chars"] >= 120:
-            per = e["chars"] / e["segments"]
-            if per < 40 or per > 500:
+        # 时长和正文体量差太远时提醒一句。
+        # **注意：这不是定时长的依据** —— 时长按剧情事件定，字数只是事后体检，
+        # 因为正文里大半是场景描写不是台词，字数和屏幕时间没有稳定比例。
+        # 只在差到离谱（每分钟 100 字以下或 2000 字以上）时才提，让人回去看一眼。
+        if e["duration_sec"] and e["chars"] >= 120:
+            per_min = e["chars"] / (e["duration_sec"] / 60)
+            if per_min < 100 or per_min > 2000:
                 issues.append({
                     "episode": e["episode"], "level": "warn",
-                    "reason": f"正文 {e['chars']} 字切 {e['segments']} 段 = "
-                              f"每段 {per:.0f} 字（常态 120-180 字）。"
-                              f"{'段数偏多，可能会注水' if per < 40 else '段数偏少，可能塞不下剧情'}；"
-                              f"环节1 给的理由：{e.get('pacing_note') or '（没写）'}"})
+                    "reason": f"正文 {e['chars']} 字要撑 {e['duration_sec']} 秒 = "
+                              f"每分钟 {per_min:.0f} 字。"
+                              f"{'内容可能撑不满这个时长（会注水）' if per_min < 100 else '这个时长可能塞不下这些剧情'}"
+                              f"；环节1 给的理由：{e.get('pacing_note') or '（没写）'}"})
 
     head = "\n".join(lines[:found[0]["start_line"]]).strip() if found else script.strip()
     return {"episodes": found, "issues": issues,
@@ -120,32 +122,50 @@ def split(script: str, ranges: list) -> dict:
             "total_chars": len(script)}
 
 
-SEG_MIN, SEG_MAX = 4, 40
+SEC_MIN, SEC_MAX = 60, 600      # 环节1 给的每集秒数的合理区间
 
 
-def _seg_count(v) -> int:
-    """环节1 给的段数。给了就用，没给或明显不合理就返回 0（由调用方退回全局参数）。"""
+def _duration_sec(v) -> int:
+    """环节1 给的本集秒数。不合理就返回 0（由调用方退回全局参数）。"""
     try:
-        n = int(v)
+        n = int(float(v))
     except (TypeError, ValueError):
         return 0
-    return n if SEG_MIN <= n <= SEG_MAX else 0
+    return n if SEC_MIN <= n <= SEC_MAX else 0
+
+
+def segs_from_sec(sec: int, clip: int) -> int:
+    """秒数 → 段数。
+
+    段是**技术单位**：视频模型一次只能生成 clip 秒，所以段数就是秒数除以它。
+    向上取整 —— 段不可分，宁可多 15 秒也不能砍掉剧情的尾巴。
+    """
+    clip = int(clip or 15) or 15
+    return max(1, -(-int(sec) // clip))          # 上取整
 
 
 def seg_target(pj: Project, episode: str, params: dict) -> tuple:
-    """这一集该切几段，以及这个数是哪来的。
+    """这一集该切几段，以及这个数是怎么来的。
 
-    优先环节1 逐集定的数 —— 它是唯一看得到全篇的环节，知道这一集有几个剧情事件。
-    老项目的产物里没有这个字段，退回按「单集分钟 ÷ 单段秒数」算（就是以前的行为），
-    这样老项目重跑不会炸。
+    环节1 给的是**秒数**（它按剧情事件定，看得到全篇）；段数在这里现算 ——
+    这样以后换成一次能出 10 秒或 20 秒的视频模型，段数自动跟着变，
+    不用重跑环节1。字数完全不参与。
+
+    老项目的产物里没有 duration_sec，退回按「单集分钟 ÷ 单段秒数」算
+    （就是以前的行为），这样老项目重跑不会炸。
     """
-    dur = int(params.get("duration") or 15) or 15
+    clip = int(params.get("duration") or 15) or 15
     for e in load(pj).get("episodes", []):
-        if e.get("episode") == episode and e.get("segments"):
-            n = int(e["segments"])
-            return n, f"环节1 按本集剧情事件定的（{e.get('pacing_note') or '没写理由'}）"
+        if e.get("episode") == episode and e.get("duration_sec"):
+            sec = int(e["duration_sec"])
+            n = segs_from_sec(sec, clip)
+            real = n * clip
+            extra = f"，取整到 {real} 秒" if real != sec else ""
+            return n, (f"环节1 定本集 {sec} 秒 ÷ 单段 {clip} 秒 = {n} 段{extra}"
+                       f"（{e.get('pacing_note') or '没写理由'}）")
     mins = float(params.get("episode_minutes") or 3)
-    return max(1, round(mins * 60 / dur)), f"环节1 没给，按单集 {mins} 分钟 ÷ {dur} 秒折算"
+    n = segs_from_sec(mins * 60, clip)
+    return n, f"环节1 没给秒数，按单集 {mins} 分钟 ÷ {clip} 秒 = {n} 段"
 
 
 # ---------------------------------------------------------------- 落盘 / 读取
