@@ -166,6 +166,10 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <label style="margin:0" title="留空=跟分析范围一致。资产表始终是全剧的，这里只限制出图出片的范围">
         只出这几集的图/片 <input id="autoProd" placeholder="留空=同分析范围，如 EP01" style="width:170px"></label>
       <span class="sp"></span>
+      <button class="btn ghost sm" id="autoOnlyEp1"
+        title="把上面两个范围都设成第一集：环节1 照样读整部剧本、切满全部集，但只加工 EP01">只测第一集</button>
+      <button class="btn ghost sm" id="autoAllEps"
+        title="清空范围 = 全部集都分析">全部集</button>
       <button class="btn ghost sm" id="autoPreview">先看会做什么（不花钱）</button>
       <button class="btn" id="autoRun">开始 / 继续</button>
       <button class="btn ghost sm" id="autoStop" style="display:none">停下</button>
@@ -569,6 +573,23 @@ function autoBody() {
                             ratio: $('#autoRatio').value,
                             duration: +$('#autoDur').value}};
 }
+// 「只测第一集」：两个范围一起设。分开填容易只填一个 ——
+// 只填分析范围会漏掉出图出片，只填出图范围会白跑 40 集的文字。
+$('#autoOnlyEp1').onclick = () => {
+  const first = ((EPS.episodes || [])[0] || {}).episode || 'EP01';
+  $('#autoOnly').value = first;
+  $('#autoProd').value = first;
+  $('#autoPlan').innerHTML =
+    `<div class="alert warn">范围已设成 ${esc(first)} 一集。`
+    + `环节1 照样读整部剧本、切满全部集（跨集人脸一致靠它），`
+    + `只是环节2 往后只加工这一集。点「先看会做什么」核对一下再开始。</div>`;
+};
+$('#autoAllEps').onclick = () => {
+  $('#autoOnly').value = '';
+  $('#autoProd').value = '';
+  $('#autoPlan').innerHTML =
+    '<div class="alert warn">范围已清空 = 全部集都分析、都出图出片。</div>';
+};
 $('#autoPreview').onclick = async () => {
   if (!PROJ) return alert('先打开项目');
   $('#autoPlan').innerHTML = '<div class="alert warn">算一下…</div>';

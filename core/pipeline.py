@@ -370,6 +370,14 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 for s in main:
                     if halt(s):
                         continue
+                    # 这一集已经卡住了就别再去等环节4 的闸门 —— 等不出任何结果，
+                    # 还白占一个并发位，而且页面上这几步会一直挂在 pending，
+                    # 看着像卡死了。直接交给 do_step 标 skipped。
+                    with st_lock:
+                        dead = ep in bad_eps
+                    if dead:
+                        do_step(s)
+                        continue
                     if s["stage"] == "s4" and k > 0:
                         while not gates[k - 1].wait(0.2):
                             if halt(s):

@@ -234,7 +234,15 @@ class LLM:
 
     def _finish(self, content: str, reason: str) -> str:
         if not content.strip():
-            raise LLMError("回复内容为空")
+            # 空回复要重试，不能当场判死。多集并发时网关被打满，很多家不回 429
+            # 而是回一个 200 加空 content —— 那是限流，退一步再来就好。
+            # 直接失败会把这一集后面所有环节连带跳过，代价大得离谱：
+            # 空回复没产生输出 token，重试几乎不花钱，而丢一集要重跑二十几次调用。
+            # 真是内容被拒的话，重试完还是空，最后照样报 LLM_EMPTY 并提示查剧本。
+            # 文案里别写「限流」「发得太快」这类词：诊断是按关键词归类的，
+            # 带上就会被归成 RATE_LIMITED，盖掉 LLM_EMPTY 那张卡里
+            # 「先降并发、再查内容」的完整说明。原因交给那张卡讲。
+            raise _Retryable("回复内容为空")
         if reason == "length":
             raise LLMFatal(
                 f"模型输出被长度上限截断了（max_tokens={self.max_tokens}），"
