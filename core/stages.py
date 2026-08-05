@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from typing import Any, Callable, Optional
 
-from . import diagnose, probe, uploader
+from . import diagnose, ledger, probe, uploader
 from .llm import LLM
 from .providers import ImageTask, VideoTask, build as build_provider
 from .apiutil import resolve_ref
@@ -208,7 +208,17 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     user = render(load_prompt(tpl_name), mapping)
     tag = f"{episode} " if episode else "全剧 "
     log(f"{tag}提示词 {len(user)} 字，调用 {llm.model}")
-    out = llm.json_call(system, user, required=required, log=log, cancel=cancel)
+    def _usage(u, _st=stage_id, _ep=episode):
+        ledger.record(pj.root, kind="llm", stage=_st, episode=_ep,
+                      provider="llm", model=u.get("model", ""),
+                      prompt_tokens=u.get("prompt_tokens") or 0,
+                      cached_tokens=(u.get("prompt_tokens_details") or {})
+                      .get("cached_tokens", 0),
+                      completion_tokens=u.get("completion_tokens") or 0,
+                      seconds=u.get("seconds") or 0,
+                      estimated=bool(u.get("estimated")))
+    out = llm.json_call(system, user, required=required, log=log, cancel=cancel,
+                        on_usage=_usage)
     pj.save_stage(tpl_name, out, episode)
 
     if stage_id == "s1":
@@ -303,10 +313,20 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
         }) + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
         log(f"[{i}/{len(todo)}] 编译 {sid}")
         try:
-            out = llm.json_call(system, user,
-                                required=["compiled[]", "compiled[].storyboard_prompt",
-                                          "compiled[].video_prompt"],
-                                log=lambda m: log(f"    {m}"), cancel=cancel)
+            out = llm.json_call(
+                system, user,
+                required=["compiled[]", "compiled[].storyboard_prompt",
+                          "compiled[].video_prompt"],
+                log=lambda m: log(f"    {m}"), cancel=cancel,
+                on_usage=lambda u, _s=sid: ledger.record(
+                    pj.root, kind="llm", stage="s8", episode=episode, target=_s,
+                    provider="llm", model=u.get("model", ""),
+                    prompt_tokens=u.get("prompt_tokens") or 0,
+                    cached_tokens=(u.get("prompt_tokens_details") or {})
+                    .get("cached_tokens", 0),
+                    completion_tokens=u.get("completion_tokens") or 0,
+                    seconds=u.get("seconds") or 0,
+                    estimated=bool(u.get("estimated"))))
             c = out["compiled"][0]
             c["id"] = sid
             by_id[sid] = c
@@ -564,6 +584,11 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
         pj.upsert_registry(kind, {"id": task["key"], "file_ref": task["output"],
                                   "status": "generated", **meta})
         pj.log_event({"stage": kind, "id": task["key"], "result": "ok", **meta})
+        # 记一次出图。出图出片是按次计费的，钱主要花在这里，必须入账。
+        ledger.record(pj.root, kind="image", stage=kind, target=task["key"],
+                      episode=task.get("episode", ""),
+                      provider=meta.get("provider", provider_cfg.get("provider", "")),
+                      model=meta.get("model", model), count=1, size=want)
         return {"output": task["output"],
                 "warn": _ratio_warn(pj, out, want, kind, task["key"],
                                     provider_cfg, model, "image")}
@@ -605,6 +630,12 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
         pj.upsert_registry("video", {"id": task["key"], "file_ref": task["output"],
                                      "storyboard_ref": sb, "status": "generated", **meta})
         pj.log_event({"stage": "video", "id": task["key"], "result": "ok", **meta})
+        # 出片是最贵的一步，必须入账。带上时长——按秒计价的家要用
+        ledger.record(pj.root, kind="video", stage="video", target=task["key"],
+                      episode=task.get("episode", ""),
+                      provider=meta.get("provider", provider_cfg.get("provider", "")),
+                      model=meta.get("model", model), count=1,
+                      duration=int(p.get("duration", 15)), ratio=want)
         return {"output": task["output"],
                 "warn": _ratio_warn(pj, out, want, "video", task["key"],
                                     provider_cfg, model, "video")}

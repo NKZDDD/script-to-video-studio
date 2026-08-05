@@ -173,6 +173,10 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <div id="healthSteps"></div>
     <div id="healthFails" style="margin-top:12px"></div>
   </div>
+  <div class="card" id="usageCard">
+    <h2>这部剧到现在花了多少 <span class="tag">跨多次续跑累计，重启不丢</span></h2>
+    <div id="usageBox" class="muted">还没有用量记录</div>
+  </div>
   <div class="card">
     <h2>项目参数 <span class="tag">影响环节 2/7/8 的编译结果</span></h2>
     <div class="grid g3" id="paramBox"></div>
@@ -316,6 +320,26 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <div id="upResult" style="margin-top:8px"></div>
   </div>
   <div class="card">
+    <h2>计价（可选） <span class="tag">填了才显示估算金额；不填只统计用量</span></h2>
+    <p class="muted" style="margin:0 0 8px">
+      各家计价方式不一样，程序猜不出来，所以要你填。<b>不填不影响跑</b>，
+      只是「花了多少」那一栏不显示金额。金额一律是<b>估算</b>，账单以服务商后台为准。<br>
+      分析引擎按 token 计价：填每 100 万 token 的单价。
+      出图出片一般按次：填每次的单价。<br>
+      键可以写 <code>服务商/模型</code>（最精确）、<code>模型</code>、或 <code>服务商</code>（兜底）。
+    </p>
+    <textarea id="priceBox" style="width:100%;min-height:150px;font-family:ui-monospace,monospace;font-size:12px"
+      placeholder='{
+  "gpt-5.6-sol":         {"in": 5, "out": 15, "cached_in": 5, "per": 1000000},
+  "lingganya/gpt-image-2": {"per_call": 0.12},
+  "paisio/sd3-fast-480p":  {"per_call": 0.35}
+}'></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="btn sm" id="savePrices">保存计价</button>
+      <span class="muted" id="priceHint"></span>
+    </div>
+  </div>
+  <div class="card">
     <h2>同时最多跑几个 <span class="tag">同时做几部剧也共用这里的上限，免得把服务商发毛</span></h2>
     <div class="grid g3">
       <div><label>总上限（所有项目合计）</label><input id="limGlobal" type="number" min="1" max="64"></div>
@@ -412,6 +436,7 @@ async function boot() {
   renderLimits();
   renderUpload();
   renderChains();
+  renderPrices();
   renderAuto();
   const l = BOOT.config.llm || {};
   $('#llmBase').value = l.base_url || 'https://api.paisio.online';
@@ -449,6 +474,7 @@ async function refreshProject() {
   renderStages(d.stages_done);
   renderGen(d.tasks_summary);
   renderHealth();
+  renderUsage();
 }
 
 // ---------- 集清单
@@ -586,8 +612,70 @@ async function pollAuto() {
         </div>`;
     AUTO = null;
     refreshProject();
+    renderUsage();
   }
 }
+
+
+// ---------- 用量账本
+function fmtNum(n) { return (n || 0).toLocaleString(); }
+async function renderUsage() {
+  if (!PROJ) return;
+  const u = await api.get('/api/usage', {root: PROJ});
+  if (u.error) return;
+  const t = u.total || {};
+  if (!u.entries) {
+    $('#usageBox').innerHTML = '还没有用量记录 —— 跑过之后这里会按环节列出 token 和出图出片次数。';
+    return;
+  }
+  const money = v => (t.cost_known && u.priced) ? ` · 约 ${(+v).toFixed(4)}` : '';
+  const rows = Object.entries(u.by_stage).map(([st, v]) => {
+    const bits = [];
+    if (v.llm_calls) bits.push(`分析 ${v.llm_calls} 次 · 输入 ${fmtNum(v.prompt_tokens)}`
+      + (v.cached_tokens ? `（缓存 ${fmtNum(v.cached_tokens)}）` : '')
+      + ` · 输出 ${fmtNum(v.completion_tokens)} token`);
+    if (v.images) bits.push(`出图 ${v.images} 张`);
+    if (v.videos) bits.push(`出片 ${v.videos} 段`);
+    if (v.seconds) bits.push(`${Math.round(v.seconds)} 秒`);
+    return `<tr><td>${esc(st)}</td><td>${bits.join(' · ')}${money(v.cost)}</td></tr>`;
+  }).join('');
+  $('#usageBox').innerHTML = `
+    <div style="margin-bottom:6px"><b>合计</b>：分析 ${t.llm_calls} 次
+      · 输入 ${fmtNum(t.prompt_tokens)}（缓存 ${fmtNum(t.cached_tokens)}）
+      · 输出 ${fmtNum(t.completion_tokens)} token
+      · 出图 ${t.images} 张 · 出片 ${t.videos} 段
+      ${(t.cost_known && u.priced) ? `· <b>约 ${t.cost.toFixed(4)}</b>` : ''}</div>
+    <table style="font-size:12px"><thead><tr><th>环节</th><th>用量</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <details style="margin-top:6px"><summary class="muted">按模型看</summary>
+      <table style="font-size:12px"><tbody>${
+      Object.entries(u.by_model).map(([mk, v]) =>
+        `<tr><td>${esc(mk)}</td><td>${
+        v.llm_calls ? `${v.llm_calls} 次 · ${fmtNum(v.prompt_tokens)}→${fmtNum(v.completion_tokens)} token` : ''}${
+        v.images ? ` 图 ${v.images}` : ''}${v.videos ? ` 片 ${v.videos}` : ''}${money(v.cost)}</td></tr>`
+      ).join('')}</tbody></table></details>
+    <div class="muted" style="margin-top:6px;font-size:11px">${esc(u.note)}</div>
+    <div class="muted" style="font-size:11px">明细在 07_检查与记录/usage.jsonl（只追加，不覆盖）</div>`;
+}
+function renderPrices() {
+  const p = BOOT.config.prices || {};
+  $('#priceBox').value = Object.keys(p).length ? JSON.stringify(p, null, 2) : '';
+  $('#priceHint').textContent = Object.keys(p).length
+    ? `已填 ${Object.keys(p).length} 条价目` : '未填 —— 只统计用量，不显示金额';
+}
+$('#savePrices').onclick = async () => {
+  const raw = $('#priceBox').value.trim();
+  let prices = {};
+  if (raw) {
+    try { prices = JSON.parse(raw); }
+    catch (e) { return alert('这段 JSON 有语法错误，存不了：\n' + e.message); }
+    if (typeof prices !== 'object' || Array.isArray(prices))
+      return alert('最外层要是一个对象 {…}');
+  }
+  await api.post('/api/config', {prices});
+  BOOT = await api.get('/api/bootstrap'); renderPrices(); renderUsage();
+  alert(raw ? '已保存。金额是估算，账单以服务商后台为准。' : '已清空，之后只统计用量。');
+};
 
 // ---------- 项目体检 / 续跑面板
 const STATE_LABEL = {done:'完成', partial:'做了一半', pending:'还没开始', blocked:'得先跑前面的'};

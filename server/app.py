@@ -39,6 +39,11 @@ def load_config() -> dict:
     # 出图出片的服务商优先级：一次配好，之后每次跑都按这个顺序，
     # 首选挂了自动换下一家。空的话「设置」页会提示去配。
     cfg.setdefault("chains", {"asset": [], "storyboard": [], "video": []})
+    # 计价表（可空）。键可以是 "服务商/模型"、"模型" 或 "服务商"，由细到粗匹配。
+    # LLM：{"in": 每 per 个输入 token 的价, "out": ..., "cached_in": ..., "per": 1000000}
+    # 出图出片：{"per_call": 每次的价}
+    # 不填就只统计用量、不算钱 —— 各家计价方式差别太大，猜一个假数字更糟。
+    cfg.setdefault("prices", {})
     # 参考图上传：给只收公网链接的接口用（零视 SD2、seedance 系都是这类）。
     # 不配也能跑，只是那类模型用不了。
     # mode: always=配了就全部走链接（推荐，请求体小）｜when_required=只在模型必须时传
@@ -235,6 +240,12 @@ def api_get(path: str, q: dict) -> dict:
         h = S.health(pj, (q.get("episode") or [""])[0])
         h["episodes"] = episodes.summary(pj)
         return h
+
+    if path == "/api/usage":
+        """这个项目到现在的用量：按环节、按模型汇总。金额按「设置 → 计价」估算。"""
+        from core import ledger
+        pj = Project(q["root"][0])
+        return ledger.summary(pj.root, cfg.get("prices") or {})
 
     if path == "/api/failures":
         pj = Project(q["root"][0])

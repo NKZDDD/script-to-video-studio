@@ -137,7 +137,7 @@ class LLM:
         self.max_tokens = int(max_tokens or 0)
 
     def chat(self, system: str, user: str, retries: int = 3, log=None,
-             cancel=None) -> str:
+             cancel=None, on_usage=None) -> str:
         """一次对话。默认走流式。
 
         为什么必须流式：非流式时，整个生成要在「timeout 秒内一个字节都没来」
@@ -176,8 +176,9 @@ class LLM:
                     body["stream_options"] = {"include_usage": True}
                 if use_stream:
                     return self._stream_once(url, headers, body, proxies, tmo,
-                                             log, cancel)
-                return self._plain_once(url, headers, body, proxies, tmo, log)
+                                             log, cancel, on_usage)
+                return self._plain_once(url, headers, body, proxies, tmo, log,
+                                        on_usage)
             except _Retryable as exc:                 # 429/5xx，值得重试
                 last = exc
                 if attempt < retries - 1:
@@ -241,7 +242,8 @@ class LLM:
                 f"或者把剧本拆成更少的集数分批处理。")
         return content
 
-    def _stream_once(self, url, headers, body, proxies, tmo, log, cancel=None) -> str:
+    def _stream_once(self, url, headers, body, proxies, tmo, log, cancel=None,
+                     on_usage=None) -> str:
         started = time.time()
         parts, reason, ticks = [], "", 0
         closed = False              # 有没有正常收到 [DONE] / finish_reason
@@ -294,6 +296,14 @@ class LLM:
                     n = sum(len(p) for p in parts)
                     log(f"正在生成… 已等 {int(time.time()-started)} 秒，收到 {n} 字")
         n = sum(len(p) for p in parts)
+        if on_usage:
+            # 没回传 usage 的家用估算兜底，标明 estimated 让记账那边知道
+            u = dict(usage) if usage else {
+                "prompt_tokens": rough_tokens(
+                    "".join(m.get("content", "") for m in body.get("messages", []))),
+                "completion_tokens": rough_tokens("".join(parts)),
+                "estimated": True}
+            on_usage(dict(u, model=self.model, seconds=round(time.time() - started, 1)))
         if not closed:
             # 流没有正常收尾就断了（既没 [DONE] 也没 finish_reason）。
             # 这跟「模型答得不合格」是两回事：不该拿去反馈重试，该当网络问题重试。
@@ -314,11 +324,14 @@ class LLM:
                     f"用了 {secs} 秒。这家没回传 usage，以上是估算")
         return self._finish("".join(parts), reason)
 
-    def _plain_once(self, url, headers, body, proxies, tmo, log=None) -> str:
+    def _plain_once(self, url, headers, body, proxies, tmo, log=None,
+                    on_usage=None) -> str:
         r = requests.post(url, headers=headers, json=body, timeout=tmo, proxies=proxies)
         self._check_status(r)
         data = r.json()
         u = data.get("usage") or {}
+        if on_usage:
+            on_usage(dict(u, model=self.model, seconds=0))
         if log and u:
             log(f"服务商记账 输入 {u.get('prompt_tokens', '?')} token"
                 f"／输出 {u.get('completion_tokens', '?')} token")
@@ -329,7 +342,8 @@ class LLM:
                             choices[0].get("finish_reason") or "")
 
     def json_call(self, system: str, user: str, required: Optional[list] = None,
-                  json_retries: int = 2, log=print, cancel=None) -> Any:
+                  json_retries: int = 2, log=print, cancel=None,
+                  on_usage=None) -> Any:
         """要求 JSON 输出；解析失败或缺键时把错误反馈给模型重试（≤json_retries）。
 
         只有「模型这次答得不合格」才重试 —— 反馈具体哪里不对，让它再答一次。
@@ -340,7 +354,8 @@ class LLM:
         for attempt in range(1 + json_retries):
             if cancel and cancel():
                 raise LLMCancelled("已按取消停止")
-            text = self.chat(system, attempt_user, log=log, cancel=cancel)
+            text = self.chat(system, attempt_user, log=log, cancel=cancel,
+                             on_usage=on_usage)
             try:
                 data = extract_json(text)
                 missing = check_keys(data, required or [])
