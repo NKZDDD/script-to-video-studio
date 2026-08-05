@@ -67,7 +67,11 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
         for sid in PER_EP:
             st = next(s for s in S.STAGES if s["id"] == sid)
             steps.append({"kind": "llm", "stage": sid, "episode": ep,
-                          "label": f"{ep} 环节{st['no']} {st['name']}"})
+                          "label": f"{ep} 环节{st['no']} {st['name']}",
+                          # 环节5 不在关键路径上：查依赖表，环节6/7/8 都不要它的产物
+                          # （s8 的依赖是 s1,s2,s3,s4,s6,s7），它只喂出图。
+                          # 所以放旁路跑，别让它挡住后面三步；失败也只影响出图。
+                          **({"side": True, "soft": True} if sid == "s5" else {})})
     # eps 为空说明环节1 还没跑、集还没切出来，这时候别显示「（只 ）」
     # 生产范围默认跟分析范围一致；给了 produce_episodes 就只出那几集的东西。
     # 这两件事本来就该分开：资产**表**要全剧（否则资产库中途返工），
@@ -296,10 +300,14 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 job.abort_diag = diag
                 job.abort_with(diag)
                 return "aborted"
-            if ep:
+            if ep and not s.get("soft"):
                 with st_lock:
                     bad_eps.add(ep)
                 job.log(key, f"{ep} 卡在这一步，这一集后面的环节跳过；其它集继续")
+            elif ep:
+                # 旁路步骤（环节5）挂了不该拖累主链：环节6/7/8 不用它的产物，
+                # 受影响的只有这几个资产的出图
+                job.log(key, f"这一步只影响出图，{ep} 后面的分镜/编译照常跑")
             return "failed"
         return "ok"
 
@@ -346,8 +354,12 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         gates = [threading.Event() for _ in eps_order]
 
         def run_episode(k: int, ep: str) -> None:
+            main = [s for s in chains[ep] if not s.get("side")]
+            side = [s for s in chains[ep] if s.get("side")]
+            pool = None
+            futs: list = []
             try:
-                for s in chains[ep]:
+                for s in main:
                     if halt(s):
                         continue
                     if s["stage"] == "s4" and k > 0:
@@ -358,9 +370,22 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                     do_step(s)
                     if s["stage"] == "s4":
                         gates[k].set()
+                        # 环节4 一出来，旁路的环节5 就能开跑了 —— 和主链的
+                        # 环节6/7/8 并行，不占关键路径
+                        if side:
+                            pool = ThreadPoolExecutor(max_workers=1)
+                            futs = [pool.submit(do_step, x) for x in side]
+                            side = []
             finally:
                 # 没跑到环节4 就挂了也要放行，否则后面所有集永远等在这儿
                 gates[k].set()
+                for x in side:          # 旁路还没起就结束了，别把步骤丢了
+                    if not halt(x):
+                        do_step(x)      # 这一集已经在 bad_eps 里 → 会标 skipped
+                for f in futs:
+                    f.result()          # do_step 自己不抛异常，这里只是等它跑完
+                if pool:
+                    pool.shutdown()
 
         workers = max(1, min(int(ep_concurrency or 1), len(eps_order) or 1))
         if eps_order:
