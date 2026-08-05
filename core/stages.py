@@ -713,21 +713,25 @@ def _build_tasks(pj: Project, params: dict) -> dict:
 # ====================================================================== 出图/出片 worker
 
 def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
-                      ref_side: int) -> Callable:
+                      ref_side: int, media: str = "image") -> Callable:
     """把参考图引用变成能发出去的形式。
 
     配了对象存储 → 一律传上去换公网链接。不只是为了那些只收 URL 的接口：
     能吃 data URI 的家，请求体也从几 MB 的 base64 缩成一行链接，快且稳。
     没配 → 转 data URI；碰上只收 URL 的模型就明确报错说去哪配。
 
-    例外：声明了 needs_bytes 的家（multipart 接口）必须给本机路径。
-    给链接它只能丢掉 —— 图照样出，但没有父资产参考，状态资产的脸就飘了，
-    而且不报错。所以这里按服务商的声明给对形式，不能一刀切上传。
+    **例外必须按服务商的声明来，不能一刀切上传**（这是踩过的坑）：
+      · needs_bytes 的家（multipart）→ 给本机路径
+      · accepts_url 为假的家（把参考图内联进某字段、只认裸 base64）→ 给 data URI
+    给错形式的后果不是报错，是**参考图被丢掉照样出图** —— 状态资产没了父资产
+    参考，脸就不是本人，而且任务标 ok 没人知道。
     """
     up = provider_cfg.get("upload") or {}
-    use_url = uploader.configured(up) and up.get("mode", "always") != "when_required"
+    configured = uploader.configured(up) and up.get("mode", "always") != "when_required"
     need_url = prov.needs_url(model)
     need_bytes = prov.needs_bytes(model)
+    can_url = prov.accepts_url(model, media)
+    use_url = need_url or (configured and can_url)
 
     def resolve(src: str, log: Callable = print) -> str:
         src = (src or "").strip()
@@ -736,7 +740,7 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
         if need_bytes:
             # 本机绝对路径，provider 自己读字节塞 multipart
             return src if os.path.isabs(src) else os.path.join(pj.root, src)
-        if not (use_url or need_url):
+        if not use_url:
             return resolve_ref(src, pj.root, max_side=ref_side)
         path = src if os.path.isabs(src) else os.path.join(pj.root, src)
         return uploader.to_url(path, up, project_root=pj.root,
@@ -779,7 +783,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
     interval = int(provider_cfg.get("poll_interval", 5))
     timeout = int(provider_cfg.get("poll_timeout", 900))
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
-    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side)
+    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="image")
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -822,7 +826,7 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
     interval = int(provider_cfg.get("poll_interval", 10))
     timeout = int(provider_cfg.get("poll_timeout", 2400))
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
-    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side)
+    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video")
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))

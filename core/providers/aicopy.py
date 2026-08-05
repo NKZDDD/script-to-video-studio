@@ -48,6 +48,11 @@ class AicopyProvider(Provider):
     default_base_url = "https://api.aicopy.top"
     supports = ("image", "video")
 
+    def accepts_url(self, model: str = "", media: str = "image") -> bool:
+        # 图片接口把参考图内联进 image 字段、只认裸 base64，给链接它读不了。
+        # 视频接口是 images 数组，链接可以。
+        return media != "image"
+
     def capabilities(self) -> dict:
         return {
             "id": self.id,
@@ -90,8 +95,22 @@ class AicopyProvider(Provider):
         body = {"model": model, "prompt": task.prompt, "n": int(task.n or 1),
                 "size": task.size or "1024x1536", "response_format": "b64_json"}
         if task.refs:
+            # 以前是 log 一句「只用第 1 张」然后照样出图 —— 静默降级。
+            # 状态资产要靠父资产定身份、场景资产定空间，少一张出来就不是同一个
+            # 人/同一个地方，而且任务标 ok 没人知道。报错让优先级链换支持多张的家。
             if len(task.refs) > 1:
-                log(f"这家的图片接口只收 1 张参考图，给了 {len(task.refs)} 张，只用第 1 张")
+                raise ApiError(
+                    f"这家的图片接口只收 1 张参考图，这一项要 {len(task.refs)} 张。"
+                    f"少了参考图出来的就不是同一个人/同一个东西，所以不出这张图。"
+                    f"把需要多张参考图的活（状态资产、故事板）排给别家，"
+                    f"这家留着当 image-2 的应急线路（单图或无参考图的活）。",
+                    status=0, kind="task_fatal")
+            if task.refs[0].startswith("http"):
+                raise ApiError(
+                    "这家的图片接口把参考图内联进 image 字段、只认裸 base64，"
+                    "拿到的却是公网链接 —— 发出去它读不了。"
+                    "关掉这家的对象存储（参考图改走 data URI），或者把这类活排给别家。",
+                    status=0, kind="task_fatal")
             body["image"] = _bare_b64(task.refs[0])
         data = self.session.request("POST", "/v1/images/generations", json_body=body,
                                     retries=2, timeout=600)

@@ -68,6 +68,16 @@ class Provider:
         """
         return self.ref_mode == "bytes"
 
+    def accepts_url(self, model: str = "", media: str = "image") -> bool:
+        """给这家公网链接它也能用吗。
+
+        默认能 —— 大多数网关的 `images` 数组既吃链接也吃 data URI，链接还更省
+        体积。但有两类不行，必须各自声明清楚，否则解析器一上传就把参考图作废了：
+          · multipart 接口（只收文件字节）
+          · 把参考图内联进某个字段、只认裸 base64 的（给链接会被原样发出去）
+        """
+        return not self.needs_bytes(model)
+
     def __init__(self, api_key: str = "", base_url: str = "", proxy: str = "", timeout: int = 900):
         self.session = HttpSession(api_key, base_url or self.default_base_url, timeout, proxy)
 
