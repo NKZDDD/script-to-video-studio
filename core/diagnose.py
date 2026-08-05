@@ -208,6 +208,20 @@ CATALOG = {
         "resume": "调大上限后回「流程」页重跑这个环节；已经做好的环节不受影响",
         "resumable": True, "scope": "stage", "level": "error",
     },
+    "SEG_PARTIAL": {
+        "title": "这一集有几段没做成，其余的都好了",
+        "why": "环节7、环节8 是一段一次调用的，所以一段失败只影响那一段。"
+               "做成的都已经存盘，不用重做。上面那条 target 带段号的记录才是真正的原因，"
+               "先看那条。",
+        "where": "看同一批里带段号的那条失败记录（比如 EP01-SEG07）",
+        "fix": ["先照那条带段号的记录处理 —— 常见是空回复（降并发）或内容被拒（改剧本那段）",
+                "然后回「一键跑到底」再点一次「开始」：**只会补没做成的那几段**，"
+                "做好的一段都不重跑",
+                "剩下的段照样往下走：没分镜的那段不会编提示词、不会出故事板和视频，"
+                "其余段一路到成片都正常"],
+        "resume": "再点一次「开始」，只补失败的那几段",
+        "resumable": True, "scope": "stage", "level": "error",
+    },
     "LLM_EMPTY": {
         "title": "拆剧本的模型什么都没回",
         "why": "模型返回了一片空白，而且已经自动重试过几次还是空的。"
@@ -301,6 +315,9 @@ _PATTERNS = [
     ("EPISODE_REQUIRED", r"得指定跑哪一集|没有 EP\d+ 这一集|还没切集"),
     ("EPISODE_SPLIT_FAILED", r"的正文是空的|一集都没切出来|找不到这一行"),
     ("PREREQ_MISSING", r"缺少前置产物|请先跑"),
+    # 「有 N 段没做成」是聚合结论，真正的原因在带段号的那条记录里。
+    # 排在前面：它的文案里也带「失败」，会被后面的规则抢走。
+    ("SEG_PARTIAL", r"段分镜失败|段编译失败|段没做成"),
     # 截断要排在 SCHEMA_FAIL 前面：它的表现也是 JSON 不完整，但修法完全不同
     ("LLM_TRUNCATED", r"被长度上限截断|finish_reason.{0,4}length|max_tokens"),
     ("LLM_SCHEMA_FAIL", r"JSON 输出校验失败|输出缺少必需字段|未找到可解析的 JSON"),
@@ -393,7 +410,7 @@ NO_FAILOVER_CODES = {
     "PROMPT_INVALID",       # 参数不合法
     "REF_MISSING",          # 参考图还没生成，是流程顺序问题
     "PREREQ_MISSING", "EPISODE_REQUIRED", "EPISODE_SPLIT_FAILED",
-    "LLM_SCHEMA_FAIL", "LLM_EMPTY",
+    "LLM_SCHEMA_FAIL", "LLM_EMPTY", "SEG_PARTIAL",
     "DISK", "WRONG_RATIO",
 }
 

@@ -321,12 +321,14 @@ def s8_done_segments(pj: Project, episode: str = "") -> set:
 def s7_done_segments(pj: Project, episode: str = "") -> set:
     """已经排好分镜的段落（磁盘为准）。和 s8 一样按段续跑。
 
-    只认 id 在不在，不额外要求 shot_list 非空：段落回来是空镜头表属于内容质量
-    问题，交给环节11 的复核清单，不该由「做过没有」来管 —— 那样重跑大概率
-    还是同样的结果，会变成无限重试。
+    **必须要求 shot_list 非空**，而且要和环节8 的判据一致：环节8 会跳过没有
+    镜头表的段（拿空分镜硬编会出一份没依据的提示词）。如果这里只认 id 在不在，
+    一个「有 id、镜头表是空的」的段就会卡死 —— 环节7 认为做完了不再重排，
+    环节8 永远跳过它，谁都不管。宁可每次重跑时重排一次并报出来。
     """
     return {x.get("id") for x in
-            (pj.stage_data("s7_shots", episode) or {}).get("shots", []) if x.get("id")}
+            (pj.stage_data("s7_shots", episode) or {}).get("shots", [])
+            if x.get("id") and x.get("shot_list")}
 
 
 def _usage_of(pj: Project, stage: str, episode: str, target: str = "") -> Callable:
@@ -489,6 +491,20 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
     assets = (data.get("s4_assets") or {}).get("assets", [])
     tpl = load_prompt("s8_compile")
+
+    # 环节7 是按段跑的，可能有几段没排出分镜（比如空回复重试完还是空）。
+    # 那几段必须跳过：拿空分镜硬编，会出一份没有镜头依据的提示词，
+    # 而它一旦落盘就被当成"做过了"，后面出图出片全按这份错的走。
+    # 跳过的段留在段落表里，修好分镜后再点一次就补上了。
+    no_shots = [s["id"] for s in segs if not (shots.get(s["id"], {}).get("shot_list"))]
+    if no_shots:
+        segs = [s for s in segs if s["id"] not in set(no_shots)]
+        log(f"{episode or '本集'} 有 {len(no_shots)} 段还没排出分镜，这次不编："
+            f"{'、'.join(no_shots[:8])}{'…' if len(no_shots) > 8 else ''}"
+            f"（先把环节7 那几段补上，再点一次「开始」会自动补编）")
+    if not segs:
+        raise RuntimeError(
+            f"{episode or '本集'} 一段分镜都没有，没东西可编。先把环节7 跑通。")
 
     def build_user(seg: dict) -> str:
         sid = seg["id"]

@@ -79,7 +79,12 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
                           # 环节5 不在关键路径上：查依赖表，环节6/7/8 都不要它的产物
                           # （s8 的依赖是 s1,s2,s3,s4,s6,s7），它只喂出图。
                           # 所以放旁路跑，别让它挡住后面三步；失败也只影响出图。
-                          **({"side": True, "soft": True} if sid == "s5" else {})})
+                          **({"side": True, "soft": True} if sid == "s5" else {}),
+                          # 环节7、8 是一段一次调用的，一段失败只该影响那一段。
+                          # skill：「禁止一个错误导致整集全部重做」。所以标 soft ——
+                          # 不毒整集，下游自己按段判断哪些能做（没分镜的段不编提示词、
+                          # 不出故事板和视频，其余段一路到成片）。
+                          **({"soft": True} if sid in ("s7", "s8") else {})})
     # eps 为空说明环节1 还没跑、集还没切出来，这时候别显示「（只 ）」
     # 生产范围默认跟分析范围一致；给了 produce_episodes 就只出那几集的东西。
     # 这两件事本来就该分开：资产**表**要全剧（否则资产库中途返工），
@@ -164,6 +169,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
 
     st_lock = threading.Lock()
     bad_eps: set = set()          # 这些集已经卡住了，后续环节别再试
+    chains_eps: list = []         # 这一趟涉及哪几集（只跑一集时报错文案要不一样）
     failed: list = []
     box: dict = {"llm": None}     # LLM 实例只造一次，多集共用
 
@@ -226,7 +232,13 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             elif s["kind"] == "produce":
                 todo = _produce_todo(pj, s["task_key"], s.get("only"))
                 if not todo:
-                    job.set_item(key, state="skipped", msg="产物都齐了，跳过")
+                    # 「一个都不用做」有两种完全不同的原因，混成一句「都齐了」会
+                    # 让人以为出完了 —— 实际可能是前置环节没产出、压根没清单。
+                    total = len(pj.tasks().get(s["task_key"]) or [])
+                    job.set_item(key, state="skipped",
+                                 msg=("产物都齐了，跳过" if total else
+                                      "前置环节还没产出任务清单，这一步没东西可做"
+                                      "（故事板要环节8 的提示词，资产图要环节5 的提示词）"))
                     return "skipped"
                 chain = provider_factory(s["produce"])      # 按优先级排好的服务商列表
                 if isinstance(chain, dict):                 # 兼容只给一家的写法
@@ -340,11 +352,15 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             if ep and not s.get("soft"):
                 with st_lock:
                     bad_eps.add(ep)
-                job.log(key, f"{ep} 卡在这一步，这一集后面的环节跳过；其它集继续")
+                more = len([e for e in chains_eps if e != ep]) if chains_eps else 0
+                job.log(key, f"{ep} 卡在这一步，这一集后面的环节跳过"
+                             + (f"；其它 {more} 集继续" if more else
+                                "（这次只跑这一集，所以流水线到此为止）"))
             elif ep:
-                # 旁路步骤（环节5）挂了不该拖累主链：环节6/7/8 不用它的产物，
-                # 受影响的只有这几个资产的出图
-                job.log(key, f"这一步只影响出图，{ep} 后面的分镜/编译照常跑")
+                # 环节5/7/8 是段级或旁路的，一处失败不该拖累整集：
+                # 环节5 只喂出图；环节7/8 按段跑，没做成的那几段单独补
+                job.log(key, "做成的部分都存了盘，没做成的那几段再点一次「开始」会自动补；"
+                             f"{ep} 其余部分照常往下走")
             return "failed"
         return "ok"
 
@@ -384,6 +400,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             else:
                 tail.append(s)
         eps_order = list(chains)
+        chains_eps[:] = eps_order
         # 环节4 必须按集号顺序跑：它的输入里有「前面几集已建好的资产」，
         # 先出现的定义优先。并行时若 EP05 抢在 EP03 前头做环节4，两集会各自
         # 给同一个新对象编号 —— 同一个编号指两个东西，出图就张冠李戴。
