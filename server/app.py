@@ -17,12 +17,14 @@ from core.executor import GATE, LLM_GATE, JobManager, run_batch, run_chain
 from core.llm import LLM
 from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provider,
                             list_capabilities, resolve_id as resolve_provider_id)
+from core import paths
 from core.store import Project, list_projects, read_json, write_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(ROOT, "web")
-CONFIG_PATH = os.path.join(ROOT, "config.json")
-DEFAULT_PROJECTS = os.path.abspath(os.path.join(ROOT, "..", "projects"))
+# 配置和产物都不在程序目录里（除了老装法），这样更新/换机器时整个覆盖程序目录
+# 也不会丢 key 和产物。位置怎么定见 core/paths.py。
+# 用函数而不是模块级常量：--data 是启动时才知道的。
 
 # 按服务商的默认并发配额。只列实测确认能扛的；没列的走兜底 4。
 # 用户在设置页改过的值优先，这里只补缺项。
@@ -32,8 +34,8 @@ JOBS = JobManager()
 
 
 def load_config() -> dict:
-    cfg = read_json(CONFIG_PATH, {}) or {}
-    cfg.setdefault("projects_dir", DEFAULT_PROJECTS)
+    cfg = read_json(paths.config_path(), {}) or {}
+    cfg.setdefault("projects_dir", paths.default_projects_dir())
     cfg.setdefault("providers", {})
     cfg.setdefault("llm", {})
     # 出图出片的服务商优先级：一次配好，之后每次跑都按这个顺序，
@@ -73,7 +75,8 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    write_json(CONFIG_PATH, cfg)
+    os.makedirs(os.path.dirname(paths.config_path()), exist_ok=True)
+    write_json(paths.config_path(), cfg)
 
 
 def proj_of(body: dict) -> Project:
@@ -203,7 +206,9 @@ def api_get(path: str, q: dict) -> dict:
                 "capabilities": list_capabilities(),
                 "stages": S.STAGES,
                 "projects": list_projects(cfg["projects_dir"]),
-                "projects_dir": cfg["projects_dir"]}
+                "projects_dir": cfg["projects_dir"],
+                # 程序目录 / 数据目录 / 配置位置，让人一眼知道更新程序会不会碰到数据
+                "paths": dict(paths.snapshot(), projects_dir=cfg["projects_dir"])}
 
     if path == "/api/projects":
         return {"projects": list_projects(cfg["projects_dir"])}
@@ -273,6 +278,9 @@ def api_get(path: str, q: dict) -> dict:
         prov = build_provider(pid, pc.get("api_key", ""), pc.get("base_url", ""))
         return {"models": prov.list_models()}
 
+    if path == "/api/paths":
+        return dict(paths.snapshot(), projects_dir=cfg["projects_dir"])
+
     if path == "/api/explorer":
         """资产库 + 按段看。把散在各处的产物拼成能看懂的两个视图。"""
         from core import explorer
@@ -321,6 +329,37 @@ def api_post(path: str, body: dict) -> dict:
                 cur[k] = v
         save_config(cur)
         return {"ok": True}
+
+    if path == "/api/paths/projects":
+        """改产物目录。换机器时最常改的就是这个（盘不一样、想放到大盘上）。"""
+        d = str(body.get("projects_dir") or "").strip().strip('"')
+        if not d:
+            raise ValueError("路径是空的")
+        d = os.path.abspath(os.path.expanduser(d))
+        if os.path.isfile(d):
+            raise ValueError(f"这是个文件不是目录：{d}")
+        try:
+            os.makedirs(d, exist_ok=True)
+            probe = os.path.join(d, ".写入自检")
+            with open(probe, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(probe)
+        except OSError as exc:
+            raise ValueError(f"这个目录建不了或者写不进去：{exc}") from exc
+        cur = load_config()
+        cur["projects_dir"] = d
+        save_config(cur)
+        found = list_projects(d)
+        return {"ok": True, "projects_dir": d, "found": len(found),
+                "names": [p.get("name") for p in found[:12]]}
+
+    if path == "/api/paths/migrate":
+        """把程序目录里的 config.json 搬到数据目录 —— 之后覆盖程序目录不会再丢配置。
+
+        只复制 + 把原件改名成 .已搬走，不删任何东西。
+        """
+        r = paths.migrate_config(str(body.get("data_dir") or "").strip())
+        return {"ok": True, **r, "paths": paths.snapshot()}
 
     if path == "/api/pipeline/preview":
         """先看清这一次会做什么、跳过什么，再决定点不点「开始」。"""

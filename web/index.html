@@ -82,6 +82,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 #genRows td{vertical-align:middle}
 #genRows .c-in{width:64px}
 #genRows button{white-space:nowrap}
+/* 路径这类「键 : 值」的行，值要能整条复制，所以用等宽且允许换行 */
+.kv2{display:grid;grid-template-columns:74px 1fr;gap:3px 10px;font-size:12px;line-height:1.75}
+.kv2>b{color:var(--dim);font-weight:400}
+.kv2 code{font-size:11.5px;word-break:break-all;background:var(--panel2);
+  padding:1px 5px;border-radius:4px}
+.alert.ok{border-color:var(--ok);color:var(--ok)}
 
 /* ---- 资产库 / 按段看 ---- */
 .acards{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:10px}
@@ -420,6 +426,28 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     </div>
   </div>
   <div class="card">
+    <h2>数据与路径 <span class="tag">换机器 / 更新程序前先看这里</span></h2>
+    <div id="pathBox"></div>
+    <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div style="flex:1;min-width:300px">
+        <label>产物目录（projects）<span class="muted" style="font-size:11px">
+          剧本、资产图、故事板、视频都在这儿，体积最大，建议放大盘</span></label>
+        <input id="projDirIn" placeholder="例：D:\stv-data\projects">
+      </div>
+      <button class="btn sm" id="saveProjDir">换到这个目录</button>
+    </div>
+    <p class="muted" style="margin:8px 0 0">
+      <b>更新程序 = 覆盖「程序目录」，只要配置和产物不在里面，覆盖多少次都不会丢。</b><br>
+      换到另一台电脑：把程序目录拷过去（或 git clone），然后
+      <code>python run.py --data D:\stv-data</code>，
+      或者设环境变量 <code>STV_DATA_DIR=D:\stv-data</code>。
+      配置和产物都从那个目录读，两台机器各有一份、互不影响。<br>
+      想两台机器共用同一批产物：把产物目录指到同一个网盘/共享盘路径即可
+      —— 判断「做过没有」只看磁盘产物，所以另一台能直接接着跑。
+      <b>但别让两台同时跑同一个项目</b>，会写同一批文件。
+    </p>
+  </div>
+  <div class="card">
     <h2>同时最多跑几个 <span class="tag">同时做几部剧也共用这里的上限，免得把服务商发毛</span></h2>
     <div class="grid g3">
       <div><label>总上限（所有项目合计）</label><input id="limGlobal" type="number" min="1" max="64"></div>
@@ -513,6 +541,7 @@ async function boot() {
   renderProjects();
   renderProviders();
   renderDefaults();
+  renderPaths();
   renderLimits();
   renderUpload();
   renderChains();
@@ -1576,6 +1605,50 @@ $('#npDrop').addEventListener('drop', e => addFiles(e.dataTransfer.files));
 $('#npClear').onclick = () => { QUEUE = []; renderQueue(); };
 
 // ---------- 并发闸门
+// ---------- 数据与路径
+function renderPaths() {
+  const p = BOOT.paths || {};
+  const row = (k, v, extra) =>
+    `<div class="kv2"><b>${k}</b><span><code>${esc(v || '—')}</code>${extra || ''}</span></div>`;
+  $('#pathBox').innerHTML =
+    (p.config_at_risk
+      ? `<div class="alert err" style="margin-bottom:10px">
+           <b>配置文件在程序目录里 —— 更新程序时整个覆盖会把所有 key、R2 凭证、
+           优先级链、计价表一起弄丢。</b><br>
+           点下面这个按钮搬出去（只复制 + 把原件改名成 <code>config.json.已搬走</code>，不删）。
+           <div class="row" style="margin-top:8px;gap:8px;align-items:flex-end">
+             <div style="flex:1;min-width:260px">
+               <label>搬到哪儿</label>
+               <input id="dataDirIn" placeholder="留空 = 系统用户数据目录">
+             </div>
+             <button class="btn sm" id="doMigrate">把配置搬出程序目录</button>
+           </div></div>`
+      : `<div class="alert ok" style="margin-bottom:10px">配置和产物都在程序目录之外，
+           更新程序不会碰到它们。</div>`)
+    + row('程序目录', p.program_dir, '<span class="muted">　更新时被覆盖的就是这个</span>')
+    + row('数据目录', p.data_dir, `<span class="muted">　来源：${esc(p.source || '')}</span>`)
+    + row('配置文件', p.config_path,
+          p.config_exists ? '' : '<span class="muted">　还没有，保存设置时会建</span>')
+    + row('产物目录', p.projects_dir);
+  $('#projDirIn').value = p.projects_dir || '';
+  const mg = $('#doMigrate');
+  if (mg) mg.onclick = async () => {
+    const r = await api.post('/api/paths/migrate', {data_dir: $('#dataDirIn').value});
+    if (r.error) return alert(r.error);
+    alert(`已搬到：${r.to}\n原件保留为：${r.old_kept_as}\n\n`
+          + `以后启动加 --data ${r.data_dir}，或设环境变量 STV_DATA_DIR。`);
+    location.reload();
+  };
+}
+$('#saveProjDir').onclick = async () => {
+  const r = await api.post('/api/paths/projects', {projects_dir: $('#projDirIn').value});
+  if (r.error) return alert(r.error);
+  alert(`产物目录已改成：\n${r.projects_dir}\n\n`
+        + `在这个目录下找到 ${r.found} 个项目`
+        + (r.names && r.names.length ? '：\n' + r.names.join('\n') : '（空目录，之后新建的项目会放这儿）'));
+  location.reload();
+};
+
 function renderLimits() {
   const L = BOOT.config.limits || {global: 8, per_provider: {}};
   $('#limGlobal').value = L.global;

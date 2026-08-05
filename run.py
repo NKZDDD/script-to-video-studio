@@ -14,7 +14,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from server.app import serve  # noqa: E402
+from core import paths  # noqa: E402
 
 
 def main() -> int:
@@ -22,7 +22,30 @@ def main() -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--data", default="", metavar="目录",
+                    help="数据目录（config.json 和默认 projects/ 放这儿）。"
+                         "也可以用环境变量 STV_DATA_DIR。"
+                         "放在程序目录之外，更新程序时就不会碰到配置和产物。")
     args = ap.parse_args()
+    if args.data:
+        paths.set_data_dir(args.data)
+
+    # 先把路径打出来再起服务：配置到底读的哪一份、产物写到哪儿，
+    # 换机器时这两行比什么文档都管用
+    from server.app import load_config, serve            # noqa: PLC0415
+    p = paths.snapshot()
+    cfg = load_config()
+    print()
+    print(f"  程序目录  {p['program_dir']}")
+    print(f"  数据目录  {p['data_dir']}   （{p['source']}）")
+    print(f"  配置文件  {p['config_path']}"
+          f"{'' if p['config_exists'] else '   ← 还没有，保存设置时会建'}")
+    print(f"  产物目录  {cfg['projects_dir']}")
+    if p["config_at_risk"]:
+        print()
+        print("  ⚠ 配置文件在程序目录里 —— 更新程序时整个覆盖会把 key 和优先级链一起弄丢。")
+        print("    在「设置 → 数据与路径」点一下「把配置搬出程序目录」，或者启动时加")
+        print("    --data D:\\stv-data （原件会保留成 config.json.已搬走，不删）")
 
     srv = serve(args.host, args.port)
     url = f"http://{args.host}:{args.port}/"
