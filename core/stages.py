@@ -185,6 +185,11 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     if stage_id == "s8":                       # s8 分段编译，天然可续跑
         return run_s8_incremental(pj, llm, params, data, log, episode, cancel,
                                   seg_concurrency=seg_concurrency)
+    if stage_id == "s7" and (data.get("s3_states") or {}).get("axis_convention"):
+        # 有整集轴线约定才敢拆段：各段照同一套左右位置排镜头，不会跳轴。
+        # 没有（老项目的环节3 产物）就走下面整集一次的老路，产物照样能用。
+        return run_s7_incremental(pj, llm, params, data, log, episode, cancel,
+                                  seg_concurrency=seg_concurrency)
 
     g = data.get("s1_global") or {}
     tone = (g.get("visual_tone") or {})
@@ -241,6 +246,9 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         "BINDINGS": jd(data.get("s6_binding", {})),
         "SHOTS": jd(data.get("s7_shots", {})),
         "KNOWN_ASSETS": jd(known_assets(pj, episode) if stage_id == "s4" else []),
+        # 整集共用的 180 度轴线约定（环节3 定的）。老项目的产物里没有，
+        # 那就是空的 —— 环节7 会自己定轴，和以前一样。
+        "AXIS": jd((data.get("s3_states") or {}).get("axis_convention") or {}),
     }
     system = load_prompt("_common")
     user = render(load_prompt(tpl_name), mapping)
@@ -310,37 +318,50 @@ def s8_done_segments(pj: Project, episode: str = "") -> set:
     return done
 
 
-def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
-                       log: Callable = print, episode: str = "",
-                       cancel: Optional[Callable] = None,
-                       seg_concurrency: int = 1) -> dict:
-    """环节8 逐段编译：一段一次 LLM 调用，段之间并发。
+def s7_done_segments(pj: Project, episode: str = "") -> set:
+    """已经排好分镜的段落（磁盘为准）。和 s8 一样按段续跑。
 
-    整集一次调用的问题：17 段 × 2 份提示词输出太长，中途失败整批白跑。
-    逐段调用后，已完成的段落跳过，失败只影响那一段 —— 天然支持续跑。
-
-    段与段之间没有依赖（每段只吃自己那段的 seg/state/binding/shots），
-    所以可以并发。实测这一步占单集耗时的四成多，并发 4 能砍掉七成。
-    真正的上限由 LLM_GATE 兜着，这里的 seg_concurrency 只是本集内的排队数。
+    只认 id 在不在，不额外要求 shot_list 非空：段落回来是空镜头表属于内容质量
+    问题，交给环节11 的复核清单，不该由「做过没有」来管 —— 那样重跑大概率
+    还是同样的结果，会变成无限重试。
     """
-    segs = (data.get("s2_segments") or {}).get("segments", [])
-    if not segs:
-        raise RuntimeError("段落表为空，请先跑环节2")
+    return {x.get("id") for x in
+            (pj.stage_data("s7_shots", episode) or {}).get("shots", []) if x.get("id")}
 
-    tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
-    states = {s["id"]: s for s in (data.get("s3_states") or {}).get("segment_states", [])}
-    binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
-    shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
-    assets = (data.get("s4_assets") or {}).get("assets", [])
 
-    prev = pj.stage_data("s8_compile", episode) or {"compiled": []}
-    by_id = {c["id"]: c for c in prev.get("compiled", [])}
-    done = s8_done_segments(pj, episode)
+def _usage_of(pj: Project, stage: str, episode: str, target: str = "") -> Callable:
+    def rec(u: dict) -> None:
+        ledger.record(pj.root, kind="llm", stage=stage, episode=episode, target=target,
+                      provider="llm", model=u.get("model", ""),
+                      prompt_tokens=u.get("prompt_tokens") or 0,
+                      cached_tokens=(u.get("prompt_tokens_details") or {})
+                      .get("cached_tokens", 0),
+                      completion_tokens=u.get("completion_tokens") or 0,
+                      seconds=u.get("seconds") or 0,
+                      estimated=bool(u.get("estimated")))
+    return rec
 
-    system = load_prompt("_common")
-    tpl = load_prompt("s8_compile")
-    todo = [s for s in segs if s["id"] not in done]
-    log(f"{episode or '本集'} 共 {len(segs)} 段，已完成 {len(done)} 段，本次编译 {len(todo)} 段")
+
+def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
+                  segs: list, done_ids: set, llm: LLM, build_user: Callable,
+                  required: list, log: Callable, episode: str,
+                  cancel: Optional[Callable], seg_concurrency: int,
+                  on_item: Optional[Callable] = None) -> tuple:
+    """按段跑一个环节：一段一次调用、每段存盘、失败只影响那一段、天然可续跑。
+
+    环节7 和环节8 共用这一套。为什么能按段拆：段与段之间没有数据依赖 ——
+    每段只吃自己那段的 seg/state/binding/shots。整集一次调用的问题是输出太长
+    （环节8 一集 12 段就 20 万字节），中途失败整批白跑。
+
+    **共享上下文必须由 build_user 按段裁过再送**，否则整份资产表重发十几遍，
+    时间省了钱翻几倍。环节7/8 的输入本来就是按段组织的，裁完基本不多花。
+
+    返回 (结果, 失败的段, 被取消的段)。异常不往外抛，由调用方决定怎么报。
+    """
+    prev = pj.stage_data(out_name, episode) or {key: []}
+    by_id = {c["id"]: c for c in prev.get(key, []) if c.get("id")}
+    todo = [s for s in segs if s["id"] not in done_ids]
+    log(f"{episode or '本集'} 共 {len(segs)} 段，已完成 {len(done_ids)} 段，本次做 {len(todo)} 段")
 
     failed: list = []
     cancelled: list = []
@@ -351,10 +372,131 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
         if (cancel and cancel()) or cancelled:
             return
         sid = seg["id"]
+        log(f"[{i}/{n}] {sid}")
+        try:
+            with LLM_GATE.slot():
+                out = llm.json_call(
+                    system=load_prompt("_common"), user=build_user(seg),
+                    required=required,
+                    log=lambda m, _s=sid: log(f"    {_s}: {m}"), cancel=cancel,
+                    on_usage=_usage_of(pj, stage_id, episode, sid))
+            item = out[key][0]
+            item["id"] = sid
+            if on_item:
+                on_item(sid, item)
+            # 每段都存盘：中途中断也不丢已完成的。并发下读-改-写必须串行，
+            # 否则两段同时保存，后写的会把先写的那段从数组里挤掉。
+            with save_lock:
+                by_id[sid] = item
+                pj.save_stage(out_name,
+                              {key: [by_id[s["id"]] for s in segs if s["id"] in by_id]},
+                              episode)
+            diagnose.clear(pj.root, f"stage:{stage_id}", sid)
+        except LLMCancelled:
+            # 用户点了取消：不算失败，也别再往下派活
+            with save_lock:
+                cancelled.append(sid)
+        except Exception as exc:                            # noqa: BLE001
+            d = diagnose.build(exc, stage=f"stage:{stage_id}", target=sid, model=llm.model)
+            diagnose.record(pj.root, d)
+            with save_lock:
+                failed.append(sid)
+            log(f"    {diagnose.one_line(d)}")
+
+    workers = max(1, min(int(seg_concurrency or 1), n or 1))
+    if workers > 1 and n > 1:
+        log(f"{episode or '本集'} {stage_id} 段内并发 {workers}")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda a: one(*a), list(enumerate(todo, 1))))
+    else:
+        for a in enumerate(todo, 1):
+            one(*a)
+
+    result = {key: [by_id[s["id"]] for s in segs if s["id"] in by_id]}
+    pj.save_stage(out_name, result, episode)
+    return result, failed, cancelled
+
+
+def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
+                       log: Callable = print, episode: str = "",
+                       cancel: Optional[Callable] = None,
+                       seg_concurrency: int = 1) -> dict:
+    """环节7 逐段排分镜。
+
+    前提是环节3 给出了整集共用的轴线约定（axis_convention）。没有它就不能拆：
+    实测一次看完 12 段时，各段的 axis_note 会互相引用（「沿同一玻璃门轴线」
+    「轴线保持不变」），Aisyah 一直在左、Dewi 一直在右。拆开并行、各段独立
+    定左右，硬切就会跳轴 —— 而这是模板里的强制规则。
+    调用方负责检查轴线约定在不在，不在就走整集一次的老路。
+    """
+    segs = (data.get("s2_segments") or {}).get("segments", [])
+    if not segs:
+        raise RuntimeError("段落表为空，请先跑环节2")
+    s3 = data.get("s3_states") or {}
+    states = {s["id"]: s for s in s3.get("segment_states", [])}
+    binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
+    tpl = load_prompt("s7_shots")
+    axis = s3.get("axis_convention")
+
+    def build_user(seg: dict) -> str:
+        sid = seg["id"]
+        return render(tpl, {
+            "EPISODE": episode, "AXIS": jd(axis),
+            "DURATION": params.get("duration", 15),
+            "SHOTS_MIN": params.get("shots_min", 5), "SHOTS_MAX": params.get("shots_max", 8),
+            "FRAMES_MIN": params.get("frames_min", 4), "FRAMES_MAX": params.get("frames_max", 6),
+            "SEGMENTS": jd(seg),
+            "STATES": jd(states.get(sid, {})),
+            "BINDINGS": jd(binds.get(sid, {})),
+        }) + (f"\n\n【只排这一段】{sid}，shots 数组只放这一段。"
+              f"轴线必须照上面的整集约定执行，不要另立一套。")
+
+    result, failed, cancelled = run_segmented(
+        pj, stage_id="s7", out_name="s7_shots", key="shots", segs=segs,
+        done_ids=s7_done_segments(pj, episode), llm=llm, build_user=build_user,
+        required=["shots[]"], log=log, episode=episode, cancel=cancel,
+        seg_concurrency=seg_concurrency)
+
+    if cancelled and not failed:
+        raise LLMCancelled(
+            f"{episode or '本集'} 环节7 已按取消停下，排好的 {len(result['shots'])} 段都存了盘；"
+            f"再点一次「开始」只补没排的那些段。")
+    if failed:
+        raise RuntimeError(
+            f"{episode or '本集'} 有 {len(failed)} 段分镜失败：{'、'.join(failed[:8])}"
+            f"{'…' if len(failed) > 8 else ''}。已完成的 {len(result['shots'])} 段已保存，"
+            f"重跑环节7 只会补失败的这些段。")
+    log(f"{episode or '本集'} 全部 {len(result['shots'])} 段分镜完成")
+    return result
+
+
+def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
+                       log: Callable = print, episode: str = "",
+                       cancel: Optional[Callable] = None,
+                       seg_concurrency: int = 1) -> dict:
+    """环节8 逐段编译：一段一次 LLM 调用，段之间并发。
+
+    整集一次调用的问题：17 段 × 2 份提示词输出太长，中途失败整批白跑。
+    逐段调用后，已完成的段落跳过，失败只影响那一段 —— 天然支持续跑。
+    """
+    segs = (data.get("s2_segments") or {}).get("segments", [])
+    if not segs:
+        raise RuntimeError("段落表为空，请先跑环节2")
+
+    tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
+    states = {s["id"]: s for s in (data.get("s3_states") or {}).get("segment_states", [])}
+    binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
+    shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
+    assets = (data.get("s4_assets") or {}).get("assets", [])
+    tpl = load_prompt("s8_compile")
+
+    def build_user(seg: dict) -> str:
+        sid = seg["id"]
         used = set((binds.get(sid, {}).get("reference_images") or [])
                    and [r.get("asset_id") for r in binds[sid]["reference_images"]] or [])
         seg_assets = [a for a in assets if a["asset_id"] in used] or assets
-        user = render(tpl, {
+        return render(tpl, {
+            "EPISODE": episode,
             "DURATION": params.get("duration", 15),
             "FRAMES": params.get("frames", 4),
             "TONE": jd({"compressed": tone.get("compressed", ""),
@@ -365,61 +507,19 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
             "BINDINGS": jd(binds.get(sid, {})),
             "SHOTS": jd(shots.get(sid, {})),
         }) + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
-        log(f"[{i}/{n}] 编译 {sid}")
-        try:
-            with LLM_GATE.slot():
-                out = llm.json_call(
-                    system, user,
-                    required=["compiled[]", "compiled[].storyboard_prompt",
-                              "compiled[].video_prompt"],
-                    log=lambda m, _s=sid: log(f"    {_s}: {m}"), cancel=cancel,
-                    on_usage=lambda u, _s=sid: ledger.record(
-                        pj.root, kind="llm", stage="s8", episode=episode, target=_s,
-                        provider="llm", model=u.get("model", ""),
-                        prompt_tokens=u.get("prompt_tokens") or 0,
-                        cached_tokens=(u.get("prompt_tokens_details") or {})
-                        .get("cached_tokens", 0),
-                        completion_tokens=u.get("completion_tokens") or 0,
-                        seconds=u.get("seconds") or 0,
-                        estimated=bool(u.get("estimated"))))
-            c = out["compiled"][0]
-            c["id"] = sid
-            write_text(pj.p("03_提示词", "故事板提示词", f"{sid}_STORYBOARD_PROMPT.txt"),
-                       c.get("storyboard_prompt", ""))
-            write_text(pj.p("03_提示词", "视频提示词", f"{sid}_VIDEO_PROMPT.txt"),
-                       c.get("video_prompt", ""))
-            # 每段都存盘：中途中断也不丢已完成的。并发下读-改-写必须串行，
-            # 否则两段同时保存，后写的会把先写的那段从数组里挤掉。
-            with save_lock:
-                by_id[sid] = c
-                pj.save_stage("s8_compile",
-                              {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]},
-                              episode)
-            diagnose.clear(pj.root, "stage:s8", sid)
-        except LLMCancelled:
-            # 用户点了取消：不算失败，也别再往下派活
-            with save_lock:
-                cancelled.append(sid)
-        except Exception as exc:                            # noqa: BLE001
-            d = diagnose.build(exc, stage="stage:s8", target=sid, model=llm.model)
-            diagnose.record(pj.root, d)
-            with save_lock:
-                failed.append(sid)
-            log(f"    {diagnose.one_line(d)}")
 
-    workers = max(1, min(int(seg_concurrency or 1), n or 1))
-    if workers > 1 and n > 1:
-        log(f"{episode or '本集'} 环节8 段内并发 {workers}")
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(lambda a: one(*a), list(enumerate(todo, 1))))
-    else:
-        for a in enumerate(todo, 1):
-            one(*a)
-    if cancelled:
-        log(f"已取消，{len(cancelled)} 段没编完（已编好的都存了盘）")
+    def on_item(sid: str, c: dict) -> None:
+        write_text(pj.p("03_提示词", "故事板提示词", f"{sid}_STORYBOARD_PROMPT.txt"),
+                   c.get("storyboard_prompt", ""))
+        write_text(pj.p("03_提示词", "视频提示词", f"{sid}_VIDEO_PROMPT.txt"),
+                   c.get("video_prompt", ""))
 
-    result = {"compiled": [by_id[s["id"]] for s in segs if s["id"] in by_id]}
-    pj.save_stage("s8_compile", result, episode)
+    result, failed, cancelled = run_segmented(
+        pj, stage_id="s8", out_name="s8_compile", key="compiled", segs=segs,
+        done_ids=s8_done_segments(pj, episode), llm=llm, build_user=build_user,
+        required=["compiled[]", "compiled[].storyboard_prompt", "compiled[].video_prompt"],
+        log=log, episode=episode, cancel=cancel, seg_concurrency=seg_concurrency,
+        on_item=on_item)
     build_tasks(pj, params)
 
     if cancelled and not failed:

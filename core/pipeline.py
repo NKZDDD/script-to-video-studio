@@ -96,10 +96,18 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
 
 
 def _llm_done(pj, stage: str, episode: str) -> bool:
-    """这一步做过没有 —— 以磁盘产物为准，不看任何运行记录。"""
-    if stage == "s8":                       # 按段算：所有段都编完才算完
+    """这一步做过没有 —— 以磁盘产物为准，不看任何运行记录。
+
+    环节7/8 按段跑，所以要按段算：跑了 8 段还剩 4 段时，产物文件是存在的，
+    但这一步没做完。只看文件在不在会把剩下 4 段永远漏掉。
+    """
+    if stage in ("s7", "s8"):
         segs = (pj.stage_data("s2_segments", episode) or {}).get("segments", [])
-        return bool(segs) and len(S.s8_done_segments(pj, episode)) >= len(segs)
+        if not segs:
+            return False
+        done = (S.s8_done_segments(pj, episode) if stage == "s8"
+                else S.s7_done_segments(pj, episode))
+        return all(s["id"] in done for s in segs)
     out = next(s["out"] for s in S.STAGES if s["id"] == stage)
     return pj.stage_data(out, episode) is not None
 
