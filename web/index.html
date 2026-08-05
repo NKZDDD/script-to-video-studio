@@ -573,23 +573,45 @@ function renderAuto() {
 // 后端把「一集都不匹配」当成没得跑，页面上安静地什么都不做。
 function parseEps(text) {
   const all = (EPS.episodes || []).map(e => e.episode);
+  // 环节1 还没跑时集清单是空的。**这时候不能拿空清单去校验** ——
+  // 那会把 EP01 也判成「认不出」，然后退化成「全部集」，正是要防的那个静默失败。
+  // 清单未知时只认写法（EPxx），存不存在等环节1 跑完由后端核对。
+  const known = all.length > 0;
+  const width = known ? Math.max(2, all[0].replace(/^EP/i, '').length) : 2;
   const idx = {};
   all.forEach((e, i) => { idx[e] = i; });
+  // EP1 / ep001 归一成本项目实际用的位数：手打漏个 0 不该算错
+  const norm = t => {
+    const m = t.match(/^EP0*(\d+)$/);
+    return m ? 'EP' + String(m[1]).padStart(width, '0') : null;
+  };
   const list = [], bad = [];
   for (const raw of String(text || '').split(/[,，、\s]+/)) {
     const t = raw.trim().toUpperCase().replace(/\s/g, '');
     if (!t) continue;
-    const m = t.match(/^(EP\d+)\s*[-~—]\s*(EP\d+)$/);
+    const m = t.match(/^(EP0*\d+)\s*[-~—]\s*(EP0*\d+)$/);
     if (m) {                                   // 区间：EP01-EP05
-      const a = idx[m[1]], b = idx[m[2]];
-      if (a === undefined || b === undefined) { bad.push(t); continue; }
-      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) list.push(all[i]);
+      const a = norm(m[1]), b = norm(m[2]);
+      if (!a || !b) { bad.push(t); continue; }
+      if (known) {
+        if (idx[a] === undefined || idx[b] === undefined) { bad.push(t); continue; }
+        for (let i = Math.min(idx[a], idx[b]); i <= Math.max(idx[a], idx[b]); i++) {
+          list.push(all[i]);
+        }
+      } else {
+        const na = +a.slice(2), nb = +b.slice(2);
+        for (let i = Math.min(na, nb); i <= Math.max(na, nb); i++) {
+          list.push('EP' + String(i).padStart(width, '0'));
+        }
+      }
       continue;
     }
-    if (idx[t] === undefined) { bad.push(t); continue; }
-    list.push(t);
+    const one = norm(t);
+    if (!one) { bad.push(t); continue; }                    // 压根不是 EPxx 写法
+    if (known && idx[one] === undefined) { bad.push(t); continue; }  // 本项目没这集
+    list.push(one);
   }
-  return {list: [...new Set(list)], bad};
+  return {list: [...new Set(list)], bad, known};
 }
 
 // 框下面实时回显：写法示例 + 这次到底会跑哪几集。范围填错的代价是几百次
@@ -604,12 +626,13 @@ function autoRangeHint() {
     : r.list.length
       ? `${esc(r.list.slice(0, 6).join('、'))}${r.list.length > 6 ? '…' : ''}`
         + ` 共 <b>${r.list.length}</b> 集`
+        + (r.known ? '' : '（环节1 还没跑，等切完集再核对是否真有这几集）')
       : empty;
   $('#autoRangeHint').innerHTML =
     `写法：<code>${esc(first)}</code>　多集用逗号 <code>${esc(first)},${esc(all[2] || 'EP03')}</code>`
     + `　区间用横线 <code>${esc(first)}-${esc(all[4] || last)}</code>`
     + (all.length ? `　（本项目已切出 ${all.length} 集：${esc(first)} … ${esc(last)}）`
-                  : '　（还没跑环节1，集号未知）')
+                  : '　（还没跑环节1，集号先按写法认；环节1 会读整部剧本切出全部集）')
     + `<br>· 分析范围：${show(o, `留空 = 全部 ${all.length || '?'} 集`)}`
     + `<br>· 出图出片范围：${show(p, '留空 = 跟分析范围一致')}`
     + (o.list.length && p.list.length && p.list.some(e => !o.list.includes(e))

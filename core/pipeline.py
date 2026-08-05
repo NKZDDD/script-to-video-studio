@@ -62,7 +62,15 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
     eps = _eps.ids(pj)
     if only_episodes:
         want = set(only_episodes)
+        have = eps
         eps = [e for e in eps if e in want]
+        # 填的集号一个都没对上：以前会安静地一步逐集环节都不排，看着像跑完了。
+        # 环节1 之前 have 是空的（还不知道有几集），那时候不校验。
+        if have and not eps:
+            raise ValueError(
+                f"「分析这几集」填的 {'、'.join(sorted(want))} 在这个项目里都不存在 —— "
+                f"没有 {sorted(want)[0]} 这一集。当前切出了 {len(have)} 集："
+                f"{have[0]} … {have[-1]}。把那个框清空 = 全部集。")
     for ep in eps:
         for sid in PER_EP:
             st = next(s for s in S.STAGES if s["id"] == sid)
