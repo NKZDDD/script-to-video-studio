@@ -232,17 +232,31 @@ class LLM:
                 raise _NoStream(f"HTTP {r.status_code}: {txt}")
             raise LLMError(f"HTTP {r.status_code}: {txt}")
 
-    def _finish(self, content: str, reason: str) -> str:
+    def _finish(self, content: str, reason: str, usage: Optional[dict] = None) -> str:
         if not content.strip():
             # 空回复要重试，不能当场判死。多集并发时网关被打满，很多家不回 429
             # 而是回一个 200 加空 content —— 那是限流，退一步再来就好。
             # 直接失败会把这一集后面所有环节连带跳过，代价大得离谱：
             # 空回复没产生输出 token，重试几乎不花钱，而丢一集要重跑二十几次调用。
             # 真是内容被拒的话，重试完还是空，最后照样报 LLM_EMPTY 并提示查剧本。
+            #
+            # 把服务商给的线索一起带上：线上碰到 EP01-SEG07 连空三次，事后只有
+            # 一句「回复内容为空」，查不出是被拒、被截断、还是上游吐了个空。
+            # 这些线索本来就在响应里，不记下来纯属浪费。
+            u = usage or {}
+            det = u.get("completion_tokens_details") or {}
+            cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+            hint = "；".join(x for x in (
+                f"结束原因={reason or '（服务商没给）'}",
+                f"输出 token={u.get('completion_tokens')}" if u else "",
+                f"其中思考 token={det.get('reasoning_tokens')}"
+                if det.get("reasoning_tokens") else "",
+                f"输入 token={u.get('prompt_tokens')}（缓存命中 {cached}）" if u else "",
+            ) if x)
             # 文案里别写「限流」「发得太快」这类词：诊断是按关键词归类的，
             # 带上就会被归成 RATE_LIMITED，盖掉 LLM_EMPTY 那张卡里
             # 「先降并发、再查内容」的完整说明。原因交给那张卡讲。
-            raise _Retryable("回复内容为空")
+            raise _Retryable(f"回复内容为空（{hint}）" if hint else "回复内容为空")
         if reason == "length":
             raise LLMFatal(
                 f"模型输出被长度上限截断了（max_tokens={self.max_tokens}），"
@@ -265,7 +279,7 @@ class LLM:
                 data = r.json()
                 ch = (data.get("choices") or [{}])[0]
                 return self._finish((ch.get("message") or {}).get("content") or "",
-                                    ch.get("finish_reason") or "")
+                                    ch.get("finish_reason") or "", data.get("usage"))
             for raw in r.iter_lines(decode_unicode=False):
                 # 每收到一块就看一眼有没有被取消。不看的话「取消」只是设了个
                 # 标志位，这边照样把整次生成读完 —— 钱照花、人照等。
@@ -330,7 +344,7 @@ class LLM:
             else:
                 log(f"生成完成：输出 {n} 字（约 {rough_tokens(''.join(parts))} token），"
                     f"用了 {secs} 秒。这家没回传 usage，以上是估算")
-        return self._finish("".join(parts), reason)
+        return self._finish("".join(parts), reason, usage)
 
     def _plain_once(self, url, headers, body, proxies, tmo, log=None,
                     on_usage=None) -> str:
@@ -347,7 +361,7 @@ class LLM:
         if not choices:
             raise LLMError(f"无 choices: {json.dumps(data, ensure_ascii=False)[:300]}")
         return self._finish((choices[0].get("message") or {}).get("content") or "",
-                            choices[0].get("finish_reason") or "")
+                            choices[0].get("finish_reason") or "", u)
 
     def json_call(self, system: str, user: str, required: Optional[list] = None,
                   json_retries: int = 2, log=print, cancel=None,
