@@ -162,9 +162,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <label style="margin:0"><input id="autoProduce" type="checkbox" checked> 包含出图出片</label>
       <label style="margin:0"><input id="autoDeliver" type="checkbox" checked> 包含复核+拼接</label>
       <label style="margin:0" title="留空=全部集。环节1 永远读整部剧本；这里限制的是逐集分析（环节2-8）">
-        分析这几集 <input id="autoOnly" placeholder="留空=全部 40 集" style="width:150px"></label>
+        分析这几集 <input id="autoOnly" list="epList" placeholder="留空=全部集，如 EP01"
+          style="width:190px"></label>
       <label style="margin:0" title="留空=跟分析范围一致。资产表始终是全剧的，这里只限制出图出片的范围">
-        只出这几集的图/片 <input id="autoProd" placeholder="留空=同分析范围，如 EP01" style="width:170px"></label>
+        只出这几集的图/片 <input id="autoProd" list="epList" placeholder="留空=同分析范围，如 EP01"
+          style="width:190px"></label>
+      <datalist id="epList"></datalist>
       <span class="sp"></span>
       <button class="btn ghost sm" id="autoOnlyEp1"
         title="把上面两个范围都设成第一集：环节1 照样读整部剧本、切满全部集，但只加工 EP01">只测第一集</button>
@@ -174,6 +177,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <button class="btn" id="autoRun">开始 / 继续</button>
       <button class="btn ghost sm" id="autoStop" style="display:none">停下</button>
     </div>
+    <div class="muted" id="autoRangeHint" style="margin-top:6px;line-height:1.7"></div>
     <div id="autoPlan" style="margin-top:8px"></div>
     <pre class="log" id="autoLog" style="max-height:220px;margin-top:8px;display:none"></pre>
   </div>
@@ -490,6 +494,13 @@ async function refreshProject() {
 // ---------- 集清单
 function renderEpisodes() {
   const eps = EPS.episodes || [], iss = EPS.issues || [];
+  // 范围输入框的下拉候选 + 框下面的示例/回显，都跟着真实集号走
+  const dl = $('#epList');
+  if (dl) {
+    dl.innerHTML = eps.map(e => `<option value="${esc(e.episode)}">${
+      esc(e.episode)}${e.title ? ' · ' + esc(e.title) : ''}</option>`).join('');
+  }
+  if (typeof autoRangeHint === 'function') autoRangeHint();
   if (!eps.length) {
     $('#epBox').innerHTML = iss.length
       ? `<div class="alert err">环节1 跑过了，但一集都没切出来。${
@@ -556,10 +567,65 @@ function renderAuto() {
   $('#autoRun').disabled = bad;
   $('#autoRun').title = bad ? '先去「设置 → 出图出片优先级」把三类活各排一条队' : '';
 }
+// 把「EP01」「EP01,EP03」「EP01-EP05」解析成集号数组。
+// 返回 {list, bad}：bad 是这个项目里不存在的集号 —— 必须回显出来，
+// 不然写错一个字（EP1、EP01-EP05 当成一整个词）就会解析出空数组，
+// 后端把「一集都不匹配」当成没得跑，页面上安静地什么都不做。
+function parseEps(text) {
+  const all = (EPS.episodes || []).map(e => e.episode);
+  const idx = {};
+  all.forEach((e, i) => { idx[e] = i; });
+  const list = [], bad = [];
+  for (const raw of String(text || '').split(/[,，、\s]+/)) {
+    const t = raw.trim().toUpperCase().replace(/\s/g, '');
+    if (!t) continue;
+    const m = t.match(/^(EP\d+)\s*[-~—]\s*(EP\d+)$/);
+    if (m) {                                   // 区间：EP01-EP05
+      const a = idx[m[1]], b = idx[m[2]];
+      if (a === undefined || b === undefined) { bad.push(t); continue; }
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) list.push(all[i]);
+      continue;
+    }
+    if (idx[t] === undefined) { bad.push(t); continue; }
+    list.push(t);
+  }
+  return {list: [...new Set(list)], bad};
+}
+
+// 框下面实时回显：写法示例 + 这次到底会跑哪几集。范围填错的代价是几百次
+// 调用白花或者干脆什么都不跑，所以点「开始」之前就得看见结果。
+function autoRangeHint() {
+  const all = (EPS.episodes || []).map(e => e.episode);
+  const first = all[0] || 'EP01', last = all[all.length - 1] || 'EP40';
+  const o = parseEps($('#autoOnly').value), p = parseEps($('#autoProd').value);
+  const show = (r, empty) => r.bad.length
+    ? `<b style="color:#c0392b">认不出：${esc(r.bad.join('、'))}</b>`
+      + (r.list.length ? `（其余 ${r.list.length} 集有效）` : '，这一项等于没填')
+    : r.list.length
+      ? `${esc(r.list.slice(0, 6).join('、'))}${r.list.length > 6 ? '…' : ''}`
+        + ` 共 <b>${r.list.length}</b> 集`
+      : empty;
+  $('#autoRangeHint').innerHTML =
+    `写法：<code>${esc(first)}</code>　多集用逗号 <code>${esc(first)},${esc(all[2] || 'EP03')}</code>`
+    + `　区间用横线 <code>${esc(first)}-${esc(all[4] || last)}</code>`
+    + (all.length ? `　（本项目已切出 ${all.length} 集：${esc(first)} … ${esc(last)}）`
+                  : '　（还没跑环节1，集号未知）')
+    + `<br>· 分析范围：${show(o, `留空 = 全部 ${all.length || '?'} 集`)}`
+    + `<br>· 出图出片范围：${show(p, '留空 = 跟分析范围一致')}`
+    + (o.list.length && p.list.length && p.list.some(e => !o.list.includes(e))
+       ? `<br><b style="color:#c0392b">· 出图出片里有不在分析范围内的集`
+         + `（${esc(p.list.filter(e => !o.list.includes(e)).join('、'))}）`
+         + `—— 它们没有分镜和提示词，出不了图</b>` : '');
+}
+['#autoOnly', '#autoProd'].forEach(s => {
+  $(s).addEventListener('input', autoRangeHint);
+});
+autoRangeHint();          // 还没打开项目时也要看得见写法示例
+
 function autoBody() {
   // 不传 provider_sel，让后端直接用 config 里存的链（单一真相源）
-  const eps = el => el.value.split(/[,，\s]+/).map(x => x.trim().toUpperCase()).filter(Boolean);
-  const only = eps($('#autoOnly')), prod = eps($('#autoProd'));
+  const only = parseEps($('#autoOnly').value).list;
+  const prod = parseEps($('#autoProd').value).list;
   return {project_root: PROJ,
           concurrency: +$('#autoConc').value,
           llm_episodes: +$('#autoEpConc').value,
@@ -579,6 +645,7 @@ $('#autoOnlyEp1').onclick = () => {
   const first = ((EPS.episodes || [])[0] || {}).episode || 'EP01';
   $('#autoOnly').value = first;
   $('#autoProd').value = first;
+  autoRangeHint();
   $('#autoPlan').innerHTML =
     `<div class="alert warn">范围已设成 ${esc(first)} 一集。`
     + `环节1 照样读整部剧本、切满全部集（跨集人脸一致靠它），`
@@ -587,6 +654,7 @@ $('#autoOnlyEp1').onclick = () => {
 $('#autoAllEps').onclick = () => {
   $('#autoOnly').value = '';
   $('#autoProd').value = '';
+  autoRangeHint();
   $('#autoPlan').innerHTML =
     '<div class="alert warn">范围已清空 = 全部集都分析、都出图出片。</div>';
 };
