@@ -21,9 +21,27 @@
 from __future__ import annotations
 
 import os
+import sys
 
 APP_NAME = "script-to-video-studio"
-PROGRAM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 打包成 exe 之后有两个「目录」，混用会出各种找不到文件的怪事：
+#   PROGRAM_DIR  exe 自己在哪 —— 用来判断「配置是不是放在程序旁边」（绿色版）
+#   BUNDLE_DIR   打包进去的只读资源（web/、prompts/）解压到哪 ——
+#                onefile 模式下是每次运行新建的临时目录，别往里写东西
+# 没打包时两者相同，都是仓库根目录。
+FROZEN = bool(getattr(sys, "frozen", False))
+if FROZEN:
+    PROGRAM_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    BUNDLE_DIR = getattr(sys, "_MEIPASS", PROGRAM_DIR)
+else:
+    PROGRAM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BUNDLE_DIR = PROGRAM_DIR
+
+
+def res(*parts: str) -> str:
+    """打包进去的只读资源（页面、提示词模板）。只读，别往里写。"""
+    return os.path.join(BUNDLE_DIR, *parts)
 
 # 启动时由 run.py 用 --data 填进来（命令行优先于环境变量）
 _forced: dict = {"data": ""}
@@ -65,24 +83,37 @@ def config_path() -> str:
 def default_projects_dir() -> str:
     """默认产物目录。
 
-    老装法（数据目录 = 程序目录）下沿用历史位置 程序目录/../projects，
-    否则放数据目录下的 projects/。
+    源码装法且数据目录 = 程序目录时沿用历史位置 程序目录/../projects
+    （那时程序目录是仓库根，产物放仓库里会被 git 和「覆盖更新」波及）。
+    exe 绿色版和其它情况都放数据目录下的 projects/。
     """
     d = data_dir()
-    if os.path.abspath(d) == os.path.abspath(PROGRAM_DIR):
+    if not FROZEN and os.path.abspath(d) == os.path.abspath(PROGRAM_DIR):
         return os.path.abspath(os.path.join(PROGRAM_DIR, "..", "projects"))
     return os.path.join(d, "projects")
 
 
-def config_at_risk() -> bool:
-    """配置是不是躺在程序目录里（覆盖程序就丢）。"""
+def at_program_dir() -> bool:
+    """数据目录是不是就在程序旁边。**是不是有风险是另一回事**，见 config_at_risk。"""
     return os.path.abspath(data_dir()) == os.path.abspath(PROGRAM_DIR)
+
+
+def config_at_risk() -> bool:
+    """配置会不会被「更新程序」这个动作弄丢。
+
+    源码装法：更新 = 覆盖整个程序目录，配置在里面就会丢 → 有风险。
+    exe：更新 = 换掉那一个 exe 文件，旁边的 config.json 不受影响 ——
+    这就是绿色版的正常用法，不该报警。
+    """
+    return (not FROZEN) and at_program_dir()
 
 
 def snapshot() -> dict:
     """给启动横幅和设置页用。"""
     cfg = config_path()
     return {
+        "frozen": FROZEN,
+        "bundle_dir": BUNDLE_DIR if FROZEN else "",
         "program_dir": PROGRAM_DIR,
         "data_dir": data_dir(),
         "config_path": cfg,
@@ -91,7 +122,8 @@ def snapshot() -> dict:
         "config_at_risk": config_at_risk(),
         "source": ("--data 参数" if _forced["data"]
                    else "STV_DATA_DIR 环境变量" if os.environ.get("STV_DATA_DIR", "").strip()
-                   else "程序目录（老装法，配置已在这里）" if config_at_risk()
+                   else ("exe 旁边（绿色版，配置已在这里）" if FROZEN
+                         else "程序目录（老装法，配置已在这里）") if at_program_dir()
                    else "系统用户数据目录（默认）"),
     }
 

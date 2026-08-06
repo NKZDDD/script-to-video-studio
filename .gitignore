@@ -12,6 +12,11 @@ projects/
 output/
 outputs/
 
+# 打包产物（140 MB 的 exe，别进仓库；要发版就传 Release）
+dist/
+build/
+*.spec
+
 # Python
 __pycache__/
 *.py[cod]

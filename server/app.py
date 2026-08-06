@@ -20,8 +20,8 @@ from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provid
 from core import paths
 from core.store import Project, list_projects, read_json, write_json
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WEB_DIR = os.path.join(ROOT, "web")
+ROOT = paths.PROGRAM_DIR
+WEB_DIR = paths.res("web")      # 打包后是解压出来的临时目录，只读
 # 配置和产物都不在程序目录里（除了老装法），这样更新/换机器时整个覆盖程序目录
 # 也不会丢 key 和产物。位置怎么定见 core/paths.py。
 # 用函数而不是模块级常量：--data 是启动时才知道的。

@@ -17,7 +17,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
-from . import diagnose, ledger, probe, uploader
+from . import diagnose, ledger, paths, probe, uploader
 from .executor import LLM_GATE
 from .llm import LLM, LLMCancelled
 from .providers import ImageTask, VideoTask, build as build_provider
@@ -25,7 +25,8 @@ from .apiutil import resolve_ref
 from .store import Project, read_text, write_text
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PROMPT_DIR = os.path.join(os.path.dirname(HERE), "prompts")
+# 打包成 exe 后模板是解压到临时目录的，不能按 __file__ 往上找
+PROMPT_DIR = paths.res("prompts")
 
 # 环节定义：驱动前端流程图与执行按钮
 STAGES = [

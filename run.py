@@ -11,8 +11,11 @@ import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # line_buffering：输出被重定向到文件时（打包成 exe 后常见，比如用
+    # Start-Process 转存日志）Python 默认按块缓冲，进程被强杀就什么都没写进去，
+    # 连启动横幅都看不到。逐行刷掉，慢一点但出事时有据可查。
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 from core import paths  # noqa: E402
 
