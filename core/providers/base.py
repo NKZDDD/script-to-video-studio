@@ -55,7 +55,13 @@ class Provider:
     ref_mode: str = "data_uri"
     url_only_models: tuple = ()
 
-    def needs_url(self, model: str = "") -> bool:
+    def needs_url(self, model: str = "", media: str = "image") -> bool:
+        """这家**只**收公网链接，给 data URI 会被丢掉。
+
+        带 media 是因为同一家的图片和视频接口经常不一样（M86 出图的 ref_images
+        只收链接，出视频却能吃 multipart 字节）。声明错的后果不是报错，是参考图
+        被悄悄丢掉照样出图 —— 状态资产没了父资产参考，脸就不是本人。
+        """
         return self.ref_mode == "url" or (model or "") in self.url_only_models
 
     def needs_bytes(self, model: str = "") -> bool:

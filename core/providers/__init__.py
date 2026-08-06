@@ -13,13 +13,14 @@ from .base import ImageTask, Provider, VideoTask   # noqa: F401  对外导出
 from .aicopy import AicopyProvider
 from .kunji import KunjiProvider
 from .lingganya import LingganyaProvider
+from .m86 import M86Provider
 from .octopus import OctopusProvider
 from .paisio import PaisioProvider
 from .zeroapi import ZeroApiProvider
 
 # 顺序 = 前端下拉的默认顺序，把实测稳的排前面
 _CLASSES = [PaisioProvider, LingganyaProvider, ZeroApiProvider,
-            AicopyProvider, KunjiProvider, OctopusProvider]
+            M86Provider, AicopyProvider, KunjiProvider, OctopusProvider]
 
 REGISTRY = {c.id: c for c in _CLASSES}
 

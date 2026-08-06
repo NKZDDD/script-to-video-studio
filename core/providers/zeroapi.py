@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from ..apiutil import (ApiError, TASK_FATAL, extract_image_items, extract_task_id,
+from ..apiutil import (ApiError, extract_image_items, extract_task_id,
                        extract_video_url)
 from .base import ImageTask, Provider, VideoTask
 
@@ -31,9 +31,13 @@ _RATIO_VALUES = {"21:9": 21 / 9, "16:9": 16 / 9, "4:3": 4 / 3, "1:1": 1.0,
 SORA_MODELS = ["veo_3_1-fast", "veo_3_1-fast-fl", "sora-2", "sora-2-pro"]
 # 图生视频系：参考图走 image / images[]，接受 base64
 I2V_MODELS = ["seedance_2_fast_480p", "vad3", "omni_flash", "grok-1.5"]
-# SD2 新接口：duration 只能 5/10/15，aspect_ratio 必填，720P 固定，只收 HTTPS URL
-SD2_MODELS = ["sd2-fast"]
+# Seedance 满血（客服确认 sd2-fast / sd2-pro **共用同一套规格**）：
+# duration 只能 5/10/15 且是**字符串**；比例由 **size** 决定（无 aspect_ratio 字段）；
+# images 公网链接和 data:base64 都收；固定 720P 专线。
+SD2_MODELS = ["sd2-fast", "sd2-pro"]
 SD2_DURATIONS = [5, 10, 15]
+_SD2_RATIO_TO_SIZE = {"9:16": "720x1280", "16:9": "1280x720", "1:1": "1024x1024",
+                      "3:4": "960x1280", "4:3": "1280x960", "21:9": "2560x1080"}
 
 I2V_DURATIONS = [4, 5, 8, 10, 12, 15, 20]
 
@@ -64,8 +68,9 @@ class ZeroApiProvider(Provider):
     name = "零视工坊 zeroapi.ai-ren.cn"
     default_base_url = "https://zeroapi.ai-ren.cn"
     supports = ("image", "video")
-    # 只有 SD2 新接口挑食：只收公网链接。其余模型直接吃图片内容。
-    url_only_models = tuple(SD2_MODELS)
+    # 全部模型都能直接吃图片内容：Seedance 满血(sd2-*) 经客服确认 images 也收 data:base64，
+    # 所以不再把它列进 url_only_models（那是按旧文档写的，会逼用户去配对象存储）。
+    url_only_models = ()
 
     def capabilities(self) -> dict:
         return {
@@ -91,10 +96,10 @@ class ZeroApiProvider(Provider):
                 "resolutions": [""],
                 "max_refs": 9,
                 "ref_mode": "data_uri",
-                "notes": "比例会显式发 aspect_ratio+ratio（只给尺寸让它猜，会静默变成横屏）。"
-                         "⚠ sd2-fast 是新接口，参考素材只收公网 HTTPS 链接，"
-                         "本程序的故事板是本地文件、走 data URI，**用不了 sd2-fast**；"
-                         "做图生视频请用 seedance_2_fast_480p / vad3 / omni_flash / grok-1.5。",
+                "notes": "vad3/omni_flash/grok-1.5/seedance 系：比例显式发 aspect_ratio+ratio"
+                         "（只给尺寸让它猜会静默变横屏）。"
+                         "sd2-fast / sd2-pro（Seedance 满血）是另一套：比例由 **size** 决定、"
+                         "duration 是字符串、images 收链接也收 base64 —— 本地故事板可直接用。",
             },
             "notes": "和 ComfyUI 里的「零视工坊」四个节点同源。",
         }
@@ -190,19 +195,24 @@ class ZeroApiProvider(Provider):
         return body
 
     def _sd2_body(self, model, prompt, dur, ratio, refs, log) -> dict:
-        if refs and any(r.startswith("data:") for r in refs):
-            # 走到这里说明上传层没生效（没配对象存储、或上传失败后被降级）。
-            # 与其发出去等 400，不如现在就说清为什么、两条出路各是什么。
-            raise ApiError(
-                f"零视 {model}（SD2 新接口）的参考素材只收公网 HTTPS 链接，"
-                f"不接受本地图片。要用它，得先在「设置 → 参考图上传」配一个对象存储"
-                f"（R2/OSS/COS/MinIO 都行），程序会自动把故事板传上去换成链接。"
-                f"不想配的话，把这一类任务的模型换成 "
-                f"{' / '.join(I2V_MODELS[:3])} 之一——这些能直接吃本地图。",
-                kind=TASK_FATAL)
+        """Seedance 满血（sd2-fast / sd2-pro 共用），按官方客服确认的规格：
+
+        ```json
+        {"model":"sd2-pro","prompt":"…","images":["data:image/png;base64,…","https://…"],
+         "duration":"10","size":"1280x720","stream":false}
+        ```
+        三个和站内那份分模型文档不一样、且是踩过的坑：
+          · **比例由 `size` 决定**，该接口**没有 aspect_ratio 字段** ——
+            之前发 aspect_ratio 而不发 size，字段被忽略、比例随上游默认，
+            表现就是「同样参数一会儿横屏一会儿竖屏」。
+          · `duration` 是**字符串**（"10"），不是 int。
+          · `images` **公网链接和 data:base64 都收**，本地图不用非得配对象存储。
+        """
+        sec = _snap(dur, SD2_DURATIONS, log, model, "duration")
         body = {"model": model, "prompt": prompt,
-                "duration": _snap(dur, SD2_DURATIONS, log, model, "duration"),
-                "aspect_ratio": ratio}              # 文档：必填
+                "duration": str(sec),                   # 字符串
+                "size": _SD2_RATIO_TO_SIZE.get(ratio, "720x1280"),   # 比例只能靠它
+                "stream": False}
         if refs:
-            body["images"] = refs
+            body["images"] = refs                        # URL 或 data URI 都行
         return body

@@ -784,7 +784,7 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
     """
     up = provider_cfg.get("upload") or {}
     configured = uploader.configured(up) and up.get("mode", "always") != "when_required"
-    need_url = prov.needs_url(model)
+    need_url = prov.needs_url(model, media)
     need_bytes = prov.needs_bytes(model)
     can_url = prov.accepts_url(model, media)
     use_url = need_url or (configured and can_url)
