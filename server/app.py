@@ -121,8 +121,11 @@ def load_config() -> dict:
         up.setdefault(k, v)
     cfg.setdefault("defaults", {
         "duration": 15, "ratio": "9:16", "image_size": "1024x1536",
-        "frames": 4, "shots_min": 5, "shots_max": 8,
-        "frames_min": 4, "frames_max": 6, "episode_minutes": 3,
+        # 只留「真的要人来定」的：出图尺寸、画面比例、单段秒数（视频模型一次
+        # 能生成多久，是硬约束）、并发、重试。
+        # 镜头数 5-8、关键帧 4-6、故事板格数、单集分钟这些**不再是配置项** ——
+        # 它们是给模型判断用的创作区间（skill 规定的），写在提示词模板里。
+        # 做成旋钮会误导人去「控制」它们，而该由模型按每一段的信息密度定。
         "concurrency": 3, "max_retry": 2,
     })
     # 多剧并行的并发闸门：全局总上限 + 按服务商配额。
@@ -501,8 +504,7 @@ def api_post(path: str, body: dict) -> dict:
         # 出图尺寸/画面比例/单段时长：点「开始」时给的值优先于「默认参数」。
         # 这些会被环节8 装配进 tasks.json，所以要在跑之前就定下来。
         for k, v in (body.get("params_override") or {}).items():
-            if k in ("image_size", "ratio", "duration", "frames", "episode_minutes",
-                     "shots_min", "shots_max") and str(v).strip():
+            if k in ("image_size", "ratio", "duration") and str(v).strip():
                 params[k] = int(v) if k not in ("image_size", "ratio") else v
         script_path = pj.p("01_剧本与分段", "原始剧本.txt")
         if os.path.isfile(script_path):
@@ -779,12 +781,12 @@ def api_post(path: str, body: dict) -> dict:
         # 要能当场改。这里只改内存里的这一批任务，不动 tasks.json ——
         # 免得一次试跑把装配结果永久改掉。
         allow = {"video": ("ratio", "duration"), "asset": ("size",),
-                 "storyboard": ("size", "frames")}[kind]
+                 "storyboard": ("size",)}[kind]
         ov = {}
         for k, v in (body.get("params_override") or {}).items():
             if k not in allow or str(v).strip() in ("", "None"):
                 continue
-            ov[k] = int(v) if k in ("duration", "frames") else v
+            ov[k] = int(v) if k == "duration" else v
         if ov:
             items = [dict(t, params=dict(t.get("params") or {}, **ov)) for t in items]
         # 未完成数（已存在的会在 worker 里跳过，这里只用于提示）

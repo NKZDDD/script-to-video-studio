@@ -123,6 +123,7 @@ def split(script: str, ranges: list) -> dict:
 
 
 SEC_MIN, SEC_MAX = 60, 600      # 环节1 给的每集秒数的合理区间
+FALLBACK_MINUTES = 3            # 只在环节1 没给秒数时兜底（老项目），不是配置项
 
 
 def _duration_sec(v) -> int:
@@ -163,9 +164,12 @@ def seg_target(pj: Project, episode: str, params: dict) -> tuple:
             extra = f"，取整到 {real} 秒" if real != sec else ""
             return n, (f"环节1 定本集 {sec} 秒 ÷ 单段 {clip} 秒 = {n} 段{extra}"
                        f"（{e.get('pacing_note') or '没写理由'}）")
-    mins = float(params.get("episode_minutes") or 3)
-    n = segs_from_sec(mins * 60, clip)
-    return n, f"环节1 没给秒数，按单集 {mins} 分钟 ÷ {clip} 秒 = {n} 段"
+    # 兜底常量，不是可配项：每集多长该由环节1 按剧情定，给个全局数字反而会
+    # 让人以为「所有集都该这么长」。这里只是老项目（产物里没有 duration_sec）
+    # 不至于跑不动。
+    n = segs_from_sec(FALLBACK_MINUTES * 60, clip)
+    return n, (f"环节1 没给秒数（老项目的产物），按兜底的 {FALLBACK_MINUTES} 分钟 "
+               f"÷ {clip} 秒 = {n} 段。重跑环节1 就会按剧情定")
 
 
 # ---------------------------------------------------------------- 落盘 / 读取

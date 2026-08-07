@@ -252,13 +252,12 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         "SCRIPT": script,
         "EPISODE": episode or params.get("episode", "EP01"),
         "DURATION": params.get("duration", 15),
-        "EPISODE_MINUTES": params.get("episode_minutes", 3),
         "SEGMENTS_TARGET": seg_n,
         "SEGMENTS_WHY": seg_why,
         "IMAGE_SIZE": params.get("image_size", "1024x1536"),
-        "SHOTS_MIN": params.get("shots_min", 5), "SHOTS_MAX": params.get("shots_max", 8),
-        "FRAMES_MIN": params.get("frames_min", 4), "FRAMES_MAX": params.get("frames_max", 6),
-        "FRAMES": params.get("frames", 4),
+        # 镜头数 5-8、关键帧 4-6 这类区间不再当配置项传：它们是给模型判断用的
+        # 创作区间（skill 的规定），写死在模板里就行。做成旋钮反而误导人
+        # 去「控制」它 —— 该由模型按这一段的信息密度定。
         "TONE": jd({"compressed": tone.get("compressed", ""),
                     "variants": tone.get("compressed_variants", [])}),
         "GLOBAL": jd(data.get("s1_global", {})),
@@ -497,8 +496,6 @@ def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
         return render(tpl, {
             "EPISODE": episode, "AXIS": jd(axis),
             "DURATION": params.get("duration", 15),
-            "SHOTS_MIN": params.get("shots_min", 5), "SHOTS_MAX": params.get("shots_max", 8),
-            "FRAMES_MIN": params.get("frames_min", 4), "FRAMES_MAX": params.get("frames_max", 6),
             "SEGMENTS": jd(seg),
             "STATES": jd(states.get(sid, {})),
             "BINDINGS": jd(binds.get(sid, {})),
@@ -566,7 +563,6 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
         return render(tpl, {
             "EPISODE": episode,
             "DURATION": params.get("duration", 15),
-            "FRAMES": params.get("frames", 4),
             "TONE": jd({"compressed": tone.get("compressed", ""),
                         "variants": tone.get("compressed_variants", [])}),
             "SEGMENTS": jd(seg),
@@ -757,8 +753,9 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                      "file_ref": asset_output_rel(amap[r["asset_id"]]) if r.get("asset_id") in amap else ""}
                     for i, r in enumerate(refs)
                 ],
-                "params": {"size": params.get("image_size", "1024x1536"),
-                           "frames": params.get("frames", 4)},
+                # 不再往任务里塞 frames：格数写在提示词正文里（环节8 按分镜采样定的
+                # 4-6 格），出图接口本来也没有「格数」这个参数
+                "params": {"size": params.get("image_size", "1024x1536")},
                 "output": sb_out,
             })
             aux = c.get("aux_reference_asset_id") or ""

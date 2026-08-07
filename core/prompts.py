@@ -25,6 +25,8 @@ from .store import read_text, write_text
 # 值取自 stages.run_llm_stage 实际填的那张 mapping。
 REQUIRED_VARS = {
     "s1_global": ["PARAMS", "SCRIPT"],
+    # 注：镜头数 5-8、关键帧 4-6 这些区间已经写死在模板正文里，不再是占位符。
+    # 它们是给模型判断用的创作区间，不该由配置去「控制」。
     "s2_segments": ["EPISODE", "GLOBAL", "SCRIPT", "SEGMENTS_TARGET"],
     "s3_states": ["EPISODE", "SEGMENTS"],
     "s4_assets": ["EPISODE", "GLOBAL", "SEGMENTS", "STATES", "KNOWN_ASSETS"],

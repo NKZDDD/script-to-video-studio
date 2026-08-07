@@ -522,13 +522,13 @@ const api = {
 };
 let BOOT = null, PROJ = null, DETAIL = null;   // DETAIL = 正在看明细的 job id
 
+// 只放「真的要人来定」的。镜头数 5-8、关键帧 4-6、故事板格数、单集分钟
+// 都不在这儿 —— 那是给模型判断用的创作区间（skill 规定的），写在提示词模板里，
+// 想改去「设置 → 提示词模板」。做成旋钮会误导人去控制本该由模型按内容定的东西。
 const PARAM_FIELDS = [
-  ['duration','单段时长(秒)','number'], ['ratio','画幅','text'],
-  ['image_size','图片尺寸','text'], ['frames','故事板格数','number'],
-  ['frames_min','关键帧下限','number'], ['frames_max','关键帧上限','number'],
-  ['shots_min','镜头数下限','number'], ['shots_max','镜头数上限','number'],
-  ['episode_minutes','单集分钟','number'], ['concurrency','默认并发','number'],
-  ['max_retry','技术重试上限','number'],
+  ['duration','单段秒数','number'], ['ratio','画幅','text'],
+  ['image_size','图片尺寸','text'],
+  ['concurrency','默认并发','number'], ['max_retry','技术重试上限','number'],
 ];
 
 // 尺寸/比例/时长的候选：取「这条链上每一家都支持」的交集 ——
