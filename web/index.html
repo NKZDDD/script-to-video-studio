@@ -249,6 +249,21 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <h2>这部剧到现在花了多少 <span class="tag">跨多次续跑累计，重启不丢</span></h2>
     <div id="usageBox" class="muted">还没有用量记录</div>
   </div>
+  <div class="card">
+    <h2>跑之前先看提示词
+      <span class="tag">不调模型、不花钱：看清这一步会发出去什么，再决定跑不跑</span>
+    </h2>
+    <div class="row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="ppStage" style="min-width:240px"></select>
+      <label style="margin:0">集 <select id="ppEp" style="width:auto"></select></label>
+      <label style="margin:0" id="ppSegWrap" style="display:none">段
+        <select id="ppSeg" style="width:auto"></select></label>
+      <span class="sp"></span>
+      <span class="muted" id="ppSize"></span>
+      <button class="btn ghost sm" id="ppGo">看提示词</button>
+    </div>
+    <div id="ppBody"><p class="muted">选一个环节，点「看提示词」</p></div>
+  </div>
   <div class="card" id="ptProjCard">
     <h2>本剧的提示词 <span class="tag">只影响这一部剧：语言、题材、基础设定这类要求写在这里</span></h2>
     <div id="ptProject"></div>
@@ -636,6 +651,7 @@ async function refreshProject() {
   renderUsage();
   PT_PROJECT.list().catch(() => {});      // 本剧的提示词跟着项目走
   renderTasks(true).catch(() => {});      // 任务明细读磁盘，随时可看
+  ppFillStages();                         // 提示词预览的环节/集下拉
 }
 
 // ---------- 集清单
@@ -1691,6 +1707,66 @@ $('#npDrop').addEventListener('drop', e => addFiles(e.dataTransfer.files));
 $('#npClear').onclick = () => { QUEUE = []; renderQueue(); };
 
 // ---------- 并发闸门
+// ---------- 跑之前先看提示词
+// LLM 环节的提示词是调用那一刻现渲染的，跑之前谁都看不见 —— 而模板改坏了、
+// 前置产物缺了、集号选错了，都要等几百次调用之后才显形。这里在花钱前先看原文。
+function ppFillStages() {
+  const llm = (BOOT.stages || []).filter(s => s.kind === 'llm');
+  $('#ppStage').innerHTML = llm.map(s =>
+    `<option value="${esc(s.id)}">环节${s.no} ${esc(s.name)}</option>`).join('');
+  $('#ppEp').innerHTML = '<option value="">（自动）</option>'
+    + (EPS.episodes || []).map(e => `<option>${esc(e.episode)}</option>`).join('');
+}
+async function ppShow() {
+  if (!PROJ) return alert('先打开项目');
+  const box = $('#ppBody');
+  box.innerHTML = '<p class="muted">渲染中…</p>';
+  let d;
+  try {
+    d = await api.get('/api/prompt_preview', {
+      root: PROJ, stage: $('#ppStage').value,
+      episode: $('#ppEp').value, segment: $('#ppSeg').value || ''});
+  } catch (e) { box.innerHTML = `<div class="alert err">${esc(String(e))}</div>`; return; }
+  if (d.error) { box.innerHTML = `<div class="alert err">${esc(d.error)}</div>`; return; }
+
+  // 按段跑的环节要能挑段
+  const segs = d.segments || [];
+  $('#ppSegWrap').style.display = segs.length ? '' : 'none';
+  if (segs.length) {
+    $('#ppSeg').innerHTML = segs.map(s =>
+      `<option${s === d.segment ? ' selected' : ''}>${esc(s)}</option>`).join('');
+  }
+  if (d.missing && d.missing.length) {
+    $('#ppSize').textContent = '';
+    box.innerHTML = `<div class="alert warn"><b>还看不了 —— 前置产物没齐</b>
+      ${d.missing.map(m => `<div>· 先跑 ${esc(m)}</div>`).join('')}
+      <div style="margin-top:6px">提示词是拿上一环节的产物拼出来的，缺了就渲染不出来。</div>
+    </div>`;
+    return;
+  }
+  $('#ppSize').textContent = `${d.chars.toLocaleString()} 字 · 约 ${d.tokens.toLocaleString()} token`;
+  const [bi, gl, pr] = d.layers || ['', '', ''];
+  box.innerHTML =
+    (d.note ? `<div class="alert warn">${esc(d.note)}</div>` : '')
+    + (d.unfilled && d.unfilled.length
+       ? `<div class="alert err">有没填上的占位符：${
+           d.unfilled.map(x => '{{' + esc(x) + '}}').join('、')}
+          —— 模板里写了程序不认识的名字，会原样发给模型</div>` : '')
+    + `<div class="muted" style="margin:6px 0">
+        ${d.episode ? '集 <b>' + esc(d.episode) + '</b>　' : ''}
+        ${d.segment ? '段 <b>' + esc(d.segment) + '</b>　' : ''}
+        模板 <code>${esc(d.template)}.md</code>
+        必需输出字段 <code>${esc((d.required_fields || []).join('、')) || '—'}</code></div>`
+    + `<b class="muted">系统提示词（_common）</b>
+       <pre class="log" style="max-height:150px">${esc(d.system)}</pre>`
+    + `<b class="muted">这一步实际发出去的正文</b>
+       <pre class="log" style="max-height:420px">${esc(d.user)}</pre>`;
+}
+$('#ppGo').onclick = () => ppShow().catch(e => alert(String(e)));
+$('#ppStage').onchange = () => { $('#ppSeg').innerHTML = ''; ppShow().catch(() => {}); };
+$('#ppEp').onchange = () => { $('#ppSeg').innerHTML = ''; ppShow().catch(() => {}); };
+$('#ppSeg').onchange = () => ppShow().catch(() => {});
+
 // ---------- 本项目的任务明细（读磁盘，不依赖正在跑的 job）
 // 以前只能看当前 job 的明细，而 job 是内存态：服务一重启就没了，
 // 想知道上次那张图是哪家出的、用的什么提示词、花了多少，只能自己翻文件夹。

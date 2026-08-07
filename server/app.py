@@ -367,6 +367,22 @@ def api_get(path: str, q: dict) -> dict:
                 "global_dir": paths.prompts_dir(),
                 "project_dir": S.project_prompt_dir(pj) if pj else ""}
 
+    if path == "/api/prompt_preview":
+        """跑之前看看这一步到底会发出去什么。不调模型、不写盘、不占资产。"""
+        pj = proj_of({"project_root": q["root"][0]})
+        meta = pj.meta()
+        params = dict(cfg.get("defaults") or {})
+        params.update(meta.get("params") or {})
+        params.update({"project_code": meta.get("project_code", "PROJ-001"),
+                       "episode": meta.get("episode", "EP01")})
+        sp = pj.p("01_剧本与分段", "原始剧本.txt")
+        if os.path.isfile(sp):
+            from core.store import read_text
+            params["script"] = read_text(sp)
+        return S.preview_prompt(pj, (q.get("stage") or ["s1"])[0], params,
+                                (q.get("episode") or [""])[0],
+                                (q.get("segment") or [""])[0])
+
     if path == "/api/tasks":
         """本项目的任务明细 —— 全部读磁盘，不用跑起来也能看。"""
         from core import explorer

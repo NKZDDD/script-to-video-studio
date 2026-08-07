@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -19,7 +20,7 @@ from typing import Any, Callable, Optional
 
 from . import diagnose, ledger, paths, probe, uploader
 from .executor import LLM_GATE
-from .llm import LLM, LLMCancelled
+from .llm import LLM, LLMCancelled, rough_tokens
 from .providers import ImageTask, VideoTask, build as build_provider
 from .apiutil import resolve_ref
 from .store import Project, read_text, write_text
@@ -179,6 +180,66 @@ def _dep_data(pj: Project, deps: list, episode: str) -> dict:
     return out
 
 
+def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
+             episode: str, script: str) -> dict:
+    """整集级环节（s1-s6）往模板里填的那张表。真跑和预览共用。"""
+    from . import episodes as _eps
+    tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
+    # PARAMS 里绝不能带 script：它已经在 {{SCRIPT}} 里送了一份。
+    # 之前没剔，等于把 8 万字的剧本发两遍 —— 环节1 的输入从 72K token 涨到
+    # 141K token，一半是重复内容，钱翻倍、首字延迟翻倍，也是上次超时的主因。
+    slim = {k: v for k, v in params.items() if k != "script"}
+    slim["episode"] = episode or params.get("episode", "")
+    seg_n, seg_why = (_eps.seg_target(pj, episode, params)
+                      if is_per_episode(stage_id) and episode else (0, ""))
+    return {
+        "PARAMS": jd(slim),
+        "SCRIPT": script,
+        "EPISODE": episode or params.get("episode", "EP01"),
+        "DURATION": params.get("duration", 15),
+        "SEGMENTS_TARGET": seg_n,
+        "SEGMENTS_WHY": seg_why,
+        "IMAGE_SIZE": params.get("image_size", "1024x1536"),
+        # 镜头数 5-8、关键帧 4-6 这类区间不再当配置项传：它们是给模型判断用的
+        # 创作区间（skill 的规定），写死在模板里就行。做成旋钮反而误导人
+        # 去「控制」它 —— 该由模型按这一段的信息密度定。
+        "TONE": jd({"compressed": tone.get("compressed", ""),
+                    "variants": tone.get("compressed_variants", [])}),
+        "GLOBAL": jd(data.get("s1_global", {})),
+        "SEGMENTS": jd(data.get("s2_segments", {})),
+        "STATES": jd(data.get("s3_states", {})),
+        "ASSETS": jd(data.get("s4_assets", {})),
+        "BINDINGS": jd(data.get("s6_binding", {})),
+        "SHOTS": jd(data.get("s7_shots", {})),
+        "KNOWN_ASSETS": jd(known_assets(pj, episode) if stage_id == "s4" else []),
+        # 整集共用的 180 度轴线约定（环节3 定的）。老项目的产物里没有，
+        # 那就是空的 —— 环节7 会自己定轴，和以前一样。
+        "AXIS": jd((data.get("s3_states") or {}).get("axis_convention") or {}),
+    }
+
+
+def _s5_filter(pj: Project, data: dict, claim: bool = True) -> tuple:
+    """环节5 只给「还没写过提示词的资产」。返回 (裁过的 s4, 要写的, 跳过的)。
+
+    资产提示词全剧共用一份文件，不过滤的话 40 集会把同一个角色的提示词重写
+    40 遍：白花钱，还可能越写越飘。
+
+    claim=False 用于**预览**：预览不能真去「领走」资产，否则看一眼就把它占了，
+    真跑的时候反而以为别人在写、跳过不写。
+    """
+    a4 = dict(data.get("s4_assets") or {})
+    free, skipped = [], []
+    for a in a4.get("assets", []):
+        aid = a.get("asset_id", "")
+        f = pj.p("03_提示词", "资产生产提示词", f"{aid}_PROMPT.txt")
+        (skipped if os.path.isfile(f) else free).append(aid)
+    # 多集并行时，别的集可能刚好也在写这几个资产的提示词 —— 领得到才算自己的
+    todo = _claim(free) if claim else list(free)
+    skipped += [i for i in free if i not in set(todo)]
+    a4["assets"] = [a for a in a4.get("assets", []) if a.get("asset_id") in set(todo)]
+    return a4, todo, skipped
+
+
 def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
                   log: Callable = print, episode: str = "",
                   cancel: Optional[Callable] = None,
@@ -230,16 +291,7 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     # 环节5 只给「还没写过提示词的资产」。资产提示词全剧共用一份文件，
     # 不过滤的话 40 集会把同一个角色的提示词重写 40 遍：白花钱，还可能越写越飘。
     if stage_id == "s5":
-        a4 = dict(data.get("s4_assets") or {})
-        free, skipped = [], []
-        for a in a4.get("assets", []):
-            aid = a.get("asset_id", "")
-            f = pj.p("03_提示词", "资产生产提示词", f"{aid}_PROMPT.txt")
-            (skipped if os.path.isfile(f) else free).append(aid)
-        # 多集并行时，别的集可能刚好也在写这几个资产的提示词 —— 领得到才算自己的
-        todo = _claim(free)
-        skipped += [i for i in free if i not in set(todo)]
-        a4["assets"] = [a for a in a4.get("assets", []) if a.get("asset_id") in set(todo)]
+        a4, todo, skipped = _s5_filter(pj, data, claim=True)
         data["s4_assets"] = a4
         if skipped:
             log(f"{episode} 有 {len(skipped)} 个资产前面几集已经写过提示词，跳过："
@@ -255,39 +307,13 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     # 之前没剔，等于把 8 万字的剧本发两遍 —— 环节1 的输入从 72K token 涨到
     # 141K token，一半是重复内容，钱翻倍、首字延迟翻倍，也是上次超时的主因。
     # 其余字段（尺寸/时长/镜头数）都是几十字节的小值，留着有用。
-    slim = {k: v for k, v in params.items() if k != "script"}
-    slim["episode"] = episode or params.get("episode", "")
-    # 本集切几段：环节1 逐集定的优先，老项目没这个字段就退回全局参数折算
     seg_n, seg_why = _eps.seg_target(pj, episode, params) if per_ep else (0, "")
     if stage_id == "s2":
         log(f"{episode} 目标 {seg_n} 段（{seg_why}）→ 成片约 "
             f"{seg_n * int(params.get('duration') or 15)} 秒")
-    mapping = {
-        "PARAMS": jd(slim),
-        "SCRIPT": script,
-        "EPISODE": episode or params.get("episode", "EP01"),
-        "DURATION": params.get("duration", 15),
-        "SEGMENTS_TARGET": seg_n,
-        "SEGMENTS_WHY": seg_why,
-        "IMAGE_SIZE": params.get("image_size", "1024x1536"),
-        # 镜头数 5-8、关键帧 4-6 这类区间不再当配置项传：它们是给模型判断用的
-        # 创作区间（skill 的规定），写死在模板里就行。做成旋钮反而误导人
-        # 去「控制」它 —— 该由模型按这一段的信息密度定。
-        "TONE": jd({"compressed": tone.get("compressed", ""),
-                    "variants": tone.get("compressed_variants", [])}),
-        "GLOBAL": jd(data.get("s1_global", {})),
-        "SEGMENTS": jd(data.get("s2_segments", {})),
-        "STATES": jd(data.get("s3_states", {})),
-        "ASSETS": jd(data.get("s4_assets", {})),
-        "BINDINGS": jd(data.get("s6_binding", {})),
-        "SHOTS": jd(data.get("s7_shots", {})),
-        "KNOWN_ASSETS": jd(known_assets(pj, episode) if stage_id == "s4" else []),
-        # 整集共用的 180 度轴线约定（环节3 定的）。老项目的产物里没有，
-        # 那就是空的 —— 环节7 会自己定轴，和以前一样。
-        "AXIS": jd((data.get("s3_states") or {}).get("axis_convention") or {}),
-    }
     system = load_prompt("_common", pj)
-    user = render(load_prompt(tpl_name, pj), mapping)
+    user = render(load_prompt(tpl_name, pj),
+                  _mapping(pj, stage_id, params, data, episode, script))
     tag = f"{episode} " if episode else "全剧 "
     log(f"{tag}提示词 {len(user)} 字，调用 {llm.model}")
     def _usage(u, _st=stage_id, _ep=episode):
@@ -382,6 +408,87 @@ def s8_done_segments(pj: Project, episode: str = "") -> set:
             if os.path.isfile(os.path.join(vd_dir, f"{sid}_VIDEO_PROMPT.txt")):
                 done.add(sid)
     return done
+
+
+def preview_prompt(pj: Project, stage_id: str, params: dict,
+                   episode: str = "", segment: str = "") -> dict:
+    """跑之前先看看这一步到底会发出去什么。**不调模型、不写盘、不占资产。**
+
+    为什么值得单独做：LLM 环节的提示词是调用那一刻现渲染的，跑之前谁都看不见。
+    而模板改坏了、前置产物缺了、集号选错了，这些都要等几百次调用之后才显形。
+    这里让人在花钱之前看到原文。
+
+    刻意和真跑共用同一套构造器（_s5_filter / s7_user_builder / s8_user_builder /
+    同一份 mapping），分开写迟早飘 —— 那样预览就成了安慰剂。
+    """
+    from . import episodes as _eps
+    if stage_id not in _LLM_SPEC:
+        raise ValueError(f"环节 {stage_id} 不是 LLM 环节，没有提示词可预览")
+    tpl_name, deps, required = _LLM_SPEC[stage_id]
+    per_ep = is_per_episode(stage_id)
+    out = {"stage": stage_id, "template": tpl_name, "episode": "",
+           "segment": "", "segments": [], "required_fields": required,
+           "missing": [], "note": ""}
+
+    if per_ep:
+        avail = _eps.ids(pj)
+        if not avail:
+            out["missing"] = ["环节1「整剧全局解析」（还没切集）"]
+            return out
+        episode = episode if episode in avail else avail[0]
+    else:
+        episode = ""
+    out["episode"] = episode
+
+    data = _dep_data(pj, deps, episode)
+    missing = [d for d, v in data.items() if v is None]
+    if missing:
+        out["missing"] = [
+            f"环节{_STAGE_OF_OUT[m]['no']}「{_STAGE_OF_OUT[m]['name']}」"
+            + ("" if _STAGE_OF_OUT[m]["id"] in SERIES_STAGES else f"（{episode} 这一集的）")
+            for m in missing if m in _STAGE_OF_OUT] or missing
+        return out
+
+    system = load_prompt("_common", pj)
+
+    # 环节7/8 是按段跑的：一段一个提示词，得挑一段看
+    if stage_id in ("s7", "s8") and not (
+            stage_id == "s7" and not (data.get("s3_states") or {}).get("axis_convention")):
+        segs = (data.get("s2_segments") or {}).get("segments", [])
+        out["segments"] = [s.get("id", "") for s in segs]
+        if not segs:
+            out["missing"] = ["环节2「节奏驱动段落划分」（段落表是空的）"]
+            return out
+        seg = next((s for s in segs if s.get("id") == segment), segs[0])
+        out["segment"] = seg.get("id", "")
+        builder = (s7_user_builder if stage_id == "s7" else s8_user_builder)(
+            pj, params, data, episode)
+        user = builder(seg)
+        out["note"] = (f"这一集共 {len(segs)} 段，每段一次调用；下面是 "
+                       f"{out['segment']} 这一段的。")
+    else:
+        script = _eps.script_of(pj, episode) if per_ep else params.get("script", "")
+        if stage_id == "s5":
+            a4, todo, skipped = _s5_filter(pj, data, claim=False)   # 预览不占资产
+            data["s4_assets"] = a4
+            out["note"] = (f"本次要写 {len(todo)} 个资产的提示词"
+                           + (f"；{len(skipped)} 个前面已经写过，跳过" if skipped else "")
+                           + ("。一个都不用写，真跑时这一步会直接跳过、不花钱。"
+                              if not todo else "。"))
+        user = render(load_prompt(tpl_name, pj), _mapping(pj, stage_id, params, data,
+                                                          episode, script))
+        if stage_id == "s7":
+            out["note"] = "这一集的环节3 没给轴线约定，环节7 会整集一次跑（不按段拆）。"
+
+    left = re.findall(r"\{\{(\w+)\}\}", user)
+    out.update({
+        "system": system, "user": user,
+        "chars": len(user) + len(system),
+        "tokens": rough_tokens(user) + rough_tokens(system),
+        "unfilled": sorted(set(left)),
+        "layers": prompt_files(tpl_name, pj),
+    })
+    return out
 
 
 def s7_done_segments(pj: Project, episode: str = "") -> set:
@@ -485,21 +592,8 @@ def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
     return result, failed, cancelled
 
 
-def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
-                       log: Callable = print, episode: str = "",
-                       cancel: Optional[Callable] = None,
-                       seg_concurrency: int = 1) -> dict:
-    """环节7 逐段排分镜。
-
-    前提是环节3 给出了整集共用的轴线约定（axis_convention）。没有它就不能拆：
-    实测一次看完 12 段时，各段的 axis_note 会互相引用（「沿同一玻璃门轴线」
-    「轴线保持不变」），Aisyah 一直在左、Dewi 一直在右。拆开并行、各段独立
-    定左右，硬切就会跳轴 —— 而这是模板里的强制规则。
-    调用方负责检查轴线约定在不在，不在就走整集一次的老路。
-    """
-    segs = (data.get("s2_segments") or {}).get("segments", [])
-    if not segs:
-        raise RuntimeError("段落表为空，请先跑环节2")
+def s7_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Callable:
+    """环节7 单段提示词的构造器。真跑和预览共用同一个 —— 分开写迟早飘。"""
     s3 = data.get("s3_states") or {}
     states = {s["id"]: s for s in s3.get("segment_states", [])}
     binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
@@ -516,6 +610,55 @@ def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
             "BINDINGS": jd(binds.get(sid, {})),
         }) + (f"\n\n【只排这一段】{sid}，shots 数组只放这一段。"
               f"轴线必须照上面的整集约定执行，不要另立一套。")
+
+    return build_user
+
+
+def s8_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Callable:
+    """环节8 单段提示词的构造器。真跑和预览共用。"""
+    tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
+    states = {s["id"]: s for s in (data.get("s3_states") or {}).get("segment_states", [])}
+    binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
+    shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
+    assets = (data.get("s4_assets") or {}).get("assets", [])
+    tpl = load_prompt("s8_compile", pj)
+
+    def build_user(seg: dict) -> str:
+        sid = seg["id"]
+        used = set((binds.get(sid, {}).get("reference_images") or [])
+                   and [r.get("asset_id") for r in binds[sid]["reference_images"]] or [])
+        seg_assets = [a for a in assets if a["asset_id"] in used] or assets
+        return render(tpl, {
+            "EPISODE": episode,
+            "DURATION": params.get("duration", 15),
+            "TONE": jd({"compressed": tone.get("compressed", ""),
+                        "variants": tone.get("compressed_variants", [])}),
+            "SEGMENTS": jd(seg),
+            "STATES": jd(states.get(sid, {})),
+            "ASSETS": jd(seg_assets),
+            "BINDINGS": jd(binds.get(sid, {})),
+            "SHOTS": jd(shots.get(sid, {})),
+        }) + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
+
+    return build_user
+
+
+def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
+                       log: Callable = print, episode: str = "",
+                       cancel: Optional[Callable] = None,
+                       seg_concurrency: int = 1) -> dict:
+    """环节7 逐段排分镜。
+
+    前提是环节3 给出了整集共用的轴线约定（axis_convention）。没有它就不能拆：
+    实测一次看完 12 段时，各段的 axis_note 会互相引用（「沿同一玻璃门轴线」
+    「轴线保持不变」），Aisyah 一直在左、Dewi 一直在右。拆开并行、各段独立
+    定左右，硬切就会跳轴 —— 而这是模板里的强制规则。
+    调用方负责检查轴线约定在不在，不在就走整集一次的老路。
+    """
+    segs = (data.get("s2_segments") or {}).get("segments", [])
+    if not segs:
+        raise RuntimeError("段落表为空，请先跑环节2")
+    build_user = s7_user_builder(pj, params, data, episode)
 
     result, failed, cancelled = run_segmented(
         pj, stage_id="s7", out_name="s7_shots", key="shots", segs=segs,
@@ -549,12 +692,7 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     if not segs:
         raise RuntimeError("段落表为空，请先跑环节2")
 
-    tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
-    states = {s["id"]: s for s in (data.get("s3_states") or {}).get("segment_states", [])}
-    binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
     shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
-    assets = (data.get("s4_assets") or {}).get("assets", [])
-    tpl = load_prompt("s8_compile", pj)
 
     # 环节7 是按段跑的，可能有几段没排出分镜（比如空回复重试完还是空）。
     # 那几段必须跳过：拿空分镜硬编，会出一份没有镜头依据的提示词，
@@ -570,22 +708,7 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
         raise RuntimeError(
             f"{episode or '本集'} 一段分镜都没有，没东西可编。先把环节7 跑通。")
 
-    def build_user(seg: dict) -> str:
-        sid = seg["id"]
-        used = set((binds.get(sid, {}).get("reference_images") or [])
-                   and [r.get("asset_id") for r in binds[sid]["reference_images"]] or [])
-        seg_assets = [a for a in assets if a["asset_id"] in used] or assets
-        return render(tpl, {
-            "EPISODE": episode,
-            "DURATION": params.get("duration", 15),
-            "TONE": jd({"compressed": tone.get("compressed", ""),
-                        "variants": tone.get("compressed_variants", [])}),
-            "SEGMENTS": jd(seg),
-            "STATES": jd(states.get(sid, {})),
-            "ASSETS": jd(seg_assets),
-            "BINDINGS": jd(binds.get(sid, {})),
-            "SHOTS": jd(shots.get(sid, {})),
-        }) + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
+    build_user = s8_user_builder(pj, params, data, episode)
 
     def on_item(sid: str, c: dict) -> None:
         write_text(pj.p("03_提示词", "故事板提示词", f"{sid}_STORYBOARD_PROMPT.txt"),
