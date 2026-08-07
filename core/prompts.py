@@ -30,7 +30,7 @@ REQUIRED_VARS = {
     "s2_segments": ["EPISODE", "GLOBAL", "SCRIPT", "SEGMENTS_TARGET"],
     "s3_states": ["EPISODE", "SEGMENTS"],
     "s4_assets": ["EPISODE", "GLOBAL", "SEGMENTS", "STATES", "KNOWN_ASSETS"],
-    "s5_asset_prompts": ["EPISODE", "TONE", "ASSETS"],
+    "s5_asset_prompts": ["EPISODE", "TONE", "ASSETS", "ASSET_CATALOG"],
     "s6_binding": ["EPISODE", "SEGMENTS", "STATES", "ASSETS"],
     "s7_shots": ["EPISODE", "SEGMENTS", "STATES", "BINDINGS"],
     "s8_compile": ["EPISODE", "SEGMENTS", "STATES", "ASSETS", "BINDINGS", "SHOTS"],

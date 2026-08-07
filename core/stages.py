@@ -184,9 +184,11 @@ def known_assets(pj: Project, upto_episode: str = "") -> list:
             if not aid or aid in seen:
                 continue
             seen.add(aid)
-            out.append({k: a.get(k, "") for k in
-                        ("asset_id", "category", "name", "parent_asset_id",
-                         "identity_anchors", "appearance")})
+            item = {k: a.get(k, "") for k in
+                    ("asset_id", "category", "name", "parent_asset_id",
+                     "state_type", "identity_anchors", "appearance", "output_spec")}
+            item["reference_assets"] = list(a.get("reference_assets") or [])
+            out.append(item)
     return out
 
 
@@ -228,6 +230,9 @@ def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
         "BINDINGS": jd(data.get("s6_binding", {})),
         "SHOTS": jd(data.get("s7_shots", {})),
         "KNOWN_ASSETS": jd(known_assets(pj, episode) if stage_id == "s4" else []),
+        # 环节5 的【待生产资产】会被 _s5_filter 裁成只剩本次要写的几条；
+        # 另给一份完整目录，否则模型根本不知道同画面的旧资产 ID，只能退化成父图一张。
+        "ASSET_CATALOG": jd(known_assets(pj, episode) if stage_id == "s5" else []),
         # 整集共用的 180 度轴线约定（环节3 定的）。老项目的产物里没有，
         # 那就是空的 —— 环节7 会自己定轴，和以前一样。
         "AXIS": jd((data.get("s3_states") or {}).get("axis_convention") or {}),
@@ -254,6 +259,99 @@ def _s5_filter(pj: Project, data: dict, claim: bool = True) -> tuple:
     skipped += [i for i in free if i not in set(todo)]
     a4["assets"] = [a for a in a4.get("assets", []) if a.get("asset_id") in set(todo)]
     return a4, todo, skipped
+
+
+def _ordered_asset_refs(*groups, exclude: str = "") -> list:
+    """按首次出现顺序合并资产 ID；父资产放第一组即可稳定排在首位。"""
+    out, seen = [], set()
+    for group in groups:
+        if isinstance(group, str):
+            group = [group]
+        for raw in (group or []):
+            rid = str(raw or "").strip()
+            if not rid or rid == exclude or rid in seen:
+                continue
+            seen.add(rid)
+            out.append(rid)
+    return out
+
+
+def _state_type(asset: dict) -> str:
+    """老项目没有 state_type：为避免把缺父资产的旧坏数据误认成组合锚点，默认 single。"""
+    if asset.get("category") != "state":
+        return ""
+    kind = str(asset.get("state_type") or "").strip().lower()
+    return kind if kind in ("single", "composite") else "single"
+
+
+def normalize_s4_asset_refs(out: dict) -> dict:
+    """把两种状态资产落实成机器可读依赖。
+
+    single：唯一父资产排第一。composite：没有父资产，保留至少两张来源参考。
+    不按描述猜资产 ID，避免名字歧义把无关图片塞进去；数量错误交给检查明确报警。
+    """
+    for a in out.get("assets") or []:
+        aid = str(a.get("asset_id") or "")
+        kind = _state_type(a)
+        if kind:
+            a["state_type"] = kind
+        if kind == "composite":
+            a["parent_asset_id"] = ""
+            a["output_spec"] = "state_composite"
+            a["reference_assets"] = _ordered_asset_refs(
+                a.get("reference_assets") or [], exclude=aid)
+        else:
+            parent = str(a.get("parent_asset_id") or "") if kind == "single" else ""
+            a["reference_assets"] = _ordered_asset_refs(
+                [parent], a.get("reference_assets") or [], exclude=aid)
+    return out
+
+
+def normalize_s5_prompt_refs(pj: Project, out: dict, episode: str) -> dict:
+    """环节5不能把环节4声明的多图依赖缩回父资产一张。"""
+    catalog = {a.get("asset_id"): a for a in known_assets(pj, episode)}
+    for ap in out.get("asset_prompts") or []:
+        aid = str(ap.get("asset_id") or "")
+        asset = catalog.get(aid) or {}
+        kind = _state_type(asset)
+        if kind:
+            ap["state_type"] = kind
+        if kind == "composite":
+            ap["output_spec"] = "state_composite"
+            ap["reference_assets"] = _ordered_asset_refs(
+                asset.get("reference_assets") or [], ap.get("reference_assets") or [],
+                exclude=aid)
+        else:
+            parent = str(asset.get("parent_asset_id") or "") if kind == "single" else ""
+            ap["reference_assets"] = _ordered_asset_refs(
+                [parent], asset.get("reference_assets") or [],
+                ap.get("reference_assets") or [], exclude=aid)
+    return out
+
+
+def merge_s5_outputs(previous: dict, fresh: dict) -> dict:
+    """环节5是增量跑的，保存时必须按 asset_id 合并，不能用一条补写覆盖整集。"""
+    previous, fresh = previous or {}, fresh or {}
+    merged = dict(previous)
+    merged.update(fresh)
+    rows, pos = [], {}
+    for ap in previous.get("asset_prompts") or []:
+        aid = ap.get("asset_id")
+        if not aid or aid in pos:
+            continue
+        pos[aid] = len(rows)
+        rows.append(ap)
+    for ap in fresh.get("asset_prompts") or []:
+        aid = ap.get("asset_id")
+        if not aid:
+            continue
+        if aid in pos:
+            rows[pos[aid]] = ap
+        else:
+            pos[aid] = len(rows)
+            rows.append(ap)
+    merged["asset_prompts"] = rows
+    return merged
 
 
 def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
@@ -351,6 +449,17 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
             _unclaim([a.get("asset_id", "") for a in
                       (data.get("s4_assets") or {}).get("assets", [])])
         raise
+
+    # 先规范化再落盘。父资产是单值，但视觉参考是列表；任何一层都不许把
+    # 环节4声明的多图依赖缩成父图一张。
+    fresh_s5_prompts = []
+    if stage_id == "s4":
+        normalize_s4_asset_refs(out)
+    elif stage_id == "s5":
+        normalize_s5_prompt_refs(pj, out, episode)
+        fresh_s5_prompts = list(out.get("asset_prompts") or [])
+        check_prompt_refs(pj, out, episode, log)
+        out = merge_s5_outputs(pj.stage_data("s5_asset_prompts", episode) or {}, out)
     pj.save_stage(tpl_name, out, episode)
 
     if stage_id == "s1":
@@ -400,8 +509,8 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
 
     # s5 额外把提示词正文落成 txt，便于人工查看与执行器读取
     if stage_id == "s5":
-        check_prompt_refs(pj, out, episode, log)
-        for ap in out.get("asset_prompts", []):
+        # 只写本次新生成的那些；旧提示词虽然合并进 JSON，但不该被无意义地重写。
+        for ap in fresh_s5_prompts:
             fn = ap.get("filename") or f"{ap['asset_id']}_PROMPT.txt"
             write_prompt_txt(pj, f"03_提示词/资产生产提示词/{fn}",
                              ap.get("prompt", ""), log)
@@ -528,17 +637,10 @@ def check_prompt_refs(pj: Project, out: dict, episode: str, log=None) -> list:
 
 
 def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
-    """环节4 建完资产就查一遍：有没有把「一个画面」建成「一条资产」。
+    """环节4 建完资产就查单父级归属和多参考依赖是否结构完整。
 
-    踩过的：ST012「豪华私人病房连续布局与床单碎纸状态」，父资产是 S001（房间），
-    appearance 却写着「Rizky固定在画面左侧、Dewi在右侧床边递交复印件」。
-    parent_asset_id 只能填一个，于是环节5 按「空镜」只给了 1 张房间参考图 ——
-    正文里那两个人没有任何参考图支撑，模型只能自己编。
-
-    模板讲清楚只是建议，模型照样会犯。这里做成硬检查：
-    状态资产的描述里出现了**别的主体**的名字，就记一条待办。
-
-    只提醒不拦截 —— 拦下来会把整集卡住，而这类问题人看一眼就知道要不要管。
+    不能再用「描述里出现别人」一刀切：single 应保持单体，composite 本来就要同时
+    看多个资产。这里只查能确定的结构错误，不猜创作意图。
     """
     assets = out.get("assets") or []
     if not assets:
@@ -547,35 +649,49 @@ def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
     # 加上前面几集已建的：本集的状态资产可能挂在早先建的人物身上
     for a in known_assets(pj, episode):
         by_id.setdefault(a.get("asset_id"), a)
-    people = _subjects(by_id)
     bad = []
     for a in assets:
         if a.get("category") != "state":
             continue
-        parent = a.get("parent_asset_id") or ""
-        # 只查 appearance —— 它是「这张图要画什么」，直接决定出图内容。
-        # allowed_change / forbidden_change 是约束不是画面清单：
-        # 「禁止 Rizky 提前苏醒」提到名字完全正当，不需要给他参考图，
-        # 一起查会让 8/11 的资产都报警，吵到没人看。
-        text = str(a.get("appearance", ""))
-        # 父资产的叫法全部豁免：它就是这条状态的主体，提到它是应该的
-        others = _mentioned(text, people, exclude={parent})
-        if others:
-            bad.append((a.get("asset_id", ""), a.get("name", ""), parent, others))
+        aid = str(a.get("asset_id") or "")
+        kind = _state_type(a)
+        parent = str(a.get("parent_asset_id") or "")
+        refs = [str(r) for r in (a.get("reference_assets") or [])]
+        reasons = []
+        if kind == "single":
+            if not parent:
+                reasons.append("single 没有 parent_asset_id")
+            elif parent not in by_id:
+                reasons.append(f"父资产 {parent} 不存在")
+            elif not refs or refs[0] != parent:
+                reasons.append(f"父资产 {parent} 没排在参考图第一位")
+            if len(refs) > 1:
+                reasons.append("single 带了多个来源；应拆出 composite 组合锚点")
+        else:
+            if parent:
+                reasons.append("composite 不应填写 parent_asset_id")
+            if len(refs) < 2:
+                reasons.append("composite 至少需要两个 reference_assets")
+            if a.get("output_spec") != "state_composite":
+                reasons.append("composite 必须使用 state_composite")
+        unknown = [r for r in refs if r not in by_id]
+        if unknown:
+            reasons.append("参考资产不存在：" + "、".join(unknown))
+        if reasons:
+            bad.append((aid, a.get("name", ""), reasons))
     if not bad:
         diagnose.clear(pj.root, "stage:s4", f"{episode}:资产越界")
         return []
-    lines = "；".join(f"{aid}「{nm}」父={pa or '无'}，却写到了 {'、'.join(o)}"
-                     for aid, nm, pa, o in bad[:5])
+    lines = "；".join(f"{aid}「{nm}」{'、'.join(reasons)}"
+                     for aid, nm, reasons in bad[:5])
     if log:
-        log(f"⚠️ {episode} 有 {len(bad)} 条状态资产写到了别的主体，"
-            f"它们拿不到对应的参考图：{lines}")
+        log(f"⚠️ {episode} 有 {len(bad)} 条状态资产的父级/参考依赖不完整：{lines}")
     diagnose.record(pj.root, diagnose.warn(
         "ASSET_SCOPE",
-        f"{episode} 有 {len(bad)} 条状态资产的描述里写到了别的主体："
+        f"{episode} 有 {len(bad)} 条状态资产的父级/参考依赖不完整："
         + lines + ("…" if len(bad) > 5 else "")
-        + "。一条状态资产只能挂一个父，写进来的别人拿不到参考图，"
-          "模型只能自己编。多主体的画面由环节6 把几条资产一起绑给故事板。",
+        + "。single 必须有唯一父资产且通常只参考父资产；composite 没有父资产，"
+          "必须参考至少两个真实来源资产。",
         stage="stage:s4", target=f"{episode}:资产越界"))
     return bad
 
@@ -981,7 +1097,7 @@ def asset_layers(tasks: list) -> list:
 
 
 def assets_used_by(pj: Project, episodes_wanted: list) -> set:
-    """这几集实际用到哪些资产（含状态资产的父资产）。
+    """这几集实际用到哪些资产（含 single 的父资产和 composite 的全部来源）。
 
     资产**表**是全剧的（skill：第 8 集才砸毁的房间也要在环节1 进演化图，
     否则资产库中途返工）。但**出图**没必要一上来就出全剧几十张 ——
@@ -1002,12 +1118,17 @@ def assets_used_by(pj: Project, episodes_wanted: list) -> set:
         segs = a.get("used_by_segs") or []
         if any(str(s).split("-")[0] in want_ep for s in segs):
             used.add(aid)
-    # 状态资产要连父资产一起出，否则没有身份基准
-    for aid in list(used):
-        p = (all_assets.get(aid) or {}).get("parent_asset_id")
-        while p and p in all_assets and p not in used:
-            used.add(p)
-            p = (all_assets.get(p) or {}).get("parent_asset_id")
+    # 依赖闭包：single 要连父资产一起出；composite 要先出完全部来源资产。
+    # 来源本身还可能是状态资产，所以用队列一直追到底。
+    queue = list(used)
+    while queue:
+        a = all_assets.get(queue.pop(0)) or {}
+        deps = _ordered_asset_refs([a.get("parent_asset_id")],
+                                   a.get("reference_assets") or [])
+        for dep in deps:
+            if dep in all_assets and dep not in used:
+                used.add(dep)
+                queue.append(dep)
     # 环节6 的绑定里出现过的也算（有些资产 used_by_segs 可能没填全）
     for ep in want_ep:
         for b in (pj.stage_data("s6_binding", ep) or {}).get("bindings", []):
@@ -1066,7 +1187,14 @@ def _build_tasks(pj: Project, params: dict) -> dict:
             noprompt.append(f"{a['asset_id']} {a.get('name', '')}".strip())
             continue
         ap = aprompts[a["asset_id"]]
-        bad = [str(r) for r in (ap.get("reference_assets") or []) if r not in amap]
+        # single 的唯一父资产排第一；composite 没有父资产，直接保留全部来源引用。
+        # 三层合并兼容旧 s5 只写一张的情况，并保留 s5 根据最终提示词补充的引用。
+        kind = _state_type(a)
+        parent = str(a.get("parent_asset_id") or "") if kind == "single" else ""
+        refs = _ordered_asset_refs([parent], a.get("reference_assets") or [],
+                                   ap.get("reference_assets") or [],
+                                   exclude=a["asset_id"])
+        bad = [str(r) for r in refs if r not in amap]
         if bad:
             ghost[a["asset_id"]] = bad
         asset_tasks.append({
@@ -1081,7 +1209,7 @@ def _build_tasks(pj: Project, params: dict) -> dict:
             "reference_images": [
                 {"image_n": i + 1, "asset_id": rid,
                  "file_ref": asset_output_rel(amap[rid]) if rid in amap else ""}
-                for i, rid in enumerate(ap.get("reference_assets", []))
+                for i, rid in enumerate(refs)
             ],
             "params": {"size": ap.get("size") or params.get("image_size", "1024x1536")},
             "output": asset_output_rel(a),

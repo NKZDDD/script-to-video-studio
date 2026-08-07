@@ -118,6 +118,7 @@ def assets(pj: Project) -> dict:
             "category": cat,
             "category_cn": _CAT_CN.get(cat, cat or "未分类"),
             "name": a.get("name", ""),
+            "state_type": a.get("state_type", ""),
             "parent": a.get("parent_asset_id") or "",
             "decision": a.get("decision", ""),
             "decision_reason": a.get("decision_reason", ""),
