@@ -17,7 +17,7 @@ import json
 import os
 from typing import Optional
 
-from . import diagnose, episodes as _eps, ledger, stages as S
+from . import diagnose, episodes as _eps, ledger, promptfile, stages as S
 from .store import Project
 
 _CAT_CN = {
@@ -28,16 +28,18 @@ _CAT_CN = {
 _CAT_ORDER = ["identity", "group", "creature", "environment", "prop", "state"]
 
 
-def _text(pj: Project, rel: str, limit: int = 0) -> dict:
+def _text(pj: Project, rel: str, limit: int = 0, edits: Optional[dict] = None) -> dict:
+    # edits 由调用方一次算好传进来：算一次要按文件哈希，几十条挨个算太浪费
+    ed = (edits or {}).get((rel or "").replace("\\", "/"))
     p = pj.p(*rel.split("/"))
     if not os.path.isfile(p):
-        return {"rel": rel, "exists": False, "text": "", "chars": 0}
+        return {"rel": rel, "exists": False, "text": "", "chars": 0, "edited": None}
     try:
         with open(p, "r", encoding="utf-8-sig") as f:
             t = f.read()
     except OSError:
-        return {"rel": rel, "exists": True, "text": "", "chars": 0}
-    return {"rel": rel, "exists": True, "chars": len(t),
+        return {"rel": rel, "exists": True, "text": "", "chars": 0, "edited": ed}
+    return {"rel": rel, "exists": True, "chars": len(t), "edited": ed,
             "text": t[:limit] if limit and len(t) > limit else t}
 
 
@@ -100,6 +102,7 @@ def assets(pj: Project) -> dict:
             prompts.setdefault(ap.get("asset_id"), ap)
     reg = {r.get("id"): r for r in pj.registry("asset")}
     spend = _spend_index(pj)
+    edits = promptfile.ledger(pj)          # 哪些提示词是人在页面上改过的
 
     out = []
     for aid in order:
@@ -127,7 +130,7 @@ def assets(pj: Project) -> dict:
             "segments": segs,
             "seg_count": len(segs),
             "image": img,
-            "prompt": _text(pj, f"03_提示词/资产生产提示词/{pf}"),
+            "prompt": _text(pj, f"03_提示词/资产生产提示词/{pf}", edits=edits),
             # 出这张图时要喂进去的参考图（状态资产靠它继承父资产的身份）
             "refs": [{"image_n": r.get("image_n"), "asset_id": r.get("asset_id"),
                       "file": _file(pj, r.get("file_ref", ""))}
@@ -245,6 +248,7 @@ def tasks(pj: Project, episode: str = "") -> dict:
     t = pj.tasks()
     spend = _spend_index(pj)
     _, amap, _ = _merged_assets(pj)
+    edits = promptfile.ledger(pj)          # 哪些提示词是人在页面上改过的
     fails = {}
     for f in diagnose.load(pj.root):
         fails.setdefault(str(f.get("target", "")), f)
@@ -279,7 +283,7 @@ def tasks(pj: Project, episode: str = "") -> dict:
                 "episode": ep or "、".join(it.get("episodes") or []) or "全剧共享",
                 "name": (amap.get(k) or {}).get("name", ""),
                 # —— 怎么做的 ——
-                "prompt": _text(pj, it.get("prompt_ref", "")),
+                "prompt": _text(pj, it.get("prompt_ref", ""), edits=edits),
                 "refs": [{"image_n": x.get("image_n"), "asset_id": x.get("asset_id"),
                           "file": _file(pj, x.get("file_ref", ""))}
                          for x in (it.get("reference_images") or [])],

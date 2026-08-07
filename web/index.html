@@ -1408,8 +1408,7 @@ function assetDetail(a) {
     <b class="muted">出这张图要喂的参考图</b>${refs}
     ${a.identity_anchors ? `<div style="margin-top:8px"><b class="muted">身份锚点（不许改的）</b><div style="font-size:12px;line-height:1.7">${esc(String(a.identity_anchors))}</div></div>` : ''}
     ${a.appearance ? `<div style="margin-top:8px"><b class="muted">外观（环节8 会原文引用）</b><div style="font-size:12px;line-height:1.7">${esc(a.appearance)}</div></div>` : ''}
-    ${a.prompt.exists ? `<div style="margin-top:8px"><b class="muted">生产提示词（${a.prompt.chars} 字 · ${esc(a.prompt.rel)}）</b>
-      <pre class="log" style="max-height:220px">${esc(a.prompt.text)}</pre></div>` : ''}
+    ${promptBlock(a.prompt, '生产提示词')}
   </div>`;
 }
 
@@ -1858,15 +1857,62 @@ function taskRow(r) {
       ${r.output.exists && /\.mp4$/i.test(r.output.rel)
         ? `<video src="${fileUrl(r.output.rel)}" controls preload="metadata"
             style="width:220px;border-radius:6px;margin-top:6px"></video>` : ''}
-      ${r.prompt.exists ? `<div style="margin-top:8px"><b class="muted">发出去的提示词（${
-        r.prompt.chars} 字 · ${esc(r.prompt.rel)}）</b>
-        <pre class="log" style="max-height:220px">${esc(r.prompt.text)}</pre></div>`
+      ${r.prompt.exists ? promptBlock(r.prompt, '发出去的提示词')
         : '<div class="alert warn" style="margin-top:8px">提示词文件不在 —— 先跑对应的文字环节</div>'}
     </div></div>`;
 }
 $('#tkRefresh').onclick = () => renderTasks(true);
 $('#tkEp').onchange = () => renderTasks(true);
 $('#tkOnlyBad').onchange = () => renderTasks(false);
+
+// ---------- 「发出去的那份提示词」就地改
+// 跟下面的「模板编辑器」是两回事：模板管**以后怎么写**，这里管**这一条实际发什么**。
+// 出图被安全策略拦下、某个词模型不认 —— 都是单条的毛病，为它重跑一遍环节5
+// 既慢又会把同批其它条一起重写。改完立刻生效（worker 是出图那一刻才读文件的）。
+function promptBlock(p, title) {
+  if (!p || !p.exists) return '';
+  const id = 'pf' + Math.random().toString(36).slice(2, 9);
+  return `<div style="margin-top:8px" data-pf="${esc(p.rel)}" id="${id}">
+    <b class="muted">${title}（${p.chars} 字 · ${esc(p.rel)}）</b>
+    ${p.edited ? `<span class="chip on" title="重跑环节5/8 会覆盖它，覆盖前会先备份并在日志里说一声"
+       >手改过 ${esc(p.edited.at)}</span>` : ''}
+    <pre class="log" style="max-height:220px">${esc(p.text)}</pre>
+    <div class="row" style="margin-top:4px"><button class="btn ghost sm" data-pfedit>改这一条</button></div>
+  </div>`;
+}
+// 事件委托：这些块是随视图重绘的，逐个绑定会在重绘后失效
+document.addEventListener('click', async ev => {
+  const btn = ev.target.closest('[data-pfedit],[data-pfsave],[data-pfcancel]');
+  if (!btn) return;
+  const box = btn.closest('[data-pf]');
+  const rel = box.dataset.pf;
+  const pre = box.querySelector('pre');
+  if (btn.hasAttribute('data-pfedit')) {
+    const ta = document.createElement('textarea');
+    ta.className = 'log'; ta.style.cssText = 'width:100%;min-height:220px;font-size:12px';
+    ta.value = pre.textContent;
+    pre.replaceWith(ta);
+    btn.parentElement.innerHTML =
+      `<button class="btn sm" data-pfsave>保存</button>
+       <button class="btn ghost sm" data-pfcancel>取消</button>
+       <span class="muted">改完直接去「生产」点「补失败」重出这一条，不用重跑文字环节。
+       重跑环节5/8 会覆盖它（覆盖前自动备份）。</span>`;
+    ta.focus();
+    return;
+  }
+  // 取消：本来就没改数据，从缓存重画就行，不用再拉一次
+  if (btn.hasAttribute('data-pfcancel')) { renderTasks(false); renderExplorer(); return; }
+  const ta = box.querySelector('textarea');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    await api.post('/api/prompt_file/save', {project_root: PROJ, rel, text: ta.value});
+    EXP = null;                    // 缓存里还是旧正文，必须作废重拉
+    renderTasks(true); renderExplorer();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '保存';
+    alert('没存上：' + e.message);
+  }
+});
 
 // ---------- 提示词模板编辑器（全局一份、每个项目一份，共用这一套）
 // scope=global  设置页，所有剧共用的底子

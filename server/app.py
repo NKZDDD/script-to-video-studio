@@ -389,6 +389,11 @@ def api_get(path: str, q: dict) -> dict:
         pj = Project(q["root"][0])
         return explorer.tasks(pj, (q.get("episode") or [""])[0])
 
+    if path == "/api/prompt_file":
+        """读一条实际发出去的提示词（资产/故事板/视频），给页面上的编辑框。"""
+        from core import promptfile
+        return promptfile.read_one(Project(q["root"][0]), (q.get("rel") or [""])[0])
+
     if path == "/api/providers/status":
         """服务商加载报告：哪几家、从哪儿来、有没有加载失败的插件。"""
         from core import providers as _pv
@@ -461,6 +466,17 @@ def api_post(path: str, body: dict) -> dict:
         root = str(body.get("project_root") or "")
         return _pt.reset(body["name"], pj=Project(root) if root else None,
                          scope=body.get("scope", "global"))
+
+    if path == "/api/prompt_file/save":
+        """改这一条实际发出去的提示词。
+
+        不做内容校验：这是人工兜底的口子（出图被安全策略拦、某个词模型不认），
+        人比规则清楚。只挡空内容和越界路径。
+        改完立刻生效 —— worker 是出图那一刻才读文件的，不用重跑文字环节。
+        """
+        from core import promptfile
+        return promptfile.save_one(proj_of(body), body.get("rel", ""),
+                                   body.get("text", ""))
 
     if path == "/api/providers/reload":
         """重新扫描服务商（内置 + 插件目录），不用重启。

@@ -390,12 +390,28 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     # s5 额外把提示词正文落成 txt，便于人工查看与执行器读取
     if stage_id == "s5":
         for ap in out.get("asset_prompts", []):
-            write_text(pj.p("03_提示词", "资产生产提示词", ap.get("filename") or f"{ap['asset_id']}_PROMPT.txt"),
-                       ap.get("prompt", ""))
+            fn = ap.get("filename") or f"{ap['asset_id']}_PROMPT.txt"
+            write_prompt_txt(pj, f"03_提示词/资产生产提示词/{fn}",
+                             ap.get("prompt", ""), log)
     if stage_id in ("s5", "s8"):
         build_tasks(pj, params)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode)
     return out
+
+
+def write_prompt_txt(pj: Project, rel: str, text: str, log=None) -> None:
+    """环节5/8 落盘一份提示词 txt。
+
+    走这里而不是直接 write_text，是为了在覆盖**手改过**的那份之前先备份 +
+    说一声。人在页面上改好一条、隔天重跑一次环节8 就被悄悄盖掉 ——
+    这种事不报出来，等出图不对劲再回头找，原文已经没了。
+    """
+    from . import promptfile
+    try:
+        promptfile.guard_overwrite(pj, rel, text, log)
+    except Exception:                                   # noqa: BLE001
+        pass                                            # 备份失败不该挡住主流程
+    write_text(pj.p(*rel.split("/")), text)
 
 
 def s8_done_segments(pj: Project, episode: str = "") -> set:
@@ -719,10 +735,10 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     build_user = s8_user_builder(pj, params, data, episode)
 
     def on_item(sid: str, c: dict) -> None:
-        write_text(pj.p("03_提示词", "故事板提示词", f"{sid}_STORYBOARD_PROMPT.txt"),
-                   c.get("storyboard_prompt", ""))
-        write_text(pj.p("03_提示词", "视频提示词", f"{sid}_VIDEO_PROMPT.txt"),
-                   c.get("video_prompt", ""))
+        write_prompt_txt(pj, f"03_提示词/故事板提示词/{sid}_STORYBOARD_PROMPT.txt",
+                         c.get("storyboard_prompt", ""), log)
+        write_prompt_txt(pj, f"03_提示词/视频提示词/{sid}_VIDEO_PROMPT.txt",
+                         c.get("video_prompt", ""), log)
 
     result, failed, cancelled = run_segmented(
         pj, stage_id="s8", out_name="s8_compile", key="compiled", segs=segs,
