@@ -46,19 +46,34 @@ STAGES = [
 ]
 
 
-def prompt_files(name: str) -> tuple:
-    """(内置模板路径, 改写模板路径)。改写的存在就用改写的。
+def project_prompt_dir(pj: Project) -> str:
+    """这一部剧自己的提示词模板目录。
 
-    改写放在数据目录而不是程序目录：内置模板打包进 exe 之后是只读的，
-    而且程序更新会覆盖它 —— 改在那儿等于白改。
+    为什么要分两层：全局那份管的是「这套体系怎么做事」，而每一部剧有自己的
+    语言（印尼语剧本 vs 中文）、题材、基础设定 —— 这些只该影响这一部，
+    不该改全局。所以项目级放项目目录里，跟着项目走、跟着项目备份。
+    """
+    return pj.p("00_项目说明", "提示词模板")
+
+
+def prompt_files(name: str, pj: Optional[Project] = None) -> tuple:
+    """(内置, 全局改写, 本剧改写)。后面的盖前面的。
+
+    改写不放程序目录：内置模板打包进 exe 之后是只读的，而且程序更新会覆盖它。
+    全局改写在数据目录，项目改写在项目目录。
     """
     return (os.path.join(PROMPT_DIR, f"{name}.md"),
-            os.path.join(paths.prompts_dir(), f"{name}.md"))
+            os.path.join(paths.prompts_dir(), f"{name}.md"),
+            os.path.join(project_prompt_dir(pj), f"{name}.md") if pj else "")
 
 
-def load_prompt(name: str) -> str:
-    builtin, custom = prompt_files(name)
-    return read_text(custom if os.path.isfile(custom) else builtin)
+def load_prompt(name: str, pj: Optional[Project] = None) -> str:
+    """取生效的模板：本剧改写 > 全局改写 > 内置。"""
+    builtin, glob, proj = prompt_files(name, pj)
+    for p in (proj, glob):
+        if p and os.path.isfile(p):
+            return read_text(p)
+    return read_text(builtin)
 
 
 def render(tpl: str, mapping: dict) -> str:
@@ -271,8 +286,8 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         # 那就是空的 —— 环节7 会自己定轴，和以前一样。
         "AXIS": jd((data.get("s3_states") or {}).get("axis_convention") or {}),
     }
-    system = load_prompt("_common")
-    user = render(load_prompt(tpl_name), mapping)
+    system = load_prompt("_common", pj)
+    user = render(load_prompt(tpl_name, pj), mapping)
     tag = f"{episode} " if episode else "全剧 "
     log(f"{tag}提示词 {len(user)} 字，调用 {llm.model}")
     def _usage(u, _st=stage_id, _ep=episode):
@@ -429,7 +444,7 @@ def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
         try:
             with LLM_GATE.slot():
                 out = llm.json_call(
-                    system=load_prompt("_common"), user=build_user(seg),
+                    system=load_prompt("_common", pj), user=build_user(seg),
                     required=required,
                     log=lambda m, _s=sid: log(f"    {_s}: {m}"), cancel=cancel,
                     on_usage=_usage_of(pj, stage_id, episode, sid))
@@ -488,7 +503,7 @@ def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     s3 = data.get("s3_states") or {}
     states = {s["id"]: s for s in s3.get("segment_states", [])}
     binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
-    tpl = load_prompt("s7_shots")
+    tpl = load_prompt("s7_shots", pj)
     axis = s3.get("axis_convention")
 
     def build_user(seg: dict) -> str:
@@ -539,7 +554,7 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
     shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
     assets = (data.get("s4_assets") or {}).get("assets", [])
-    tpl = load_prompt("s8_compile")
+    tpl = load_prompt("s8_compile", pj)
 
     # 环节7 是按段跑的，可能有几段没排出分镜（比如空回复重试完还是空）。
     # 那几段必须跳过：拿空分镜硬编，会出一份没有镜头依据的提示词，

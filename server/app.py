@@ -349,11 +349,29 @@ def api_get(path: str, q: dict) -> dict:
         return dict(paths.snapshot(), projects_dir=cfg["projects_dir"])
 
     if path == "/api/prompts":
-        """提示词模板：不带 name 就返回清单，带了就返回那一份的全文。"""
+        """提示词模板。
+
+        scope=global   全局基础模板（设置页）
+        scope=project  这一部剧自己的（要带 root）—— 语言、题材、基础设定这类
+                       只影响一部剧的要求写在这里，不该动全局
+        不带 name 返回清单，带了返回那一份。
+        """
         from core import prompts as _pt
         n = (q.get("name") or [""])[0]
-        return _pt.read(n) if n else {"items": _pt.catalog(),
-                                      "dir": paths.prompts_dir()}
+        scope = (q.get("scope") or ["global"])[0]
+        root = (q.get("root") or [""])[0]
+        pj = Project(root) if root else None
+        if n:
+            return _pt.read(n, pj, scope)
+        return {"items": _pt.catalog(pj), "scope": scope,
+                "global_dir": paths.prompts_dir(),
+                "project_dir": S.project_prompt_dir(pj) if pj else ""}
+
+    if path == "/api/tasks":
+        """本项目的任务明细 —— 全部读磁盘，不用跑起来也能看。"""
+        from core import explorer
+        pj = Project(q["root"][0])
+        return explorer.tasks(pj, (q.get("episode") or [""])[0])
 
     if path == "/api/providers/status":
         """服务商加载报告：哪几家、从哪儿来、有没有加载失败的插件。"""
@@ -416,12 +434,17 @@ def api_post(path: str, body: dict) -> dict:
     if path == "/api/prompts/save":
         """存改写版。校验不过就不存 —— 模板改坏了要几百次调用之后才看得出来。"""
         from core import prompts as _pt
+        root = str(body.get("project_root") or "")
         return _pt.save(body["name"], body.get("text", ""),
-                        force=bool(body.get("force")))
+                        force=bool(body.get("force")),
+                        pj=Project(root) if root else None,
+                        scope=body.get("scope", "global"))
 
     if path == "/api/prompts/reset":
         from core import prompts as _pt
-        return _pt.reset(body["name"])
+        root = str(body.get("project_root") or "")
+        return _pt.reset(body["name"], pj=Project(root) if root else None,
+                         scope=body.get("scope", "global"))
 
     if path == "/api/providers/reload":
         """重新扫描服务商（内置 + 插件目录），不用重启。

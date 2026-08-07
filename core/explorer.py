@@ -13,10 +13,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional
 
-from . import episodes as _eps, ledger, stages as S
+from . import diagnose, episodes as _eps, ledger, stages as S
 from .store import Project
 
 _CAT_CN = {
@@ -222,6 +223,87 @@ def segments(pj: Project, episode: str) -> dict:
             "axis_convention": s3.get("axis_convention") or {},
             "continuity_bad": [c for c in s3.get("continuity_check", [])
                                if c.get("consistent") is False]}
+
+
+_TASK_KINDS = [("asset_tasks", "asset", "资产图", "环节5b"),
+               ("storyboard_tasks", "storyboard", "故事板", "环节9"),
+               ("video_tasks", "video", "分段视频", "环节10")]
+
+
+def tasks(pj: Project, episode: str = "") -> dict:
+    """三类生产任务的完整状态 —— **全部从磁盘读，不用跑起来也能看**。
+
+    以前只能在「生产」页看正在跑的那个 job 的明细，而 job 是内存态：
+    服务一重启就没了，想知道上次那张图是哪家出的、用的什么提示词、
+    花了多少，只能自己去翻文件夹和 JSON。这里把这些接起来：
+
+      怎么做的 = tasks.json 的提示词/参考图/参数
+      做了什么 = 注册表（哪家/什么模型）+ 执行日志（什么时候）
+                 + 用量账本（花了多少）+ 产物文件本身（多大、什么时候写的）
+      没做成   = failures.json 里的诊断
+    """
+    t = pj.tasks()
+    spend = _spend_index(pj)
+    _, amap, _ = _merged_assets(pj)
+    fails = {}
+    for f in diagnose.load(pj.root):
+        fails.setdefault(str(f.get("target", "")), f)
+    logs = {}
+    p = pj.p("07_检查与记录", "execution_log.jsonl")
+    if os.path.isfile(p):
+        with open(p, "r", encoding="utf-8-sig") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("id"):
+                    logs[str(e["id"])] = e        # 同一个 id 取最后一次
+
+    groups = []
+    for key, kind, label, stage in _TASK_KINDS:
+        reg = {str(r.get("id")): r for r in pj.registry(kind)}
+        rows = []
+        for it in (t.get(key) or []):
+            k = str(it.get("key", ""))
+            ep = it.get("episode") or ""
+            if episode and key != "asset_tasks" and ep != episode:
+                continue
+            out = _file(pj, it.get("output", ""))
+            r, lg = reg.get(k, {}), logs.get(k, {})
+            rows.append({
+                "key": k,
+                "episode": ep or "、".join(it.get("episodes") or []) or "全剧共享",
+                "name": (amap.get(k) or {}).get("name", ""),
+                # —— 怎么做的 ——
+                "prompt": _text(pj, it.get("prompt_ref", "")),
+                "refs": [{"image_n": x.get("image_n"), "asset_id": x.get("asset_id"),
+                          "file": _file(pj, x.get("file_ref", ""))}
+                         for x in (it.get("reference_images") or [])],
+                "params": it.get("params") or {},
+                "storyboard_ref": it.get("storyboard_ref", ""),
+                # —— 做了什么 ——
+                "output": out,
+                "done": out["exists"],
+                "provider": r.get("provider", ""),
+                "model": r.get("model", ""),
+                "at": lg.get("at", "") or out["at"],
+                "spend": spend.get(k, {}),
+                # —— 没做成 ——
+                "fail": fails.get(k, {}),
+            })
+        groups.append({
+            "key": key, "kind": kind, "label": label, "stage": stage,
+            "total": len(rows),
+            "done": sum(1 for x in rows if x["done"]),
+            "failed": sum(1 for x in rows if x["fail"] and not x["done"]),
+            "rows": rows,
+        })
+    return {"episode": episode, "groups": groups,
+            "has_tasks": any(g["total"] for g in groups)}
 
 
 def view(pj: Project, episode: str = "") -> dict:

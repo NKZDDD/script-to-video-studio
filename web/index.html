@@ -249,6 +249,16 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <h2>这部剧到现在花了多少 <span class="tag">跨多次续跑累计，重启不丢</span></h2>
     <div id="usageBox" class="muted">还没有用量记录</div>
   </div>
+  <div class="card" id="ptProjCard">
+    <h2>本剧的提示词 <span class="tag">只影响这一部剧：语言、题材、基础设定这类要求写在这里</span></h2>
+    <div id="ptProject"></div>
+    <p class="muted" style="margin:8px 0 0">
+      继承关系：<b>内置 → 全局基础（设置页）→ 本剧</b>，下面的盖上面的。<br>
+      这里改的东西跟着项目走、跟着项目备份，不影响别的剧。
+      典型用法：这部剧是印尼语的、是 3D 漫剧不是真人短剧、有特定的称谓和禁忌 ——
+      写在这儿，别改全局。
+    </p>
+  </div>
   <div class="card">
     <h2>项目参数 <span class="tag">影响环节 2/7/8 的编译结果</span></h2>
     <div class="grid g3" id="paramBox"></div>
@@ -275,6 +285,18 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <button class="btn ghost sm" id="rebuildTasks">重建 tasks.json</button>
       <span class="muted">环节 4/5/6/8 产物变化后点这里</span>
     </div>
+  </div>
+  <div class="card">
+    <h2>本项目的任务明细
+      <span class="tag">读磁盘，不用跑起来也能看：每一项怎么做的、谁做的、做成没有</span>
+    </h2>
+    <div class="row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap;align-items:center">
+      <label style="margin:0">集 <select id="tkEp" style="width:auto"></select></label>
+      <label style="margin:0"><input type="checkbox" id="tkOnlyBad"> 只看没做成的</label>
+      <span class="sp"></span>
+      <button class="btn ghost sm" id="tkRefresh">刷新</button>
+    </div>
+    <div id="tkBody"><p class="muted">打开项目后看这里</p></div>
   </div>
   <div class="card">
     <h2>运行中的任务 <span class="tag">全局视图 · 含其它项目；切项目不会中断</span></h2>
@@ -426,19 +448,8 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     </div>
   </div>
   <div class="card">
-    <h2>提示词模板 <span class="tag">每个环节发给模型的原文，可以改；改坏了保存时会拦</span></h2>
-    <div class="row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap;align-items:center">
-      <select id="ptSel" style="min-width:300px"></select>
-      <span class="muted" id="ptState"></span>
-      <span class="sp"></span>
-      <button class="btn ghost sm" id="ptDiff">看内置原文</button>
-      <button class="btn ghost sm" id="ptReset">恢复内置</button>
-      <button class="btn sm" id="ptSave">保存</button>
-    </div>
-    <div id="ptMeta" class="muted" style="margin-bottom:6px"></div>
-    <textarea id="ptText" spellcheck="false"
-      style="min-height:340px;font-size:12px;line-height:1.6"></textarea>
-    <div id="ptMsg" style="margin-top:8px"></div>
+    <h2>全局基础提示词 <span class="tag">所有剧共用的底子；某一部剧的特殊要求去「流程」页改</span></h2>
+    <div id="ptGlobal"></div>
     <p class="muted" style="margin:8px 0 0">
       <code>{{XXX}}</code> 是程序往里填数据的口子（剧本、上一环节的产物、参数）。
       <b>必需的那几个删了会被拦住</b> —— 删了模型就收不到对应的输入，而这不会立刻报错，
@@ -568,7 +579,7 @@ $$('nav button').forEach(b => b.onclick = () => {
   $$('main > section').forEach(s => s.classList.add('hide'));
   $('#t-' + b.dataset.t).classList.remove('hide');
   if (b.dataset.t === 'out') { EXP = null; vwSwitch(VW); }
-  if (b.dataset.t === 'gen') refreshProject();
+  if (b.dataset.t === 'gen') { refreshProject(); renderTasks(true).catch(() => {}); }
 });
 
 // ---------- bootstrap
@@ -578,7 +589,7 @@ async function boot() {
   renderProjects();
   renderProviders();
   renderDefaults();
-  renderPromptList().catch(() => {});
+  PT_GLOBAL.list().catch(() => {});
   renderPlugins(true).catch(() => {});
   renderPaths();
   renderLimits();
@@ -623,6 +634,8 @@ async function refreshProject() {
   renderGen(d.tasks_summary);
   renderHealth();
   renderUsage();
+  PT_PROJECT.list().catch(() => {});      // 本剧的提示词跟着项目走
+  renderTasks(true).catch(() => {});      // 任务明细读磁盘，随时可看
 }
 
 // ---------- 集清单
@@ -1678,81 +1691,231 @@ $('#npDrop').addEventListener('drop', e => addFiles(e.dataTransfer.files));
 $('#npClear').onclick = () => { QUEUE = []; renderQueue(); };
 
 // ---------- 并发闸门
-// ---------- 提示词模板
-let PT = null;              // 当前打开的那一份
-async function renderPromptList() {
-  const d = await api.get('/api/prompts', {});
-  $('#ptSel').innerHTML = d.items.map(x =>
-    `<option value="${esc(x.name)}">${x.stage_no ? '环节' + x.stage_no + '　' : '　　　'}${
-      esc(x.label)}　（${esc(x.name)}.md${x.customized ? ' · 已改写' : ''}）</option>`).join('');
-  await openPrompt($('#ptSel').value);
-}
-async function openPrompt(name) {
-  PT = await api.get('/api/prompts', {name});
-  $('#ptText').value = PT.text;
-  $('#ptState').innerHTML = PT.customized
-    ? '<span class="pill s-ok">已改写</span>'
-    : '<span class="muted">用的是内置版</span>';
-  const v = (list, cls) => list.map(x =>
-    `<span class="chip ${cls}">{{${esc(x)}}}</span>`).join('');
-  $('#ptMeta').innerHTML =
-    `必需占位符 ${v(PT.required_vars, 'on') || '（无）'}　`
-    + `其余可用 ${v(PT.vars.filter(x => !PT.required_vars.includes(x)), '') || '（无）'}`
-    + (PT.required_fields.length
-       ? `<br>必需输出字段 <code>${esc(PT.required_fields.join('、'))}</code>` : '')
-    + `<br><span class="muted">内置：${esc(PT.builtin_path)}</span>`;
-  $('#ptMsg').innerHTML = '';
-}
-$('#ptSel').onchange = e => openPrompt(e.target.value).catch(er => alert(String(er)));
-function ptShow(r) {
-  $('#ptMsg').innerHTML =
-    (r.errors || []).map(x => `<div class="alert err">${esc(x)}</div>`).join('')
-    + (r.warnings || []).map(x => `<div class="alert warn">${esc(x)}</div>`).join('');
-  return !(r.errors || []).length;
-}
-$('#ptSave').onclick = async () => {
-  const text = $('#ptText').value;
-  const r = await api.post('/api/prompts/save', {name: PT.name, text});
-  if (r.error) return alert(r.error);
-  if (!ptShow(r)) {
-    // 校验没过：给一条明路，而不是让人干瞪眼
-    if (!confirm('这份模板有上面标红的问题，存下去很可能白跑几百次调用。\n\n'
-                 + '确定还是要存吗？（一般应该先按提示改）')) return;
-    const f = await api.post('/api/prompts/save', {name: PT.name, text, force: true});
-    if (f.error) return alert(f.error);
-    ptShow(f);
+// ---------- 本项目的任务明细（读磁盘，不依赖正在跑的 job）
+// 以前只能看当前 job 的明细，而 job 是内存态：服务一重启就没了，
+// 想知道上次那张图是哪家出的、用的什么提示词、花了多少，只能自己翻文件夹。
+let TK = null;
+async function renderTasks(fresh) {
+  if (!PROJ) return;
+  const box = $('#tkBody');
+  if (fresh || !TK) {
+    try { TK = await api.get('/api/tasks', {root: PROJ, episode: $('#tkEp').value || ''}); }
+    catch (e) { box.innerHTML = `<div class="alert err">${esc(String(e))}</div>`; return; }
   }
-  await renderPromptList();
-  $('#ptSel').value = PT.name;
-  await openPrompt(PT.name);
-  $('#ptMsg').innerHTML += '<div class="alert ok">已保存。下一次跑到这个环节就用新的了。</div>';
-};
-$('#ptReset').onclick = async () => {
-  if (!PT.customized) return alert('这份现在用的就是内置版，没什么可恢复的。');
-  if (!confirm(`确定丢掉改写、恢复内置版？\n\n会删掉：\n${PT.custom_path}`)) return;
-  const r = await api.post('/api/prompts/reset', {name: PT.name});
-  if (r.error) return alert(r.error);
-  await renderPromptList();
-  $('#ptSel').value = PT.name;
-  await openPrompt(PT.name);
-  $('#ptMsg').innerHTML = '<div class="alert ok">已恢复内置版。</div>';
-};
-$('#ptDiff').onclick = () => {
-  const cur = $('#ptText').value;
-  if (cur === PT.builtin) return alert('和内置版一模一样。');
-  const a = PT.builtin.split('\n'), b = cur.split('\n');
-  const out = [];
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    if (a[i] !== b[i]) {
-      if (a[i] !== undefined) out.push(`- ${i + 1}  ${a[i]}`);
-      if (b[i] !== undefined) out.push(`+ ${i + 1}  ${b[i]}`);
+  const eps = (EPS.episodes || []).map(e => e.episode);
+  $('#tkEp').innerHTML = '<option value="">全部集</option>'
+    + eps.map(e => `<option${e === TK.episode ? ' selected' : ''}>${esc(e)}</option>`).join('');
+  if (!TK.has_tasks) {
+    box.innerHTML = '<p class="muted">还没有任务。任务是环节5 / 环节8 装配出来的 —— '
+      + '先把文字环节跑完，这里就有内容了。</p>';
+    return;
+  }
+  const bad = $('#tkOnlyBad').checked;
+  box.innerHTML = TK.groups.map(g => {
+    const rows = g.rows.filter(r => !bad || (!r.done));
+    if (!rows.length && bad) return '';
+    return `<div style="margin-bottom:14px">
+      <div class="steps"><div class="s ${g.done >= g.total && g.total ? 'full' : g.done ? '' : 'none'}">
+        ${esc(g.label)}（${esc(g.stage)}） ${g.done}/${g.total}
+        ${g.failed ? ` · <b style="color:#c0392b">${g.failed} 项没做成</b>` : ''}</div></div>
+      ${rows.map(taskRow).join('') || '<p class="muted">（这一类没有待办）</p>'}
+    </div>`;
+  }).join('');
+  document.querySelectorAll('#tkBody .segrow > .hd').forEach(el => {
+    el.onclick = () => el.parentElement.querySelector('.bd').classList.toggle('hide');
+  });
+}
+function taskRow(r) {
+  const lamp = (on, t, warn) =>
+    `<span class="chip ${on ? 'on' : (warn ? 'warn' : 'off')}">${t}</span>`;
+  const refBad = r.refs.filter(x => !x.file.exists).length;
+  const sp = r.spend || {};
+  return `<div class="segrow">
+    <div class="hd">
+      <b style="font-size:12px">${esc(r.key)}</b>
+      <span class="sname">${esc(r.name || r.episode)}</span>
+      <span>
+        ${lamp(r.prompt.exists, '提示词')}
+        ${r.refs.length ? lamp(!refBad, `参${r.refs.length - refBad}/${r.refs.length}`, true) : ''}
+        ${lamp(r.done, r.done ? '已出' : '未出', !r.done && r.fail.code)}
+        ${r.provider ? `<span class="chip">${esc(r.provider)}${
+          r.model ? '/' + esc(r.model) : ''}</span>` : ''}
+        ${r.at ? `<span class="muted" style="font-size:10px">${esc(r.at)}</span>` : ''}
+      </span>
+    </div>
+    <div class="bd hide">
+      ${r.fail && r.fail.code ? `<div class="alert err" style="margin:8px 0">
+        <b>${esc(r.fail.title || r.fail.code)}</b>
+        <div class="muted">去哪改：${esc(r.fail.where || '')}</div>
+        ${(r.fail.fix || []).map(f => `<div>· ${esc(f)}</div>`).join('')}
+        <pre class="log" style="max-height:120px;margin-top:6px">${esc(r.fail.raw || '')}</pre>
+      </div>` : ''}
+      <div class="kv" style="display:grid;grid-template-columns:80px 1fr;gap:4px 10px;
+           font-size:12px;line-height:1.7">
+        <b class="muted">范围</b><span>${esc(r.episode)}</span>
+        <b class="muted">输出</b><span>${r.output.exists
+          ? `<a href="${fileUrl(r.output.rel)}" target="_blank">${esc(r.output.rel)}</a>　${
+             Math.round(r.output.size / 1024)} KB　${esc(r.output.at)}`
+          : `<span class="muted">还没出</span>　${esc(r.output.rel)}`}</span>
+        <b class="muted">参数</b><span>${esc(JSON.stringify(r.params)) || '—'}</span>
+        ${r.provider ? `<b class="muted">谁做的</b><span>${esc(r.provider)}${
+          r.model ? ' / ' + esc(r.model) : ''}${r.at ? '　' + esc(r.at) : ''}</span>` : ''}
+        ${sp.calls ? `<b class="muted">花销</b><span>${sp.calls} 次调用${
+          sp.tokens ? ' · ' + sp.tokens + ' token' : ''}${
+          sp.seconds ? ' · ' + Math.round(sp.seconds) + ' 秒' : ''}</span>` : ''}
+      </div>
+      ${r.refs.length ? `<b class="muted">参考图（按这个顺序传给服务商）</b>
+        <div class="refstrip">${r.refs.map(x => `<div class="r">${
+          x.file.exists ? `<img src="${fileUrl(x.file.rel)}" loading="lazy">`
+                        : '<div class="miss">缺</div>'}<div>${esc(x.asset_id)}</div></div>`).join('')}
+        </div>` : '<div class="muted">无参考图</div>'}
+      ${r.output.exists && /\.(png|jpe?g|webp)$/i.test(r.output.rel)
+        ? `<div style="margin-top:6px"><a href="${fileUrl(r.output.rel)}" target="_blank">
+            <img src="${fileUrl(r.output.rel)}" style="width:200px;border-radius:6px;display:block"></a></div>`
+        : ''}
+      ${r.output.exists && /\.mp4$/i.test(r.output.rel)
+        ? `<video src="${fileUrl(r.output.rel)}" controls preload="metadata"
+            style="width:220px;border-radius:6px;margin-top:6px"></video>` : ''}
+      ${r.prompt.exists ? `<div style="margin-top:8px"><b class="muted">发出去的提示词（${
+        r.prompt.chars} 字 · ${esc(r.prompt.rel)}）</b>
+        <pre class="log" style="max-height:220px">${esc(r.prompt.text)}</pre></div>`
+        : '<div class="alert warn" style="margin-top:8px">提示词文件不在 —— 先跑对应的文字环节</div>'}
+    </div></div>`;
+}
+$('#tkRefresh').onclick = () => renderTasks(true);
+$('#tkEp').onchange = () => renderTasks(true);
+$('#tkOnlyBad').onchange = () => renderTasks(false);
+
+// ---------- 提示词模板编辑器（全局一份、每个项目一份，共用这一套）
+// scope=global  设置页，所有剧共用的底子
+// scope=project 流程页，只影响这一部剧（语言、题材、基础设定）
+function makePromptEditor(host, scope) {
+  const E = {scope, cur: null, host, list: async () => {}, open: async () => {}};
+  const root = document.querySelector('#' + host);
+  // 挂载点不在就安静退出：一个编辑器挂不上不该让整个页面的脚本停摆
+  if (!root) { console.warn('提示词编辑器挂载点不存在:', host); return E; }
+  const id = s => `${host}-${s}`;
+  const $$$ = s => document.querySelector(`#${id(s)}`);
+  root.innerHTML = `
+    <div class="row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="${id('sel')}" style="min-width:300px"></select>
+      <span class="muted" id="${id('state')}"></span>
+      <span class="sp"></span>
+      <button class="btn ghost sm" id="${id('diff')}">看差异</button>
+      <button class="btn ghost sm" id="${id('reset')}">恢复继承</button>
+      <button class="btn sm" id="${id('save')}">保存</button>
+    </div>
+    <div id="${id('meta')}" class="muted" style="margin-bottom:6px"></div>
+    <textarea id="${id('text')}" spellcheck="false"
+      style="min-height:300px;font-size:12px;line-height:1.6"></textarea>
+    <div id="${id('msg')}" style="margin-top:8px"></div>`;
+
+  const args = () => scope === 'project' ? {scope, root: PROJ} : {scope};
+
+  E.list = async () => {
+    if (scope === 'project' && !PROJ) {
+      document.querySelector('#' + host).innerHTML =
+        '<p class="muted">先打开一个项目</p>';
+      return;
     }
-  }
-  $('#ptMsg').innerHTML =
-    `<div class="muted" style="margin-bottom:4px">和内置版的差异（− 内置 / ＋ 现在）共 ${
-      out.length} 行：</div><pre class="log" style="max-height:300px">${
-      esc(out.join('\n'))}</pre>`;
-};
+    const d = await api.get('/api/prompts', args());
+    $$$('sel').innerHTML = d.items.map(x => {
+      const tag = scope === 'project'
+        ? (x.has_project ? ' · 本剧已改' : (x.has_global ? ' · 继承全局' : ''))
+        : (x.has_global ? ' · 已改写' : '');
+      return `<option value="${esc(x.name)}">${
+        x.stage_no ? '环节' + x.stage_no + '　' : '　　　'}${esc(x.label)}　（${
+        esc(x.name)}.md${tag}）</option>`;
+    }).join('');
+    await E.open($$$('sel').value);
+  };
+
+  E.open = async name => {
+    E.cur = await api.get('/api/prompts', {name, ...args()});
+    const c = E.cur;
+    $$$('text').value = c.text;
+    const chain = ['内置', c.has_global ? '<b>全局</b>' : '全局(无)',
+                   c.project_path ? (c.has_project ? '<b>本剧</b>' : '本剧(无)') : null]
+      .filter(Boolean).join(' → ');
+    const eff = {builtin: '内置', global: '全局', project: '本剧'}[c.effective];
+    $$$('state').innerHTML =
+      `<span class="chip ${c.effective === 'builtin' ? '' : 'on'}">当前生效：${eff}</span>`
+      + `<span class="muted" style="margin-left:6px">${chain}</span>`;
+    const v = (list, cls) => list.map(x =>
+      `<span class="chip ${cls}">{{${esc(x)}}}</span>`).join('');
+    $$$('meta').innerHTML =
+      `必需占位符 ${v(c.required_vars, 'on') || '（无）'}　`
+      + `其余可用 ${v(c.vars.filter(x => !c.required_vars.includes(x)), '') || '（无）'}`
+      + (c.required_fields.length
+         ? `<br>必需输出字段 <code>${esc(c.required_fields.join('、'))}</code>` : '')
+      + `<br><span class="muted">这一层存到：${esc(
+          scope === 'project' ? c.project_path : c.global_path)}</span>`;
+    $$$('msg').innerHTML = '';
+  };
+
+  const show = r => {
+    $$$('msg').innerHTML =
+      (r.errors || []).map(x => `<div class="alert err">${esc(x)}</div>`).join('')
+      + (r.warnings || []).map(x => `<div class="alert warn">${esc(x)}</div>`).join('');
+    return !(r.errors || []).length;
+  };
+
+  $$$('sel').onchange = e => E.open(e.target.value).catch(er => alert(String(er)));
+  $$$('save').onclick = async () => {
+    const text = $$$('text').value, name = E.cur.name;
+    const body = {name, text, scope, project_root: scope === 'project' ? PROJ : ''};
+    let r = await api.post('/api/prompts/save', body);
+    if (r.error) return alert(r.error);
+    if (!show(r)) {
+      // 校验没过：给一条明路，而不是让人干瞪眼
+      if (!confirm('这份模板有上面标红的问题，存下去很可能白跑几百次调用。\n\n'
+                   + '确定还是要存吗？（一般应该先按提示改）')) return;
+      r = await api.post('/api/prompts/save', {...body, force: true});
+      if (r.error) return alert(r.error);
+      show(r);
+    }
+    await E.list();
+    $$$('sel').value = name;
+    await E.open(name);
+    $$$('msg').innerHTML += `<div class="alert ok">已保存到${
+      scope === 'project' ? '本剧' : '全局'}。下一次跑到这个环节就用新的了。</div>`;
+  };
+  $$$('reset').onclick = async () => {
+    const c = E.cur, mine = scope === 'project' ? c.has_project : c.has_global;
+    if (!mine) return alert(`这一层本来就没有改写，现在用的是继承来的那份。`);
+    const p = scope === 'project' ? c.project_path : c.global_path;
+    if (!confirm(`确定丢掉这一层的改写？\n\n会删掉：\n${p}\n\n`
+                 + `删掉后回到它继承的那份（${scope === 'project' ? '全局或内置' : '内置'}）。`)) return;
+    const r = await api.post('/api/prompts/reset',
+                             {name: c.name, scope, project_root: scope === 'project' ? PROJ : ''});
+    if (r.error) return alert(r.error);
+    await E.list();
+    $$$('sel').value = c.name;
+    await E.open(c.name);
+    $$$('msg').innerHTML = '<div class="alert ok">已恢复成继承的那份。</div>';
+  };
+  $$$('diff').onclick = () => {
+    const c = E.cur, cur = $$$('text').value;
+    // 项目层比的是「它继承的那份」，全局层比的是内置 —— 比错基准看不出改了啥
+    const base = scope === 'project' ? c.inherited : c.builtin;
+    const baseName = scope === 'project' ? '继承的（全局或内置）' : '内置';
+    if (cur === base) return alert(`和${baseName}一模一样。`);
+    const a = base.split('\n'), b = cur.split('\n'), out = [];
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      if (a[i] !== b[i]) {
+        if (a[i] !== undefined) out.push(`- ${i + 1}  ${a[i]}`);
+        if (b[i] !== undefined) out.push(`+ ${i + 1}  ${b[i]}`);
+      }
+    }
+    $$$('msg').innerHTML =
+      `<div class="muted" style="margin-bottom:4px">和${baseName}的差异（− 原来 / ＋ 现在）共 ${
+        out.length} 行：</div><pre class="log" style="max-height:300px">${
+        esc(out.join('\n'))}</pre>`;
+  };
+  return E;
+}
+const PT_GLOBAL = makePromptEditor('ptGlobal', 'global');
+const PT_PROJECT = makePromptEditor('ptProject', 'project');
 
 // ---------- 服务商插件
 let PLUG = null;

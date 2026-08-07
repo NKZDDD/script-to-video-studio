@@ -47,45 +47,70 @@ def _spec(name: str) -> tuple:
     return 0, "所有环节共用的系统提示词", []
 
 
-def catalog() -> list:
-    """所有模板 + 各自的状态，给设置页列表用。"""
+def _paths(name: str, pj=None) -> tuple:
+    """(内置, 全局改写, 本剧改写) 三个路径 + 各自存不存在。"""
+    b, g, p = S.prompt_files(name, pj)
+    return b, g, p
+
+
+def _layers(name: str, pj=None) -> dict:
+    """三层各是什么状态，以及最终生效的是哪一层。"""
+    b, g, p = _paths(name, pj)
+    has_g, has_p = os.path.isfile(g), bool(p) and os.path.isfile(p)
+    eff = "project" if has_p else ("global" if has_g else "builtin")
+    return {"builtin_path": b, "global_path": g, "project_path": p,
+            "has_global": has_g, "has_project": has_p, "effective": eff}
+
+
+def catalog(pj=None) -> list:
+    """所有模板 + 各自的状态。pj 给了就带上本剧那一层。"""
     out = []
     names = [tpl for tpl, _, _ in S._LLM_SPEC.values()] + ["_common"]
     for name in names:
-        builtin, custom = S.prompt_files(name)
+        L = _layers(name, pj)
         no, label, req = _spec(name)
-        cur = read_text(custom) if os.path.isfile(custom) else (
-            read_text(builtin) if os.path.isfile(builtin) else "")
+        cur = S.load_prompt(name, pj)
         out.append({
             "name": name,
             "stage_no": no,
             "label": label,
-            "customized": os.path.isfile(custom),
-            "builtin_path": builtin,
-            "custom_path": custom,
+            # customized 指「相对内置有没有被改过」，给列表打标用
+            "customized": L["effective"] != "builtin",
             "chars": len(cur),
             "vars": sorted(set(re.findall(r"\{\{(\w+)\}\}", cur))),
             "required_vars": REQUIRED_VARS.get(name, []),
             "required_fields": req,
+            **L,
         })
     out.sort(key=lambda x: (x["stage_no"] or 99, x["name"]))
     return out
 
 
-def read(name: str) -> dict:
-    """一份模板的当前内容 + 内置原文（供对比和还原）。"""
+def read(name: str, pj=None, scope: str = "") -> dict:
+    """一份模板。
+
+    scope 决定编辑框里放哪一层的内容：
+      global   全局改写（没有就拿内置当起点）
+      project  本剧改写（没有就拿「全局或内置」当起点 —— 那才是它现在实际继承的）
+      ''       只看，不编辑：给最终生效的那份
+    """
     if name not in REQUIRED_VARS:
         raise ValueError(f"没有这个模板：{name}")
-    builtin, custom = S.prompt_files(name)
+    L = _layers(name, pj)
     no, label, req = _spec(name)
-    b = read_text(builtin) if os.path.isfile(builtin) else ""
-    c = read_text(custom) if os.path.isfile(custom) else ""
-    return {"name": name, "stage_no": no, "label": label,
-            "customized": bool(c), "text": c or b, "builtin": b,
-            "builtin_path": builtin, "custom_path": custom,
+    b = read_text(L["builtin_path"]) if os.path.isfile(L["builtin_path"]) else ""
+    g = read_text(L["global_path"]) if L["has_global"] else ""
+    p = read_text(L["project_path"]) if L["has_project"] else ""
+    inherited = g or b               # 本剧那层没有时，它继承的是这个
+    text = {"global": g or b, "project": p or inherited}.get(scope, p or g or b)
+    return {"name": name, "stage_no": no, "label": label, "scope": scope,
+            "text": text, "builtin": b, "global_text": g,
+            "project_text": p, "inherited": inherited,
+            "customized": L["effective"] != "builtin",
             "required_vars": REQUIRED_VARS.get(name, []),
             "required_fields": req,
-            "vars": sorted(set(re.findall(r"\{\{(\w+)\}\}", c or b)))}
+            "vars": sorted(set(re.findall(r"\{\{(\w+)\}\}", text))),
+            **L}
 
 
 def check(name: str, text: str) -> dict:
@@ -96,7 +121,7 @@ def check(name: str, text: str) -> dict:
         return {"errors": errors, "warnings": warnings}
 
     have = set(re.findall(r"\{\{(\w+)\}\}", text))
-    builtin, _ = S.prompt_files(name)
+    builtin = S.prompt_files(name)[0]
     b = read_text(builtin) if os.path.isfile(builtin) else ""
     orig = set(re.findall(r"\{\{(\w+)\}\}", b))
 
@@ -135,24 +160,34 @@ def check(name: str, text: str) -> dict:
     return {"errors": errors, "warnings": warnings}
 
 
-def save(name: str, text: str, force: bool = False) -> dict:
-    """写改写版。有 errors 且没 force 就不写。"""
+def _target(name: str, pj=None, scope: str = "global") -> str:
     if name not in REQUIRED_VARS:
         raise ValueError(f"没有这个模板：{name}")
+    b, g, p = _paths(name, pj)
+    if scope == "project":
+        if not p:
+            raise ValueError("要改本剧的模板得先打开一个项目")
+        return p
+    if scope != "global":
+        raise ValueError(f"作用域只能是 global 或 project：{scope}")
+    return g
+
+
+def save(name: str, text: str, force: bool = False, pj=None,
+         scope: str = "global") -> dict:
+    """写改写版。有 errors 且没 force 就不写。"""
     r = check(name, text)
     if r["errors"] and not force:
         return {"ok": False, **r}
-    _, custom = S.prompt_files(name)
-    os.makedirs(os.path.dirname(custom), exist_ok=True)
-    write_text(custom, text)
-    return {"ok": True, **r, "custom_path": custom, **read(name)}
+    dst = _target(name, pj, scope)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    write_text(dst, text)
+    return {"ok": True, **r, "saved_to": dst, **read(name, pj, scope)}
 
 
-def reset(name: str) -> dict:
-    """删掉改写版，回到内置模板。"""
-    if name not in REQUIRED_VARS:
-        raise ValueError(f"没有这个模板：{name}")
-    _, custom = S.prompt_files(name)
-    if os.path.isfile(custom):
-        os.remove(custom)
-    return {"ok": True, **read(name)}
+def reset(name: str, pj=None, scope: str = "global") -> dict:
+    """删掉这一层的改写，回到它继承的那一层。"""
+    dst = _target(name, pj, scope)
+    if os.path.isfile(dst):
+        os.remove(dst)
+    return {"ok": True, "removed": dst, **read(name, pj, scope)}
