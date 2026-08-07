@@ -283,6 +283,23 @@ CATALOG = {
         "resume": "解决之后点「开始」",
         "resumable": True, "scope": "task", "level": "error",
     },
+    "GHOST_REF": {
+        "title": "参考图里有资产表里根本没有的东西",
+        "why": "环节8 排参考图顺序时写了一个资产表里查不到的 ID，最常见的是把"
+               "「本段故事板」自己写了进去 —— 那是环节10 视频的约定"
+               "（视频以故事板为参考），不该出现在故事板的参考图里。"
+               "这种 ID 指不到任何文件。以前程序会悄悄跳过、照样出图，"
+               "出来的脸和场景全靠模型自己编，还标成做好了；现在到这一步会停下。",
+        "where": "「任务明细」里这一段的「参考图」那一栏，缺的会显示成「缺」",
+        "fix": ["先看「任务明细」确认少的是哪几张",
+                "只影响一两段：直接在页面上改这一段的故事板提示词，"
+                "把参考图角色映射改成真实资产 ID",
+                "整集都是这个毛病：重跑环节8（模板已经写明 reference_order "
+                "只能填真实资产 ID、禁止填本段故事板）",
+                "如果那个资产本来就该出图却还没出，先去把它出出来"],
+        "resume": "改好之后在「生产」页点「补失败」，只重做这几条。",
+        "resumable": True, "scope": "task", "level": "warn",
+    },
     "WRONG_RATIO": {
         "title": "做出来的画面比例，跟你要的不一样",
         "why": "文件已经出来了，服务商也没报错，但程序量了一下实际尺寸，"
@@ -427,6 +444,7 @@ NO_FAILOVER_CODES = {
     "PREREQ_MISSING", "EPISODE_REQUIRED", "EPISODE_SPLIT_FAILED",
     "LLM_SCHEMA_FAIL", "LLM_EMPTY", "SEG_PARTIAL", "SEG_COUNT_OFF",
     "DISK", "WRONG_RATIO",
+    "GHOST_REF",            # 换一家也一样缺那张图，是活儿本身的问题
 }
 
 

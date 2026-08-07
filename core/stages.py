@@ -895,6 +895,7 @@ def _build_tasks(pj: Project, params: dict) -> dict:
 
     # ---- 故事板 / 视频：逐集展开 ---------------------------------------
     sb_tasks, vd_tasks = [], []
+    ghost: dict = {}          # 段号 → 环节8 写了、但资产表里根本没有的那些引用
     for ep in eps:
         bindings = {b["id"]: b for b in (pj.stage_data("s6_binding", ep) or {}).get("bindings", [])}
         compiled = (pj.stage_data("s8_compile", ep) or {}).get("compiled", [])
@@ -906,6 +907,14 @@ def _build_tasks(pj: Project, params: dict) -> dict:
             seg = sid.split("-")[-1]
             b = bindings.get(sid, {})
             refs = c.get("reference_order") or b.get("reference_images") or []
+            # 环节8 有时会把「本段故事板」自己写进参考图顺序 —— 那是环节10 视频的
+            # 约定（视频以故事板为参考），串到故事板这一步就成了自己参考自己。
+            # 这种 id 在资产表里找不到，file_ref 只能是空。留着不删（删了数量就
+            # 对不上，看不出少了东西），但要在这里就记一条，别等出图才发现。
+            bad = [str(r.get("asset_id") or "") for r in refs
+                   if r.get("asset_id") not in amap]
+            if bad:
+                ghost[sid] = bad
             sb_out = f"04_故事板/{code}_{ep}_{seg}_STORYBOARD_V01_FIXED.png"
             sb_tasks.append({
                 "key": sid, "episode": ep,
@@ -921,6 +930,8 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                 "output": sb_out,
             })
             aux = c.get("aux_reference_asset_id") or ""
+            if aux and aux not in amap:
+                ghost.setdefault(sid, []).append(f"{aux}（视频的补充参考图）")
             vd_tasks.append({
                 "key": sid, "episode": ep,
                 "prompt_ref": f"03_提示词/视频提示词/{sid}_VIDEO_PROMPT.txt",
@@ -930,6 +941,22 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                            "ratio": params.get("ratio", "9:16")},
                 "output": f"05_分段视频/{code}_{ep}_{seg}_VIDEO_V01_FIXED.mp4",
             })
+
+    for sid, bad in ghost.items():
+        diagnose.record(pj.root, diagnose.warn(
+            "GHOST_REF",
+            f"{sid} 的参考图里有 {len(bad)} 个资产表里没有的东西："
+            + "、".join(bad[:5]) + ("…" if len(bad) > 5 else "")
+            + "。它们指不到任何文件，出图那一步会停下 —— "
+            + ("其中有『本段故事板自己』，那是环节10 视频的约定，"
+               "不该出现在故事板的参考图里。"
+               if any("STORYBOARD" in x.upper() for x in bad) else "")
+            + "改「任务明细」里这一段的提示词，或者重跑环节8。",
+            stage="storyboard", target=sid))
+    if not ghost:
+        # 上一轮记过、这一轮已经好了的，要清掉，否则面板上一直挂着假警报
+        for sid in {t["key"] for t in sb_tasks}:
+            diagnose.clear(pj.root, "storyboard", sid)
 
     tasks = {"project_code": code, "episodes": eps, "episode": eps[0],
              "asset_tasks": asset_tasks, "storyboard_tasks": sb_tasks, "video_tasks": vd_tasks}
@@ -1022,11 +1049,24 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
                     "warn": _ratio_warn(pj, out, want, kind, task["key"],
                                         provider_cfg, model, "image")}
         prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
-        refs = []
-        for r in sorted(task.get("reference_images", []), key=lambda x: x.get("image_n", 0)):
-            src = r.get("url") or r.get("file_ref") or ""
-            if src:
-                refs.append(to_ref(src, log))
+        want_refs = sorted(task.get("reference_images", []),
+                           key=lambda x: x.get("image_n", 0))
+        # 先把整批都点一遍再动手解析。一是别为注定失败的任务白传几 MB 上对象存储，
+        # 二是要一次说清缺哪几张，而不是缺一张报一张。
+        srcs = [(r, r.get("url") or r.get("file_ref") or "") for r in want_refs]
+        missing = [r.get("asset_id") or f"第{r.get('image_n', '?')}张"
+                   for r, s in srcs if not s]
+        if missing:
+            # 声明了要这张参考图，却指不到任何文件。以前是 `if src` 跳过 ——
+            # 于是「声明 1 张、一张没传」照样出图，出来的脸不是本人，任务还标 ok。
+            # 这类静默降级只能靠肉眼在几百张里发现，是最坏的一类错。
+            raise RuntimeError(
+                f"参考图指不到文件：{'、'.join(missing)}。"
+                f"声明了 {len(want_refs)} 张，只解析出 {len(want_refs) - len(missing)} 张 —— "
+                f"少一张就出图，脸和场景都会跑掉，所以这里停下。"
+                f"多半是环节8 把不存在的东西写进了参考图顺序"
+                f"（比如把本段故事板自己写进去），去「任务明细」看这一条的参考图那栏。")
+        refs = [to_ref(s, log) for _, s in srcs]
         log(f"参考图×{len(refs)}")
         meta = prov.generate_image(
             ImageTask(prompt=prompt, refs=refs, size=want, model=model),
