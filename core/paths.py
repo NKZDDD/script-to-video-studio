@@ -80,6 +80,23 @@ def config_path() -> str:
     return os.path.join(data_dir(), "config.json")
 
 
+def plugins_dir() -> str:
+    """外挂服务商目录。丢一个 .py 进去就多一家，不用改程序、不用重新打包。
+
+    放在**数据目录**而不是程序目录：程序更新会覆盖程序目录，打包成 exe 之后
+    程序里的代码根本改不了。放数据目录，更新和换机器都不影响。
+    """
+    return os.path.join(data_dir(), "providers")
+
+
+def prompts_dir() -> str:
+    """提示词模板的**改写目录**。同名文件优先于内置模板。
+
+    同理放数据目录：内置模板在 exe 里是只读的，改了也存不进去。
+    """
+    return os.path.join(data_dir(), "prompts")
+
+
 def default_projects_dir() -> str:
     """默认产物目录。
 

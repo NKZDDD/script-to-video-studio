@@ -30,6 +30,70 @@ WEB_DIR = paths.res("web")      # 打包后是解压出来的临时目录，只�
 # 用户在设置页改过的值优先，这里只补缺项。
 PROVIDER_QUOTA = {"paisio": 6, "lingganya": 4}
 
+# 放进插件目录当范例。写成 .py.txt 是故意的：改完名字去掉 .txt 才会被加载，
+# 免得半成品被当成真插件加载失败、在设置页刷一条红色错误。
+PLUGIN_TEMPLATE = '''# -*- coding: utf-8 -*-
+"""外挂服务商范例。改完把文件名的 .txt 去掉，回设置页点「重新扫描」。
+
+必填：id / name / supports / capabilities() / 对应的 generate_*
+参考图形式一定要声明对（见下面的三个方法），声明错了不会报错，
+只会让参考图被悄悄丢掉 —— 出来的图不是同一个人，任务还标成功。
+"""
+
+from core.providers.base import ImageTask, Provider, VideoTask
+from core.apiutil import ApiError, extract_image_items
+
+
+class MyProvider(Provider):
+    id = "myprovider"                 # 唯一标识，配置和优先级链里用它
+    name = "我的服务商 example.com"      # 前端下拉显示的名字
+    default_base_url = "https://api.example.com"
+    supports = ("image",)             # ("image",) / ("video",) / 两个都写
+    aliases = ()                      # 别名，配置里写别名也认
+
+    # 参考图给什么形式。三个方法按需覆盖，不覆盖就是「给我 data URI」：
+    #   ref_mode = "url"    这家只收公网链接（本机图会先传对象存储）
+    #   ref_mode = "bytes"  这家只收文件字节（multipart 接口）
+    #   accepts_url(...)    返回 False = 给链接它读不了（比如内联 base64 的接口）
+    # 同一家图片和视频接口不一样时，覆盖带 media 参数的那两个方法按 media 分开判断。
+    ref_mode = "data_uri"
+
+    def capabilities(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "default_base_url": self.default_base_url,
+            "supports": list(self.supports),
+            "image": {
+                "models": ["my-model-v1"],
+                "default_model": "my-model-v1",
+                "sizes": ["1024x1536", "1024x1024"],
+                "default_size": "1024x1536",
+                "max_refs": 5,
+                "ref_mode": "data_uri",
+                "notes": "这里写这家的坑：字段名、单位、限制，跑之前会看到。",
+            },
+            "notes": "这一家的总体说明。",
+        }
+
+    def generate_image(self, task: ImageTask, dest: str, *, log=print,
+                       cancel=None, poll_interval: int = 5,
+                       poll_timeout: int = 900) -> dict:
+        body = {"model": task.model or "my-model-v1",
+                "prompt": task.prompt,
+                "size": task.size or "1024x1536"}
+        if task.refs:
+            body["images"] = task.refs[:5]
+        log(f"model={body['model']} size={body['size']} 参考图×{len(task.refs or [])}")
+        data = self.session.request("POST", "/v1/images/generations",
+                                    json_body=body, retries=2, timeout=600)
+        items = extract_image_items(data)
+        if not items:
+            raise ApiError(f"没返回可用结果: {str(data)[:300]}")
+        self.session.save_item(items[0], dest)       # 存盘（URL 或 b64 都能处理）
+        return {"provider": self.id, "model": body["model"], "source": items[0][:200]}
+'''
+
 JOBS = JobManager()
 
 
@@ -281,6 +345,18 @@ def api_get(path: str, q: dict) -> dict:
     if path == "/api/paths":
         return dict(paths.snapshot(), projects_dir=cfg["projects_dir"])
 
+    if path == "/api/prompts":
+        """提示词模板：不带 name 就返回清单，带了就返回那一份的全文。"""
+        from core import prompts as _pt
+        n = (q.get("name") or [""])[0]
+        return _pt.read(n) if n else {"items": _pt.catalog(),
+                                      "dir": paths.prompts_dir()}
+
+    if path == "/api/providers/status":
+        """服务商加载报告：哪几家、从哪儿来、有没有加载失败的插件。"""
+        from core import providers as _pv
+        return _pv.status()
+
     if path == "/api/explorer":
         """资产库 + 按段看。把散在各处的产物拼成能看懂的两个视图。"""
         from core import explorer
@@ -329,6 +405,48 @@ def api_post(path: str, body: dict) -> dict:
                 cur[k] = v
         save_config(cur)
         return {"ok": True}
+
+    if path == "/api/prompts/check":
+        from core import prompts as _pt
+        return _pt.check(body["name"], body.get("text", ""))
+
+    if path == "/api/prompts/save":
+        """存改写版。校验不过就不存 —— 模板改坏了要几百次调用之后才看得出来。"""
+        from core import prompts as _pt
+        return _pt.save(body["name"], body.get("text", ""),
+                        force=bool(body.get("force")))
+
+    if path == "/api/prompts/reset":
+        from core import prompts as _pt
+        return _pt.reset(body["name"])
+
+    if path == "/api/providers/reload":
+        """重新扫描服务商（内置 + 插件目录），不用重启。
+
+        新加一家之后配额表里要补上它，否则新家会没有并发配额。
+        """
+        from core import providers as _pv
+        st = _pv.reload_all()
+        cur = load_config()
+        per = cur.setdefault("limits", {}).setdefault("per_provider", {})
+        added = [p for p in _pv.REGISTRY if p not in per]
+        for pid in added:
+            per[pid] = PROVIDER_QUOTA.get(pid, 4)
+        if added:
+            save_config(cur)
+        return {"ok": True, **st, "new_quota_for": added,
+                "capabilities": list_capabilities()}
+
+    if path == "/api/providers/mkdir":
+        """把插件目录建出来，并放一份带注释的模板，照着改就能加一家。"""
+        from core import providers as _pv
+        d = paths.plugins_dir()
+        os.makedirs(d, exist_ok=True)
+        sample = os.path.join(d, "_示例_把我改成你的服务商.py.txt")
+        if not os.path.isfile(sample):
+            with open(sample, "w", encoding="utf-8") as f:
+                f.write(PLUGIN_TEMPLATE)
+        return {"ok": True, "dir": d, "sample": sample, **_pv.status()}
 
     if path == "/api/paths/projects":
         """改产物目录。换机器时最常改的就是这个（盘不一样、想放到大盘上）。"""

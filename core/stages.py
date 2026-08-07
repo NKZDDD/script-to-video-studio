@@ -46,8 +46,19 @@ STAGES = [
 ]
 
 
+def prompt_files(name: str) -> tuple:
+    """(内置模板路径, 改写模板路径)。改写的存在就用改写的。
+
+    改写放在数据目录而不是程序目录：内置模板打包进 exe 之后是只读的，
+    而且程序更新会覆盖它 —— 改在那儿等于白改。
+    """
+    return (os.path.join(PROMPT_DIR, f"{name}.md"),
+            os.path.join(paths.prompts_dir(), f"{name}.md"))
+
+
 def load_prompt(name: str) -> str:
-    return read_text(os.path.join(PROMPT_DIR, f"{name}.md"))
+    builtin, custom = prompt_files(name)
+    return read_text(custom if os.path.isfile(custom) else builtin)
 
 
 def render(tpl: str, mapping: dict) -> str:

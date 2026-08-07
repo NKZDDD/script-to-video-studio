@@ -426,6 +426,43 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     </div>
   </div>
   <div class="card">
+    <h2>提示词模板 <span class="tag">每个环节发给模型的原文，可以改；改坏了保存时会拦</span></h2>
+    <div class="row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="ptSel" style="min-width:300px"></select>
+      <span class="muted" id="ptState"></span>
+      <span class="sp"></span>
+      <button class="btn ghost sm" id="ptDiff">看内置原文</button>
+      <button class="btn ghost sm" id="ptReset">恢复内置</button>
+      <button class="btn sm" id="ptSave">保存</button>
+    </div>
+    <div id="ptMeta" class="muted" style="margin-bottom:6px"></div>
+    <textarea id="ptText" spellcheck="false"
+      style="min-height:340px;font-size:12px;line-height:1.6"></textarea>
+    <div id="ptMsg" style="margin-top:8px"></div>
+    <p class="muted" style="margin:8px 0 0">
+      <code>{{XXX}}</code> 是程序往里填数据的口子（剧本、上一环节的产物、参数）。
+      <b>必需的那几个删了会被拦住</b> —— 删了模型就收不到对应的输入，而这不会立刻报错，
+      要跑几百次调用之后才看得出产出不对。<br>
+      改写存在<b>数据目录</b>下，不动内置那份，随时能一键恢复；程序更新、换 exe 都不会冲掉。
+    </p>
+  </div>
+  <div class="card">
+    <h2>服务商插件 <span class="tag">丢个 .py 进去就多一家，不用改程序、不用重新打包</span></h2>
+    <div id="plugBox"></div>
+    <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+      <button class="btn sm" id="plugReload">重新扫描</button>
+      <button class="btn ghost sm" id="plugMkdir">建插件目录并放一份范例</button>
+      <button class="btn ghost sm" id="plugOpen">打开插件目录</button>
+    </div>
+    <p class="muted" style="margin:8px 0 0">
+      插件目录在<b>数据目录</b>下，不在程序目录里 —— 更新程序、换 exe 都不会动它。
+      写法照范例改：继承 <code>Provider</code>，给 <code>id / name / supports</code>，
+      实现 <code>capabilities()</code> 和 <code>generate_image / generate_video</code>。
+      <b>参考图形式一定要声明对</b>，声明错了不报错，只会让参考图被悄悄丢掉。<br>
+      ⚠️ 插件是真的会被执行的 Python 代码，只放你自己写的或信得过的。
+    </p>
+  </div>
+  <div class="card">
     <h2>数据与路径 <span class="tag">换机器 / 更新程序前先看这里</span></h2>
     <div id="pathBox"></div>
     <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap;align-items:flex-end">
@@ -541,6 +578,8 @@ async function boot() {
   renderProjects();
   renderProviders();
   renderDefaults();
+  renderPromptList().catch(() => {});
+  renderPlugins(true).catch(() => {});
   renderPaths();
   renderLimits();
   renderUpload();
@@ -1639,6 +1678,141 @@ $('#npDrop').addEventListener('drop', e => addFiles(e.dataTransfer.files));
 $('#npClear').onclick = () => { QUEUE = []; renderQueue(); };
 
 // ---------- 并发闸门
+// ---------- 提示词模板
+let PT = null;              // 当前打开的那一份
+async function renderPromptList() {
+  const d = await api.get('/api/prompts', {});
+  $('#ptSel').innerHTML = d.items.map(x =>
+    `<option value="${esc(x.name)}">${x.stage_no ? '环节' + x.stage_no + '　' : '　　　'}${
+      esc(x.label)}　（${esc(x.name)}.md${x.customized ? ' · 已改写' : ''}）</option>`).join('');
+  await openPrompt($('#ptSel').value);
+}
+async function openPrompt(name) {
+  PT = await api.get('/api/prompts', {name});
+  $('#ptText').value = PT.text;
+  $('#ptState').innerHTML = PT.customized
+    ? '<span class="pill s-ok">已改写</span>'
+    : '<span class="muted">用的是内置版</span>';
+  const v = (list, cls) => list.map(x =>
+    `<span class="chip ${cls}">{{${esc(x)}}}</span>`).join('');
+  $('#ptMeta').innerHTML =
+    `必需占位符 ${v(PT.required_vars, 'on') || '（无）'}　`
+    + `其余可用 ${v(PT.vars.filter(x => !PT.required_vars.includes(x)), '') || '（无）'}`
+    + (PT.required_fields.length
+       ? `<br>必需输出字段 <code>${esc(PT.required_fields.join('、'))}</code>` : '')
+    + `<br><span class="muted">内置：${esc(PT.builtin_path)}</span>`;
+  $('#ptMsg').innerHTML = '';
+}
+$('#ptSel').onchange = e => openPrompt(e.target.value).catch(er => alert(String(er)));
+function ptShow(r) {
+  $('#ptMsg').innerHTML =
+    (r.errors || []).map(x => `<div class="alert err">${esc(x)}</div>`).join('')
+    + (r.warnings || []).map(x => `<div class="alert warn">${esc(x)}</div>`).join('');
+  return !(r.errors || []).length;
+}
+$('#ptSave').onclick = async () => {
+  const text = $('#ptText').value;
+  const r = await api.post('/api/prompts/save', {name: PT.name, text});
+  if (r.error) return alert(r.error);
+  if (!ptShow(r)) {
+    // 校验没过：给一条明路，而不是让人干瞪眼
+    if (!confirm('这份模板有上面标红的问题，存下去很可能白跑几百次调用。\n\n'
+                 + '确定还是要存吗？（一般应该先按提示改）')) return;
+    const f = await api.post('/api/prompts/save', {name: PT.name, text, force: true});
+    if (f.error) return alert(f.error);
+    ptShow(f);
+  }
+  await renderPromptList();
+  $('#ptSel').value = PT.name;
+  await openPrompt(PT.name);
+  $('#ptMsg').innerHTML += '<div class="alert ok">已保存。下一次跑到这个环节就用新的了。</div>';
+};
+$('#ptReset').onclick = async () => {
+  if (!PT.customized) return alert('这份现在用的就是内置版，没什么可恢复的。');
+  if (!confirm(`确定丢掉改写、恢复内置版？\n\n会删掉：\n${PT.custom_path}`)) return;
+  const r = await api.post('/api/prompts/reset', {name: PT.name});
+  if (r.error) return alert(r.error);
+  await renderPromptList();
+  $('#ptSel').value = PT.name;
+  await openPrompt(PT.name);
+  $('#ptMsg').innerHTML = '<div class="alert ok">已恢复内置版。</div>';
+};
+$('#ptDiff').onclick = () => {
+  const cur = $('#ptText').value;
+  if (cur === PT.builtin) return alert('和内置版一模一样。');
+  const a = PT.builtin.split('\n'), b = cur.split('\n');
+  const out = [];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] !== b[i]) {
+      if (a[i] !== undefined) out.push(`- ${i + 1}  ${a[i]}`);
+      if (b[i] !== undefined) out.push(`+ ${i + 1}  ${b[i]}`);
+    }
+  }
+  $('#ptMsg').innerHTML =
+    `<div class="muted" style="margin-bottom:4px">和内置版的差异（− 内置 / ＋ 现在）共 ${
+      out.length} 行：</div><pre class="log" style="max-height:300px">${
+      esc(out.join('\n'))}</pre>`;
+};
+
+// ---------- 服务商插件
+let PLUG = null;
+async function renderPlugins(fresh) {
+  if (fresh || !PLUG) {
+    try { PLUG = await api.get('/api/providers/status'); }
+    catch (e) { $('#plugBox').innerHTML = `<div class="alert err">${esc(String(e))}</div>`; return; }
+  }
+  const p = PLUG, ext = p.providers.filter(x => !x.builtin);
+  const rows = p.providers.map(x =>
+    `<tr><td><code>${esc(x.id)}</code></td><td>${esc(x.name)}</td>
+       <td class="muted">${esc(x.supports.join(' / ')) || '—'}</td>
+       <td>${x.builtin ? '<span class="muted">内置</span>'
+                       : `<span class="pill s-ok">插件</span>`}</td>
+       <td class="muted" title="${esc(x.source)}">${
+         x.builtin ? '' : esc(x.source.split(/[\\/]/).pop())}</td></tr>`).join('');
+  $('#plugBox').innerHTML =
+    `<div class="kv2"><b>插件目录</b><span><code>${esc(p.plugins_dir)}</code>${
+       p.plugins_dir_exists ? '' : '<span class="muted">　还没建，点下面的按钮</span>'}</span></div>`
+    + `<div class="muted" style="margin:6px 0 4px">共 ${p.providers.length} 家：内置 ${
+        p.providers.length - ext.length} · 插件 ${ext.length}</div>`
+    + `<table style="font-size:12px"><thead><tr><th>id</th><th>名称</th><th>能力</th>
+        <th>来源</th><th>文件</th></tr></thead><tbody>${rows}</tbody></table>`
+    + (p.errors.length ? `<div class="alert err" style="margin-top:8px">
+        <b>${p.errors.length} 个文件加载失败</b>（其余照常用）
+        ${p.errors.map(e => `<div style="margin-top:6px">· <code>${esc(e.file)}</code>
+          <pre class="log" style="max-height:150px;margin-top:4px">${esc(e.error)}</pre></div>`).join('')}
+        </div>` : '')
+    + (p.warnings.length ? `<div class="alert warn" style="margin-top:8px">
+        <b>${p.warnings.length} 处声明有问题</b>（能用，但可能出错图）
+        ${p.warnings.map(w => `<div>· <code>${esc(w.id)}</code>：${
+          esc(w.problems.join('；'))}</div>`).join('')}</div>` : '');
+}
+$('#plugReload').onclick = async () => {
+  const r = await api.post('/api/providers/reload', {});
+  if (r.error) return alert(r.error);
+  PLUG = r;
+  BOOT.capabilities = r.capabilities;          // 下拉候选跟着更新
+  await renderPlugins(false);
+  renderProviders(); renderChains(); renderLimits();
+  alert(`扫描完成：${r.providers.length} 家`
+        + (r.new_quota_for.length ? `\n新增并发配额：${r.new_quota_for.join('、')}` : '')
+        + (r.errors.length ? `\n${r.errors.length} 个文件加载失败，看页面上的红框` : ''));
+};
+$('#plugMkdir').onclick = async () => {
+  const r = await api.post('/api/providers/mkdir', {});
+  if (r.error) return alert(r.error);
+  PLUG = r;
+  await renderPlugins(false);
+  alert(`目录已建好：\n${r.dir}\n\n范例文件：\n${r.sample.split(/[\\/]/).pop()}\n`
+        + `照着改，把文件名的 .txt 去掉，再点「重新扫描」。`);
+};
+$('#plugOpen').onclick = () => {
+  const d = (PLUG && PLUG.plugins_dir) || '';
+  if (!d) return;
+  navigator.clipboard?.writeText(d);
+  alert(`插件目录路径已复制到剪贴板：\n${d}\n\n`
+        + `（浏览器不能直接打开本机文件夹，粘到资源管理器地址栏即可）`);
+};
+
 // ---------- 数据与路径
 function renderPaths() {
   const p = BOOT.paths || {};
