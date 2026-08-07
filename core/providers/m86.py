@@ -78,7 +78,7 @@ class M86Provider(Provider):
     def needs_url(self, model: str = "", media: str = "image") -> bool:
         # 出图的 ref_images 只认链接。不声明的话，没配对象存储时解析器会给
         # data URI，然后被 generate_image 丢掉 —— 图照出但没有参考图，
-        # 状态资产的脸就不是本人了，而且任务标 ok 没人知道。
+        # 连续性锚点的脸就不是本人了，而且任务标 ok 没人知道。
         return media == "image"
 
     def capabilities(self) -> dict:
@@ -127,7 +127,7 @@ class M86Provider(Provider):
             "response_format": "url",
         }
         # ref_images 文档写明是 URL 数组，本地图（data URI）它不收。
-        # 丢了不能只 log 一句照样出图 —— 状态资产要靠父资产定身份，少一张出来
+        # 丢了不能只 log 一句照样出图 —— 连续性锚点要靠来源资产定身份，少一张出来
         # 就不是同一个人，而且任务标 ok 没人知道。报错让优先级链换下一家。
         urls = [r for r in (task.refs or []) if not r.startswith("data:")]
         dropped = len(task.refs or []) - len(urls)

@@ -284,34 +284,26 @@ CATALOG = {
         "resumable": True, "scope": "task", "level": "error",
     },
     "PROMPT_REF_MISSING": {
-        "title": "提示词里写了某个人，却没给他参考图",
-        "why": "画面描述里出现谁，谁就必须在参考图里 —— 这是资产图这一层的硬规矩。"
-               "没参考图的那个人，出图模型只能照着文字自己编一张脸，"
-               "和他自己的资产图对不上，跨段跨集就飘。"
-               "而且这事不报错、图照出，只能靠肉眼在几百张里发现。"
-               "注意参考图是个**列表**：single 的父资产仍只有一个；composite 则没有父资产，"
-               "所有参与对象都通过 reference_assets 声明。",
+        "title": "资产提示词的参考依赖不完整",
+        "why": "现在只有「基础原子资产 + 连续性锚点」：基础资产不引用别人；"
+               "连续性锚点没有父资产，必须通过 reference_assets 明确列出至少一个来源。"
+               "程序不再扫描剧情文字里的人名猜谁出镜，避免把离屏人物误判成参考图。",
         "where": "「产物」页资产库里这几条的「出这张图要喂的参考图」",
-        "fix": ["这个人确实该出现在画面里：把他加进 reference_assets，"
-                "并在「参考图角色映射」里写清他控制什么",
-                "这是跨多个段落持续的多人/场景状态：保留画面描述，使用 state_composite，"
-                "state_type 填 composite、父资产留空，所有主体作为来源参考",
-                "只是某一镜的临时站位和动作：不要做成状态资产，交给环节7分镜",
-                "明确声明空镜无人物的，正文里才不该出现角色名"],
+        "fix": ["基础身份、环境、道具资产保持原子，reference_assets 填空",
+                "连续性锚点不填父资产，把画面实际需要继承的全部已建资产ID写进 reference_assets",
+                "删除或改正不存在的引用ID；只是离屏剧情提到的人物不要硬加参考图",
+                "只属于某一镜的临时站位和动作交给环节7，不必建立锚点"],
         "resume": "改完提示词后在「生产」页点「补失败」；已经出过的图要先删掉才会重做。",
         "resumable": True, "scope": "task", "level": "warn",
     },
     "ASSET_SCOPE": {
-        "title": "状态资产的父级或参考依赖不完整",
-        "why": "状态资产分两种：single 是一个对象自身的变化，必须有唯一父资产；"
-               "composite 是多个已建资产之间的组合连续性锚点，不属于任何父资产，"
-               "必须用 reference_assets 明确列出至少两个来源资产。",
-        "where": "「产物」页资产库里这几条资产的父资产和参考资产栏",
-        "fix": ["单体变化：state_type 填 single，parent_asset_id 填唯一父资产，"
-                "reference_assets 以该父资产开头",
-                "多个主体的持续关系：另建 state_type=composite，parent_asset_id 留空，"
-                "reference_assets 填至少两个来源资产，output_spec 填 state_composite",
-                "单体变化和多人关系同时存在时分别建两条，不要强塞进同一条",
+        "title": "基础资产或连续性锚点的依赖结构不完整",
+        "why": "基础资产必须原子化，不填写父资产也不引用其他资产。连续性锚点没有父资产，"
+               "用 reference_assets 表达全部来源依赖，可以是一张或多张。",
+        "where": "「产物」页资产库里这几条资产的参考资产栏",
+        "fix": ["基础身份、环境、道具：清空 parent_asset_id 和 reference_assets",
+                "连续性锚点：清空 parent_asset_id，把原父资产和其他可见来源全部放进 reference_assets",
+                "连续性锚点的 output_spec 使用 state_anchor",
                 "删除或改正指向不存在资产 ID 的引用"],
         "resume": "改完资产表后重跑环节5（只会补没写过提示词的），再往下跑。",
         "resumable": True, "scope": "task", "level": "warn",

@@ -1396,7 +1396,6 @@ function assetDetail(a) {
     <h3>${esc(a.asset_id)}　${esc(a.name)}　<span class="muted">${esc(a.category_cn)}</span></h3>
     <div class="kv">
       <b>产生自</b><span>表 = 环节4　提示词 = 环节5　图 = 环节5b</span>
-      ${a.parent ? `<b>父资产</b><span>${esc(a.parent)}（状态资产只描述与它的差异）</span>` : ''}
       <b>要不要出</b><span>${esc(a.decision) || '—'}${a.decision_reason ? '　' + esc(a.decision_reason) : ''}</span>
       <b>输出规格</b><span>${esc(a.output_spec) || '—'}</span>
       <b>用在</b><span>${a.episodes.length} 集（${esc(a.episodes.join('、'))}）· ${a.seg_count} 段</span>

@@ -855,8 +855,8 @@ def api_post(path: str, body: dict) -> dict:
 
         def go():
             try:
-                # 资产图按参考图依赖分层，和「一键跑到底」同一套：状态资产的参考图
-                # 是它的父资产，不分层就会父子并发，子任务读不到父资产的 png。
+                # 资产图按参考图依赖分层，和「一键跑到底」同一套：连续性锚点
+                # 引用一张或多张来源图，不分层就会并发并读不到来源 png。
                 layers = S.asset_layers(items) if kind == "asset" else [items]
                 if len(layers) > 1:
                     parent.log(kind, f"按参考图依赖分 {len(layers)} 层："

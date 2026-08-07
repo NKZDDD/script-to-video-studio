@@ -20,7 +20,7 @@
     {
       "state_id": "ST001",
       "object": "对象名（人物/道具/场景/生物）",
-      "parent_asset": "所属父资产的名称或 ID（如无填空）",
+      "source_assets": ["该状态涉及的基础资产名称或 ID"],
       "first_seg": "{{EPISODE}}-SEG01",
       "range": "持续范围，如 SEG01-SEG06 或 本集全程",
       "trigger": "触发事件",
@@ -28,8 +28,8 @@
       "exit_state": "",
       "irreversible": true,
       "dependent_segs": ["后续依赖该状态的段落"],
-      "need_state_asset": true,
-      "reason": "是否需要生产连续状态资产的理由"
+      "need_continuity_anchor": true,
+      "reason": "是否需要生产连续性锚点的理由"
     }
   ],
   "segment_states": [
