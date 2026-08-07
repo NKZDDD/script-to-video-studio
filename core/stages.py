@@ -395,6 +395,9 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         if out.get("segments_note"):
             log(f"环节2 的说明：{out['segments_note']}")
 
+    if stage_id == "s4":
+        check_asset_scope(pj, out, episode, log)
+
     # s5 额外把提示词正文落成 txt，便于人工查看与执行器读取
     if stage_id == "s5":
         for ap in out.get("asset_prompts", []):
@@ -405,6 +408,75 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         build_tasks(pj, params)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode)
     return out
+
+
+def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
+    """环节4 建完资产就查一遍：有没有把「一个画面」建成「一条资产」。
+
+    踩过的：ST012「豪华私人病房连续布局与床单碎纸状态」，父资产是 S001（房间），
+    appearance 却写着「Rizky固定在画面左侧、Dewi在右侧床边递交复印件」。
+    parent_asset_id 只能填一个，于是环节5 按「空镜」只给了 1 张房间参考图 ——
+    正文里那两个人没有任何参考图支撑，模型只能自己编。
+
+    模板讲清楚只是建议，模型照样会犯。这里做成硬检查：
+    状态资产的描述里出现了**别的主体**的名字，就记一条待办。
+
+    只提醒不拦截 —— 拦下来会把整集卡住，而这类问题人看一眼就知道要不要管。
+    """
+    assets = out.get("assets") or []
+    if not assets:
+        return []
+    by_id = {a.get("asset_id"): a for a in assets}
+    # 加上前面几集已建的：本集的状态资产可能挂在早先建的人物身上
+    for a in known_assets(pj, episode):
+        by_id.setdefault(a.get("asset_id"), a)
+    # 「别的主体」= 人物/群体/生物类资产。场景和道具不算：
+    # 一条状态资产提到自己所在的房间、手里的道具是正常的。
+    #
+    # 匹配要按**分词**来，不能只比全名：资产叫「Rizky Adhitama」，正文里只写
+    # 「Rizky」—— 只比全名就漏了，而这正是实际踩到的那条。
+    def parts(name: str) -> set:
+        name = (name or "").strip()
+        toks = {t for t in re.split(r"[\s·・,，]+", name) if len(t) >= 2}
+        return ({name} | toks) if len(name) >= 2 else set()
+
+    people = {aid: (a.get("name") or "").strip()
+              for aid, a in by_id.items()
+              if a.get("category") in ("identity", "group", "creature")
+              and len((a.get("name") or "").strip()) >= 2}
+    bad = []
+    for a in assets:
+        if a.get("category") != "state":
+            continue
+        parent = a.get("parent_asset_id") or ""
+        # 只查 appearance —— 它是「这张图要画什么」，直接决定出图内容。
+        # allowed_change / forbidden_change 是约束不是画面清单：
+        # 「禁止 Rizky 提前苏醒」提到名字完全正当，不需要给他参考图，
+        # 一起查会让 8/11 的资产都报警，吵到没人看。
+        text = str(a.get("appearance", ""))
+        # 父资产的叫法全部豁免：它就是这条状态的主体，提到它是应该的
+        mine = parts((by_id.get(parent) or {}).get("name", ""))
+        others = sorted({nm for aid, nm in people.items()
+                         if aid != parent and (parts(nm) - mine) & {
+                             t for t in parts(nm) if t in text}})
+        if others:
+            bad.append((a.get("asset_id", ""), a.get("name", ""), parent, others))
+    if not bad:
+        diagnose.clear(pj.root, "stage:s4", f"{episode}:资产越界")
+        return []
+    lines = "；".join(f"{aid}「{nm}」父={pa or '无'}，却写到了 {'、'.join(o)}"
+                     for aid, nm, pa, o in bad[:5])
+    if log:
+        log(f"⚠️ {episode} 有 {len(bad)} 条状态资产写到了别的主体，"
+            f"它们拿不到对应的参考图：{lines}")
+    diagnose.record(pj.root, diagnose.warn(
+        "ASSET_SCOPE",
+        f"{episode} 有 {len(bad)} 条状态资产的描述里写到了别的主体："
+        + lines + ("…" if len(bad) > 5 else "")
+        + "。一条状态资产只能挂一个父，写进来的别人拿不到参考图，"
+          "模型只能自己编。多主体的画面由环节6 把几条资产一起绑给故事板。",
+        stage="stage:s4", target=f"{episode}:资产越界"))
+    return bad
 
 
 def write_prompt_txt(pj: Project, rel: str, text: str, log=None) -> None:

@@ -283,6 +283,26 @@ CATALOG = {
         "resume": "解决之后点「开始」",
         "resumable": True, "scope": "task", "level": "error",
     },
+    "ASSET_SCOPE": {
+        "title": "一条状态资产写到了别的主体，那些人拿不到参考图",
+        "why": "状态资产只能挂**一个**父资产（parent_asset_id 是单值），"
+               "所以它只该描述父资产自己的状态。描述里写进别的角色，"
+               "那些角色没有对应的参考图，出图时模型只能自己编 —— "
+               "同一个人在这张图和他自己的资产图里会长得不一样。"
+               "典型是把一个「画面」建成了一条资产：『病房里 A 在左、B 在右』——"
+               "那是分镜的事，不是资产。",
+        "where": "「产物」页资产库里这几条资产的「外观」栏",
+        "fix": ["多主体的画面不用建成一条资产：几个人各自是独立资产，"
+                "环节6 会把这一段用到的全部绑给故事板，环节9 一起当参考图传进去",
+                "这条资产只保留父资产自己的状态描述，别人的位置和动作删掉 —— "
+                "站位由环节3 的轴线和环节7 的分镜负责",
+                "只是想给它多几张参考图的话，改环节5 的 reference_assets 就行，"
+                "不用动父资产",
+                "确认这条资产其实是多余的（布局连续性已由场景资产+轴线覆盖），"
+                "就把 decision 改成 skip"],
+        "resume": "改完资产表后重跑环节5（只会补没写过提示词的），再往下跑。",
+        "resumable": True, "scope": "task", "level": "warn",
+    },
     "ASSET_NO_PROMPT": {
         "title": "有资产判定要出，却没有生产提示词",
         "why": "环节4 说这个资产必须出图，环节5 却没给它写提示词。"
@@ -478,7 +498,7 @@ NO_FAILOVER_CODES = {
     "LLM_SCHEMA_FAIL", "LLM_EMPTY", "SEG_PARTIAL", "SEG_COUNT_OFF",
     "DISK", "WRONG_RATIO",
     # 这几条都是「活儿本身缺东西」，换一家服务商也一样缺，别浪费一轮重试
-    "GHOST_REF", "ASSET_NO_PROMPT", "NO_REF", "SEG_NOT_COMPILED",
+    "GHOST_REF", "ASSET_NO_PROMPT", "NO_REF", "SEG_NOT_COMPILED", "ASSET_SCOPE",
 }
 
 
