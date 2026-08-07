@@ -6,6 +6,14 @@
 上文 TXT 是本环节唯一业务规范，必须逐条执行，不得套用“基础资产 + 连续性锚点”等其他模型。
 由于程序只接收 JSON，请把上文要求的 A—Q 全部内容映射到下面 JSON 字段；不要输出 Markdown。
 
+## 依赖图必须可生产（强制）
+
+- 每个 `reference_assets` 只能指向已经排在自己之前、能够先完成生产的资产。
+- 同一生产层级的资产不得互相引用；严禁 A 引用 B、同时 B 又引用 A。
+- 后续状态需要继承前一状态时，必须给后续状态更大的 `dependency_order`，形成单向链。
+- 复杂状态引用多个来源时，全部来源都必须位于更早层级；不得为了补齐画面反向引用本状态或同级状态。
+- 整个父资产与状态资产依赖图必须是有向无环图。无法确定先后时，回退到基础父资产，不能制造循环等待。
+
 ```json
 {
   "assets": [
@@ -31,7 +39,7 @@
       "allowed_change": "",
       "forbidden_change": "",
       "output_spec": "four_view|scene_wide|prop_multi|closeup|state_asset",
-      "dependency_order": 1
+      "dependency_order": "严格递增的正整数；所有引用资产的值都必须小于本资产"
     }
   ],
   "space_masters": [

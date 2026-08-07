@@ -106,6 +106,27 @@ class AssetReferenceTests(unittest.TestCase):
             used = stages.assets_used_by(pj, ["EP01"])
             self.assertTrue({"ST001", "C002", "S001", "C005"}.issubset(used))
 
+    def test_asset_layers_reject_mutual_same_level_dependencies(self):
+        tasks = [
+            {"key": "ST003", "reference_images": [{"asset_id": "ST005"}]},
+            {"key": "ST005", "reference_images": [{"asset_id": "ST003"}]},
+        ]
+        self.assertEqual(stages.asset_dependency_cycles(tasks), [["ST003", "ST005"]])
+        with self.assertRaisesRegex(stages.AssetDependencyCycleError,
+                                    "ST003.*ST005"):
+            stages.asset_layers(tasks)
+
+    def test_asset_layers_keep_independent_same_level_assets_parallel(self):
+        tasks = [
+            {"key": "C001", "reference_images": []},
+            {"key": "C002", "reference_images": []},
+            {"key": "ST001", "reference_images": [{"asset_id": "C001"}]},
+            {"key": "ST002", "reference_images": [{"asset_id": "C002"}]},
+        ]
+        layers = stages.asset_layers(tasks)
+        self.assertEqual([[t["key"] for t in layer] for layer in layers],
+                         [["C001", "C002"], ["ST001", "ST002"]])
+
     def test_offscreen_names_do_not_create_false_dependency_warning(self):
         with tempfile.TemporaryDirectory() as root:
             pj = self._make_project(root)

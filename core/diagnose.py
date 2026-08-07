@@ -309,6 +309,18 @@ CATALOG = {
         "resume": "改完资产表后点当前集的环节5“重跑”（会按新规则覆盖本集旧提示词），再往下跑。",
         "resumable": True, "scope": "task", "level": "warn",
     },
+    "ASSET_DEP_CYCLE": {
+        "title": "资产之间形成了循环依赖",
+        "why": "同一组资产互相把对方当参考图，没有任何一个能先生产。旧调度会把它们"
+               "塞进同一层并发，看起来一直在互相等待；现在会在发请求前直接停下。",
+        "where": "环节4资产表的 parent_asset_id、reference_assets 和 dependency_order",
+        "fix": ["按照提示列出的资产ID检查互相引用",
+                "同级资产不得互相引用；每张资产只能引用更早生产完成的资产",
+                "复杂状态优先引用基础人物、场景和道具；确需继承前一状态时提高后续状态的 dependency_order",
+                "不要简单删除必要参考图；应把依赖关系改成单向链后重跑环节5"],
+        "resume": "修正环节4并重跑环节5后，再回生产页开始；无需等待超时。",
+        "resumable": True, "scope": "task", "level": "error",
+    },
     "ASSET_NO_PROMPT": {
         "title": "有资产判定要出，却没有生产提示词",
         "why": "环节4 说这个资产必须出图，环节5 却没给它写提示词。"
@@ -388,6 +400,7 @@ CATALOG = {
 
 # 原始报错 → 错误码（按顺序匹配，先命中先用）
 _PATTERNS = [
+    ("ASSET_DEP_CYCLE", r"资产循环依赖|资产依赖无法继续分层"),
     ("QUOTA_EXHAUSTED", r"insufficient|quota|余额|额度|欠费|balance|billing|payment|credit|arrears"),
     ("AUTH_INVALID", r"invalid[_ ]api[_ ]key|incorrect api key|unauthorized|authentication|令牌|token 不正确|无效的?密钥"),
     ("ACCOUNT_BANNED", r"banned|封禁|禁用|账户异常|无可用渠道|no available channel|suspend"),
@@ -505,7 +518,7 @@ NO_FAILOVER_CODES = {
     "DISK", "WRONG_RATIO",
     # 这几条都是「活儿本身缺东西」，换一家服务商也一样缺，别浪费一轮重试
     "GHOST_REF", "ASSET_NO_PROMPT", "NO_REF", "SEG_NOT_COMPILED", "ASSET_SCOPE",
-    "PROMPT_REF_MISSING",
+    "PROMPT_REF_MISSING", "ASSET_DEP_CYCLE",
 }
 
 

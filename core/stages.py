@@ -637,9 +637,20 @@ def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
             reasons.append("参考资产不存在：" + "、".join(unknown))
         if reasons:
             bad.append((aid, a.get("name", ""), reasons))
+    cycles = asset_dependency_cycles(assets)
+    if cycles:
+        detail = "；".join(" ↔ ".join(group) for group in cycles)
+        if log:
+            log(f"⚠️ {episode} 资产存在循环依赖：{detail}。已禁止进入同层并发生产。")
+        diagnose.record(pj.root, diagnose.warn(
+            "ASSET_DEP_CYCLE",
+            f"{episode} 资产循环依赖：{detail}。互相引用的资产都在等待对方先出图。",
+            stage="stage:s4", target=f"{episode}:资产循环依赖"))
+    else:
+        diagnose.clear(pj.root, "stage:s4", f"{episode}:资产循环依赖")
     if not bad:
         diagnose.clear(pj.root, "stage:s4", f"{episode}:资产越界")
-        return []
+        return [("循环依赖", "", [" ↔ ".join(c) for c in cycles])] if cycles else []
     lines = "；".join(f"{aid}「{nm}」{'、'.join(reasons)}"
                      for aid, nm, reasons in bad[:5])
     if log:
@@ -1028,6 +1039,66 @@ def asset_output_rel(asset: dict) -> str:
     return f"02_固定资产/{d}/{asset['asset_id']}.png"
 
 
+class AssetDependencyCycleError(RuntimeError):
+    """资产参考图形成闭环，任何一个成员都不可能成为第一张。"""
+
+
+def asset_dependency_cycles(items: list) -> list:
+    """返回资产/任务依赖图里的强连通分量；每一组都是一个真实循环。
+
+    同时接受环节4的资产结构（asset_id/reference_assets）和 tasks.json 的任务结构
+    （key/reference_images），便于分析阶段与生产阶段使用同一套判断。
+    """
+    by_key = {}
+    order = {}
+    for item in items or []:
+        key = str(item.get("key") or item.get("asset_id") or "").strip()
+        if key and key not in by_key:
+            order[key] = len(order)
+            by_key[key] = item
+    graph = {}
+    for key, item in by_key.items():
+        if "key" in item:
+            refs = [r.get("asset_id") for r in (item.get("reference_images") or [])]
+        else:
+            refs = _ordered_asset_refs([item.get("parent_asset_id")],
+                                       item.get("reference_assets") or [])
+        graph[key] = [str(r) for r in refs if str(r) in by_key]
+
+    index = 0
+    stack, on_stack = [], set()
+    indexes, lowlinks, cycles = {}, {}, []
+
+    def visit(node):
+        nonlocal index
+        indexes[node] = lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+        for dep in graph[node]:
+            if dep not in indexes:
+                visit(dep)
+                lowlinks[node] = min(lowlinks[node], lowlinks[dep])
+            elif dep in on_stack:
+                lowlinks[node] = min(lowlinks[node], indexes[dep])
+        if lowlinks[node] != indexes[node]:
+            return
+        component = []
+        while stack:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node:
+                break
+        if len(component) > 1 or (component and component[0] in graph[component[0]]):
+            cycles.append(sorted(component, key=lambda x: order[x]))
+
+    for node in graph:
+        if node not in indexes:
+            visit(node)
+    return sorted(cycles, key=lambda c: min(order[x] for x in c))
+
+
 def asset_layers(tasks: list) -> list:
     """把资产任务按参考图依赖分层：第 0 层没有参考图，第 N 层的参考图都在前面几层。
 
@@ -1036,8 +1107,16 @@ def asset_layers(tasks: list) -> list:
     失败（实测：ST007 重试两次全报「参考图文件不存在」）。
     分层之后层内并发、层间串行，来源资产必然先出完，竞态从根上没了。
 
-    成环（互相引用）时把剩下的全塞最后一层 —— 那是数据问题，不该让调度死循环。
+    成环时必须在派任务前立即失败并报出成员。把循环组塞进同一层并发并没有消除依赖，
+    只会让它们同时读取尚不存在的参考图，看起来像互相等待。
     """
+    cycles = asset_dependency_cycles(tasks)
+    if cycles:
+        detail = "；".join(" ↔ ".join(group) for group in cycles)
+        raise AssetDependencyCycleError(
+            f"资产循环依赖：{detail}。这些资产互相把对方当参考图，没有任何一个能先生产。"
+            "请回到环节4调整 dependency_order/reference_assets：同级资产不得互相引用，"
+            "每条引用只能指向更早完成的基础资产或状态资产。")
     by_key = {t["key"]: t for t in tasks}
     layers, placed = [], set()
     rest = list(tasks)
@@ -1045,9 +1124,9 @@ def asset_layers(tasks: list) -> list:
         cur = [t for t in rest
                if all(r.get("asset_id") in placed or r.get("asset_id") not in by_key
                       for r in (t.get("reference_images") or []))]
-        if not cur:                       # 成环，别卡死
-            layers.append(rest)
-            break
+        if not cur:  # 理论上已被上面的强连通分量检查覆盖；保留防御，绝不静默并发。
+            blocked = "、".join(t["key"] for t in rest)
+            raise AssetDependencyCycleError(f"资产依赖无法继续分层：{blocked}")
         layers.append(cur)
         placed.update(t["key"] for t in cur)
         rest = [t for t in rest if t["key"] not in placed]
