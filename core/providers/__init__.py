@@ -103,10 +103,31 @@ def _register(cls, source: str) -> None:
         ALIASES[a] = pid
 
 
-def _load_builtin() -> None:
+def _builtin_names() -> list:
+    """本目录里有哪几个内置服务商模块。
+
+    正常情况扫目录就行。但**打包成 exe 之后本目录在磁盘上根本不存在** ——
+    .py 都在 exe 内部的归档里，扫出来是空的，结果是「一家服务商都没有」，
+    而且不报错，页面就是干干净净的空下拉框。这个坑源码方式跑永远遇不到。
+
+    所以冻结环境下扫不到时，退回按 _BUILTIN_ORDER 挨个 import，并留下警告 ——
+    退回意味着「新加的内置文件如果没写进 _BUILTIN_ORDER 就会被漏掉」，
+    这件事必须说出来，不能悄悄少一家。
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     names = sorted(m.name for m in pkgutil.iter_modules([here])
                    if not m.name.startswith("_") and m.name != "base")
+    if not names and getattr(sys, "frozen", False):
+        names = list(_BUILTIN_ORDER)
+        WARNINGS.append({"id": "(内置)", "source": "exe",
+                         "problems": ["exe 里扫不到内置服务商目录，已按内置清单逐个加载。"
+                                      "如果新加了内置服务商但没写进 _BUILTIN_ORDER，"
+                                      "它在 exe 里会缺席 —— 打包时的自检会报出来"]})
+    return names
+
+
+def _load_builtin() -> None:
+    names = _builtin_names()
     names.sort(key=lambda n: (_BUILTIN_ORDER.index(n) if n in _BUILTIN_ORDER
                               else len(_BUILTIN_ORDER), n))
     for name in names:

@@ -36,6 +36,94 @@ OPTIONAL = {
 HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg"]
 
 
+def selfcheck(exe: str) -> bool:
+    """真把 exe 跑起来，比对「源码方式有什么」和「exe 里有什么」。
+
+    为什么非做不可：打包会漏东西，而漏了**不报错**。运行时才 import 的模块
+    （服务商）、当资源读的文件（web/、prompts/）—— 少了就是空下拉框、空模板列表，
+    源码方式跑一辈子也复现不出来。人工验的话，只会在换机器用的那天才发现。
+
+    用临时数据目录和随机端口，不碰本机配置。
+    """
+    import json
+    import socket
+    import tempfile
+    import time
+    import urllib.request
+
+    print("\n自检：把 exe 跑起来，对比源码方式认得的东西 —— 打包漏了不会报错，只会缺")
+    sys.path.insert(0, HERE)
+    from core import providers as P                       # noqa: PLC0415
+    want_prov = sorted(p["id"] for p in P.status()["providers"])
+    want_tpl = sorted(os.path.splitext(f)[0] for f in os.listdir(os.path.join(HERE, "prompts"))
+                      if f.endswith(".md"))
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    data = tempfile.mkdtemp(prefix="stv-selfcheck-")
+    proc = subprocess.Popen([exe, "--data", data, "--port", str(port), "--no-browser"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            encoding="utf-8", errors="replace")
+
+    def get(path):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+            return r.read().decode("utf-8")
+
+    ok = True
+    try:
+        deadline = time.time() + 90
+        while True:
+            if proc.poll() is not None:
+                print(f"  ✗ exe 起不来，退出码 {proc.returncode}")
+                print((proc.stdout.read() or "")[-2000:])
+                return False
+            try:
+                got_prov = sorted(p["id"] for p in json.loads(get("/api/providers/status"))["providers"])
+                break
+            except Exception:                            # noqa: BLE001, PERF203
+                if time.time() > deadline:
+                    print("  ✗ 90 秒还没起来（单文件首次启动要解压，但不该这么久）")
+                    return False
+                time.sleep(1)
+
+        # 1. 服务商：运行时动态 import 的，最容易被打包漏掉
+        miss = [x for x in want_prov if x not in got_prov]
+        print(f"  {'✓' if not miss else '✗'} 服务商 {len(got_prov)}/{len(want_prov)} 家"
+              + (f"　缺：{', '.join(miss)}" if miss else ""))
+        if miss:
+            print("     → 检查 --collect-submodules core.providers，"
+                  "以及新加的内置有没有写进 _BUILTIN_ORDER")
+            ok = False
+
+        st = json.loads(get("/api/providers/status"))
+        for w in st.get("warnings", []):
+            print(f"  ⚠ {w.get('id')}：{'；'.join(w.get('problems', []))}")
+        for e in st.get("errors", []):
+            print(f"  ✗ {e.get('file')} 加载失败")
+            ok = False
+
+        # 2. 提示词模板：当资源打进去的，--add-data 漏了就是空列表
+        got_tpl = sorted(t["name"] for t in json.loads(get("/api/prompts"))["items"])
+        miss = [x for x in want_tpl if x not in got_tpl]
+        print(f"  {'✓' if not miss else '✗'} 提示词模板 {len(got_tpl)}/{len(want_tpl)} 份"
+              + (f"　缺：{', '.join(miss)}" if miss else ""))
+        ok = ok and not miss
+
+        # 3. 页面：同上
+        html = get("/")
+        print(f"  {'✓' if len(html) > 10000 else '✗'} 页面 {len(html):,} 字符")
+        ok = ok and len(html) > 10000
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        shutil.rmtree(data, ignore_errors=True)
+    return ok
+
+
 def main() -> int:
     onedir = "--onedir" in sys.argv
     if importlib.util.find_spec("PyInstaller") is None:
@@ -79,6 +167,10 @@ def main() -> int:
     for h in HIDDEN:
         if importlib.util.find_spec(h):
             cmd += ["--hidden-import", h]
+    # 服务商是运行时按目录扫出来 import 的，没有任何一处静态 import ——
+    # PyInstaller 的静态分析看不见它们，不点名就一个都不打进去。
+    # 后果不是报错，是 exe 里「一家服务商都没有」，页面下拉框空白。
+    cmd += ["--collect-submodules", "core.providers"]
     cmd.append(os.path.join(HERE, "run.py"))
 
     print("执行：\n  " + " ".join(cmd) + "\n")
@@ -98,6 +190,11 @@ def main() -> int:
     if onedir:
         exe = os.path.join(out, NAME, NAME + (".exe" if os.name == "nt" else ""))
     size = os.path.getsize(exe) / 1024 / 1024 if os.path.isfile(exe) else 0
+
+    if not selfcheck(exe):
+        print("\n打出来的 exe 没通过自检，别发出去。上面写了缺什么。")
+        return 2
+
     print(f"\n完成 → {exe}　({size:.0f} MB)")
     print(f"       dist/ 整个文件夹拷走就能用（手册也在里面）")
     print()
