@@ -56,7 +56,7 @@ def selfcheck(exe: str) -> bool:
     from core import providers as P                       # noqa: PLC0415
     want_prov = sorted(p["id"] for p in P.status()["providers"])
     want_tpl = sorted(os.path.splitext(f)[0] for f in os.listdir(os.path.join(HERE, "prompts"))
-                      if f.endswith(".md"))
+                      if f.endswith(".md") and not f.endswith("_adapter.md"))
 
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

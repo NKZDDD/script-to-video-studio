@@ -761,8 +761,13 @@ def api_post(path: str, body: dict) -> dict:
                         continue
                     job.set_item(key, state="running")
                     try:
+                        # 单集按钮显示为「重跑」时，环节5必须覆盖已有资产提示词；
+                        # 否则旧 txt 会被增量过滤器跳过，用户看不到新规则的效果。
+                        force = (stage_id == "s5" and not body.get("all_episodes")
+                                 and pj.stage_data("s5_asset_prompts", tgt) is not None)
                         S.run_llm_stage(pj, stage_id, llm, params,
-                                        log=lambda m, k=key: job.log(k, m), episode=tgt)
+                                        log=lambda m, k=key: job.log(k, m), episode=tgt,
+                                        force=force)
                         job.set_item(key, state="ok")
                         diagnose.clear(pj.root, f"stage:{stage_id}", tgt)
                     except Exception as exc:             # noqa: BLE001

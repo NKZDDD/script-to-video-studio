@@ -22,7 +22,7 @@ from .store import Project
 
 _CAT_CN = {
     "identity": "人物身份", "environment": "场景", "prop": "道具",
-    "state": "连续性锚点", "group": "群体", "creature": "生物",
+    "state": "连续状态资产", "group": "群体", "creature": "生物",
 }
 # 资产库里的显示顺序：先身份，再环境道具，状态放最后（它们挂在前面几类下面）
 _CAT_ORDER = ["identity", "group", "creature", "environment", "prop", "state"]
@@ -118,6 +118,7 @@ def assets(pj: Project) -> dict:
             "category": cat,
             "category_cn": _CAT_CN.get(cat, cat or "未分类"),
             "name": a.get("name", ""),
+            "parent": a.get("parent_asset_id") or "",
             "decision": a.get("decision", ""),
             "decision_reason": a.get("decision_reason", ""),
             "output_spec": a.get("output_spec", "") or ap.get("output_spec", ""),
@@ -130,7 +131,7 @@ def assets(pj: Project) -> dict:
             "seg_count": len(segs),
             "image": img,
             "prompt": _text(pj, f"03_提示词/资产生产提示词/{pf}", edits=edits),
-            # 出这张图时要喂进去的来源图（连续性锚点靠它继承基础资产）。
+            # 出这张图时要喂进去的依赖图（状态资产第一张是父资产）。
             "refs": [{"image_n": r.get("image_n"), "asset_id": r.get("asset_id"),
                       "file": _file(pj, r.get("file_ref", ""))}
                      for r in (t.get("reference_images") or [])],

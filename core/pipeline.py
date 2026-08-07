@@ -130,7 +130,7 @@ def _produce_todo(pj, task_key: str, only: Optional[list] = None) -> list:
     if only:
         want = set(only)
         if task_key == "asset_tasks":
-            # 资产表是全剧的，但只出这几集用得到的图（含连续性锚点的全部来源）。
+            # 资产表是全剧的，但只出这几集用得到的图（含状态资产父级与全部依赖）。
             # 其余资产的编号和外观已经在表里定死，跑到那几集时再补图，仍是同一张脸。
             used = S.assets_used_by(pj, only)
             items = [t for t in items if t["key"] in used] if used else items
@@ -261,14 +261,14 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                                              provider=pcfg["provider"],
                                              model=pcfg.get("model", "")))
 
-                # 资产图按参考图依赖分层：连续性锚点依赖一张或多张来源图，
-                # 不分层的话锚点与来源会并发，锚点任务读不到来源 png 直接失败。
+                # 资产图按参考图依赖分层：状态资产依赖父资产及其他来源图，
+                # 不分层的话父子会并发，状态任务读不到来源 png 直接失败。
                 layers = (S.asset_layers(todo) if s["task_key"] == "asset_tasks"
                           else [todo])
                 if len(layers) > 1:
                     log(f"按参考图依赖分 {len(layers)} 层："
                         + "、".join(f"第{i}层 {len(g)} 项" for i, g in enumerate(layers, 1))
-                        + "。上一层出完才跑下一层，否则连续性锚点读不到来源图")
+                        + "。上一层出完才跑下一层，否则状态资产读不到父资产或依赖图")
                 r = {"attempts": [], "left": 0, "switched": 0}
                 for gi, grp in enumerate(layers, 1):
                     if stop_now():

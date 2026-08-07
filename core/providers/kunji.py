@@ -90,7 +90,7 @@ class KunjiProvider(Provider):
                 dropped.append(i)
         if dropped:
             # 以前是 log 一句然后照着出图 —— 那是静默降级：图有了，但没有来源
-            # 参考，连续性锚点的脸不认识本人，而且任务标 ok 没人知道。
+            # 参考，状态资产的脸不认识父资产，而且任务标 ok 没人知道。
             # 报错走失败路径，优先级链会自动换下一家（收链接的那种）补上。
             raise ApiError(
                 f"这家的 edits 只收文件字节，不收链接，第 {dropped} 张参考图给的是链接。"

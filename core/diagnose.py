@@ -285,27 +285,28 @@ CATALOG = {
     },
     "PROMPT_REF_MISSING": {
         "title": "资产提示词的参考依赖不完整",
-        "why": "现在只有「基础原子资产 + 连续性锚点」：基础资产不引用别人；"
-               "连续性锚点没有父资产，必须通过 reference_assets 明确列出至少一个来源。"
+        "why": "连续性状态资产必须继承父资产；复杂关系状态还必须引用所有参与资产。"
                "程序不再扫描剧情文字里的人名猜谁出镜，避免把离屏人物误判成参考图。",
         "where": "「产物」页资产库里这几条的「出这张图要喂的参考图」",
         "fix": ["基础身份、环境、道具资产保持原子，reference_assets 填空",
-                "连续性锚点不填父资产，把画面实际需要继承的全部已建资产ID写进 reference_assets",
+                "连续性状态资产填写 parent_asset_id，并把它排在 reference_assets 第一位",
+                "复杂关系状态继续列出画面需要继承的全部已建资产ID",
                 "删除或改正不存在的引用ID；只是离屏剧情提到的人物不要硬加参考图",
                 "只属于某一镜的临时站位和动作交给环节7，不必建立锚点"],
         "resume": "改完提示词后在「生产」页点「补失败」；已经出过的图要先删掉才会重做。",
         "resumable": True, "scope": "task", "level": "warn",
     },
     "ASSET_SCOPE": {
-        "title": "基础资产或连续性锚点的依赖结构不完整",
-        "why": "基础资产必须原子化，不填写父资产也不引用其他资产。连续性锚点没有父资产，"
-               "用 reference_assets 表达全部来源依赖，可以是一张或多张。",
-        "where": "「产物」页资产库里这几条资产的参考资产栏",
+        "title": "父资产或连续性状态依赖不完整",
+        "why": "基础资产不填写父资产。连续性状态资产必须填写唯一主父资产，并让"
+               "reference_assets 以父资产开头；复杂状态继续列出全部依赖。",
+        "where": "「产物」页资产库里这几条资产的父资产和参考资产栏",
         "fix": ["基础身份、环境、道具：清空 parent_asset_id 和 reference_assets",
-                "连续性锚点：清空 parent_asset_id，把原父资产和其他可见来源全部放进 reference_assets",
-                "连续性锚点的 output_spec 使用 state_anchor",
+                "连续性状态资产：填写 parent_asset_id，并放在 reference_assets 第一位",
+                "复杂关系涉及的其他人物、场景、道具继续放进 reference_assets",
+                "连续性状态资产的 output_spec 使用 state_asset",
                 "删除或改正指向不存在资产 ID 的引用"],
-        "resume": "改完资产表后重跑环节5（只会补没写过提示词的），再往下跑。",
+        "resume": "改完资产表后点当前集的环节5“重跑”（会按新规则覆盖本集旧提示词），再往下跑。",
         "resumable": True, "scope": "task", "level": "warn",
     },
     "ASSET_NO_PROMPT": {

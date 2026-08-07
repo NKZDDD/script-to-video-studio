@@ -29,7 +29,8 @@ REQUIRED_VARS = {
     # 它们是给模型判断用的创作区间，不该由配置去「控制」。
     "s2_segments": ["EPISODE", "GLOBAL", "SCRIPT", "SEGMENTS_TARGET"],
     "s3_states": ["EPISODE", "SEGMENTS"],
-    "s4_assets": ["EPISODE", "GLOBAL", "SEGMENTS", "STATES", "KNOWN_ASSETS"],
+    "s4_assets": ["EPISODE", "GLOBAL", "SEGMENTS", "STATES", "KNOWN_ASSETS",
+                  "KNOWN_SPACES"],
     "s5_asset_prompts": ["EPISODE", "TONE", "ASSETS", "ASSET_CATALOG"],
     "s6_binding": ["EPISODE", "SEGMENTS", "STATES", "ASSETS"],
     "s7_shots": ["EPISODE", "SEGMENTS", "STATES", "BINDINGS"],
@@ -120,10 +121,16 @@ def check(name: str, text: str) -> dict:
         errors.append("模板是空的")
         return {"errors": errors, "warnings": warnings}
 
-    have = set(re.findall(r"\{\{(\w+)\}\}", text))
     builtin = S.prompt_files(name)[0]
     b = read_text(builtin) if os.path.isfile(builtin) else ""
-    orig = set(re.findall(r"\{\{(\w+)\}\}", b))
+    # 环节4业务正文按用户TXT逐字保存；变量与JSON外壳在只读适配层，校验时合起来看。
+    adapter = ""
+    if name == "s4_assets":
+        ap = S.prompt_files("s4_assets_adapter")[0]
+        adapter = "\n\n" + (read_text(ap) if os.path.isfile(ap) else "")
+    effective, builtin_effective = text + adapter, b + adapter
+    have = set(re.findall(r"\{\{(\w+)\}\}", effective))
+    orig = set(re.findall(r"\{\{(\w+)\}\}", builtin_effective))
 
     missing = [v for v in REQUIRED_VARS.get(name, []) if v not in have]
     if missing:
@@ -143,13 +150,13 @@ def check(name: str, text: str) -> dict:
                         + " —— 程序不会填它们，会原样发给模型")
 
     _, _, req = _spec(name)
-    lost = [f for f in req if f.split("[")[0].split(".")[0] not in text]
+    lost = [f for f in req if f.split("[")[0].split(".")[0] not in effective]
     if lost:
         errors.append(
             "输出 schema 里找不到必需字段 " + "、".join(lost)
             + " —— 模型不按这个字段输出的话，程序校验不过会反复重试然后失败")
 
-    for block in re.findall(r"```json\s*(.*?)```", text, re.S):
+    for block in re.findall(r"```json\s*(.*?)```", effective, re.S):
         probe = re.sub(r"\{\{\w+\}\}", "0", block)
         try:
             json.loads(probe)

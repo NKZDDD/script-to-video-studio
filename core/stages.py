@@ -77,6 +77,16 @@ def load_prompt(name: str, pj: Optional[Project] = None) -> str:
     return read_text(builtin)
 
 
+def stage_prompt(stage_id: str, template_name: str,
+                 pj: Optional[Project] = None) -> str:
+    """业务模板原文 + 程序传输层。环节4的 TXT 保持逐字不改。"""
+    text = load_prompt(template_name, pj)
+    if stage_id == "s4":
+        adapter = read_text(os.path.join(PROMPT_DIR, "s4_assets_adapter.md"))
+        return text + "\n\n" + adapter
+    return text
+
+
 def render(tpl: str, mapping: dict) -> str:
     for k, v in mapping.items():
         tpl = tpl.replace("{{" + k + "}}", str(v))
@@ -185,12 +195,35 @@ def known_assets(pj: Project, upto_episode: str = "") -> list:
                 continue
             seen.add(aid)
             item = {k: a.get(k, "") for k in
-                    ("asset_id", "category", "name", "identity_anchors",
-                     "appearance", "output_spec")}
-            # 给提示词看的是新模型。旧父级只作为迁移来源并入引用，不再暴露旧字段。
+                    ("asset_id", "category", "asset_type", "name",
+                     "parent_asset_id", "identity_anchors", "appearance",
+                     "allowed_change", "forbidden_change", "output_spec",
+                     "space_master_id", "space_region_id")}
             item["reference_assets"] = _ordered_asset_refs(
                 [a.get("parent_asset_id")], a.get("reference_assets") or [])
             out.append(item)
+    return out
+
+
+def known_space_masters(pj: Project, upto_episode: str = "") -> list:
+    """空间母资产全剧复用；同一编号取最近一集记录的完整版本。"""
+    from . import episodes as _eps
+    order = _eps.ids(pj)
+    if upto_episode:
+        cut = order.index(upto_episode) if upto_episode in order else len(order)
+        order = order[:cut] + [upto_episode]
+    out, pos = [], {}
+    for ep in order:
+        for space in (pj.stage_data("s4_assets", ep) or {}).get("space_masters", []):
+            sid = str(space.get("space_id") or "")
+            if not sid:
+                continue
+            item = json.loads(json.dumps(space, ensure_ascii=False))
+            if sid in pos:
+                out[pos[sid]] = item
+            else:
+                pos[sid] = len(out)
+                out.append(item)
     return out
 
 
@@ -232,6 +265,7 @@ def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
         "BINDINGS": jd(data.get("s6_binding", {})),
         "SHOTS": jd(data.get("s7_shots", {})),
         "KNOWN_ASSETS": jd(known_assets(pj, episode) if stage_id == "s4" else []),
+        "KNOWN_SPACES": jd(known_space_masters(pj, episode) if stage_id == "s4" else []),
         # 环节5 的【待生产资产】会被 _s5_filter 裁成只剩本次要写的几条；
         # 另给一份完整目录，否则模型根本不知道同画面的旧资产 ID，只能退化成一张来源图。
         "ASSET_CATALOG": jd(known_assets(pj, episode) if stage_id == "s5" else []),
@@ -241,7 +275,8 @@ def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
     }
 
 
-def _s5_filter(pj: Project, data: dict, claim: bool = True) -> tuple:
+def _s5_filter(pj: Project, data: dict, claim: bool = True,
+               force: bool = False) -> tuple:
     """环节5 只给「还没写过提示词的资产」。返回 (裁过的 s4, 要写的, 跳过的)。
 
     资产提示词全剧共用一份文件，不过滤的话 40 集会把同一个角色的提示词重写
@@ -249,15 +284,18 @@ def _s5_filter(pj: Project, data: dict, claim: bool = True) -> tuple:
 
     claim=False 用于**预览**：预览不能真去「领走」资产，否则看一眼就把它占了，
     真跑的时候反而以为别人在写、跳过不写。
+
+    force=True 只用于用户明确点「重跑」环节5：已有 txt 也要重新编译，
+    否则提示词规则更新后，界面虽然显示重跑成功，磁盘上仍会一直是旧结果。
     """
     a4 = dict(data.get("s4_assets") or {})
     free, skipped = [], []
     for a in a4.get("assets", []):
         aid = a.get("asset_id", "")
         f = pj.p("03_提示词", "资产生产提示词", f"{aid}_PROMPT.txt")
-        (skipped if os.path.isfile(f) else free).append(aid)
+        (free if force or not os.path.isfile(f) else skipped).append(aid)
     # 多集并行时，别的集可能刚好也在写这几个资产的提示词 —— 领得到才算自己的
-    todo = _claim(free) if claim else list(free)
+    todo = _claim(free) if claim and not force else list(free)
     skipped += [i for i in free if i not in set(todo)]
     a4["assets"] = [a for a in a4.get("assets", []) if a.get("asset_id") in set(todo)]
     return a4, todo, skipped
@@ -279,22 +317,21 @@ def _ordered_asset_refs(*groups, exclude: str = "") -> list:
 
 
 def normalize_s4_asset_refs(out: dict) -> dict:
-    """把旧状态资产统一迁成无父级的连续性锚点。
-
-    老项目的 parent_asset_id 不丢弃，而是迁入 reference_assets 第一位；新数据只使用
-    reference_assets。基础资产保持原子，不替模型猜测或删除它声明的引用，结构错误交给检查。
-    """
+    """按TXT规则规范父资产、连续性状态资产和完整依赖列表。"""
     for a in out.get("assets") or []:
         aid = str(a.get("asset_id") or "")
         if a.get("category") == "state":
-            legacy_parent = str(a.get("parent_asset_id") or "")
-            a.pop("parent_asset_id", None)
+            refs = _ordered_asset_refs(a.get("reference_assets") or [], exclude=aid)
+            parent = str(a.get("parent_asset_id") or "").strip()
+            if not parent and refs:
+                parent = refs[0]
+            a["parent_asset_id"] = parent
             a.pop("state_type", None)
-            a["output_spec"] = "state_anchor"
+            a["output_spec"] = "state_asset"
             a["reference_assets"] = _ordered_asset_refs(
-                [legacy_parent], a.get("reference_assets") or [], exclude=aid)
+                [parent], refs, exclude=aid)
         else:
-            a.pop("parent_asset_id", None)
+            a["parent_asset_id"] = ""
             a.pop("state_type", None)
             a["reference_assets"] = _ordered_asset_refs(
                 a.get("reference_assets") or [], exclude=aid)
@@ -302,19 +339,21 @@ def normalize_s4_asset_refs(out: dict) -> dict:
 
 
 def normalize_s5_prompt_refs(pj: Project, out: dict, episode: str) -> dict:
-    """环节5不能删减环节4声明的锚点依赖；兼容旧版父子数据。"""
+    """环节5必须保留父资产和环节4声明的全部状态依赖。"""
     catalog = {a.get("asset_id"): a for a in known_assets(pj, episode)}
     for ap in out.get("asset_prompts") or []:
         aid = str(ap.get("asset_id") or "")
         asset = catalog.get(aid) or {}
         ap.pop("state_type", None)
         if asset.get("category") == "state":
-            ap["output_spec"] = "state_anchor"
+            ap["parent_asset_id"] = str(asset.get("parent_asset_id") or "")
+            ap["output_spec"] = "state_asset"
             ap["reference_assets"] = _ordered_asset_refs(
                 [asset.get("parent_asset_id")], asset.get("reference_assets") or [],
                 ap.get("reference_assets") or [],
                 exclude=aid)
         else:
+            ap["parent_asset_id"] = ""
             ap["reference_assets"] = _ordered_asset_refs(
                 asset.get("reference_assets") or [],
                 ap.get("reference_assets") or [], exclude=aid)
@@ -349,7 +388,8 @@ def merge_s5_outputs(previous: dict, fresh: dict) -> dict:
 def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
                   log: Callable = print, episode: str = "",
                   cancel: Optional[Callable] = None,
-                  seg_concurrency: int = 1) -> dict:
+                  seg_concurrency: int = 1,
+                  force: bool = False) -> dict:
     from . import episodes as _eps
     tpl_name, deps, required = _LLM_SPEC[stage_id]
     per_ep = is_per_episode(stage_id)
@@ -397,8 +437,10 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     # 环节5 只给「还没写过提示词的资产」。资产提示词全剧共用一份文件，
     # 不过滤的话 40 集会把同一个角色的提示词重写 40 遍：白花钱，还可能越写越飘。
     if stage_id == "s5":
-        a4, todo, skipped = _s5_filter(pj, data, claim=True)
+        a4, todo, skipped = _s5_filter(pj, data, claim=True, force=force)
         data["s4_assets"] = a4
+        if force:
+            log(f"{episode} 明确重跑环节5：按当前 TXT 规则重新编译本集全部资产提示词")
         if skipped:
             log(f"{episode} 有 {len(skipped)} 个资产前面几集已经写过提示词，跳过："
                 f"{'、'.join(skipped[:8])}{'…' if len(skipped) > 8 else ''}")
@@ -418,7 +460,7 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         log(f"{episode} 目标 {seg_n} 段（{seg_why}）→ 成片约 "
             f"{seg_n * int(params.get('duration') or 15)} 秒")
     system = load_prompt("_common", pj)
-    user = render(load_prompt(tpl_name, pj),
+    user = render(stage_prompt(stage_id, tpl_name, pj),
                   _mapping(pj, stage_id, params, data, episode, script))
     tag = f"{episode} " if episode else "全剧 "
     log(f"{tag}提示词 {len(user)} 字，调用 {llm.model}")
@@ -436,14 +478,14 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
             out = llm.json_call(system, user, required=required, log=log,
                                 cancel=cancel, on_usage=_usage)
     except BaseException:
-        if stage_id == "s5":
+        if stage_id == "s5" and not force:
             # 没写成，把领走的资产放回去，让下一集或重跑能接手
             _unclaim([a.get("asset_id", "") for a in
                       (data.get("s4_assets") or {}).get("assets", [])])
         raise
 
-    # 先规范化再落盘。连续性锚点的视觉来源始终是列表；任何一层都不许把
-    # 环节4声明的多图依赖缩成一张。旧父级字段会迁入列表。
+    # 先规范化再落盘。状态资产保留唯一主父资产，并让完整依赖列表以父资产开头；
+    # 任何一层都不许把环节4声明的多图依赖缩成一张。
     fresh_s5_prompts = []
     if stage_id == "s4":
         normalize_s4_asset_refs(out)
@@ -533,8 +575,11 @@ def check_prompt_refs(pj: Project, out: dict, episode: str, log=None) -> list:
         reasons = []
         if aid not in by_id:
             reasons.append("对应资产不存在")
-        if asset.get("category") == "state" and not refs:
-            reasons.append("连续性锚点没有 reference_assets")
+        parent = str(asset.get("parent_asset_id") or "")
+        if asset.get("category") == "state" and not parent:
+            reasons.append("连续性状态资产没有 parent_asset_id")
+        if asset.get("category") == "state" and (not refs or refs[0] != parent):
+            reasons.append("父资产没有排在 reference_assets 第一位")
         if asset.get("category") != "state" and refs:
             reasons.append("基础原子资产不应引用其他资产")
         unknown = [r for r in refs if r not in by_id]
@@ -552,13 +597,14 @@ def check_prompt_refs(pj: Project, out: dict, episode: str, log=None) -> list:
         "PROMPT_REF_MISSING",
         f"{episode} 有 {len(bad)} 份资产提示词的参考依赖不完整："
         + lines + ("…" if len(bad) > 6 else "")
-        + "。基础资产必须原子化；连续性锚点必须明确引用至少一个真实来源资产。",
+        + "。连续性状态资产必须填写父资产，并在 reference_assets 第一位引用它；"
+          "复杂状态还要列出全部依赖资产。",
         stage="stage:s5", target=f"{episode}:缺参考图"))
     return bad
 
 
 def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
-    """环节4检查基础资产原子性和连续性锚点依赖，不猜自然语言中的出镜关系。"""
+    """按TXT检查父资产、连续性状态依赖和基础资产原子性。"""
     assets = out.get("assets") or []
     if not assets:
         return []
@@ -573,12 +619,14 @@ def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
         refs = [str(r) for r in (a.get("reference_assets") or [])]
         reasons = []
         if a.get("category") == "state":
-            if parent:
-                reasons.append("连续性锚点不应填写 parent_asset_id")
-            if not refs:
-                reasons.append("连续性锚点至少需要一个 reference_assets")
-            if a.get("output_spec") != "state_anchor":
-                reasons.append("连续性锚点必须使用 state_anchor")
+            if not parent:
+                reasons.append("连续性状态资产缺少 parent_asset_id")
+            elif parent not in by_id:
+                reasons.append(f"父资产 {parent} 不存在")
+            elif not refs or refs[0] != parent:
+                reasons.append(f"父资产 {parent} 必须排在 reference_assets 第一位")
+            if a.get("output_spec") != "state_asset":
+                reasons.append("连续性状态资产必须使用 state_asset")
         else:
             if parent:
                 reasons.append("基础资产不应填写 parent_asset_id")
@@ -600,7 +648,8 @@ def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
         "ASSET_SCOPE",
         f"{episode} 有 {len(bad)} 条资产的参考依赖不完整："
         + lines + ("…" if len(bad) > 5 else "")
-        + "。基础资产必须原子化；连续性锚点没有父资产，必须引用至少一个真实来源资产。",
+        + "。连续性状态资产必须填写真实父资产，reference_assets 以父资产开头并列出"
+          "复杂关系需要的全部依赖；基础资产不引用其他图片资产。",
         stage="stage:s4", target=f"{episode}:资产越界"))
     return bad
 
@@ -705,7 +754,7 @@ def preview_prompt(pj: Project, stage_id: str, params: dict,
                            + (f"；{len(skipped)} 个前面已经写过，跳过" if skipped else "")
                            + ("。一个都不用写，真跑时这一步会直接跳过、不花钱。"
                               if not todo else "。"))
-        user = render(load_prompt(tpl_name, pj), _mapping(pj, stage_id, params, data,
+        user = render(stage_prompt(stage_id, tpl_name, pj), _mapping(pj, stage_id, params, data,
                                                           episode, script))
         if stage_id == "s7":
             out["note"] = "这一集的环节3 没给轴线约定，环节7 会整集一次跑（不按段拆）。"
@@ -970,7 +1019,6 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
 
 _CAT_DIR = {
     "identity": "人物身份资产", "environment": "场景资产", "prop": "道具资产",
-    # 保留旧目录名，避免升级后已出图片失联；UI 与数据模型统一称“连续性锚点”。
     "state": "连续状态资产", "group": "群体资产", "creature": "生物资产",
 }
 
@@ -983,7 +1031,7 @@ def asset_output_rel(asset: dict) -> str:
 def asset_layers(tasks: list) -> list:
     """把资产任务按参考图依赖分层：第 0 层没有参考图，第 N 层的参考图都在前面几层。
 
-    为什么必须分层：连续性锚点 ST007 的来源图是 ST006，而任务是按环节4 的输出顺序
+    为什么必须分层：状态资产 ST007 的父资产或来源图是 ST006，而任务是按环节4 的输出顺序
     排的、并发跑的。ST006 还在生成时 ST007 就被派出去，读不到 ST006.png 就直接
     失败（实测：ST007 重试两次全报「参考图文件不存在」）。
     分层之后层内并发、层间串行，来源资产必然先出完，竞态从根上没了。
@@ -1007,7 +1055,7 @@ def asset_layers(tasks: list) -> list:
 
 
 def assets_used_by(pj: Project, episodes_wanted: list) -> set:
-    """这几集实际用到哪些资产（含连续性锚点的全部来源）。
+    """这几集实际用到哪些资产（含状态资产父级与全部来源）。
 
     资产**表**是全剧的（skill：第 8 集才砸毁的房间也要在环节1 进演化图，
     否则资产库中途返工）。但**出图**没必要一上来就出全剧几十张 ——
@@ -1028,7 +1076,7 @@ def assets_used_by(pj: Project, episodes_wanted: list) -> set:
         segs = a.get("used_by_segs") or []
         if any(str(s).split("-")[0] in want_ep for s in segs):
             used.add(aid)
-    # 依赖闭包：连续性锚点要先出完全部来源；兼容旧项目的 parent_asset_id。
+    # 依赖闭包：状态资产要先出完父资产与全部来源。
     # 来源本身还可能是锚点，所以用队列一直追到底。
     queue = list(used)
     while queue:
@@ -1097,8 +1145,7 @@ def _build_tasks(pj: Project, params: dict) -> dict:
             noprompt.append(f"{a['asset_id']} {a.get('name', '')}".strip())
             continue
         ap = aprompts[a["asset_id"]]
-        # 新模型只有基础资产 + 连续性锚点。旧项目的 parent_asset_id 迁入引用列表，
-        # 再与环节4/5声明合并，保证升级后不丢原来的身份参考。
+        # 状态资产的父资产排第一，再与环节4/5的全部依赖合并。
         legacy_parent = str(a.get("parent_asset_id") or "") \
             if a.get("category") == "state" else ""
         refs = _ordered_asset_refs([legacy_parent], a.get("reference_assets") or [],
@@ -1251,7 +1298,7 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
     **例外必须按服务商的声明来，不能一刀切上传**（这是踩过的坑）：
       · needs_bytes 的家（multipart）→ 给本机路径
       · accepts_url 为假的家（把参考图内联进某字段、只认裸 base64）→ 给 data URI
-    给错形式的后果不是报错，是**参考图被丢掉照样出图** —— 连续性锚点没了来源
+    给错形式的后果不是报错，是**参考图被丢掉照样出图** —— 状态资产没了父资产或来源
     参考，脸就不是本人，而且任务标 ok 没人知道。
     """
     up = provider_cfg.get("upload") or {}
