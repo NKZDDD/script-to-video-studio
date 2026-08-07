@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 
@@ -365,7 +365,8 @@ class LLM:
 
     def json_call(self, system: str, user: str, required: Optional[list] = None,
                   json_retries: int = 2, log=print, cancel=None,
-                  on_usage=None) -> Any:
+                  on_usage=None,
+                  validator: Optional[Callable[[Any], list]] = None) -> Any:
         """要求 JSON 输出；解析失败或缺键时把错误反馈给模型重试（≤json_retries）。
 
         只有「模型这次答得不合格」才重试 —— 反馈具体哪里不对，让它再答一次。
@@ -383,6 +384,12 @@ class LLM:
                 missing = check_keys(data, required or [])
                 if missing:
                     raise LLMError(f"输出缺少必需字段: {missing}")
+                problems = validator(data) if validator else []
+                if problems:
+                    shown = list(problems)[:24]
+                    tail = f"；另有{len(problems) - len(shown)}处" \
+                        if len(problems) > len(shown) else ""
+                    raise LLMError("输出结构不符合要求: " + "；".join(shown) + tail)
                 return data
             except (LLMFatal, LLMCancelled):
                 raise                                  # 超时/截断/取消，重试无意义

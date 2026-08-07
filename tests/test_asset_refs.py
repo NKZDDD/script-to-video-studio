@@ -1,12 +1,75 @@
 # -*- coding: utf-8 -*-
+import json
 import tempfile
 import unittest
 
 from core import prompts, stages
+from core.llm import LLM
 from core.store import Project, read_text
 
 
 class AssetReferenceTests(unittest.TestCase):
+    def _valid_s4_output(self):
+        return {
+            "assets": [{
+                "asset_id": "C001", "category": "identity", "asset_type": "人物",
+                "name": "Aisyah", "asset_level": "核心主角", "decision": "must",
+                "decision_reason": "跨段持续", "first_seg": "EP01-SEG01",
+                "used_by_segs": ["EP01-SEG01"], "parent_asset_id": "",
+                "reference_assets": [], "space_master_id": "", "space_region_id": "",
+                "identity_anchors": "身份锚点", "appearance": "固定外观",
+                "fixed_content": ["面孔"], "story_function": "主角",
+                "state_changes": [], "allowed_change": "姿势",
+                "forbidden_change": "身份", "output_spec": "four_view",
+                "dependency_order": 1,
+            }],
+            "space_masters": [], "identity_asset_ids": ["C001"],
+            "group_asset_ids": [], "space_master_ids": [],
+            "environment_asset_ids": [], "vehicle_and_prop_asset_ids": [],
+            "state_asset_ids": [], "dynamic_elements": [], "reuse_relations": [],
+            "parent_state_dependency_chains": [], "space_continuity_chains": [],
+            "must_produce_asset_ids": ["C001"], "conditional_asset_ids": [],
+            "skipped": [], "production_order": ["C001"],
+            "output_register": {
+                "identity_count": 1, "group_count": 0, "space_master_count": 0,
+                "environment_count": 0, "vehicle_count": 0, "prop_count": 0,
+                "state_count": 0, "must_count": 1, "conditional_count": 0,
+                "skip_count": 0, "high_risk_assets": [], "high_risk_spaces": [],
+                "cross_seg_spaces": [], "irreversible_states": [],
+            },
+        }
+
+    def test_s4_complete_schema_validator_accepts_full_mapping(self):
+        self.assertEqual(stages.validate_s4_output(self._valid_s4_output(), "EP01"), [])
+
+    def test_s4_complete_schema_validator_rejects_missing_a_q_fields(self):
+        out = self._valid_s4_output()
+        del out["space_continuity_chains"]
+        del out["assets"][0]["appearance"]
+        problems = stages.validate_s4_output(out, "EP01")
+        self.assertIn("顶层缺少space_continuity_chains", problems)
+        self.assertIn("C001缺少appearance", problems)
+
+    def test_json_call_feeds_custom_validator_failure_back_for_retry(self):
+        class FakeLLM(LLM):
+            def __init__(self):
+                self.responses = iter([
+                    json.dumps({"assets": [{"asset_id": "C001"}]}),
+                    json.dumps({"assets": [{"asset_id": "C001"}], "complete": True}),
+                ])
+                self.calls = 0
+
+            def chat(self, *args, **kwargs):
+                self.calls += 1
+                return next(self.responses)
+
+        llm = FakeLLM()
+        out = llm.json_call("", "prompt", required=["assets[]", "assets[].asset_id"],
+                            validator=lambda x: [] if x.get("complete") else ["语义映射不完整"],
+                            log=lambda _m: None)
+        self.assertTrue(out["complete"])
+        self.assertEqual(llm.calls, 2)
+
     def test_state_keeps_parent_first_and_all_dependencies(self):
         out = {"assets": [{
             "asset_id": "ST001", "category": "state", "state_type": "single",

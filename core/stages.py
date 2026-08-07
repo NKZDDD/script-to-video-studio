@@ -108,7 +108,21 @@ _LLM_SPEC = {
     # 「单集分钟 ÷ 单段秒数」算，见 _seg_target()。
     "s2": ("s2_segments", ["s1_global"], ["segments[]", "segments[].id", "segments[].exit_state"]),
     "s3": ("s3_states", ["s1_global", "s2_segments"], ["segment_states[]"]),
-    "s4": ("s4_assets", ["s1_global", "s2_segments", "s3_states"], ["assets[]", "assets[].asset_id"]),
+    "s4": ("s4_assets", ["s1_global", "s2_segments", "s3_states"], [
+        "assets[]", "assets[].asset_id", "assets[].category", "assets[].asset_type",
+        "assets[].name", "assets[].asset_level", "assets[].decision",
+        "assets[].decision_reason", "assets[].first_seg", "assets[].used_by_segs",
+        "assets[].parent_asset_id", "assets[].reference_assets",
+        "assets[].space_master_id", "assets[].space_region_id",
+        "assets[].identity_anchors", "assets[].appearance", "assets[].fixed_content",
+        "assets[].story_function", "assets[].state_changes", "assets[].allowed_change",
+        "assets[].forbidden_change", "assets[].output_spec", "assets[].dependency_order",
+        "space_masters", "identity_asset_ids", "group_asset_ids", "space_master_ids",
+        "environment_asset_ids", "vehicle_and_prop_asset_ids", "state_asset_ids",
+        "dynamic_elements", "reuse_relations", "parent_state_dependency_chains",
+        "space_continuity_chains", "must_produce_asset_ids", "conditional_asset_ids",
+        "skipped", "production_order", "output_register",
+    ]),
     "s5": ("s5_asset_prompts", ["s1_global", "s4_assets"], ["asset_prompts[]", "asset_prompts[].prompt"]),
     "s6": ("s6_binding", ["s2_segments", "s3_states", "s4_assets"], ["bindings[]"]),
     "s7": ("s7_shots", ["s2_segments", "s3_states", "s6_binding"], ["shots[]"]),
@@ -338,6 +352,179 @@ def normalize_s4_asset_refs(out: dict) -> dict:
     return out
 
 
+_S4_TOP_LISTS = (
+    "space_masters", "identity_asset_ids", "group_asset_ids", "space_master_ids",
+    "environment_asset_ids", "vehicle_and_prop_asset_ids", "state_asset_ids",
+    "dynamic_elements", "reuse_relations", "parent_state_dependency_chains",
+    "space_continuity_chains", "must_produce_asset_ids", "conditional_asset_ids",
+    "skipped", "production_order",
+)
+_S4_ASSET_STRINGS = (
+    "asset_id", "category", "asset_type", "name", "asset_level", "decision",
+    "decision_reason", "first_seg", "parent_asset_id", "space_master_id",
+    "space_region_id", "identity_anchors", "appearance", "story_function",
+    "allowed_change", "forbidden_change", "output_spec",
+)
+_S4_ASSET_LISTS = ("used_by_segs", "reference_assets", "fixed_content", "state_changes")
+_S4_REGISTER_COUNTS = (
+    "identity_count", "group_count", "space_master_count", "environment_count",
+    "vehicle_count", "prop_count", "state_count", "must_count", "conditional_count",
+    "skip_count",
+)
+_S4_REGISTER_LISTS = (
+    "high_risk_assets", "high_risk_spaces", "cross_seg_spaces", "irreversible_states",
+)
+
+
+def validate_s4_output(out: Any, episode: str = "", known_asset_ids=None,
+                       known_space_ids=None) -> list:
+    """环节4保存前的完整结构校验；返回可直接反馈给模型的问题列表。
+
+    通用 required 只能判断“键在不在”。这里继续检查类型、状态资产条件字段、
+    引用先后和空间母资产内部结构，避免半份 A—Q 结果被当成成功保存。
+    """
+    if not isinstance(out, dict):
+        return ["顶层必须是JSON对象"]
+    problems = []
+    assets = out.get("assets")
+    if not isinstance(assets, list) or not assets:
+        problems.append("assets必须是非空数组")
+        assets = []
+    for key in _S4_TOP_LISTS:
+        if key not in out:
+            problems.append(f"顶层缺少{key}")
+        elif not isinstance(out[key], list):
+            problems.append(f"{key}必须是数组")
+    if "output_register" not in out:
+        problems.append("顶层缺少output_register")
+    elif not isinstance(out["output_register"], dict):
+        problems.append("output_register必须是对象")
+
+    local = {}
+    for i, asset in enumerate(assets):
+        if not isinstance(asset, dict):
+            problems.append(f"assets[{i}]必须是对象")
+            continue
+        aid = str(asset.get("asset_id") or f"assets[{i}]")
+        if aid in local:
+            problems.append(f"asset_id重复:{aid}")
+        else:
+            local[aid] = asset
+        for key in _S4_ASSET_STRINGS:
+            if key not in asset:
+                problems.append(f"{aid}缺少{key}")
+            elif not isinstance(asset[key], str):
+                problems.append(f"{aid}.{key}必须是字符串")
+        for key in _S4_ASSET_LISTS:
+            if key not in asset:
+                problems.append(f"{aid}缺少{key}")
+            elif not isinstance(asset[key], list):
+                problems.append(f"{aid}.{key}必须是数组")
+        order = asset.get("dependency_order")
+        if "dependency_order" not in asset:
+            problems.append(f"{aid}缺少dependency_order")
+        elif isinstance(order, bool) or not isinstance(order, int) or order < 1:
+            problems.append(f"{aid}.dependency_order必须是正整数")
+
+        category = asset.get("category")
+        if category not in {"identity", "group", "creature", "environment",
+                            "prop", "state", "dynamic"}:
+            problems.append(f"{aid}.category取值无效:{category}")
+        decision = asset.get("decision")
+        if decision not in {"must", "conditional", "skip"}:
+            problems.append(f"{aid}.decision取值无效:{decision}")
+        spec = asset.get("output_spec")
+        if spec not in {"four_view", "scene_wide", "prop_multi", "closeup",
+                        "state_asset"}:
+            problems.append(f"{aid}.output_spec取值无效:{spec}")
+        if not str(asset.get("name") or "").strip():
+            problems.append(f"{aid}.name不能为空")
+        if not isinstance(asset.get("used_by_segs"), list) or not asset.get("used_by_segs"):
+            problems.append(f"{aid}.used_by_segs不能为空")
+
+        parent = str(asset.get("parent_asset_id") or "")
+        refs = asset.get("reference_assets") if isinstance(asset.get("reference_assets"), list) else []
+        refs = [str(x) for x in refs]
+        if category == "state":
+            if not parent:
+                problems.append(f"{aid}状态资产缺少父资产")
+            if not refs or refs[0] != parent:
+                problems.append(f"{aid}.reference_assets第一项必须是父资产{parent or 'ID'}")
+            if spec != "state_asset":
+                problems.append(f"{aid}状态资产必须使用state_asset")
+        elif parent or refs:
+            problems.append(f"{aid}基础资产的父资产和reference_assets必须为空")
+
+    all_ids = set(local) | set(known_asset_ids or [])
+    for aid, asset in local.items():
+        refs = [str(x) for x in (asset.get("reference_assets") or [])]
+        unknown = [x for x in refs if x not in all_ids]
+        if unknown:
+            problems.append(f"{aid}引用不存在资产:{','.join(unknown)}")
+        cur_order = asset.get("dependency_order")
+        if isinstance(cur_order, int) and not isinstance(cur_order, bool):
+            for rid in refs:
+                dep_order = (local.get(rid) or {}).get("dependency_order")
+                if isinstance(dep_order, int) and dep_order >= cur_order:
+                    problems.append(f"{aid}引用{rid}但dependency_order没有严格后置")
+
+    cycles = asset_dependency_cycles(assets)
+    if cycles:
+        problems.append("资产循环依赖:" + "；".join("↔".join(x) for x in cycles))
+
+    spaces = out.get("space_masters") if isinstance(out.get("space_masters"), list) else []
+    known_spaces = set(known_space_ids or [])
+    current_spaces = set()
+    space_fields = {
+        "space_id": str, "name": str, "decision": str, "used_by_segs": list,
+        "regions": list, "connections": list, "fixed_directions": list,
+        "main_entries": list, "main_exits": list, "fixed_large_objects": list,
+        "movement_paths": list, "forbidden_changes": list,
+    }
+    for i, space in enumerate(spaces):
+        if not isinstance(space, dict):
+            problems.append(f"space_masters[{i}]必须是对象")
+            continue
+        sid = str(space.get("space_id") or f"space_masters[{i}]")
+        if sid in current_spaces:
+            problems.append(f"space_id重复:{sid}")
+        current_spaces.add(sid)
+        for key, typ in space_fields.items():
+            if key not in space:
+                problems.append(f"{sid}缺少{key}")
+            elif not isinstance(space[key], typ):
+                problems.append(f"{sid}.{key}类型错误")
+        if not isinstance(space.get("regions"), list) or not space.get("regions"):
+            problems.append(f"{sid}.regions不能为空")
+        for j, region in enumerate(space.get("regions") or []):
+            if not isinstance(region, dict):
+                problems.append(f"{sid}.regions[{j}]必须是对象")
+                continue
+            for key in ("region_id", "name", "environment_asset_id", "fixed_features"):
+                if key not in region:
+                    problems.append(f"{sid}.regions[{j}]缺少{key}")
+
+    valid_spaces = current_spaces | known_spaces
+    for aid, asset in local.items():
+        sid = str(asset.get("space_master_id") or "")
+        if sid and sid not in valid_spaces:
+            problems.append(f"{aid}引用不存在空间母资产:{sid}")
+
+    register = out.get("output_register")
+    if isinstance(register, dict):
+        for key in _S4_REGISTER_COUNTS:
+            if key not in register:
+                problems.append(f"output_register缺少{key}")
+            elif isinstance(register[key], bool) or not isinstance(register[key], int):
+                problems.append(f"output_register.{key}必须是整数")
+        for key in _S4_REGISTER_LISTS:
+            if key not in register:
+                problems.append(f"output_register缺少{key}")
+            elif not isinstance(register[key], list):
+                problems.append(f"output_register.{key}必须是数组")
+    return problems
+
+
 def normalize_s5_prompt_refs(pj: Project, out: dict, episode: str) -> dict:
     """环节5必须保留父资产和环节4声明的全部状态依赖。"""
     catalog = {a.get("asset_id"): a for a in known_assets(pj, episode)}
@@ -473,10 +660,17 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
                       completion_tokens=u.get("completion_tokens") or 0,
                       seconds=u.get("seconds") or 0,
                       estimated=bool(u.get("estimated")))
+    validator = None
+    if stage_id == "s4":
+        known_ids = {str(a.get("asset_id") or "") for a in known_assets(pj, episode)}
+        known_space_ids = {str(s.get("space_id") or "")
+                           for s in known_space_masters(pj, episode)}
+        validator = lambda value: validate_s4_output(
+            value, episode, known_ids, known_space_ids)
     try:
         with LLM_GATE.slot():
             out = llm.json_call(system, user, required=required, log=log,
-                                cancel=cancel, on_usage=_usage)
+                                validator=validator, cancel=cancel, on_usage=_usage)
     except BaseException:
         if stage_id == "s5" and not force:
             # 没写成，把领走的资产放回去，让下一集或重跑能接手

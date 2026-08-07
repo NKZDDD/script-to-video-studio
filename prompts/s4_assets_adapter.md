@@ -4,7 +4,9 @@
 # 程序传输适配（不改变上文业务规则）
 
 上文 TXT 是本环节唯一业务规范，必须逐条执行，不得套用“基础资产 + 连续性锚点”等其他模型。
-由于程序只接收 JSON，请把上文要求的 A—Q 全部内容映射到下面 JSON 字段；不要输出 Markdown。
+上文 A—Q 定义本环节必须完整覆盖的语义内容，下面的 JSON Schema 定义这些语义内容
+在程序中的承载结构。请逐项完成 A—Q 要求，将结果完整映射到对应 JSON 字段，最终返回
+一个符合下面 Schema 的 JSON 对象。
 
 ## 依赖图必须可生产（强制）
 
@@ -39,7 +41,7 @@
       "allowed_change": "",
       "forbidden_change": "",
       "output_spec": "four_view|scene_wide|prop_multi|closeup|state_asset",
-      "dependency_order": "严格递增的正整数；所有引用资产的值都必须小于本资产"
+      "dependency_order": 1
     }
   ],
   "space_masters": [
