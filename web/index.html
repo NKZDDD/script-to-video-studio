@@ -551,9 +551,15 @@ let BOOT = null, PROJ = null, DETAIL = null;   // DETAIL = 正在看明细的 jo
 // 只放「真的要人来定」的。镜头数 5-8、关键帧 4-6、故事板格数、单集分钟
 // 都不在这儿 —— 那是给模型判断用的创作区间（skill 规定的），写在提示词模板里，
 // 想改去「设置 → 提示词模板」。做成旋钮会误导人去控制本该由模型按内容定的东西。
+// 会被环节8 装配进 tasks.json、真正影响产出的三个。项目和全局都有意义。
 const PARAM_FIELDS = [
   ['duration','单段秒数','number'], ['ratio','画幅','text'],
   ['image_size','图片尺寸','text'],
+];
+// 只在「设置」里出现。它们是跑法不是剧的属性 —— 跑的时候只认「一键跑到底」
+// 面板送的值，或者这里的默认值，**从不读项目参数**。放进项目参数就是个假旋钮：
+// 填了、存了、显示着，就是没人读。
+const RUN_FIELDS = [
   ['concurrency','默认并发','number'], ['max_retry','技术重试上限','number'],
 ];
 
@@ -1637,7 +1643,7 @@ $('#saveChains').onclick = async () => {
 };
 function renderDefaults() {
   const d = BOOT.config.defaults || {};
-  $('#defBox').innerHTML = PARAM_FIELDS.map(([k, label, t]) =>
+  $('#defBox').innerHTML = PARAM_FIELDS.concat(RUN_FIELDS).map(([k, label, t]) =>
     paramField(k, label, t, d[k], 'data-dk')).join('');
 }
 $('#saveDefs').onclick = async () => {

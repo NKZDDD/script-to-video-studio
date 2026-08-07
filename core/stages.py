@@ -111,6 +111,17 @@ _LLM_SPEC = {
 # 不可更改事实）都在它的产物里，往下每集都引用同一份，人物才不会换脸。
 SERIES_STAGES = {"s1"}
 
+# {{PARAMS}} 里发给模型的，只有这几个 —— 白名单不是黑名单。
+#
+# 以前是「除了 script 全发」，出过两次事：
+#   · script 没剔时等于把 8 万字剧本发两遍，环节1 从 72K token 涨到 141K，
+#     一半是重复内容，钱翻倍、首字延迟翻倍，也是那次超时的主因
+#   · 后来删掉的那批旧旋钮（shots_min/max、frames、episode_minutes）还留在
+#     config.json 里，照样被转储进去 —— 模型会把它们当成指令，跟模板里
+#     「镜头数由你按信息密度定 5-8」直接打架
+# 黑名单只挡得住想得到的，白名单挡得住想不到的。加了新配置项默认不外泄。
+_PROMPT_PARAMS = ("project_code", "episode", "duration", "ratio", "image_size")
+
 
 def is_per_episode(stage_id: str) -> bool:
     return stage_id not in SERIES_STAGES
@@ -185,10 +196,7 @@ def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
     """整集级环节（s1-s6）往模板里填的那张表。真跑和预览共用。"""
     from . import episodes as _eps
     tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
-    # PARAMS 里绝不能带 script：它已经在 {{SCRIPT}} 里送了一份。
-    # 之前没剔，等于把 8 万字的剧本发两遍 —— 环节1 的输入从 72K token 涨到
-    # 141K token，一半是重复内容，钱翻倍、首字延迟翻倍，也是上次超时的主因。
-    slim = {k: v for k, v in params.items() if k != "script"}
+    slim = {k: params[k] for k in _PROMPT_PARAMS if k in params}
     slim["episode"] = episode or params.get("episode", "")
     seg_n, seg_why = (_eps.seg_target(pj, episode, params)
                       if is_per_episode(stage_id) and episode else (0, ""))
