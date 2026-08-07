@@ -874,10 +874,20 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                     for a in (pj.stage_data("s5_asset_prompts") or {}).get("asset_prompts", [])}
 
     asset_tasks = []
+    ghost: dict = {}          # 目标 → 声明了、但资产表里根本没有的那些引用
+    noprompt = []             # 环节4 说要出、环节5 却没写提示词的
     for a in assets:
-        if a.get("decision") == "skip" or a["asset_id"] not in aprompts:
+        if a.get("decision") == "skip":
+            continue
+        if a["asset_id"] not in aprompts:
+            # 环节4 判定要出，环节5 却没给提示词 —— 以前 continue 掉，
+            # 结果是这个资产**永远不会出图**，任务列表里连它都没有，没人吭声。
+            noprompt.append(f"{a['asset_id']} {a.get('name', '')}".strip())
             continue
         ap = aprompts[a["asset_id"]]
+        bad = [str(r) for r in (ap.get("reference_assets") or []) if r not in amap]
+        if bad:
+            ghost[a["asset_id"]] = bad
         asset_tasks.append({
             "key": a["asset_id"],
             # 哪几集用到它 —— 「只出第一集的资产图」靠这个字段过滤
@@ -885,9 +895,12 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                                 for s in (a.get("used_by_segs") or [])
                                 if str(s).startswith("EP")}),
             "prompt_ref": f"03_提示词/资产生产提示词/{ap.get('filename') or a['asset_id'] + '_PROMPT.txt'}",
+            # 认不出的引用**留在列表里、file_ref 留空**，跟故事板那边一个规矩：
+            # 悄悄删掉的话数量看着是对的，反而看不出少了一张参考图
             "reference_images": [
-                {"image_n": i + 1, "asset_id": rid, "file_ref": asset_output_rel(amap[rid])}
-                for i, rid in enumerate(ap.get("reference_assets", [])) if rid in amap
+                {"image_n": i + 1, "asset_id": rid,
+                 "file_ref": asset_output_rel(amap[rid]) if rid in amap else ""}
+                for i, rid in enumerate(ap.get("reference_assets", []))
             ],
             "params": {"size": ap.get("size") or params.get("image_size", "1024x1536")},
             "output": asset_output_rel(a),
@@ -895,13 +908,19 @@ def _build_tasks(pj: Project, params: dict) -> dict:
 
     # ---- 故事板 / 视频：逐集展开 ---------------------------------------
     sb_tasks, vd_tasks = [], []
-    ghost: dict = {}          # 段号 → 环节8 写了、但资产表里根本没有的那些引用
+    noref, uncompiled = [], []
     for ep in eps:
         bindings = {b["id"]: b for b in (pj.stage_data("s6_binding", ep) or {}).get("bindings", [])}
         compiled = (pj.stage_data("s8_compile", ep) or {}).get("compiled", [])
         if not compiled and len(eps) == 1:       # 老单集项目
             bindings = {b["id"]: b for b in (pj.stage_data("s6_binding") or {}).get("bindings", [])}
             compiled = (pj.stage_data("s8_compile") or {}).get("compiled", [])
+        # 环节2 切了段、环节8 却没编出来的：那几段根本不会有故事板和视频任务。
+        # 不记一笔的话，「6 段只出了 4 段」看起来就像本来只有 4 段。
+        done_ids = {c.get("id") for c in compiled}
+        uncompiled += [s.get("id") for s in
+                       (pj.stage_data("s2_segments", ep) or {}).get("segments", [])
+                       if s.get("id") and s.get("id") not in done_ids]
         for c in compiled:
             sid = c["id"]
             seg = sid.split("-")[-1]
@@ -915,6 +934,10 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                    if r.get("asset_id") not in amap]
             if bad:
                 ghost[sid] = bad
+            if not refs:
+                # 一张参考图都没有 —— 人脸、场景全靠模型现编，跨段必然不一致。
+                # 这个「0 声明 0 解析」躲得过出图时的缺图检查，只能在这里逮。
+                noref.append(sid)
             sb_out = f"04_故事板/{code}_{ep}_{seg}_STORYBOARD_V01_FIXED.png"
             sb_tasks.append({
                 "key": sid, "episode": ep,
@@ -942,21 +965,53 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                 "output": f"05_分段视频/{code}_{ep}_{seg}_VIDEO_V01_FIXED.mp4",
             })
 
-    for sid, bad in ghost.items():
+    # ---- 装配时就能看出来的窟窿，全部记进待办 ---------------------------
+    # 这一类的共同点是**不报错、只是少**：少一张参考图、少一个资产、少一段任务。
+    # 跑完看着都成功，要到人工验收才发现脸不对、片子短了一段。
+    for key, bad in ghost.items():
         diagnose.record(pj.root, diagnose.warn(
             "GHOST_REF",
-            f"{sid} 的参考图里有 {len(bad)} 个资产表里没有的东西："
+            f"{key} 的参考图里有 {len(bad)} 个资产表里没有的东西："
             + "、".join(bad[:5]) + ("…" if len(bad) > 5 else "")
             + "。它们指不到任何文件，出图那一步会停下 —— "
             + ("其中有『本段故事板自己』，那是环节10 视频的约定，"
                "不该出现在故事板的参考图里。"
                if any("STORYBOARD" in x.upper() for x in bad) else "")
-            + "改「任务明细」里这一段的提示词，或者重跑环节8。",
-            stage="storyboard", target=sid))
-    if not ghost:
-        # 上一轮记过、这一轮已经好了的，要清掉，否则面板上一直挂着假警报
-        for sid in {t["key"] for t in sb_tasks}:
-            diagnose.clear(pj.root, "storyboard", sid)
+            + "改「任务明细」里这一条的提示词，或者重跑对应的文字环节。",
+            stage="storyboard", target=key))
+    if noprompt:
+        diagnose.record(pj.root, diagnose.warn(
+            "ASSET_NO_PROMPT",
+            f"环节4 判定要出、环节5 却没写提示词的资产有 {len(noprompt)} 个："
+            + "、".join(noprompt[:8]) + ("…" if len(noprompt) > 8 else "")
+            + "。它们不会进出图任务，等于**永远不会出图**，"
+            "而引用到它们的故事板会因为缺参考图停下。重跑这一集的环节5。",
+            stage="asset", target="(缺提示词)"))
+    if noref:
+        diagnose.record(pj.root, diagnose.warn(
+            "NO_REF",
+            f"有 {len(noref)} 段的故事板一张参考图都没有："
+            + "、".join(noref[:8]) + ("…" if len(noref) > 8 else "")
+            + "。人脸、场景全靠模型现编，跨段必然不一致。"
+            "多半是环节6 没给这几段绑资产，重跑环节6 再重跑环节8。",
+            stage="storyboard", target="(无参考图)"))
+    if uncompiled:
+        diagnose.record(pj.root, diagnose.warn(
+            "SEG_NOT_COMPILED",
+            f"环节2 切了段、环节8 没编出来的有 {len(uncompiled)} 段："
+            + "、".join(uncompiled[:8]) + ("…" if len(uncompiled) > 8 else "")
+            + "。这几段不会有故事板和视频任务，成片会直接少这几段 —— "
+            "而任务列表里看不出来，因为它们压根没被排进去。重跑环节8。",
+            stage="storyboard", target="(未编译的段)"))
+    # 上一轮记过、这一轮已经好了的要清掉，否则面板上一直挂着假警报
+    for cleared, targets in ((not ghost, {t["key"] for t in sb_tasks} | {t["key"] for t in asset_tasks}),
+                             (not noprompt, {"(缺提示词)"}),
+                             (not noref, {"(无参考图)"}),
+                             (not uncompiled, {"(未编译的段)"})):
+        if cleared:
+            for tg in targets:
+                diagnose.clear(pj.root, "storyboard", tg)
+                diagnose.clear(pj.root, "asset", tg)
 
     tasks = {"project_code": code, "episodes": eps, "episode": eps[0],
              "asset_tasks": asset_tasks, "storyboard_tasks": sb_tasks, "video_tasks": vd_tasks}
