@@ -161,16 +161,24 @@ _STAGE_OF_OUT = {s["out"]: s for s in STAGES if s.get("out")}
 
 
 def known_assets(pj: Project, upto_episode: str = "") -> list:
-    """把前面几集已经建好的资产汇总起来，喂给环节4 让它沿用编号。
+    """把已经建好的资产汇总起来，喂给环节4 让它沿用编号。
 
     资产库全剧共享：同一个角色在 EP01 和 EP07 必须是同一个 asset_id，
     否则会各出一张脸。这里按集顺序累加，先出现的定义优先（后面的不许改写）。
+
+    **本集上一次建的也算**（放在最后，优先级最低）。不然重跑环节4 等于从零
+    重编：上一轮的 ST007 是「衣服湿透」，这一轮可能变成「街道积水」——
+    编号一洗牌，已经出好的资产图、故事板引用全部对不上号，等于白花的钱。
+    重跑通常是为了修内容，不是为了换编号。
     """
     from . import episodes as _eps
+    order = _eps.ids(pj)
+    if upto_episode:
+        # 本集之前的集（优先级高）+ 本集自己上一次的产物（垫最后，优先级最低）
+        cut = order.index(upto_episode) if upto_episode in order else len(order)
+        order = order[:cut] + [upto_episode]
     out, seen = [], set()
-    for ep in _eps.ids(pj):
-        if upto_episode and ep == upto_episode:
-            break
+    for ep in order:
         for a in (pj.stage_data("s4_assets", ep) or {}).get("assets", []):
             aid = a.get("asset_id")
             if not aid or aid in seen:
