@@ -400,6 +400,7 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
 
     # s5 额外把提示词正文落成 txt，便于人工查看与执行器读取
     if stage_id == "s5":
+        check_prompt_refs(pj, out, episode, log)
         for ap in out.get("asset_prompts", []):
             fn = ap.get("filename") or f"{ap['asset_id']}_PROMPT.txt"
             write_prompt_txt(pj, f"03_提示词/资产生产提示词/{fn}",
@@ -408,6 +409,122 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         build_tasks(pj, params)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode)
     return out
+
+
+def _name_parts(name: str) -> set:
+    """一个资产名的所有叫法。
+
+    必须按**分词**来，不能只比全名：资产叫「Rizky Adhitama」，正文里往往只写
+    「Rizky」—— 只比全名恰好会漏掉实际踩到的那条。
+    """
+    name = (name or "").strip()
+    if len(name) < 2:
+        return set()
+    return {name} | {t for t in re.split(r"[\s·・,，]+", name) if len(t) >= 2}
+
+
+def _subjects(by_id: dict) -> dict:
+    """能「出镜」的主体：人物/群体/生物。场景和道具不算 ——
+    一条状态资产提到自己所在的房间、手里的道具是正常的。"""
+    return {aid: (a.get("name") or "").strip()
+            for aid, a in by_id.items()
+            if a.get("category") in ("identity", "group", "creature")
+            and len((a.get("name") or "").strip()) >= 2}
+
+
+def _mentioned(text: str, subjects: dict, exclude: set) -> list:
+    """text 里点到名的主体（排除 exclude 里那些资产的所有叫法）。"""
+    skip = set()
+    for aid in exclude:
+        skip |= _name_parts(subjects.get(aid, ""))
+    return sorted({nm for aid, nm in subjects.items()
+                   if aid not in exclude and (_name_parts(nm) - skip) & {
+                       t for t in _name_parts(nm) if t in text}})
+
+
+# 环节5 提示词的固定小节名（模板规定的那些）。
+_P_SECTIONS = ("资产名称", "输出结构", "参考图角色映射", "参考图场景映射", "身份绑定",
+               "父资产identity_anchors原文", "外观与结构", "状态差异", "材质",
+               "基础状态或剧情状态", "允许改变内容", "禁止改变内容", "使用场景", "输出限制")
+# 这几节提到别人的名字是**正当**的，不算「画面里有这个人」：
+#   基础状态：衣物可沾有 Rizky 鲜血    ← 画面里没有 Rizky，只有血
+#   禁止改变：禁止 Rizky 提前苏醒       ← 约束，不是画面清单
+#   使用场景：与 Dewi 对峙的段落        ← 说明用在哪
+# 不排除它们的话，17 份提示词里 13 份都报警，吵到没人看。
+_P_SAFE = ("参考图角色映射", "参考图场景映射", "身份绑定", "父资产identity_anchors原文",
+           "基础状态或剧情状态", "允许改变内容", "禁止改变内容", "使用场景", "输出限制")
+
+
+def _picture_part(prompt: str) -> str:
+    """一份资产提示词里「这张图要画什么」的部分。
+
+    用**减法**而不是「切出外观与结构那一段」：实测有的资产（ST008）压根没写
+    「外观与结构：」这个小节头，外观直接是裸句 —— 按加法切会切出空字符串，
+    检查就静默跳过了，正好漏掉真问题。减法在模型不守格式时也还剩点东西。
+    """
+    text = prompt or ""
+    marks = []
+    for s in _P_SECTIONS:
+        for sep in ("：", ":"):
+            i = text.find(s + sep)
+            if i >= 0:
+                marks.append((i, s, len(s) + len(sep)))
+    marks.sort()
+    if not marks:
+        return text
+    out, prev_end, prev_name = [], 0, ""
+    for i, name, hlen in marks + [(len(text), "", 0)]:
+        if prev_name not in _P_SAFE:
+            out.append(text[prev_end:i])
+        prev_end, prev_name = i + hlen, name
+    return " ".join(out)
+
+
+def check_prompt_refs(pj: Project, out: dict, episode: str, log=None) -> list:
+    """环节5 写完提示词就查：**画面里出现谁，谁就得有参考图**。
+
+    这是这一层真正的不变量。父资产只能填一个（它回答「这是谁的状态」），
+    但参考图是个列表（它回答「画这张图要看哪几张」）—— 两者不是一回事。
+    所以规则不是「不许写别人」，而是「写了谁就得给谁参考图」。
+
+    没参考图的那个人，模型只能照着文字自己编一张脸，和他自己的资产图对不上，
+    跨段跨集就飘。而且这事不报错，只能靠肉眼在几百张里发现。
+
+    比环节4 那个 check_asset_scope 更靠后也更准：那边查的是「设计上是不是把
+    一个画面塞进了一条资产」，这边查的是「实际要发出去的这段字，参考图配齐没有」。
+    """
+    prompts = out.get("asset_prompts") or []
+    if not prompts:
+        return []
+    by_id = {a.get("asset_id"): a for a in known_assets(pj, episode)}
+    for ep in ([episode] if episode else [""]):
+        for a in (pj.stage_data("s4_assets", ep) or {}).get("assets", []):
+            by_id[a.get("asset_id")] = a
+    subjects = _subjects(by_id)
+    bad = []
+    for ap in prompts:
+        aid = ap.get("asset_id", "")
+        # 自己 + 已经列进参考图的，都不用再报
+        have = {aid} | {str(r) for r in (ap.get("reference_assets") or [])}
+        miss = _mentioned(_picture_part(str(ap.get("prompt", ""))),
+                          subjects, exclude=have)
+        if miss:
+            bad.append((aid, miss))
+    if not bad:
+        diagnose.clear(pj.root, "stage:s5", f"{episode}:缺参考图")
+        return []
+    lines = "；".join(f"{aid} 提到了 {'、'.join(m)} 却没给参考图" for aid, m in bad[:6])
+    if log:
+        log(f"⚠️ {episode} 有 {len(bad)} 份资产提示词写到了没有参考图的人：{lines}")
+    diagnose.record(pj.root, diagnose.warn(
+        "PROMPT_REF_MISSING",
+        f"{episode} 有 {len(bad)} 份资产提示词提到了没配参考图的主体："
+        + lines + ("…" if len(bad) > 6 else "")
+        + "。没参考图的那个人，模型只能照着文字自己编一张脸，"
+          "和他自己的资产图对不上。要么把他加进 reference_assets，"
+          "要么把他从画面描述里删掉（站位和动作本来就该由分镜负责）。",
+        stage="stage:s5", target=f"{episode}:缺参考图"))
+    return bad
 
 
 def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
@@ -430,20 +547,7 @@ def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
     # 加上前面几集已建的：本集的状态资产可能挂在早先建的人物身上
     for a in known_assets(pj, episode):
         by_id.setdefault(a.get("asset_id"), a)
-    # 「别的主体」= 人物/群体/生物类资产。场景和道具不算：
-    # 一条状态资产提到自己所在的房间、手里的道具是正常的。
-    #
-    # 匹配要按**分词**来，不能只比全名：资产叫「Rizky Adhitama」，正文里只写
-    # 「Rizky」—— 只比全名就漏了，而这正是实际踩到的那条。
-    def parts(name: str) -> set:
-        name = (name or "").strip()
-        toks = {t for t in re.split(r"[\s·・,，]+", name) if len(t) >= 2}
-        return ({name} | toks) if len(name) >= 2 else set()
-
-    people = {aid: (a.get("name") or "").strip()
-              for aid, a in by_id.items()
-              if a.get("category") in ("identity", "group", "creature")
-              and len((a.get("name") or "").strip()) >= 2}
+    people = _subjects(by_id)
     bad = []
     for a in assets:
         if a.get("category") != "state":
@@ -455,10 +559,7 @@ def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
         # 一起查会让 8/11 的资产都报警，吵到没人看。
         text = str(a.get("appearance", ""))
         # 父资产的叫法全部豁免：它就是这条状态的主体，提到它是应该的
-        mine = parts((by_id.get(parent) or {}).get("name", ""))
-        others = sorted({nm for aid, nm in people.items()
-                         if aid != parent and (parts(nm) - mine) & {
-                             t for t in parts(nm) if t in text}})
+        others = _mentioned(text, people, exclude={parent})
         if others:
             bad.append((a.get("asset_id", ""), a.get("name", ""), parent, others))
     if not bad:
