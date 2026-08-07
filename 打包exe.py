@@ -62,9 +62,13 @@ def selfcheck(exe: str) -> bool:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     data = tempfile.mkdtemp(prefix="stv-selfcheck-")
+    # 单独开一个进程组：这样后面能像用户按 Ctrl+C 那样让它自己收尾
+    # （单文件 exe 被强杀的话，引导程序来不及删 %TEMP%\_MEI*，会一直攒着）
     proc = subprocess.Popen([exe, "--data", data, "--port", str(port), "--no-browser"],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            encoding="utf-8", errors="replace")
+                            encoding="utf-8", errors="replace",
+                            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
+                                           if os.name == "nt" else 0))
 
     def get(path):
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
@@ -115,13 +119,42 @@ def selfcheck(exe: str) -> bool:
         print(f"  {'✓' if len(html) > 10000 else '✗'} 页面 {len(html):,} 字符")
         ok = ok and len(html) > 10000
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _stop(proc)
         shutil.rmtree(data, ignore_errors=True)
     return ok
+
+
+def _stop(proc) -> None:
+    """把自检起的 exe 停干净。
+
+    两个坑叠在一起：
+      · 单文件 exe 是「引导程序 + 真正的子进程」两个进程，只 terminate 引导程序，
+        子进程会变孤儿 —— 端口占着、进程列表里赖着
+      · 强杀则轮到引导程序来不及删 %TEMP%\\_MEI*，每打一次包攒一个几百 MB 的目录
+
+    所以先按 Ctrl+C 让它自己收尾（run.py 接住 KeyboardInterrupt 会 shutdown），
+    不听话再连整棵进程树一起杀。
+    """
+    import signal
+    import time
+
+    if os.name == "nt":
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            for _ in range(30):
+                if proc.poll() is not None:
+                    return
+                time.sleep(0.3)
+        except Exception:                                # noqa: BLE001
+            pass
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True)
+    else:
+        proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def main() -> int:
