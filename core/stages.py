@@ -1139,14 +1139,16 @@ def assemble(pj: Project, params: dict, log: Callable = print,
                 "msg": "未找到 ffmpeg，已生成 concat 清单，请手动拼接或 pip install imageio-ffmpeg"}
     cmd = [ff, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", concat, "-c", "copy", master]
     log("流拷贝拼接…")
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    # 走 probe.run_text：它显式给 utf-8，不用系统默认的 GBK。
+    # 拼接可能跑很久（重编码几分钟），所以超时给足。
+    r = probe.run_text(cmd, timeout=3600)
     if r.returncode != 0 or not os.path.isfile(master):
         log("流拷贝失败，重编码兜底")
         cmd = [ff, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", concat,
                "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-c:a", "aac", master]
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = probe.run_text(cmd, timeout=7200)
         if r.returncode != 0:
-            raise RuntimeError(f"ffmpeg 拼接失败: {r.stderr[:300]}")
+            raise RuntimeError(f"ffmpeg 拼接失败: {(r.stderr or '')[:300]}")
     size = os.path.getsize(master)
     pj.log_event({"stage": "assemble", "episode": ep, "result": "ok",
                   "count": len(exist), "size": size})

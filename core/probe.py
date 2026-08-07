@@ -146,6 +146,19 @@ def find_ffprobe() -> str:
 _SIZE_RE = re.compile(r"\b(\d{2,5})x(\d{2,5})\b")
 
 
+def run_text(cmd: list, timeout: int = 30):
+    """跑外部程序并按文本拿输出。**永远显式给编码。**
+
+    踩过的坑：subprocess 的 text=True 用的是系统默认编码，中文 Windows 上是
+    GBK。ffmpeg 打出来的流信息里常有 ® © 之类的字节，GBK 解不了，就在
+    subprocess 内部的读取线程里抛 UnicodeDecodeError —— 那是另一个线程，
+    调用方 try/except 根本接不住，整条拼接就这么断了。
+    统一走这里：utf-8 + errors="replace"，解不了的字符变成 � 而不是炸掉。
+    """
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout)
+
+
 def video_size(path: str) -> Optional[tuple]:
     """读第一条视频轨的宽高。ffprobe 和 ffmpeg 有哪个用哪个；都没有就返回 None。"""
     if not os.path.isfile(path):
@@ -153,10 +166,9 @@ def video_size(path: str) -> Optional[tuple]:
     probe_exe = find_ffprobe()
     if probe_exe:
         try:
-            r = subprocess.run(
+            r = run_text(
                 [probe_exe, "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path],
-                capture_output=True, text=True, timeout=30)
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path])
             m = _SIZE_RE.search(r.stdout or "")
             if m:
                 return int(m.group(1)), int(m.group(2))
@@ -170,8 +182,7 @@ def video_size(path: str) -> Optional[tuple]:
     if not ff:
         return None
     try:
-        r = subprocess.run([ff, "-hide_banner", "-i", path],
-                           capture_output=True, text=True, timeout=30)
+        r = run_text([ff, "-hide_banner", "-i", path])
     except (OSError, subprocess.SubprocessError):
         return None
     for line in (r.stderr or "").splitlines():
