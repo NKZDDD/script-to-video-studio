@@ -21,6 +21,12 @@ import shutil
 import subprocess
 import sys
 
+# Windows 的非 UTF-8 控制台无法直接输出自检使用的 ✓/✗，会在真正打包前
+# 抛 UnicodeEncodeError。固定脚本自身的输出编码，避免依赖调用者先设置环境变量。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 NAME = "script-to-video-studio"        # exe 文件名，改成中文也行，但英文最省事
 
