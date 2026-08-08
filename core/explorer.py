@@ -278,15 +278,36 @@ def tasks(pj: Project, episode: str = "") -> dict:
                 continue
             out = _file(pj, it.get("output", ""))
             r, lg = reg.get(k, {}), logs.get(k, {})
+            if kind == "video":
+                # 视频执行器固定按「故事板 → 可选补充资产」传图；这两项分别存放在
+                # storyboard_ref / aux_reference，不在通用 reference_images 里。
+                # 旧页面只看后者，于是任务明明有故事板却显示“无参考图”。
+                display_refs = []
+                storyboard_ref = str(it.get("storyboard_ref") or "")
+                aux_reference = str(it.get("aux_reference") or "")
+                if storyboard_ref:
+                    display_refs.append({
+                        "image_n": 1, "asset_id": "本段固定故事板",
+                        "file": _file(pj, storyboard_ref),
+                    })
+                if aux_reference:
+                    display_refs.append({
+                        "image_n": 2, "asset_id": "补充资产参考图",
+                        "file": _file(pj, aux_reference),
+                    })
+            else:
+                display_refs = [
+                    {"image_n": x.get("image_n"), "asset_id": x.get("asset_id"),
+                     "file": _file(pj, x.get("file_ref", ""))}
+                    for x in (it.get("reference_images") or [])
+                ]
             rows.append({
                 "key": k,
                 "episode": ep or "、".join(it.get("episodes") or []) or "全剧共享",
                 "name": (amap.get(k) or {}).get("name", ""),
                 # —— 怎么做的 ——
                 "prompt": _text(pj, it.get("prompt_ref", ""), edits=edits),
-                "refs": [{"image_n": x.get("image_n"), "asset_id": x.get("asset_id"),
-                          "file": _file(pj, x.get("file_ref", ""))}
-                         for x in (it.get("reference_images") or [])],
+                "refs": display_refs,
                 "params": it.get("params") or {},
                 "storyboard_ref": it.get("storyboard_ref", ""),
                 # —— 做了什么 ——
