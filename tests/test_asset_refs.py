@@ -28,6 +28,7 @@ class AssetReferenceTests(unittest.TestCase):
             "environment_asset_ids": [], "vehicle_and_prop_asset_ids": [],
             "state_asset_ids": [], "dynamic_elements": [], "reuse_relations": [],
             "parent_state_dependency_chains": [], "space_continuity_chains": [],
+            "character_space_bindings": [],
             "must_produce_asset_ids": ["C001"], "conditional_asset_ids": [],
             "skipped": [], "production_order": ["C001"],
             "output_register": {
@@ -42,13 +43,57 @@ class AssetReferenceTests(unittest.TestCase):
     def test_s4_complete_schema_validator_accepts_full_mapping(self):
         self.assertEqual(stages.validate_s4_output(self._valid_s4_output(), "EP01"), [])
 
-    def test_s4_complete_schema_validator_rejects_missing_a_q_fields(self):
+    def test_s4_complete_schema_validator_rejects_missing_fields(self):
         out = self._valid_s4_output()
         del out["space_continuity_chains"]
         del out["assets"][0]["appearance"]
         problems = stages.validate_s4_output(out, "EP01")
         self.assertIn("顶层缺少space_continuity_chains", problems)
         self.assertIn("C001缺少appearance", problems)
+
+    def test_s4_character_space_binding_validates_structured_references(self):
+        out = self._valid_s4_output()
+        out["assets"].append({
+            "asset_id": "P001", "category": "prop", "asset_type": "道具",
+            "name": "床头柜", "asset_level": "固定道具", "decision": "must",
+            "decision_reason": "固定人物位置", "first_seg": "EP01-SEG01",
+            "used_by_segs": ["EP01-SEG01"], "parent_asset_id": "",
+            "reference_assets": [], "space_master_id": "SP001",
+            "space_region_id": "A", "identity_anchors": "固定结构",
+            "appearance": "病床左侧床头柜", "fixed_content": ["位置"],
+            "story_function": "空间参照", "state_changes": [],
+            "allowed_change": "无", "forbidden_change": "移动",
+            "output_spec": "prop_multi", "dependency_order": 1,
+        })
+        out["space_masters"] = [{
+            "space_id": "SP001", "name": "病房", "decision": "must",
+            "used_by_segs": ["EP01-SEG01"],
+            "regions": [{"region_id": "A", "name": "床位区",
+                         "environment_asset_id": "", "fixed_features": []}],
+            "connections": [], "fixed_directions": [], "main_entries": [],
+            "main_exits": [], "fixed_large_objects": [], "movement_paths": [],
+            "forbidden_changes": [],
+        }]
+        out["character_space_bindings"] = [{
+            "character_asset_id": "C001", "character_name": "Aisyah",
+            "continuity_state_asset_id": "",
+            "seg_id": "EP01-SEG01", "space_master_id": "SP001",
+            "space_region_id": "A", "position": "病床左侧",
+            "facing": "面向天花板",
+            "fixed_object_relations": [{
+                "object_asset_id": "P001", "object_name": "床头柜",
+                "relation": "头部靠近床头柜",
+            }],
+            "relative_character_positions": [],
+            "exit_state": "仍躺在病床左侧", "inherit_to_seg": "EP01-SEG02",
+            "inheritance_rule": "下一段保持躺卧位置", "change_trigger": "",
+        }]
+        self.assertEqual(stages.validate_s4_output(out, "EP01"), [])
+        out["character_space_bindings"][0]["inherit_to_seg"] = "EP02-SEG01"
+        self.assertIn(
+            "character_space_bindings[0].inherit_to_seg不属于本集:EP02-SEG01",
+            stages.validate_s4_output(out, "EP01"),
+        )
 
     def test_json_call_feeds_custom_validator_failure_back_for_retry(self):
         class FakeLLM(LLM):
@@ -210,7 +255,50 @@ class AssetReferenceTests(unittest.TestCase):
         self.assertTrue(effective.startswith(txt))
         self.assertIn("# 程序传输适配（不改变上文业务规则）", effective)
         self.assertIn("{{GLOBAL}}", effective)
+        self.assertIn("character_space_bindings", effective)
         self.assertEqual(prompts.check("s4_assets", txt)["errors"], [])
+
+    def test_character_space_continuity_reaches_later_prompts(self):
+        s6 = read_text(stages.prompt_files("s6_binding")[0])
+        s7 = read_text(stages.prompt_files("s7_shots")[0])
+        s8 = read_text(stages.prompt_files("s8_compile")[0])
+        self.assertIn("character_space_bindings", s6)
+        self.assertIn("character_space_context", s6)
+        self.assertIn("character_space_context", s7)
+        self.assertIn("character_space_note", s7)
+        self.assertIn("character_space_context", s8)
+        self.assertIn("character_space_note", s8)
+
+    def test_s8_keeps_assets_named_only_by_character_space_context(self):
+        with tempfile.TemporaryDirectory() as root:
+            pj = Project(root)
+            pj.init_dirs()
+            data = {
+                "s1_global": {"visual_tone": {}},
+                "s3_states": {"segment_states": []},
+                "s4_assets": {"assets": [
+                    {"asset_id": "C001", "appearance": "主角资产原文"},
+                    {"asset_id": "C002", "appearance": "对位人物资产原文"},
+                    {"asset_id": "P001", "appearance": "固定床头柜资产原文"},
+                ]},
+                "s6_binding": {"bindings": [{
+                    "id": "EP01-SEG01",
+                    "reference_images": [{"asset_id": "C001"}],
+                    "character_space_context": [{
+                        "character_asset_id": "C001",
+                        "fixed_object_relations": [{"object_asset_id": "P001"}],
+                        "relative_character_positions": [{
+                            "character_asset_id": "C002"
+                        }],
+                    }],
+                }]},
+                "s7_shots": {"shots": [{"id": "EP01-SEG01"}]},
+            }
+            user = stages.s8_user_builder(pj, {}, data, "EP01")({
+                "id": "EP01-SEG01"
+            })
+            self.assertIn("对位人物资产原文", user)
+            self.assertIn("固定床头柜资产原文", user)
 
     def test_s5_uses_parent_state_model(self):
         text = read_text(stages.prompt_files("s5_asset_prompts")[0])

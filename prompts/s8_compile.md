@@ -16,7 +16,10 @@
   - 例：`Image 1 = C001 Aisyah，控制人物身份与基础服装，不控制 Dewi、场景和道具。`
 三、身份与资产绑定（**从资产清单原样复制 appearance，禁止重新组织语言**）
 四、视觉风格（引用压缩版基调）
-五、空间与轴线（原样落实绑定的 space_context 和分镜的 space_note）
+五、空间与轴线（原样落实绑定的 space_context、character_space_context，以及分镜的 space_note、character_space_note）
+  - 故事板每格的人物位置、身体与视线朝向、与固定物关系、人物相对位置必须服从对应分镜的 `positions`；
+    没有 `change_trigger` 或明确移动镜头时不得让人物换边、换位、突然坐下/站起或离开固定物。
+  - 视频首帧必须继承人物 `entry_state`，末帧必须落在 `exit_state`；存在 `inherit_to_seg` 时，末帧状态必须可直接作为下一 SEG 的进入状态。
 六、关键帧顺序（逐格内容，首格=进入状态，末格=退出状态）
 七、进入状态
 八、退出状态

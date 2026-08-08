@@ -120,12 +120,17 @@ _LLM_SPEC = {
         "space_masters", "identity_asset_ids", "group_asset_ids", "space_master_ids",
         "environment_asset_ids", "vehicle_and_prop_asset_ids", "state_asset_ids",
         "dynamic_elements", "reuse_relations", "parent_state_dependency_chains",
-        "space_continuity_chains", "must_produce_asset_ids", "conditional_asset_ids",
+        "space_continuity_chains", "character_space_bindings",
+        "must_produce_asset_ids", "conditional_asset_ids",
         "skipped", "production_order", "output_register",
     ]),
     "s5": ("s5_asset_prompts", ["s1_global", "s4_assets"], ["asset_prompts[]", "asset_prompts[].prompt"]),
-    "s6": ("s6_binding", ["s2_segments", "s3_states", "s4_assets"], ["bindings[]"]),
-    "s7": ("s7_shots", ["s2_segments", "s3_states", "s6_binding"], ["shots[]"]),
+    "s6": ("s6_binding", ["s2_segments", "s3_states", "s4_assets"], [
+        "bindings[]", "bindings[].character_space_context",
+    ]),
+    "s7": ("s7_shots", ["s2_segments", "s3_states", "s6_binding"], [
+        "shots[]", "shots[].character_space_note", "shots[].shot_list[].positions",
+    ]),
     "s8": ("s8_compile", ["s1_global", "s2_segments", "s3_states", "s4_assets", "s6_binding", "s7_shots"],
            ["compiled[]", "compiled[].storyboard_prompt", "compiled[].video_prompt"]),
 }
@@ -356,7 +361,8 @@ _S4_TOP_LISTS = (
     "space_masters", "identity_asset_ids", "group_asset_ids", "space_master_ids",
     "environment_asset_ids", "vehicle_and_prop_asset_ids", "state_asset_ids",
     "dynamic_elements", "reuse_relations", "parent_state_dependency_chains",
-    "space_continuity_chains", "must_produce_asset_ids", "conditional_asset_ids",
+    "space_continuity_chains", "character_space_bindings",
+    "must_produce_asset_ids", "conditional_asset_ids",
     "skipped", "production_order",
 )
 _S4_ASSET_STRINGS = (
@@ -381,7 +387,7 @@ def validate_s4_output(out: Any, episode: str = "", known_asset_ids=None,
     """环节4保存前的完整结构校验；返回可直接反馈给模型的问题列表。
 
     通用 required 只能判断“键在不在”。这里继续检查类型、状态资产条件字段、
-    引用先后和空间母资产内部结构，避免半份 A—Q 结果被当成成功保存。
+    引用先后和空间母资产内部结构，避免不完整结果被当成成功保存。
     """
     if not isinstance(out, dict):
         return ["顶层必须是JSON对象"]
@@ -475,6 +481,7 @@ def validate_s4_output(out: Any, episode: str = "", known_asset_ids=None,
     spaces = out.get("space_masters") if isinstance(out.get("space_masters"), list) else []
     known_spaces = set(known_space_ids or [])
     current_spaces = set()
+    space_regions = {}
     space_fields = {
         "space_id": str, "name": str, "decision": str, "used_by_segs": list,
         "regions": list, "connections": list, "fixed_directions": list,
@@ -496,6 +503,7 @@ def validate_s4_output(out: Any, episode: str = "", known_asset_ids=None,
                 problems.append(f"{sid}.{key}类型错误")
         if not isinstance(space.get("regions"), list) or not space.get("regions"):
             problems.append(f"{sid}.regions不能为空")
+        region_ids = set()
         for j, region in enumerate(space.get("regions") or []):
             if not isinstance(region, dict):
                 problems.append(f"{sid}.regions[{j}]必须是对象")
@@ -503,12 +511,115 @@ def validate_s4_output(out: Any, episode: str = "", known_asset_ids=None,
             for key in ("region_id", "name", "environment_asset_id", "fixed_features"):
                 if key not in region:
                     problems.append(f"{sid}.regions[{j}]缺少{key}")
+            region_id = str(region.get("region_id") or "").strip()
+            if region_id:
+                region_ids.add(region_id)
+        space_regions[sid] = region_ids
 
     valid_spaces = current_spaces | known_spaces
     for aid, asset in local.items():
         sid = str(asset.get("space_master_id") or "")
         if sid and sid not in valid_spaces:
             problems.append(f"{aid}引用不存在空间母资产:{sid}")
+
+    bindings = (out.get("character_space_bindings")
+                if isinstance(out.get("character_space_bindings"), list) else [])
+    binding_strings = (
+        "character_asset_id", "character_name", "continuity_state_asset_id",
+        "seg_id", "space_master_id", "space_region_id", "position", "facing",
+        "exit_state", "inherit_to_seg", "inheritance_rule", "change_trigger",
+    )
+    binding_lists = ("fixed_object_relations", "relative_character_positions")
+    binding_keys = set()
+    for i, binding in enumerate(bindings):
+        label = f"character_space_bindings[{i}]"
+        if not isinstance(binding, dict):
+            problems.append(f"{label}必须是对象")
+            continue
+        for key in binding_strings:
+            if key not in binding:
+                problems.append(f"{label}缺少{key}")
+            elif not isinstance(binding[key], str):
+                problems.append(f"{label}.{key}必须是字符串")
+        for key in binding_lists:
+            if key not in binding:
+                problems.append(f"{label}缺少{key}")
+            elif not isinstance(binding[key], list):
+                problems.append(f"{label}.{key}必须是数组")
+
+        character_id = str(binding.get("character_asset_id") or "").strip()
+        state_id = str(binding.get("continuity_state_asset_id") or "").strip()
+        seg_id = str(binding.get("seg_id") or "").strip()
+        sid = str(binding.get("space_master_id") or "").strip()
+        region_id = str(binding.get("space_region_id") or "").strip()
+        inherit_to = str(binding.get("inherit_to_seg") or "").strip()
+        for key in ("character_asset_id", "character_name", "seg_id",
+                    "space_master_id", "space_region_id", "position", "facing",
+                    "exit_state"):
+            if not str(binding.get(key) or "").strip():
+                problems.append(f"{label}.{key}不能为空")
+        if character_id and character_id not in all_ids:
+            problems.append(f"{label}引用不存在人物资产:{character_id}")
+        if character_id in local and local[character_id].get("category") != "identity":
+            problems.append(f"{label}.character_asset_id必须指向人物身份资产")
+        if state_id and state_id not in all_ids:
+            problems.append(f"{label}引用不存在连续性状态资产:{state_id}")
+        if state_id in local and local[state_id].get("category") != "state":
+            problems.append(f"{label}.continuity_state_asset_id必须指向状态资产")
+        if sid and sid not in valid_spaces:
+            problems.append(f"{label}引用不存在空间母资产:{sid}")
+        if sid in current_spaces and region_id and region_id not in space_regions.get(sid, set()):
+            problems.append(f"{label}引用不存在空间区域:{sid}/{region_id}")
+        if episode:
+            prefix = f"{episode}-SEG"
+            if seg_id and not seg_id.startswith(prefix):
+                problems.append(f"{label}.seg_id不属于本集:{seg_id}")
+            if inherit_to and not inherit_to.startswith(prefix):
+                problems.append(f"{label}.inherit_to_seg不属于本集:{inherit_to}")
+        if inherit_to and inherit_to == seg_id:
+            problems.append(f"{label}.inherit_to_seg不能指向自身")
+        if inherit_to and not str(binding.get("inheritance_rule") or "").strip():
+            problems.append(f"{label}.inheritance_rule在跨SEG继承时不能为空")
+        binding_key = (character_id, seg_id)
+        if character_id and seg_id:
+            if binding_key in binding_keys:
+                problems.append(f"人物空间记录重复:{character_id}/{seg_id}")
+            binding_keys.add(binding_key)
+
+        for j, relation in enumerate(binding.get("fixed_object_relations") or []):
+            rel_label = f"{label}.fixed_object_relations[{j}]"
+            if not isinstance(relation, dict):
+                problems.append(f"{rel_label}必须是对象")
+                continue
+            for key in ("object_asset_id", "object_name", "relation"):
+                if key not in relation or not isinstance(relation.get(key), str):
+                    problems.append(f"{rel_label}.{key}必须是字符串")
+            object_id = str(relation.get("object_asset_id") or "").strip()
+            object_name = str(relation.get("object_name") or "").strip()
+            if object_id and object_id not in all_ids:
+                problems.append(f"{rel_label}引用不存在资产:{object_id}")
+            if not object_id and not object_name:
+                problems.append(f"{rel_label}必须填写object_asset_id或object_name")
+            if not str(relation.get("relation") or "").strip():
+                problems.append(f"{rel_label}.relation不能为空")
+
+        for j, relation in enumerate(binding.get("relative_character_positions") or []):
+            rel_label = f"{label}.relative_character_positions[{j}]"
+            if not isinstance(relation, dict):
+                problems.append(f"{rel_label}必须是对象")
+                continue
+            for key in ("character_asset_id", "relation"):
+                if key not in relation or not isinstance(relation.get(key), str):
+                    problems.append(f"{rel_label}.{key}必须是字符串")
+            other_id = str(relation.get("character_asset_id") or "").strip()
+            if not other_id:
+                problems.append(f"{rel_label}.character_asset_id不能为空")
+            if other_id and other_id not in all_ids:
+                problems.append(f"{rel_label}引用不存在人物资产:{other_id}")
+            if other_id and other_id == character_id:
+                problems.append(f"{rel_label}不能引用人物自身")
+            if not str(relation.get("relation") or "").strip():
+                problems.append(f"{rel_label}.relation不能为空")
 
     register = out.get("output_register")
     if isinstance(register, dict):
@@ -1109,8 +1220,26 @@ def s8_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Call
 
     def build_user(seg: dict) -> str:
         sid = seg["id"]
-        used = set((binds.get(sid, {}).get("reference_images") or [])
-                   and [r.get("asset_id") for r in binds[sid]["reference_images"]] or [])
+        binding = binds.get(sid, {})
+        used = {r.get("asset_id") for r in binding.get("reference_images", [])
+                if r.get("asset_id")}
+        # 人物空间绑定中的固定物或对位人物不一定都能挤进参考图上限，
+        # 但环节8仍需看到它们的资产原文，才能正确编译位置与关系。
+        for context in binding.get("character_space_context", []) or []:
+            character_id = context.get("character_asset_id")
+            if character_id:
+                used.add(character_id)
+            state_id = context.get("continuity_state_asset_id")
+            if state_id:
+                used.add(state_id)
+            for relation in context.get("fixed_object_relations", []) or []:
+                object_id = relation.get("object_asset_id")
+                if object_id:
+                    used.add(object_id)
+            for relation in context.get("relative_character_positions", []) or []:
+                other_id = relation.get("character_asset_id")
+                if other_id:
+                    used.add(other_id)
         seg_assets = [a for a in assets if a["asset_id"] in used] or assets
         return render(tpl, {
             "EPISODE": episode,
@@ -1120,7 +1249,7 @@ def s8_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Call
             "SEGMENTS": jd(seg),
             "STATES": jd(states.get(sid, {})),
             "ASSETS": jd(seg_assets),
-            "BINDINGS": jd(binds.get(sid, {})),
+            "BINDINGS": jd(binding),
             "SHOTS": jd(shots.get(sid, {})),
         }) + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
 
@@ -1147,7 +1276,9 @@ def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     result, failed, cancelled = run_segmented(
         pj, stage_id="s7", out_name="s7_shots", key="shots", segs=segs,
         done_ids=s7_done_segments(pj, episode), llm=llm, build_user=build_user,
-        required=["shots[]"], log=log, episode=episode, cancel=cancel,
+        required=["shots[]", "shots[].character_space_note",
+                  "shots[].shot_list[].positions"],
+        log=log, episode=episode, cancel=cancel,
         seg_concurrency=seg_concurrency)
 
     if cancelled and not failed:
