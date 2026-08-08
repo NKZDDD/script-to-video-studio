@@ -182,8 +182,16 @@ class LLM:
             except _Retryable as exc:                 # 429/5xx，值得重试
                 last = exc
                 if attempt < retries - 1:
-                    time.sleep(2 ** attempt * 2)
+                    delay = 2 ** attempt * 2
+                    (log or (lambda m: None))(
+                        f"[传输中断] 第 {attempt + 1}/{retries} 次请求未完整结束：{exc}。"
+                        f"本次内容不会进入 JSON 校验；{delay} 秒后重新发送同一任务"
+                        f"（传输重试 {attempt + 1}/{retries - 1}）")
+                    time.sleep(delay)
                     continue
+                (log or (lambda m: None))(
+                    f"[传输失败] 第 {attempt + 1}/{retries} 次请求仍未完整结束：{exc}。"
+                    "传输重试已耗尽，本任务没有形成可保存结果")
                 raise LLMError(str(exc)) from exc
             except _NoStreamOptions as exc:           # 这家不认 stream_options，去掉再试
                 if want_usage:
@@ -211,8 +219,16 @@ class LLM:
             except requests.RequestException as exc:
                 last = exc
                 if attempt < retries - 1:
-                    time.sleep(2 ** attempt * 2)
+                    delay = 2 ** attempt * 2
+                    (log or (lambda m: None))(
+                        f"[网络中断] 第 {attempt + 1}/{retries} 次请求失败：{exc}。"
+                        f"{delay} 秒后重新发送同一任务"
+                        f"（传输重试 {attempt + 1}/{retries - 1}）")
+                    time.sleep(delay)
                     continue
+                (log or (lambda m: None))(
+                    f"[网络失败] 第 {attempt + 1}/{retries} 次请求仍失败：{exc}。"
+                    "传输重试已耗尽，本任务没有形成可保存结果")
                 raise LLMError(f"网络错误: {exc}") from exc
         raise LLMError(f"重试耗尽: {last}")
 
@@ -270,6 +286,19 @@ class LLM:
         parts, reason, ticks = [], "", 0
         closed = False              # 有没有正常收到 [DONE] / finish_reason
         usage = None                # 服务商回传的真实 token 数（可能没有）
+
+        def stream_lines(response):
+            try:
+                yield from response.iter_lines(decode_unicode=False)
+            except requests.Timeout:
+                raise
+            except requests.RequestException as exc:
+                n = sum(len(p) for p in parts)
+                raise _Retryable(
+                    f"流式连接异常中断：本次已收到 {n} 字，但没有形成完整回复，"
+                    f"已接收内容将被丢弃（耗时 {int(time.time()-started)} 秒；"
+                    f"原始错误：{exc}）") from exc
+
         with requests.post(url, headers=headers, json=body, timeout=tmo,
                            proxies=proxies, stream=True) as r:
             self._check_status(r)
@@ -280,7 +309,7 @@ class LLM:
                 ch = (data.get("choices") or [{}])[0]
                 return self._finish((ch.get("message") or {}).get("content") or "",
                                     ch.get("finish_reason") or "", data.get("usage"))
-            for raw in r.iter_lines(decode_unicode=False):
+            for raw in stream_lines(r):
                 # 每收到一块就看一眼有没有被取消。不看的话「取消」只是设了个
                 # 标志位，这边照样把整次生成读完 —— 钱照花、人照等。
                 # 退出 with 会关掉连接，上游那边也就停了。
@@ -396,7 +425,8 @@ class LLM:
             except (json.JSONDecodeError, LLMError) as exc:
                 if attempt >= json_retries:
                     raise LLMError(f"JSON 输出校验失败（已重试{json_retries}次）: {exc}") from exc
-                log(f"    JSON 校验失败，反馈重试 {attempt + 1}/{json_retries}: {str(exc)[:150]}")
+                log(f"[JSON 校验重试] 第 {attempt + 1}/{json_retries} 次："
+                    f"{str(exc)[:150]}。这次是内容结构不合格，不是传输中断")
                 attempt_user = (user + "\n\n【上次输出的问题】" + str(exc)[:400]
                                 + "\n请严格只输出一个符合要求的 JSON（用 ```json 围栏包裹），不要输出其他内容。")
         raise LLMError("不可达")
