@@ -5,13 +5,15 @@
 就是 api.paisio.online，文档是 y5dprsil1i.apifox.cn。之前这里显示成「派系」，
 现在统一叫「鹤」。
 
-视频：POST /v1/videos，body 带 metadata{modeType,ratio,enableSound} + images[]，提示词补 @图N。
+视频：POST /v1/videos。旧模型沿用 metadata+images 兼容格式；Seedance 2.5
+使用文档规定的 aspect_ratio/image_url/extra_* 标准格式。
 图片：OpenAI 兼容 /v1/images/generations（同步或异步都兼容）。
 
 这家还有两个能力本程序没实现，需要时再补：
   · POST /v1/images/edits —— 最多 16 张图 + mask，能做局部重绘（定向修订用得上）
   · POST /v1/virtual-assets —— 官方的参考**视频/音频**上传途径（→ va_xxx，
-    再 /sync 轮询到 active）。参考图用 data URI 就够了，所以现在没接。
+    再 /sync 轮询到 active）。目前 Seedance 2.5 的图片通过项目对象存储转公网 URL；
+    虚拟资产上传仍未接入。
 """
 
 from __future__ import annotations
@@ -20,6 +22,11 @@ from typing import Callable, Optional
 
 from ..apiutil import ApiError, extract_image_items, extract_task_id, extract_video_url
 from .base import ImageTask, Provider, VideoTask
+
+
+SEEDANCE25_MODELS = ("seedance-2.5-480p", "seedance-2.5-720p")
+SEEDANCE25_DURATIONS = list(range(4, 30))
+SEEDANCE25_RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9"]
 
 
 class PaisioProvider(Provider):
@@ -31,6 +38,9 @@ class PaisioProvider(Provider):
     aliases = ("he", "pis", "派系")      # 认这些别名，指到同一家
     default_base_url = "https://api.paisio.online"
     supports = ("image", "video")
+    # 新文档明确要求 image_url / extra_images 是公网 http(s) URL。
+    # 没配对象存储时宁可在发送前报清楚，也不能把 data URI 发出去后让参考图静默失效。
+    url_only_models = SEEDANCE25_MODELS
 
     def capabilities(self) -> dict:
         return {
@@ -70,6 +80,8 @@ class PaisioProvider(Provider):
                     "seedance2.0-fast2-480p", "seedance2.0-fast2-720p",
                     "seedance-discount-720p", "seedance-discount-fast-720p",
                     "seedance-2-0-fast", "seedance-2-0-mini",
+                    # Seedance 2.5（2026-08-08 文档新增）
+                    *SEEDANCE25_MODELS,
                     # video 系
                     "video-fast-480p", "video-fast-720p",
                     "video-pro-480p", "video-pro-1080p",
@@ -84,11 +96,25 @@ class PaisioProvider(Provider):
                 "resolutions": [""],
                 "max_refs": 9,
                 "ref_mode": "data_uri",
+                # 不能把 2.5 的 29 秒/30 图能力写成整家通用值，否则切回旧模型时
+                # 前端仍会允许选 29 秒，直到付费请求发出去才收到 400。
+                "model_options": {
+                    model: {
+                        "durations": SEEDANCE25_DURATIONS,
+                        "ratios": SEEDANCE25_RATIOS,
+                        "max_refs": 30,
+                        "max_video_refs": 10,
+                        "max_audio_refs": 10,
+                        "ref_mode": "url",
+                    }
+                    for model in SEEDANCE25_MODELS
+                },
                 "notes": "分辨率写在模型名里，不用也不能单独传。名字带 fast 的便宜、"
                          "带 480p 的更便宜 —— 试跑和调提示词用 sd3-fast-480p / "
                          "sd2-fast-480p，定稿再换 720p/1080p。"
                          "sd2-pro-720p 实测稳定（17/17 一次通过），sd3 系较新未实测。"
-                         "参考图用压缩 data URI 直传（本站无上传端点）。",
+                         "旧模型参考图可用压缩 data URI；Seedance 2.5 必须使用公网 URL，"
+                         "支持4-29秒、30图/10视频/10音频。",
             },
             "notes": "视频首选。也提供 chat 模型（claude/gpt 系）可作 LLM 分析引擎。",
         }
@@ -124,22 +150,11 @@ class PaisioProvider(Provider):
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
-        refs = task.refs[:9]
-        prompt = task.prompt or ""
-        if refs and "@图" not in prompt:
-            prompt = prompt.strip() + " " + " ".join(f"@图{i + 1}" for i in range(len(refs)))
-        body = {
-            "model": task.model or "sd2-pro-720p",
-            "prompt": prompt,
-            "duration": int(task.duration),
-            "metadata": {
-                "modeType": "image2video" if refs else "text2video",
-                "ratio": task.ratio or "9:16",
-                "enableSound": "on" if task.extra.get("enable_sound", True) else "off",
-            },
-        }
-        if refs:
-            body["images"] = refs
+        model = task.model or "sd2-pro-720p"
+        if model in SEEDANCE25_MODELS:
+            body = self._seedance25_body(task, model)
+        else:
+            body = self._legacy_video_body(task, model)
         data = self.session.request("POST", "/v1/videos", json_body=body, retries=2, timeout=300)
         url = extract_video_url(data)
         task_id = extract_task_id(data)
@@ -151,4 +166,66 @@ class PaisioProvider(Provider):
                                     content_path_tpl="/v1/videos/{id}/content",
                                     log=log, cancel=cancel)
         self.session.save_item(url, dest)
-        return {"task_id": task_id, "source": url, "provider": self.id, "model": body["model"]}
+        return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
+
+    @staticmethod
+    def _legacy_video_body(task: VideoTask, model: str) -> dict:
+        refs = task.refs[:9]
+        prompt = task.prompt or ""
+        if refs and "@图" not in prompt:
+            prompt = prompt.strip() + " " + " ".join(f"@图{i + 1}" for i in range(len(refs)))
+        body = {
+            "model": model,
+            "prompt": prompt,
+            "duration": int(task.duration),
+            "metadata": {
+                "modeType": "image2video" if refs else "text2video",
+                "ratio": task.ratio or "9:16",
+                "enableSound": "on" if task.extra.get("enable_sound", True) else "off",
+            },
+        }
+        if refs:
+            body["images"] = refs
+        return body
+
+    @staticmethod
+    def _seedance25_body(task: VideoTask, model: str) -> dict:
+        refs = list(task.refs or [])
+        videos = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
+        audios = list(task.extra.get("audio_refs") or task.extra.get("audios") or [])
+        duration = int(task.duration or 15)
+        ratio = task.ratio or "9:16"
+
+        problems = []
+        if not 4 <= duration <= 29:
+            problems.append(f"时长只能是4-29秒，收到{duration}秒")
+        if ratio not in SEEDANCE25_RATIOS:
+            problems.append(f"比例只支持{'、'.join(SEEDANCE25_RATIOS)}，收到{ratio}")
+        if len(refs) > 30:
+            problems.append(f"图片最多30张，收到{len(refs)}张")
+        if len(videos) > 10:
+            problems.append(f"视频素材最多10条，收到{len(videos)}条")
+        if len(audios) > 10:
+            problems.append(f"音频素材最多10条，收到{len(audios)}条")
+        local_refs = [r for r in refs if not str(r).startswith(("http://", "https://"))]
+        if local_refs:
+            problems.append("参考图必须先转成公网 http/https URL（请配置对象存储）")
+        if problems:
+            raise ApiError("Seedance 2.5 参数不符合鹤的接口要求：" + "；".join(problems),
+                           status=0, kind="task_fatal")
+
+        body = {
+            "model": model,
+            "prompt": task.prompt or "",
+            "duration": duration,
+            "aspect_ratio": ratio,
+        }
+        if refs:
+            body["image_url"] = refs[0]
+            if len(refs) > 1:
+                body["extra_images"] = refs[1:]
+        if videos:
+            body["extra_videos"] = videos
+        if audios:
+            body["extra_audios"] = audios
+        return body

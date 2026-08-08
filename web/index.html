@@ -566,12 +566,17 @@ const RUN_FIELDS = [
 // 尺寸/比例/时长的候选：取「这条链上每一家都支持」的交集 ——
 // 只有交集里的值才保证自动换家时不会因为参数不支持而挂掉。
 // 交集为空（各家完全不重叠）就退回首选那家的清单，并标出来提醒。
+function effectiveBlock(capability, blockName, model) {
+  const base = (capability && capability[blockName]) || {};
+  const modelOpt = ((base.model_options || {})[model]) || {};
+  return {...base, ...modelOpt};
+}
 function paramChoices() {
   const cross = (kind, block, field) => {
     const chain = (BOOT.config.chains || {})[kind] || [];
     const lists = chain.map(x => {
       const c = BOOT.capabilities.find(y => y.id === x.provider);
-      return ((c && c[block]) || {})[field] || null;
+      return effectiveBlock(c, block, x.model)[field] || null;
     }).filter(Boolean).map(l => l.map(String));
     if (!lists.length) return {list: [], note: '（这一类还没排服务商）'};
     const inter = lists.reduce((a, b) => a.filter(x => b.includes(x)));
@@ -759,7 +764,7 @@ function renderAuto() {
   const capOf = (kind, block) => {
     const first = (ch[kind] || [])[0];
     const c = first && BOOT.capabilities.find(x => x.id === first.provider);
-    return (c && c[block]) || {};
+    return effectiveBlock(c, block, first && first.model);
   };
   const opt = (list, cur) => (list || []).map(x =>
     `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`).join('');
@@ -1178,25 +1183,31 @@ function renderGen(summary) {
     const pbox = tr.querySelector('.pbox'), kind = tr.dataset.k;
     // 尺寸/比例/时长的候选来自「这家自己声明支持的值」，换服务商就跟着变 ——
     // 各家支持的不一样，给全集合只会让人选到一个这家不认的值然后吃 400。
+    const fillParams = block => {
+      const currentCap = BOOT.capabilities.find(c => c.id === sel.value) || {};
+      const selected = effectiveBlock(currentCap, sel.dataset.cap, msel.value);
+      msel.title = selected.notes || block.notes || '';
+      const opt = (list, cur) => (list || []).map(x =>
+        `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`).join('');
+      if (kind === 'video') {
+        pbox.innerHTML =
+          `<select class="v-ratio" title="画面比例">${opt(selected.ratios, d.ratio)}</select>
+           <select class="v-dur" title="单段时长（秒）">${opt(selected.durations, d.duration)}</select>`;
+        if (!(selected.durations || []).length || String(selected.durations) === '0')
+          pbox.innerHTML = `<select class="v-ratio">${opt(selected.ratios, d.ratio)}</select>
+            <span class="muted" style="font-size:11px">时长写在模型名里</span>`;
+      } else {
+        pbox.innerHTML = `<select class="i-size" title="出图尺寸">${
+          opt(selected.sizes, d.image_size)}</select>`;
+      }
+    };
     const fill = () => {
       const cap = BOOT.capabilities.find(c => c.id === sel.value) || {};
       const block = cap[sel.dataset.cap] || {};
       msel.innerHTML = (block.models || []).map(m =>
         `<option${m === block.default_model ? ' selected' : ''}>${esc(m)}</option>`).join('');
-      msel.title = block.notes || '';
-      const opt = (list, cur) => (list || []).map(x =>
-        `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`).join('');
-      if (kind === 'video') {
-        pbox.innerHTML =
-          `<select class="v-ratio" title="画面比例">${opt(block.ratios, d.ratio)}</select>
-           <select class="v-dur" title="单段时长（秒）">${opt(block.durations, d.duration)}</select>`;
-        if (!(block.durations || []).length || String(block.durations) === '0')
-          pbox.innerHTML = `<select class="v-ratio">${opt(block.ratios, d.ratio)}</select>
-            <span class="muted" style="font-size:11px">时长写在模型名里</span>`;
-      } else {
-        pbox.innerHTML = `<select class="i-size" title="出图尺寸">${
-          opt(block.sizes, d.image_size)}</select>`;
-      }
+      msel.onchange = () => fillParams(block);
+      fillParams(block);
     };
     sel.onchange = fill; fill();
     const go = failedOnly => {
@@ -1616,12 +1627,19 @@ function renderChains() {
       const want = (saved[idx] || {}).model;
       ms.innerHTML = (block.models || []).map(m =>
         `<option${m === (want || block.default_model) ? ' selected' : ''}>${esc(m)}</option>`).join('');
-      ms.title = block.notes || '';
-      // 这家支持的尺寸/比例，直接标出来 —— 免得在「默认参数」里填了它不认的值
-      const sizes = (block.sizes || []).join(' ');
-      const ratios = (block.ratios || []).join(' ');
-      hint.textContent = sizes ? `支持 ${sizes}` : (ratios ? `支持 ${ratios}` : '');
-      hint.title = block.notes || '';
+      const fillHint = () => {
+        const selected = effectiveBlock(c, ps.dataset.cap, ms.value);
+        ms.title = selected.notes || block.notes || '';
+        // 这家支持的尺寸/比例，直接标出来 —— 免得在「默认参数」里填了它不认的值
+        const sizes = (selected.sizes || []).join(' ');
+        const ratios = (selected.ratios || []).join(' ');
+        const durations = (selected.durations || []).join(' ');
+        hint.textContent = sizes ? `支持 ${sizes}` : (ratios
+          ? `支持比例 ${ratios}${durations ? `；时长 ${durations} 秒` : ''}` : '');
+        hint.title = selected.notes || block.notes || '';
+      };
+      ms.onchange = fillHint;
+      fillHint();
     };
     ps.onchange = fill; fill();
   });
