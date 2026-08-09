@@ -388,6 +388,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <div><label>单次输出上限 tokens
         <span class="muted">整部剧解析输出很长，太小会被截断</span></label>
         <input id="llmMaxTok" type="number" min="1024" max="200000" step="1024" value="16000"></div>
+      <div><label>流式输出 <span class="muted">默认关闭</span></label>
+        <label class="row" style="margin:0;gap:7px;align-items:center">
+          <input id="llmStream" type="checkbox" style="width:auto">
+          <span>开启实时接收字数</span>
+        </label>
+        <span class="muted">关闭时等待完整结果一次返回，可避开部分线路的 SSE 中断</span></div>
     </div>
     <div class="row" style="margin-top:10px">
       <button class="btn" id="saveLlm">保存</button>
@@ -627,6 +633,7 @@ async function boot() {
   $('#llmBase').value = l.base_url || 'https://api.paisio.online';
   $('#llmModel').value = l.model || 'gpt-5.6-sol';
   $('#llmMaxTok').value = l.max_tokens || 16000;
+  $('#llmStream').checked = l.stream === true;
 }
 
 function renderProjects() {
@@ -1564,7 +1571,8 @@ function renderProviders() {
 }
 $('#saveLlm').onclick = async () => {
   const llm = {base_url: $('#llmBase').value, model: $('#llmModel').value,
-               max_tokens: +$('#llmMaxTok').value || 16000};
+               max_tokens: +$('#llmMaxTok').value || 16000,
+               stream: $('#llmStream').checked};
   if ($('#llmKey').value) llm.api_key = $('#llmKey').value;
   await api.post('/api/config', {llm});
   BOOT = await api.get('/api/bootstrap'); alert('已保存');

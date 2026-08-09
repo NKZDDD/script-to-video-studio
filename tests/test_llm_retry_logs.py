@@ -5,11 +5,39 @@ from unittest.mock import patch
 import requests
 
 from core.llm import LLM, LLMError, _Retryable
+from server.app import build_llm
 
 
 class LLMRetryLogTests(unittest.TestCase):
-    def _client(self):
-        return LLM("test-key", "https://example.invalid", "test-model")
+    def _client(self, stream=True):
+        return LLM("test-key", "https://example.invalid", "test-model",
+                   stream=stream)
+
+    def test_default_mode_is_nonstreaming_without_stream_options(self):
+        client = LLM("test-key", "https://example.invalid", "test-model")
+        captured = {}
+
+        def plain_once(url, headers, body, proxies, tmo, log, on_usage):
+            captured.update(body)
+            return "完整结果"
+
+        client._plain_once = plain_once
+        client._stream_once = lambda *args, **kwargs: self.fail("不应调用流式读取")
+        logs = []
+        self.assertEqual(client.chat("", "任务", log=logs.append), "完整结果")
+        self.assertIs(captured["stream"], False)
+        self.assertNotIn("stream_options", captured)
+        self.assertIn("非流式（完成后一次返回", "\n".join(logs))
+
+    def test_build_llm_applies_saved_switch_and_false_override(self):
+        cfg = {
+            "providers": {"paisio": {"api_key": "provider-key"}},
+            "llm": {"provider": "paisio", "model": "test-model", "stream": True},
+        }
+        self.assertTrue(build_llm(cfg).stream)
+        self.assertFalse(build_llm(cfg, {"stream": False}).stream)
+        del cfg["llm"]["stream"]
+        self.assertFalse(build_llm(cfg).stream)
 
     def test_stream_interruption_names_attempt_and_discarded_output(self):
         client = self._client()

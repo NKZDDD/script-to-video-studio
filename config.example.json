@@ -19,7 +19,8 @@
     "base_url": "https://api.paisio.online",
     "api_key": "",
     "model": "claude-sonnet-5",
-    "timeout": 900
+    "timeout": 900,
+    "stream": false
   },
 
   "defaults": {

@@ -123,7 +123,8 @@ def check_keys(data: Any, required: list) -> list:
 
 class LLM:
     def __init__(self, api_key: str, base_url: str, model: str,
-                 timeout: int = 600, proxy: str = "", max_tokens: int = 16000):
+                 timeout: int = 600, proxy: str = "", max_tokens: int = 16000,
+                 stream: bool = False):
         if not api_key:
             raise LLMError("缺少 llm_api_key")
         self.api_key = api_key
@@ -131,6 +132,9 @@ class LLM:
         self.model = model
         self.timeout = timeout
         self.proxy = proxy
+        # 所有 OpenAI 兼容 LLM 共用。默认非流式：部分中转站的 SSE 长连接会在
+        # 约 100 秒被网关提前切断；需要实时字数时再由设置页显式开启。
+        self.stream = bool(stream)
         # 不显式给上限的话走服务商默认值（常见 4k）。环节1 要为整部剧输出
         # 人物/场景/道具/伏笔 + 每一集的边界锚点，4k 根本不够 —— 输出被截断
         # 表现为 JSON 不完整，会白重试两次再报错。给足了就是一次成功。
@@ -162,11 +166,13 @@ class LLM:
         # 不是整次生成的总时长 —— 这正是我们要的语义。
         tmo = (30, max(60, int(self.timeout)))
 
-        use_stream, want_usage = True, True
+        use_stream, want_usage = self.stream, self.stream
         last = None
         if log:
+            mode = ("流式（实时显示接收字数）" if use_stream else
+                    "非流式（完成后一次返回，期间不会显示接收字数）")
             log(f"发出 {len(user)} 字（约 {rough_tokens(user)} token），"
-                f"上限 {self.max_tokens} token，流式")
+                f"上限 {self.max_tokens} token，{mode}")
         for attempt in range(retries):
             try:
                 body = dict(base, stream=use_stream)

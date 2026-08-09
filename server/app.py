@@ -101,7 +101,10 @@ def load_config() -> dict:
     cfg = read_json(paths.config_path(), {}) or {}
     cfg.setdefault("projects_dir", paths.default_projects_dir())
     cfg.setdefault("providers", {})
-    cfg.setdefault("llm", {})
+    llm_cfg = cfg.setdefault("llm", {})
+    # 老配置没有该字段时也按非流式处理。这个开关适用于任意 LLM Base URL，
+    # 不与具体服务商绑定。
+    llm_cfg.setdefault("stream", False)
     # 出图出片的服务商优先级：一次配好，之后每次跑都按这个顺序，
     # 首选挂了自动换下一家。空的话「设置」页会提示去配。
     cfg.setdefault("chains", {"asset": [], "storyboard": [], "video": []})
@@ -240,7 +243,8 @@ def resolve_provider_cfg(cfg: dict, sel: dict) -> dict:
 
 def build_llm(cfg: dict, override: dict = None) -> LLM:
     c = dict(cfg.get("llm") or {})
-    c.update({k: v for k, v in (override or {}).items() if v})
+    # False 是 stream 的有效覆盖值，不能像空字符串一样过滤掉。
+    c.update({k: v for k, v in (override or {}).items() if v not in (None, "")})
     if not c.get("api_key"):
         pid = c.get("provider") or "paisio"
         c["api_key"] = ((cfg.get("providers") or {}).get(pid, {})).get("api_key", "")
@@ -249,7 +253,8 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
         raise ValueError("LLM 未配置 api_key（在「分析引擎」页签保存）")
     return LLM(c["api_key"], c.get("base_url", "https://api.paisio.online"),
                c.get("model", "claude-sonnet-5"), timeout=int(c.get("timeout", 900)),
-               proxy=c.get("proxy", ""), max_tokens=int(c.get("max_tokens", 16000)))
+               proxy=c.get("proxy", ""), max_tokens=int(c.get("max_tokens", 16000)),
+               stream=c.get("stream", False) is True)
 
 
 # ====================================================================== 路由
