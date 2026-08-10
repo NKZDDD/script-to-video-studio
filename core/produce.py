@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Callable
 
 from . import diagnose, ledger, probe, uploader
@@ -184,6 +185,64 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
     return resolve
 
 
+# 提示词里 `Image 1 = C001 名称` 这种映射行。全角冒号/等号都认。
+_IMAGE_MAP = re.compile(r"[Ii]mage\s*(\d+)\s*[=＝:：]\s*([A-Za-z0-9_\-]+)")
+
+
+def check_image_map(prompt: str, want_refs: list) -> tuple:
+    """核对提示词里的 Image 编号和程序实际上传顺序是否一致。
+
+    出图模型收到的是 N 张**没有标签**的图，它只知道第 1 张、第 2 张。
+    它不认识 `C001` 这个编号 —— 所以提示词必须逐张写 `Image 1 = C001 ...`，
+    而且编号顺序必须等于上传顺序（reference_images 按 image_n 排的那个顺序）。
+
+    编号写错的后果不是报错，是**每张参考图都被错误归属**：模型拿病房那张图
+    去沿用人脸。图照出、任务标 ok，只能靠肉眼在几百张里发现。
+
+    返回 (硬错误, 提醒)。分两级是因为轻重差很远：
+      · 写了映射但对不上 → 硬停。已经确定是错的，出图只会浪费钱。
+      · 两张以上却没写映射 → 硬停。模型不可能知道哪张是哪张。
+      · 只有一张且没写映射 → 只提醒。顺序上不存在歧义，但仍该补。
+    """
+    want = [(r.get("image_n") or i + 1, str(r.get("asset_id") or ""))
+            for i, r in enumerate(want_refs)]
+    if not want:
+        return "", ""
+    got = _IMAGE_MAP.findall(prompt or "")
+    if not got:
+        head = ("提示词里没有 `Image N = 资产ID` 的参考图映射，"
+                f"但这一条要传 {len(want)} 张参考图（{'、'.join(a for _, a in want)}）。")
+        if len(want) >= 2:
+            return (head + "两张以上参考图却不说哪张是谁，模型只能猜，"
+                    "必然把其中一张的身份用到别处 —— 所以这里停下。"
+                    "去「任务明细」改这一条的提示词，逐张写 `Image 1 = 资产ID 名称`，"
+                    "顺序和上面括号里一致；或者重跑对应的文字环节。"), ""
+        return "", head + "只有一张、顺序上没有歧义，先照常出图，但建议补上。"
+
+    seen = {}
+    for n, aid in got:
+        seen.setdefault(int(n), aid)        # 同一编号重复出现时取第一次
+    problems = []
+    for n, aid in want:
+        claim = seen.get(n)
+        if claim is None:
+            problems.append(f"Image {n} 应该是 {aid}，提示词里没提这个编号")
+        elif claim != aid:
+            problems.append(f"Image {n} 实际传的是 {aid}，提示词里却写成 {claim}")
+    extra = sorted(set(seen) - {n for n, _ in want})
+    if extra:
+        problems.append("提示词里多写了 Image "
+                        + "、".join(str(n) for n in extra)
+                        + f"（这一条只有 {len(want)} 张）")
+    if problems:
+        return ("参考图编号和实际上传顺序对不上：" + "；".join(problems)
+                + f"。实际上传顺序是 {'、'.join(f'Image {n}={a}' for n, a in want)}。"
+                  "编号错位等于每张参考图都被错误归属（拿场景图去沿用人脸），"
+                  "出来的东西看着正常但全是错的，所以这里停下。"
+                  "去「任务明细」按实际顺序改这一条的映射。"), ""
+    return "", ""
+
+
 def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
                 provider_cfg: dict, model: str, media: str):
     """出完东西量一下真实尺寸，比例不对就挂一条提醒。
@@ -247,6 +306,11 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
                 f"少一张就出图，脸和场景都会跑掉，所以这里停下。"
                 f"多半是环节8 把不存在的东西写进了参考图顺序"
                 f"（比如把本段故事板自己写进去），去「任务明细」看这一条的参考图那栏。")
+        bad_map, map_warn = check_image_map(prompt, want_refs)
+        if bad_map:
+            raise RuntimeError(bad_map)
+        if map_warn:
+            log(f"⚠️ {map_warn}")
         refs = [to_ref(s, log) for _, s in srcs]
         log(f"参考图×{len(refs)}")
         meta = prov.generate_image(
