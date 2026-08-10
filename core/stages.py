@@ -25,6 +25,14 @@ from .providers import ImageTask, VideoTask, build as build_provider
 from .apiutil import resolve_ref
 from .store import Project, read_text, write_text
 
+# 出图出片执行层搬到了 core/produce.py（体系无关，见那边的文件头说明）。
+# 这里转发进来：调用方写 stages.make_image_worker 照旧能用，
+# 但定义只在 produce.py 一处 —— 换体系的分支不碰它，引擎修复才好同步。
+from .produce import (  # noqa: F401
+    AssetDependencyCycleError, _ordered_asset_refs, asset_dependency_cycles,
+    asset_layers, make_image_worker, make_ref_resolver, make_video_worker,
+    write_prompt_txt)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 # 打包成 exe 后模板是解压到临时目录的，不能按 __file__ 往上找
 PROMPT_DIR = paths.res("prompts")
@@ -318,21 +326,6 @@ def _s5_filter(pj: Project, data: dict, claim: bool = True,
     skipped += [i for i in free if i not in set(todo)]
     a4["assets"] = [a for a in a4.get("assets", []) if a.get("asset_id") in set(todo)]
     return a4, todo, skipped
-
-
-def _ordered_asset_refs(*groups, exclude: str = "") -> list:
-    """按首次出现顺序合并资产 ID。"""
-    out, seen = [], set()
-    for group in groups:
-        if isinstance(group, str):
-            group = [group]
-        for raw in (group or []):
-            rid = str(raw or "").strip()
-            if not rid or rid == exclude or rid in seen:
-                continue
-            seen.add(rid)
-            out.append(rid)
-    return out
 
 
 def normalize_s4_asset_refs(out: dict) -> dict:
@@ -970,21 +963,6 @@ def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
     return bad
 
 
-def write_prompt_txt(pj: Project, rel: str, text: str, log=None) -> None:
-    """环节5/8 落盘一份提示词 txt。
-
-    走这里而不是直接 write_text，是为了在覆盖**手改过**的那份之前先备份 +
-    说一声。人在页面上改好一条、隔天重跑一次环节8 就被悄悄盖掉 ——
-    这种事不报出来，等出图不对劲再回头找，原文已经没了。
-    """
-    from . import promptfile
-    try:
-        promptfile.guard_overwrite(pj, rel, text, log)
-    except Exception:                                   # noqa: BLE001
-        pass                                            # 备份失败不该挡住主流程
-    write_text(pj.p(*rel.split("/")), text)
-
-
 def s8_done_segments(pj: Project, episode: str = "") -> set:
     """已经编好两份提示词的段落（磁盘为准，重启也认）。
 
@@ -1364,100 +1342,6 @@ def asset_output_rel(asset: dict) -> str:
     return f"02_固定资产/{d}/{asset['asset_id']}.png"
 
 
-class AssetDependencyCycleError(RuntimeError):
-    """资产参考图形成闭环，任何一个成员都不可能成为第一张。"""
-
-
-def asset_dependency_cycles(items: list) -> list:
-    """返回资产/任务依赖图里的强连通分量；每一组都是一个真实循环。
-
-    同时接受环节4的资产结构（asset_id/reference_assets）和 tasks.json 的任务结构
-    （key/reference_images），便于分析阶段与生产阶段使用同一套判断。
-    """
-    by_key = {}
-    order = {}
-    for item in items or []:
-        key = str(item.get("key") or item.get("asset_id") or "").strip()
-        if key and key not in by_key:
-            order[key] = len(order)
-            by_key[key] = item
-    graph = {}
-    for key, item in by_key.items():
-        if "key" in item:
-            refs = [r.get("asset_id") for r in (item.get("reference_images") or [])]
-        else:
-            refs = _ordered_asset_refs([item.get("parent_asset_id")],
-                                       item.get("reference_assets") or [])
-        graph[key] = [str(r) for r in refs if str(r) in by_key]
-
-    index = 0
-    stack, on_stack = [], set()
-    indexes, lowlinks, cycles = {}, {}, []
-
-    def visit(node):
-        nonlocal index
-        indexes[node] = lowlinks[node] = index
-        index += 1
-        stack.append(node)
-        on_stack.add(node)
-        for dep in graph[node]:
-            if dep not in indexes:
-                visit(dep)
-                lowlinks[node] = min(lowlinks[node], lowlinks[dep])
-            elif dep in on_stack:
-                lowlinks[node] = min(lowlinks[node], indexes[dep])
-        if lowlinks[node] != indexes[node]:
-            return
-        component = []
-        while stack:
-            member = stack.pop()
-            on_stack.remove(member)
-            component.append(member)
-            if member == node:
-                break
-        if len(component) > 1 or (component and component[0] in graph[component[0]]):
-            cycles.append(sorted(component, key=lambda x: order[x]))
-
-    for node in graph:
-        if node not in indexes:
-            visit(node)
-    return sorted(cycles, key=lambda c: min(order[x] for x in c))
-
-
-def asset_layers(tasks: list) -> list:
-    """把资产任务按参考图依赖分层：第 0 层没有参考图，第 N 层的参考图都在前面几层。
-
-    为什么必须分层：状态资产 ST007 的父资产或来源图是 ST006，而任务是按环节4 的输出顺序
-    排的、并发跑的。ST006 还在生成时 ST007 就被派出去，读不到 ST006.png 就直接
-    失败（实测：ST007 重试两次全报「参考图文件不存在」）。
-    分层之后层内并发、层间串行，来源资产必然先出完，竞态从根上没了。
-
-    成环时必须在派任务前立即失败并报出成员。把循环组塞进同一层并发并没有消除依赖，
-    只会让它们同时读取尚不存在的参考图，看起来像互相等待。
-    """
-    cycles = asset_dependency_cycles(tasks)
-    if cycles:
-        detail = "；".join(" ↔ ".join(group) for group in cycles)
-        raise AssetDependencyCycleError(
-            f"资产循环依赖：{detail}。这些资产互相把对方当参考图，没有任何一个能先生产。"
-            "请回到环节4调整 dependency_order/reference_assets：同级资产不得互相引用，"
-            "每条引用只能指向更早完成的基础资产或状态资产。")
-    by_key = {t["key"]: t for t in tasks}
-    layers, placed = [], set()
-    rest = list(tasks)
-    while rest:
-        cur = [t for t in rest
-               if all(r.get("asset_id") in placed or r.get("asset_id") not in by_key
-                      for r in (t.get("reference_images") or []))]
-        if not cur:  # 理论上已被上面的强连通分量检查覆盖；保留防御，绝不静默并发。
-            blocked = "、".join(t["key"] for t in rest)
-            raise AssetDependencyCycleError(f"资产依赖无法继续分层：{blocked}")
-        layers.append(cur)
-        placed.update(t["key"] for t in cur)
-        rest = [t for t in rest if t["key"] not in placed]
-    return layers
-
-
 def assets_used_by(pj: Project, episodes_wanted: list) -> set:
     """这几集实际用到哪些资产（含状态资产父级与全部来源）。
 
@@ -1690,173 +1574,6 @@ def _build_tasks(pj: Project, params: dict) -> dict:
 
 
 # ====================================================================== 出图/出片 worker
-
-def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
-                      ref_side: int, media: str = "image") -> Callable:
-    """把参考图引用变成能发出去的形式。
-
-    配了对象存储 → 一律传上去换公网链接。不只是为了那些只收 URL 的接口：
-    能吃 data URI 的家，请求体也从几 MB 的 base64 缩成一行链接，快且稳。
-    没配 → 转 data URI；碰上只收 URL 的模型就明确报错说去哪配。
-
-    **例外必须按服务商的声明来，不能一刀切上传**（这是踩过的坑）：
-      · needs_bytes 的家（multipart）→ 给本机路径
-      · accepts_url 为假的家（把参考图内联进某字段、只认裸 base64）→ 给 data URI
-    给错形式的后果不是报错，是**参考图被丢掉照样出图** —— 状态资产没了父资产或来源
-    参考，脸就不是本人，而且任务标 ok 没人知道。
-    """
-    up = provider_cfg.get("upload") or {}
-    configured = uploader.configured(up) and up.get("mode", "always") != "when_required"
-    need_url = prov.needs_url(model, media)
-    need_bytes = prov.needs_bytes(model)
-    can_url = prov.accepts_url(model, media)
-    use_url = need_url or (configured and can_url)
-
-    def resolve(src: str, log: Callable = print) -> str:
-        src = (src or "").strip()
-        if not src or src.startswith("http"):
-            return src
-        if need_bytes:
-            # 本机绝对路径，provider 自己读字节塞 multipart
-            return src if os.path.isabs(src) else os.path.join(pj.root, src)
-        if not use_url:
-            return resolve_ref(src, pj.root, max_side=ref_side)
-        path = src if os.path.isabs(src) else os.path.join(pj.root, src)
-        return uploader.to_url(path, up, project_root=pj.root,
-                               max_side=ref_side, log=log)
-
-    return resolve
-
-
-def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
-                provider_cfg: dict, model: str, media: str):
-    """出完东西量一下真实尺寸，比例不对就挂一条提醒。
-
-    这类问题接口不会报错——200、文件也正常下载，只是画面躺倒了。
-    不主动量，就得等人工验收才发现，那时候钱早花完了。
-    量不到（缺 ffprobe、格式不认识）就当没这回事，不能反过来卡住主流程。
-    """
-    try:
-        bad = probe.check(path, want, kind=media)
-    except Exception:                                  # noqa: BLE001
-        return None
-    if not bad:
-        return None
-    flip = ("你要的是竖屏，出来的是横屏。"
-            if bad["portrait_wanted"] and not bad["portrait_got"] else
-            "你要的是横屏，出来的是竖屏。"
-            if not bad["portrait_wanted"] and bad["portrait_got"] else "")
-    pj.log_event({"stage": stage, "id": key, "result": "ratio_mismatch", **bad})
-    return diagnose.warn(
-        "WRONG_RATIO",
-        f"要的是 {bad['want']}，实际出来 {bad['got']}（约 {bad['got_ratio']}）。{flip}",
-        stage=stage, target=key, provider=provider_cfg.get("provider", ""), model=model,
-        extra_fix=[f"这个文件在：{pj.rel(path)}"])
-
-
-def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
-    """kind: asset | storyboard。返回 worker(task, log, cancel)。"""
-    prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
-                          provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
-    model = provider_cfg.get("model", "")
-    interval = int(provider_cfg.get("poll_interval", 5))
-    timeout = int(provider_cfg.get("poll_timeout", 900))
-    ref_side = int(provider_cfg.get("ref_max_side", 1024))
-    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="image")
-
-    def worker(task: dict, log: Callable, cancel: Callable) -> dict:
-        out = pj.p(*task["output"].split("/"))
-        want = (task.get("params") or {}).get("size", "1024x1536")
-        if os.path.isfile(out):
-            # 跳过也要重新量一遍：不然「比例不对」的提醒会被这次跳过悄悄清掉，
-            # 而文件其实还是那个躺倒的文件。以磁盘上的东西为准。
-            return {"skipped": True, "msg": "已经有了，跳过（做出来的就不再动）",
-                    "warn": _ratio_warn(pj, out, want, kind, task["key"],
-                                        provider_cfg, model, "image")}
-        prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
-        want_refs = sorted(task.get("reference_images", []),
-                           key=lambda x: x.get("image_n", 0))
-        # 先把整批都点一遍再动手解析。一是别为注定失败的任务白传几 MB 上对象存储，
-        # 二是要一次说清缺哪几张，而不是缺一张报一张。
-        srcs = [(r, r.get("url") or r.get("file_ref") or "") for r in want_refs]
-        missing = [r.get("asset_id") or f"第{r.get('image_n', '?')}张"
-                   for r, s in srcs if not s]
-        if missing:
-            # 声明了要这张参考图，却指不到任何文件。以前是 `if src` 跳过 ——
-            # 于是「声明 1 张、一张没传」照样出图，出来的脸不是本人，任务还标 ok。
-            # 这类静默降级只能靠肉眼在几百张里发现，是最坏的一类错。
-            raise RuntimeError(
-                f"参考图指不到文件：{'、'.join(missing)}。"
-                f"声明了 {len(want_refs)} 张，只解析出 {len(want_refs) - len(missing)} 张 —— "
-                f"少一张就出图，脸和场景都会跑掉，所以这里停下。"
-                f"多半是环节8 把不存在的东西写进了参考图顺序"
-                f"（比如把本段故事板自己写进去），去「任务明细」看这一条的参考图那栏。")
-        refs = [to_ref(s, log) for _, s in srcs]
-        log(f"参考图×{len(refs)}")
-        meta = prov.generate_image(
-            ImageTask(prompt=prompt, refs=refs, size=want, model=model),
-            out, log=log, cancel=cancel, poll_interval=interval, poll_timeout=timeout)
-        pj.upsert_registry(kind, {"id": task["key"], "file_ref": task["output"],
-                                  "status": "generated", **meta})
-        pj.log_event({"stage": kind, "id": task["key"], "result": "ok", **meta})
-        # 记一次出图。出图出片是按次计费的，钱主要花在这里，必须入账。
-        ledger.record(pj.root, kind="image", stage=kind, target=task["key"],
-                      episode=task.get("episode", ""),
-                      provider=meta.get("provider", provider_cfg.get("provider", "")),
-                      model=meta.get("model", model), count=1, size=want)
-        return {"output": task["output"],
-                "warn": _ratio_warn(pj, out, want, kind, task["key"],
-                                    provider_cfg, model, "image")}
-
-    return worker
-
-
-def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
-    prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
-                          provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
-    model = provider_cfg.get("model", "")
-    interval = int(provider_cfg.get("poll_interval", 10))
-    timeout = int(provider_cfg.get("poll_timeout", 2400))
-    ref_side = int(provider_cfg.get("ref_max_side", 1024))
-    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video")
-
-    def worker(task: dict, log: Callable, cancel: Callable) -> dict:
-        out = pj.p(*task["output"].split("/"))
-        p = task.get("params") or {}
-        want = p.get("ratio", "9:16")
-        if os.path.isfile(out):
-            # 同上：跳过时也重新量，别把「比例不对」的提醒清没了
-            return {"skipped": True, "msg": "已经有了，跳过",
-                    "warn": _ratio_warn(pj, out, want, "video", task["key"],
-                                        provider_cfg, model, "video")}
-        sb = task["storyboard_ref"]
-        if not (sb.startswith("http") or os.path.isfile(pj.p(*sb.split("/")))):
-            raise RuntimeError(f"固定故事板不存在，请先跑环节9: {sb}")
-        prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
-        refs = [to_ref(sb, log)]
-        if task.get("aux_reference"):
-            refs.append(to_ref(task["aux_reference"], log))
-        log(f"model={model} {p.get('duration', 15)}s {want} 参考图×{len(refs)}")
-        meta = prov.generate_video(
-            VideoTask(prompt=prompt, refs=refs, duration=int(p.get("duration", 15)),
-                      ratio=want, model=model,
-                      resolution=provider_cfg.get("resolution", "")),
-            out, log=log, cancel=cancel, poll_interval=interval, poll_timeout=timeout)
-        pj.upsert_registry("video", {"id": task["key"], "file_ref": task["output"],
-                                     "storyboard_ref": sb, "status": "generated", **meta})
-        pj.log_event({"stage": "video", "id": task["key"], "result": "ok", **meta})
-        # 出片是最贵的一步，必须入账。带上时长——按秒计价的家要用
-        ledger.record(pj.root, kind="video", stage="video", target=task["key"],
-                      episode=task.get("episode", ""),
-                      provider=meta.get("provider", provider_cfg.get("provider", "")),
-                      model=meta.get("model", model), count=1,
-                      duration=int(p.get("duration", 15)), ratio=want)
-        return {"output": task["output"],
-                "warn": _ratio_warn(pj, out, want, "video", task["key"],
-                                    provider_cfg, model, "video")}
-
-    return worker
-
 
 # ====================================================================== 环节 11 / 12
 
