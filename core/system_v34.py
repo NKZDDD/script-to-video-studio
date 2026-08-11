@@ -200,6 +200,45 @@ COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
                        "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT")
 
 
+# 每个环节实际需要上游产物的**哪几部分**。
+#
+# 为什么要有这张表：mapping() 原来是 jd(obj) 整块塞，一个字节不筛。
+# 实测环节1 吐出 2.8 万字，环节2 的提示词 3.1 万字里 92% 就是它 ——
+# 而环节2 连剧本都不吃，只吃这一份。后果有两条，都是真金白银：
+#
+#   1. 大输入 + 大输出同时发生，把网关的上限试出来了。环节1 能过
+#      （小输入大输出），环节2 就断在中途，三次重试三次断。
+#   2. n1_truth 有 4 个下游、其中 3 个是逐集的。一集重复发 3 遍同一份东西，
+#      40 集就是 340 万字纯重复。
+#
+# 裁剪原则：**宁可少裁**。只裁明确用不上的部分。
+#   keep  只留这几个顶层键（用于「这个环节只要一小块」）
+#   drop  去掉这几处（支持 `a[].b` 这种嵌套路径）
+# 表里没有的组合一律整块发送 —— 加错一条的代价是模型少了输入却不报错，
+# 所以默认必须是「不裁」。
+PRODUCT_NEEDS = {
+    # 环节4下只要视觉基调（它的模板标的就是【视觉基调】），
+    # 不需要实体表、事件链、切集边界。这是最大的一块浪费。
+    ("n4b", "n1_truth"): {"keep": [
+        "project_name", "story_type", "cultural_setting", "dialogue_language",
+        "worldview", "era", "main_conflict", "open_design"]},
+
+    # episode_ranges 是切集用的行号边界，切完集就没人需要了。
+    # state_deltas 是逐事件的视觉状态变化明细，那是第六环节的账本要的东西；
+    # 人物动机和世界规则靠 action/result 就够，不需要每件事的外观增量。
+    ("n2", "n1_truth"): {"drop": ["episode_ranges", "open_design",
+                                  "events[].state_deltas"]},
+    ("n3", "n1_truth"): {"drop": ["episode_ranges", "events[].state_deltas"]},
+    # 资产系统要看状态变化（连续性状态资产就是从这儿来的），所以留着 state_deltas
+    ("n4", "n1_truth"): {"drop": ["episode_ranges"]},
+}
+
+
+def needs_of(stage_id: str, out_name: str) -> dict:
+    """这个环节要上游产物的哪几部分。没登记就是整块要。"""
+    return PRODUCT_NEEDS.get((stage_id, out_name)) or {}
+
+
 def placeholder_of(out_name: str) -> str:
     """产物名 → 模板里引用它的占位符。`n4_assets` → `ASSETS`。
 

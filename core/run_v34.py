@@ -69,6 +69,9 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
     for out_name, obj in data.items():
         if segment:
             obj = _narrow(out_name, obj, segment)
+        # 逐段裁剪之后再按环节投影：两件事都是「只发这一步真正要的」，
+        # 但一个按段切、一个按用途切，顺序无所谓，都做才完整。
+        obj = project_product(stage_id, out_name, obj)
         m[V.placeholder_of(out_name)] = jd(obj)
     return m
 
@@ -122,6 +125,63 @@ def _capability_block(pj: Project) -> str:
             f"执行模式：{cap.get('transition_execution_mode', 'MODEL_NATIVE_ONLY')}"
             f"（外部剪辑和后期补转场一律禁止；模型做不出来就降到更稳的机制，"
             f"不许改用后期）")
+
+
+def _drop_path(obj, path: str):
+    """按 `a[].b` 这种路径去掉一处。原对象不动。
+
+    只支持「顶层键」和「数组里每一项的某个键」两种形状 —— 够用了，
+    再往下嵌套的话这张表就没人看得懂了。
+    """
+    if not isinstance(obj, dict):
+        return obj
+    head, _, rest = path.partition(".")
+    if not rest:
+        return {k: v for k, v in obj.items() if k != head.rstrip("[]")}
+    key = head.rstrip("[]")
+    if key not in obj:
+        return obj
+    rows = obj[key]
+    if head.endswith("[]") and isinstance(rows, list):
+        return dict(obj, **{key: [_drop_path(r, rest) for r in rows]})
+    return dict(obj, **{key: _drop_path(rows, rest)})
+
+
+def project_product(stage_id: str, out_name: str, obj):
+    """把上游产物裁成这个环节真正需要的部分。
+
+    见 system_v34.PRODUCT_NEEDS 里那段说明：不裁的代价是
+    「同一份 2.8 万字发给 4 个下游、其中 3 个还是逐集的」，
+    既把网关的输入上限试出来，又按集重复付钱。
+    """
+    spec = V.needs_of(stage_id, out_name)
+    if not spec or not isinstance(obj, dict):
+        return obj
+    keep = spec.get("keep")
+    if keep:
+        return {k: obj[k] for k in keep if k in obj}
+    for path in spec.get("drop") or []:
+        obj = _drop_path(obj, path)
+    return obj
+
+
+def trim_saving(pj: Project, stage_id: str, episode: str = "") -> str:
+    """这一步的按环节裁剪省了多少字。没裁就返回空。
+
+    必须报出来。裁剪是「悄悄少发一部分输入」，裁错了模型不会报错、
+    只会答得差一点 —— 那正是这个项目里最难查的一类问题。
+    看得见省了多少，才有人会去核对裁得对不对。
+    """
+    parts = []
+    for out_name, obj in deps_data(pj, stage_id, episode).items():
+        if not V.needs_of(stage_id, out_name) or not obj:
+            continue
+        full, cut = len(jd(obj)), len(jd(project_product(stage_id, out_name, obj)))
+        if full > cut:
+            parts.append(f"{V.placeholder_of(out_name)} {full:,}→{cut:,} 字")
+    if not parts:
+        return ""
+    return "按环节裁剪：" + "、".join(parts)
 
 
 def _ref_limit_block(params: dict) -> str:
@@ -210,6 +270,9 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     user = build_user(pj, stage_id, params, episode)
     tag = f"{episode} " if episode else "全剧 "
     log(f"{tag}{stage_id} 提示词 {len(user)} 字，调 {llm.model}")
+    saved = trim_saving(pj, stage_id, episode)
+    if saved:
+        log(f"  {saved}")
     with LLM_GATE.slot():
         out = llm.json_call(load_prompt("_common", pj), user, required=required,
                             log=log, cancel=cancel,
