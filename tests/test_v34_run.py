@@ -54,8 +54,10 @@ class FakeLLM:
     @staticmethod
     def _which(user):
         """从正文里认出这是哪个环节 —— 靠模板标题，不靠调用顺序。"""
-        m = re.search(r"^# 第(.{1,3})环节｜(.+)$", user, re.M)
-        title = m.group(2).strip() if m else ""
+        # 标题可能带后缀，比如「第四环节（下）｜资产生产提示词编译」，
+        # 所以只认 ｜ 后面那截，不去猜前面写了什么。
+        m = re.search(r"^#[^｜\n]*｜(.+)$", user, re.M)
+        title = m.group(1).strip() if m else ""
         for sid, (tpl, _, _) in V.LLM_SPEC.items():
             head = open(os.path.join(_PROMPTS, tpl + ".md"),
                         encoding="utf-8").readline()
@@ -95,6 +97,11 @@ _FIXTURES = {
                        "output_spec": "four_view", "dependency_order": 1}],
            "costume_contracts": [], "prop_specs": [], "prop_instances": [],
            "production_order": ["C001"]},
+    "n4b": {"asset_prompts": [
+        {"asset_id": "C001", "filename": "C001_PROMPT.txt", "family": "CHAR",
+         "output_spec": "four_view", "size": "1024x1536",
+         "reference_assets": [], "reference_role_map": [],
+         "prompt": "资产名称：甲。四视图。"}]},
     "n5": {"spatial_masters": [{"spatial_id": "SP001", "world_origin": "o",
                                 "axis": {}, "unit": "meter", "zones": [],
                                 "anchors": [], "routes": [], "landmarks": [],

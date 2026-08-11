@@ -278,6 +278,208 @@ def done_segments(pj: Project, stage_id: str, episode: str) -> set:
     return {c.get("seg_id") for c in got if c.get("seg_id")}
 
 
+# ---------------------------------------------------------------- 跨集共享资产
+
+def known_asset_ids(pj: Project, upto_episode: str = "") -> set:
+    """前面几集已经写过提示词的资产。
+
+    资产库全剧共享：同一个角色只出一张图，跨集人脸才一致。所以第二集起
+    只写「本集新出现的」—— 不过滤的话 40 集会把同一个角色的提示词重写 40 遍，
+    白花钱，而且每次重写都可能写飘一点。
+    """
+    ids = set()
+    for ep in _eps.ids(pj):
+        if upto_episode and ep == upto_episode:
+            break
+        for ap in (pj.stage_data("n4b_asset_prompts", ep) or {}).get("asset_prompts", []):
+            if ap.get("asset_id"):
+                ids.add(ap["asset_id"])
+    return ids
+
+
+def assets_to_write(pj: Project, episode: str) -> tuple:
+    """这一集要写提示词的资产，和跳过的。喂给 n4b 的【待写清单】。"""
+    assets = (pj.stage_data("n4_assets", episode) or {}).get("assets", [])
+    done = known_asset_ids(pj, episode)
+    todo, skipped = [], []
+    for a in assets:
+        if a.get("decision") == "skip":
+            continue
+        (skipped if a.get("asset_id") in done else todo).append(a)
+    return todo, skipped
+
+
+# ---------------------------------------------------------------- 任务装配
+
+def _rel(kind: str, name: str) -> str:
+    return {"asset": f"03_提示词/资产生产提示词/{name}",
+            "scstate": f"03_提示词/场景状态提示词/{name}",
+            "storyboard": f"03_提示词/故事板提示词/{name}",
+            "video": f"03_提示词/视频提示词/{name}"}[kind]
+
+
+def _asset_out(a: dict) -> str:
+    """资产图落在哪。按家族分目录，人看文件夹时能对上。"""
+    sub = {"CHAR": "人物身份资产", "PH": "人物身份资产", "LOOK": "人物造型资产",
+           "CT": "连续状态资产", "COST": "服饰资产", "LOC": "场景资产",
+           "PROP_SPEC": "道具资产", "PROP_INSTANCE": "道具资产",
+           "VEH": "载具资产", "CRE": "生物资产", "GRP": "群体资产",
+           "VFX": "特效资产"}.get(a.get("family", ""), "其它资产")
+    return f"02_固定资产/{sub}/{a['asset_id']}.png"
+
+
+def build_tasks(pj: Project, params: dict) -> dict:
+    """把各环节的产物装配成 tasks.json —— 出图出片那一层唯一读的东西。
+
+    四类任务。相对 V6.1 多出来的是 scstate 那一类：故事板不再直接拿一堆
+    原子资产当参考，而是先合成一张场景状态图再参考它。
+
+    资产是全剧共享的，所以要把所有集的产物合起来装配，按 asset_id 去重；
+    故事板和视频逐集逐段展开。
+
+    参考图里认不出的 ID **留在列表里、file_ref 留空**，不要悄悄删掉 ——
+    删了数量看着是对的，反而看不出少了一张，而出图那一层会因为
+    「声明了几张就必须解析出几张」停下来并报清楚缺哪张。
+    """
+    code = params.get("project_code", "PROJ-001")
+    eps = _eps.ids(pj) or [params.get("episode", "EP01")]
+    size = params.get("image_size", "1024x1536")
+
+    # ---- 资产：全剧合并，先出现的定义优先 ----
+    amap, prompts = {}, {}
+    for ep in eps:
+        for a in (pj.stage_data("n4_assets", ep) or {}).get("assets", []):
+            if a.get("asset_id") and a["asset_id"] not in amap:
+                amap[a["asset_id"]] = a
+        for ap in (pj.stage_data("n4b_asset_prompts", ep) or {}).get("asset_prompts", []):
+            prompts.setdefault(ap.get("asset_id"), ap)
+
+    asset_tasks = []
+    for aid, a in amap.items():
+        if a.get("decision") == "skip" or aid not in prompts:
+            continue
+        ap = prompts[aid]
+        asset_tasks.append({
+            "key": aid,
+            "episodes": sorted({str(s).split("-")[0]
+                                for s in (a.get("used_by_segs") or [])
+                                if str(s).startswith("EP")}),
+            "prompt_ref": _rel("asset", ap.get("filename") or f"{aid}_PROMPT.txt"),
+            "reference_images": [
+                {"image_n": i + 1, "asset_id": rid,
+                 "file_ref": _asset_out(amap[rid]) if rid in amap else ""}
+                for i, rid in enumerate(ap.get("reference_assets") or [])
+            ],
+            "params": {"size": ap.get("size") or size},
+            "output": _asset_out(a),
+        })
+
+    # ---- 场景状态图 / 故事板 / 视频：逐集逐段 ----
+    scstate_tasks, sb_tasks, vd_tasks = [], [], []
+    for ep in eps:
+        for sc in (pj.stage_data("n11_scstate", ep) or {}).get("scstates", []):
+            sid = sc.get("scstate_id")
+            # 场景状态图按**状态**去重，不按段。V3.4 里 SCSTATE 编号不含段号：
+            # 同一场戏跨几段而世界状态没变时，本来就该复用同一张。
+            # 不去重的话同一张图付几次钱，而且几条任务写同一个文件、
+            # 后一条覆盖前一条 —— 不报错，只是白花钱。
+            if not sid or any(x["key"] == sid for x in scstate_tasks):
+                continue
+            scstate_tasks.append({
+                "key": sid, "episode": ep, "segment": sc.get("seg_id", ""),
+                "prompt_ref": _rel("scstate", f"{sid}_PROMPT.txt"),
+                "reference_images": [
+                    {"image_n": i + 1, "asset_id": rid,
+                     "file_ref": _asset_out(amap[rid]) if rid in amap else ""}
+                    for i, rid in enumerate(sc.get("reference_assets") or [])
+                ],
+                "params": {"size": size},
+                "output": f"03b_场景状态图/{code}_{sid}.png",
+            })
+
+        scst_out = {t["key"]: t["output"] for t in scstate_tasks}
+        for pkg in (pj.stage_data("n12_storyboard", ep) or {}).get("sbpkg", []):
+            seg = pkg.get("seg_id")
+            if not seg:
+                continue
+            sb_out = f"04_故事板/{code}_{seg}_STORYBOARD.png"
+            sb_tasks.append({
+                "key": seg, "episode": ep, "segment": seg,
+                "prompt_ref": _rel("storyboard", f"{seg}_STORYBOARD_PROMPT.txt"),
+                "reference_images": [
+                    {"image_n": r.get("image_n", i + 1),
+                     "asset_id": r.get("asset_id", ""),
+                     "file_ref": scst_out.get(r.get("asset_id"))
+                     or (_asset_out(amap[r["asset_id"]])
+                         if r.get("asset_id") in amap else "")}
+                    for i, r in enumerate(pkg.get("reference_order") or [])
+                ],
+                "params": {"size": size},
+                "output": sb_out,
+            })
+
+        sb_by_seg = {t["key"]: t["output"] for t in sb_tasks}
+        for vp in (pj.stage_data("n13_video", ep) or {}).get("video_plan", []):
+            seg = vp.get("seg_id")
+            if not seg:
+                continue
+            vd_tasks.append({
+                "key": seg, "episode": ep, "segment": seg,
+                "prompt_ref": _rel("video", f"{seg}_VIDEO_PROMPT.txt"),
+                "storyboard_ref": sb_by_seg.get(seg, ""),
+                # 视频的补充参考图（首次显露覆盖用），认不出就留空
+                "reference_images": [
+                    {"image_n": r.get("image_n", i + 1),
+                     "asset_id": r.get("asset_id", ""),
+                     "file_ref": _asset_out(amap[r["asset_id"]])
+                     if r.get("asset_id") in amap else ""}
+                    for i, r in enumerate(vp.get("reference_order") or [])
+                    if r.get("asset_id") in amap
+                ],
+                "params": {"duration": params.get("duration", 15),
+                           "ratio": params.get("ratio", "9:16")},
+                "output": f"05_分段视频/{code}_{seg}.mp4",
+            })
+
+    tasks = {"system": "v34", "project_code": code, "episodes": eps,
+             "asset_tasks": asset_tasks, "scstate_tasks": scstate_tasks,
+             "storyboard_tasks": sb_tasks, "video_tasks": vd_tasks}
+    pj.save_tasks(tasks)
+    return tasks
+
+
+def write_prompt_files(pj: Project, episode: str) -> int:
+    """把各环节写好的提示词正文落成 txt —— 出图那一层是按路径读文件的。
+
+    落盘而不是塞进 tasks.json：人要能在页面上直接改这一条，
+    改完立刻生效不用重跑文字环节。
+    """
+    from .produce import write_prompt_txt
+    n = 0
+    for ap in (pj.stage_data("n4b_asset_prompts", episode) or {}).get("asset_prompts", []):
+        if ap.get("prompt"):
+            write_prompt_txt(pj, _rel("asset", ap.get("filename")
+                                      or f"{ap['asset_id']}_PROMPT.txt"), ap["prompt"])
+            n += 1
+    for sc in (pj.stage_data("n11_scstate", episode) or {}).get("scstates", []):
+        if sc.get("prompt") and sc.get("scstate_id"):
+            write_prompt_txt(pj, _rel("scstate", f"{sc['scstate_id']}_PROMPT.txt"),
+                             sc["prompt"])
+            n += 1
+    for pkg in (pj.stage_data("n12_storyboard", episode) or {}).get("sbpkg", []):
+        if pkg.get("storyboard_prompt") and pkg.get("seg_id"):
+            write_prompt_txt(pj, _rel("storyboard",
+                                      f"{pkg['seg_id']}_STORYBOARD_PROMPT.txt"),
+                             pkg["storyboard_prompt"])
+            n += 1
+    for vp in (pj.stage_data("n13_video", episode) or {}).get("video_plan", []):
+        if vp.get("video_prompt") and vp.get("seg_id"):
+            write_prompt_txt(pj, _rel("video", f"{vp['seg_id']}_VIDEO_PROMPT.txt"),
+                             vp["video_prompt"])
+            n += 1
+    return n
+
+
 def _usage(pj: Project, stage_id: str, episode: str, target: str = "") -> Callable:
     def rec(u: dict) -> None:
         ledger.record(pj.root, kind="llm", stage=stage_id, episode=episode,

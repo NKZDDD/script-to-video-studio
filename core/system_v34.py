@@ -39,6 +39,12 @@ STAGES = [
     # ---- 逐集：视觉与状态层 ------------------------------------------------
     {"id": "n4", "no": 4, "name": "资产系统", "kind": "llm",
      "scope": "episode", "out": "n4_assets"},
+    # n4 只产出资产表（外观、锚点、依赖），不产出能直接投喂出图模型的正文。
+    # 单独一个环节而不是让 n4 顺手写，是因为资产库全剧共享：提示词一个资产
+    # 只写一次，EP02 不该把 EP01 已经写过的重写一遍 —— 白花钱，还会越写越飘。
+    {"id": "n4b", "no": 4, "name": "资产生产提示词编译", "kind": "llm",
+     "scope": "episode", "out": "n4b_asset_prompts"},
+
     {"id": "n5", "no": 5, "name": "空间主表", "kind": "llm",
      "scope": "episode", "out": "n5_spatial"},
     {"id": "n6", "no": 6, "name": "连续性总账", "kind": "llm",
@@ -112,6 +118,12 @@ LLM_SPEC = {
         "assets[].output_spec", "assets[].dependency_order",
         "costume_contracts[]", "prop_specs[]", "prop_instances[]",
         "production_order",
+    ]),
+    "n4b": ("n4b_asset_prompts", ["n1_truth", "n4_assets"], [
+        "asset_prompts[]", "asset_prompts[].asset_id",
+        "asset_prompts[].reference_assets", "asset_prompts[].reference_role_map",
+        "asset_prompts[].output_spec", "asset_prompts[].filename",
+        "asset_prompts[].prompt",
     ]),
     "n5": ("n5_spatial", ["n3_narrative", "n4_assets"], [
         "spatial_masters[]", "spatial_masters[].spatial_id",

@@ -114,9 +114,13 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(V.check_graph(), [])
 
     def test_stage_ids_do_not_collide_with_v61(self):
-        """n/p/d 前缀和 main 上的 s1..s12 分开，两套产物能共存一个项目目录。"""
+        """n/p/d 前缀和 main 上的 s1..s12 分开，两套产物能共存一个项目目录。
+
+        允许 n4b 这种带后缀的：一个章拆成两次调用时（资产表 / 资产提示词），
+        比硬塞一个新数字更好读 —— main 上的 s5/s5b 就是这个约定。
+        """
         for s in V.STAGES:
-            self.assertRegex(s["id"], r"^[npd]\d+$", s["id"])
+            self.assertRegex(s["id"], r"^[npd]\d+[a-z]?$", s["id"])
 
 
 if __name__ == "__main__":
