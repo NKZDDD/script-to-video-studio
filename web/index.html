@@ -401,7 +401,20 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
           <span>开启实时接收字数</span>
         </label>
         <span class="muted">关闭时等待完整结果一次返回，可避开部分线路的 SSE 中断</span></div>
+      <!-- 代理必须能在页面上看见和改。requests 在没配代理时会自动读
+           HTTPS_PROXY 和 Windows 系统代理，机器上挂着 Clash 之类的东西时
+           请求会悄悄绕一圈，而那些工具常在 100 秒左右掐断长连接 ——
+           表现成「服务商挂了」，之前为这个排了很久。 -->
+      <div><label>网络 <span class="muted">长请求被掐断先试强制直连</span></label>
+        <select id="llmProxyMode">
+          <option value="">跟随系统与环境代理</option>
+          <option value="direct">强制直连（忽略系统与环境代理）</option>
+          <option value="custom">指定代理…</option>
+        </select>
+        <input id="llmProxy" placeholder="http://127.0.0.1:7890"
+               style="margin-top:6px;display:none"></div>
     </div>
+    <div class="muted" id="llmProxyNow" style="margin-top:6px"></div>
     <div class="row" style="margin-top:10px">
       <button class="btn" id="saveLlm">保存</button>
       <button class="btn ghost sm" id="loadLlmModels">拉取可用模型（不花钱）</button>
@@ -642,7 +655,20 @@ async function boot() {
   $('#llmModel').value = l.model || 'gpt-5.6-sol';
   $('#llmMaxTok').value = l.max_tokens || 16000;
   $('#llmStream').checked = l.stream === true;
+  const p = (l.proxy || '').trim();
+  $('#llmProxyMode').value = !p ? '' : (p === 'direct' ? 'direct' : 'custom');
+  $('#llmProxy').value = (p && p !== 'direct') ? p : '';
+  proxyModeUI();
+  // 实际生效的那条路径由后端算（它才看得到环境变量和系统代理），
+  // 直接回显出来 —— 不显示的话代理就是隐形的，出问题查不到。
+  $('#llmProxyNow').textContent = '当前生效：' + ((BOOT.net || {}).proxy_note || '未知');
 }
+
+function proxyModeUI() {
+  $('#llmProxy').style.display =
+    $('#llmProxyMode').value === 'custom' ? '' : 'none';
+}
+$('#llmProxyMode').onchange = proxyModeUI;
 
 function renderProjects() {
   const tb = $('#projList');
@@ -1606,8 +1632,10 @@ function renderProviders() {
   });
 }
 $('#saveLlm').onclick = async () => {
+  const mode = $('#llmProxyMode').value;
   const llm = {base_url: $('#llmBase').value, model: $('#llmModel').value,
                max_tokens: +$('#llmMaxTok').value || 16000,
+               proxy: mode === 'custom' ? $('#llmProxy').value.trim() : mode,
                stream: $('#llmStream').checked};
   if ($('#llmKey').value) llm.api_key = $('#llmKey').value;
   await api.post('/api/config', {llm});

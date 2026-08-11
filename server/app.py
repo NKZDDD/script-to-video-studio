@@ -283,8 +283,26 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
         raise ValueError("LLM 未配置 api_key（在「分析引擎」页签保存）")
     return LLM(c["api_key"], c.get("base_url", "https://api.paisio.online"),
                c.get("model", "claude-sonnet-5"), timeout=int(c.get("timeout", 900)),
-               proxy=c.get("proxy", ""), max_tokens=int(c.get("max_tokens", 16000)),
+               proxy=c.get("proxy", ""), max_tokens=_max_tokens(c.get("max_tokens")),
                stream=c.get("stream", False) is True)
+
+
+# 各家的真实上限都在 20 万 token 以内。填 999999 这种值网关会拿它去做
+# 预分配或直接转给上游，行为不可预测 —— 实测表现是流到中途连接被关，
+# 报错却指向「网络中断」，根本看不出是这个值的问题。
+# 页面上那个 input 标了 max="200000"，但 HTML 的 max 不会阻止提交，
+# 所以真正的关口必须在这里。
+MAX_TOKENS_CEILING = 200000
+
+
+def _max_tokens(v) -> int:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 16000
+    if n <= 0:
+        return 0                      # 0 = 不传这个参数，走服务商默认
+    return max(1024, min(n, MAX_TOKENS_CEILING))
 
 
 # ====================================================================== 路由
@@ -302,8 +320,28 @@ def api_get(path: str, q: dict) -> dict:
         if up.get("access_key"):
             up["access_key"] = up["access_key"][:4] + "…"
         pub["upload"] = up
+        # llm.api_key 之前是原文发给前端的 —— providers 整块剔了、upload 的
+        # 密钥也抹了，就漏了这一个。页面只需要知道「配了没」。
+        lm = dict(pub.get("llm") or {})
+        lm["api_key_set"] = bool((cfg.get("llm") or {}).get("api_key"))
+        lm.pop("api_key", None)
+        pub["llm"] = lm
         from core import system_v34 as V34
+        from core.llm import _env_proxy, mask_url
+        env_p = _env_proxy()
+        mode = (lm.get("proxy") or "").strip()
         return {"config": pub,
+                # 实际生效的网络路径。前端算不出来 —— 环境变量和系统代理
+                # 只有服务端看得见。不回显的话代理就是隐形的。
+                "net": {
+                    "env_proxy": mask_url(env_p),
+                    "proxy_note": (
+                        "强制直连（忽略系统与环境代理）" if mode.lower() in
+                        ("direct", "直连", "none", "off") else
+                        f"配置指定的代理 {mask_url(mode)}" if mode else
+                        f"跟随系统/环境代理 {mask_url(env_p)}" if env_p else
+                        "直连（系统与环境都没有代理）"),
+                },
                 "providers_configured": {k: bool(v.get("api_key"))
                                          for k, v in (cfg.get("providers") or {}).items()},
                 "capabilities": list_capabilities(),
@@ -491,6 +529,10 @@ def api_post(path: str, body: dict) -> dict:
                 # 这几个是只读回显字段，不该被存进 config
                 v.pop("access_key_set", None)
                 v.pop("secret_key_set", None)
+                # 存的时候就夹住，不只在用的时候夹 —— 否则 config.json 里
+                # 一直躺着个 999999，页面回显也是它，人会以为这个值是有效的。
+                if k == "llm" and "max_tokens" in v:
+                    v["max_tokens"] = _max_tokens(v["max_tokens"])
                 cur.setdefault(k, {}).update(v)
             else:
                 cur[k] = v

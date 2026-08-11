@@ -17,7 +17,10 @@ class LLMRetryLogTests(unittest.TestCase):
         client = LLM("test-key", "https://example.invalid", "test-model")
         captured = {}
 
-        def plain_once(url, headers, body, proxies, tmo, log, on_usage):
+        # sess 是第一个参数：trust_env 只能在 Session 上设，
+        # 裸 requests.post 会让「强制直连」失效。
+        def plain_once(sess, url, headers, body, proxies, tmo, log,
+                       on_usage=None, on_partial=None):
             captured.update(body)
             return "完整结果"
 
@@ -78,14 +81,24 @@ class LLMRetryLogTests(unittest.TestCase):
                 yield (b'data: {"choices":[{"delta":{"content":"abc"}}]}')
                 raise requests.ConnectionError("peer closed connection")
 
+        class FakeSession:
+            """请求必须从 Session 上发出去 —— patch requests.post 已经拦不到了。"""
+            trust_env = True
+
+            def post(self, *a, **k):
+                return Response()
+
         client = self._client()
-        with patch("core.llm.requests.post", return_value=Response()):
-            with self.assertRaisesRegex(
-                    _Retryable, "本次已收到 3 字.*已接收内容将被丢弃"):
-                client._stream_once(
-                    "https://example.invalid", {}, {"messages": []}, None,
-                    (30, 60), None,
-                )
+        kept = []
+        with self.assertRaisesRegex(
+                _Retryable, "本次已收到 3 字.*已接收内容将被丢弃"):
+            client._stream_once(
+                FakeSession(), "https://example.invalid", {}, {"messages": []},
+                None, (30, 60), None, on_partial=lambda t, w: kept.append((t, w)),
+            )
+        # 丢弃之前必须先存下来：断在哪个字段是排这类问题唯一有用的证据
+        self.assertEqual(kept[0][0], "abc")
+        self.assertIn("流式连接中断", kept[0][1])
 
     def test_network_retry_exhaustion_is_explicit(self):
         client = self._client()

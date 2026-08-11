@@ -15,6 +15,22 @@ from typing import Any, Callable, Optional
 import requests
 
 
+def _env_proxy() -> str:
+    """这台机器上会被 requests 自动采用的 HTTPS 代理，没有就返回空。
+
+    urllib 的 getproxies() 读的正是 requests 会读的那几处：
+    环境变量 HTTPS_PROXY/ALL_PROXY，以及 Windows 的系统代理设置。
+    """
+    import urllib.request
+    p = urllib.request.getproxies()
+    return p.get("https") or p.get("http") or p.get("all") or ""
+
+
+def mask_url(u: str) -> str:
+    """代理地址里可能带账号密码，打日志前抹掉。"""
+    return re.sub(r"://[^/@]+@", "://***:***@", u or "")
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -131,7 +147,16 @@ class LLM:
         self.base_url = (base_url or "").rstrip("/")
         self.model = model
         self.timeout = timeout
-        self.proxy = proxy
+        # 三态，不是「填了/没填」两态：
+        #   ""        跟随系统与环境代理（requests 默认行为，向后兼容）
+        #   "direct"  强制直连，忽略系统与环境代理
+        #   其它      指定这个代理
+        # 为什么要有「强制直连」这一档：requests 在 proxies=None 时会**自动**
+        # 读 HTTPS_PROXY 和 Windows 系统代理。机器上挂着 Clash 之类的东西时，
+        # 请求会悄悄绕一圈，而那些工具常在 100 秒左右掐掉长连接 ——
+        # 表现是「流式中途断」或「Unable to connect to proxy」，
+        # 看起来像服务商挂了。程序这边连「我在走代理」都不说，根本查不到。
+        self.proxy = (proxy or "").strip()
         # 所有 OpenAI 兼容 LLM 共用。默认非流式：部分中转站的 SSE 长连接会在
         # 约 100 秒被网关提前切断；需要实时字数时再由设置页显式开启。
         self.stream = bool(stream)
@@ -140,8 +165,52 @@ class LLM:
         # 表现为 JSON 不完整，会白重试两次再报错。给足了就是一次成功。
         self.max_tokens = int(max_tokens or 0)
 
+    # ------------------------------------------------------------ 代理
+    DIRECT = ("direct", "直连", "none", "off")
+
+    def _session(self, trust_env: bool):
+        """整个 LLM 对象共用一个 Session。
+
+        必须用 Session 而不是 requests.post：`trust_env` 只能在 Session 上设，
+        裸 requests.post 每次自己建一个 trust_env=True 的临时 session，
+        「强制直连」就成了一句空话。
+        一个对象一个 Session 顺带拿到 keep-alive —— 一集五十次调用，
+        每次重新握手 TLS 是白等。
+        """
+        s = getattr(self, "_sess", None)
+        if s is None:
+            s = self._sess = requests.Session()
+        s.trust_env = trust_env
+        return s
+
+    def close(self):
+        s = getattr(self, "_sess", None)
+        if s is not None:
+            s.close()
+            self._sess = None
+
+    def resolve_proxy(self) -> tuple:
+        """(给 requests 的 proxies, trust_env, 给人看的一句话)。
+
+        这句话必须打进日志。之前排一个「n2 老是断」排了半天，
+        就是因为谁也不知道请求实际走了代理 —— 报错只说「连不上代理」，
+        不说是哪个代理、从配置来还是从环境来。
+        """
+        if self.proxy.lower() in self.DIRECT:
+            return {"http": None, "https": None}, False, "强制直连（忽略系统与环境代理）"
+        if self.proxy:
+            return ({"http": self.proxy, "https": self.proxy}, False,
+                    f"走配置指定的代理 {mask_url(self.proxy)}")
+        env = _env_proxy()
+        if env:
+            return (None, True,
+                    f"跟随系统/环境代理 {mask_url(env)}（程序没配代理，"
+                    f"是这台机器上的设置）—— 长请求被它掐断过的话，"
+                    f"把「网络」改成强制直连再试")
+        return None, True, "直连（系统与环境都没有代理）"
+
     def chat(self, system: str, user: str, retries: int = 3, log=None,
-             cancel=None, on_usage=None) -> str:
+             cancel=None, on_usage=None, on_partial=None) -> str:
         """一次对话。默认走流式。
 
         为什么必须流式：非流式时，整个生成要在「timeout 秒内一个字节都没来」
@@ -154,7 +223,8 @@ class LLM:
         url = self.base_url + "/v1/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}",
                    "Content-Type": "application/json"}
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
+        proxies, trust_env, proxy_note = self.resolve_proxy()
+        sess = self._session(trust_env)
         base = {
             "model": self.model,
             "messages": ([{"role": "system", "content": system}] if system else [])
@@ -173,6 +243,8 @@ class LLM:
                     "非流式（完成后一次返回，期间不会显示接收字数）")
             log(f"发出 {len(user)} 字（约 {rough_tokens(user)} token），"
                 f"上限 {self.max_tokens} token，{mode}")
+            # 网络路径必须报出来。不报的话，代理掐连接会被当成服务商挂了。
+            log(f"网络：{proxy_note}")
         for attempt in range(retries):
             try:
                 body = dict(base, stream=use_stream)
@@ -181,10 +253,11 @@ class LLM:
                     # 对不上后台账单时没法查
                     body["stream_options"] = {"include_usage": True}
                 if use_stream:
-                    return self._stream_once(url, headers, body, proxies, tmo,
-                                             log, cancel, on_usage)
-                return self._plain_once(url, headers, body, proxies, tmo, log,
-                                        on_usage)
+                    return self._stream_once(sess, url, headers, body, proxies,
+                                             tmo, log, cancel, on_usage,
+                                             on_partial)
+                return self._plain_once(sess, url, headers, body, proxies, tmo,
+                                        log, on_usage, on_partial)
             except _Retryable as exc:                 # 429/5xx，值得重试
                 last = exc
                 if attempt < retries - 1:
@@ -286,8 +359,17 @@ class LLM:
                 f"或者把剧本拆成更少的集数分批处理。")
         return content
 
-    def _stream_once(self, url, headers, body, proxies, tmo, log, cancel=None,
-                     on_usage=None) -> str:
+    def _stream_once(self, sess, url, headers, body, proxies, tmo, log, cancel=None,
+                     on_usage=None, on_partial=None) -> str:
+        # 丢弃之前先交给调用方存盘。不存的话，连接断在第几个字段、
+        # 模型是不是正在写某个超长数组，全都看不到 —— 而那是排
+        # 「老是断在中途」唯一有用的证据。之前三次断流丢了两万多字。
+        def keep(why):
+            if on_partial and parts:
+                try:
+                    on_partial("".join(parts), why)
+                except Exception:                       # noqa: BLE001
+                    pass                                # 存盘失败不能盖掉真错误
         started = time.time()
         parts, reason, ticks = [], "", 0
         closed = False              # 有没有正常收到 [DONE] / finish_reason
@@ -300,12 +382,13 @@ class LLM:
                 raise
             except requests.RequestException as exc:
                 n = sum(len(p) for p in parts)
+                keep(f"流式连接中断：{exc}")
                 raise _Retryable(
                     f"流式连接异常中断：本次已收到 {n} 字，但没有形成完整回复，"
                     f"已接收内容将被丢弃（耗时 {int(time.time()-started)} 秒；"
                     f"原始错误：{exc}）") from exc
 
-        with requests.post(url, headers=headers, json=body, timeout=tmo,
+        with sess.post(url, headers=headers, json=body, timeout=tmo,
                            proxies=proxies, stream=True) as r:
             self._check_status(r)
             ctype = (r.headers.get("Content-Type") or "").lower()
@@ -362,6 +445,7 @@ class LLM:
                 "estimated": True}
             on_usage(dict(u, model=self.model, seconds=round(time.time() - started, 1)))
         if not closed:
+            keep("流没有正常收尾就断了")
             # 流没有正常收尾就断了（既没 [DONE] 也没 finish_reason）。
             # 这跟「模型答得不合格」是两回事：不该拿去反馈重试，该当网络问题重试。
             # 尤其别在这时候报「回复内容为空」—— 那会让人以为是模型拒答。
@@ -381,9 +465,9 @@ class LLM:
                     f"用了 {secs} 秒。这家没回传 usage，以上是估算")
         return self._finish("".join(parts), reason, usage)
 
-    def _plain_once(self, url, headers, body, proxies, tmo, log=None,
-                    on_usage=None) -> str:
-        r = requests.post(url, headers=headers, json=body, timeout=tmo, proxies=proxies)
+    def _plain_once(self, sess, url, headers, body, proxies, tmo, log=None,
+                    on_usage=None, on_partial=None) -> str:
+        r = sess.post(url, headers=headers, json=body, timeout=tmo, proxies=proxies)
         self._check_status(r)
         data = r.json()
         u = data.get("usage") or {}
@@ -400,7 +484,7 @@ class LLM:
 
     def json_call(self, system: str, user: str, required: Optional[list] = None,
                   json_retries: int = 2, log=print, cancel=None,
-                  on_usage=None,
+                  on_usage=None, on_partial=None,
                   validator: Optional[Callable[[Any], list]] = None) -> Any:
         """要求 JSON 输出；解析失败或缺键时把错误反馈给模型重试（≤json_retries）。
 
@@ -413,7 +497,7 @@ class LLM:
             if cancel and cancel():
                 raise LLMCancelled("已按取消停止")
             text = self.chat(system, attempt_user, log=log, cancel=cancel,
-                             on_usage=on_usage)
+                             on_usage=on_usage, on_partial=on_partial)
             try:
                 data = extract_json(text)
                 missing = check_keys(data, required or [])
@@ -429,6 +513,12 @@ class LLM:
             except (LLMFatal, LLMCancelled):
                 raise                                  # 超时/截断/取消，重试无意义
             except (json.JSONDecodeError, LLMError) as exc:
+                if on_partial and text:
+                    try:
+                        on_partial(text, f"JSON 校验不过（第 {attempt + 1} 次）："
+                                         f"{str(exc)[:200]}")
+                    except Exception:                   # noqa: BLE001
+                        pass
                 if attempt >= json_retries:
                     raise LLMError(f"JSON 输出校验失败（已重试{json_retries}次）: {exc}") from exc
                 log(f"[JSON 校验重试] 第 {attempt + 1}/{json_retries} 次："
