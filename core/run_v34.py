@@ -478,14 +478,24 @@ def _rel(kind: str, name: str) -> str:
             "video": f"03_提示词/视频提示词/{name}"}[kind]
 
 
-def _asset_out(a: dict) -> str:
-    """资产图落在哪。按家族分目录，人看文件夹时能对上。"""
+def _asset_out(a: dict, revision: int = 1) -> str:
+    """资产图落在哪。按家族分目录，人看文件夹时能对上。
+
+    文件名带版本号：内容要改时建新文件而不是原地覆盖 —— 已经引用过它的
+    故事板还指着旧那张，覆盖了就查不出「当时用的是哪一版人脸」。
+    """
     sub = {"CHAR": "人物身份资产", "PH": "人物身份资产", "LOOK": "人物造型资产",
            "CT": "连续状态资产", "COST": "服饰资产", "LOC": "场景资产",
            "PROP_SPEC": "道具资产", "PROP_INSTANCE": "道具资产",
            "VEH": "载具资产", "CRE": "生物资产", "GRP": "群体资产",
            "VFX": "特效资产"}.get(a.get("family", ""), "其它资产")
-    return f"02_固定资产/{sub}/{a['asset_id']}.png"
+    return f"02_固定资产/{sub}/{a['asset_id']}_R{int(revision):02d}.png"
+
+
+def asset_out(pj: Project, a: dict) -> str:
+    """这个资产**当前版本**的图在哪。"""
+    from . import registry_v34 as REG
+    return _asset_out(a, REG.current_revision(pj, str(a.get("asset_id") or "")))
 
 
 def build_tasks(pj: Project, params: dict) -> dict:
@@ -514,6 +524,9 @@ def build_tasks(pj: Project, params: dict) -> dict:
         for ap in (pj.stage_data("n4b_asset_prompts", ep) or {}).get("asset_prompts", []):
             prompts.setdefault(ap.get("asset_id"), ap)
 
+    from . import registry_v34 as REG
+    REG.sync(pj, list(amap.values()))   # 先登记，版本号才查得到
+
     asset_tasks = []
     for aid, a in amap.items():
         if a.get("decision") == "skip" or aid not in prompts:
@@ -527,11 +540,11 @@ def build_tasks(pj: Project, params: dict) -> dict:
             "prompt_ref": _rel("asset", ap.get("filename") or f"{aid}_PROMPT.txt"),
             "reference_images": [
                 {"image_n": i + 1, "asset_id": rid,
-                 "file_ref": _asset_out(amap[rid]) if rid in amap else ""}
+                 "file_ref": asset_out(pj, amap[rid]) if rid in amap else ""}
                 for i, rid in enumerate(ap.get("reference_assets") or [])
             ],
             "params": {"size": ap.get("size") or size},
-            "output": _asset_out(a),
+            "output": asset_out(pj, a),
         })
 
     # ---- 场景状态图 / 故事板 / 视频：逐集逐段 ----
@@ -550,7 +563,7 @@ def build_tasks(pj: Project, params: dict) -> dict:
                 "prompt_ref": _rel("scstate", f"{sid}_PROMPT.txt"),
                 "reference_images": [
                     {"image_n": i + 1, "asset_id": rid,
-                     "file_ref": _asset_out(amap[rid]) if rid in amap else ""}
+                     "file_ref": asset_out(pj, amap[rid]) if rid in amap else ""}
                     for i, rid in enumerate(sc.get("reference_assets") or [])
                 ],
                 "params": {"size": size},
@@ -570,7 +583,7 @@ def build_tasks(pj: Project, params: dict) -> dict:
                     {"image_n": r.get("image_n", i + 1),
                      "asset_id": r.get("asset_id", ""),
                      "file_ref": scst_out.get(r.get("asset_id"))
-                     or (_asset_out(amap[r["asset_id"]])
+                     or (asset_out(pj, amap[r["asset_id"]])
                          if r.get("asset_id") in amap else "")}
                     for i, r in enumerate(pkg.get("reference_order") or [])
                 ],
@@ -591,7 +604,7 @@ def build_tasks(pj: Project, params: dict) -> dict:
                 "reference_images": [
                     {"image_n": r.get("image_n", i + 1),
                      "asset_id": r.get("asset_id", ""),
-                     "file_ref": _asset_out(amap[r["asset_id"]])
+                     "file_ref": asset_out(pj, amap[r["asset_id"]])
                      if r.get("asset_id") in amap else ""}
                     for i, r in enumerate(vp.get("reference_order") or [])
                     if r.get("asset_id") in amap

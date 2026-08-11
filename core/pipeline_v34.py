@@ -245,6 +245,20 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             if one["left"] and gi < len(layers):
                 job.log(key, f"第 {gi} 层还有 {one['left']} 项没成 —— "
                              f"下一层依赖它们的会因为缺参考图停下")
+        if s["task_key"] == "asset_tasks":
+            # 出完就登记指纹。登记是为了后面能查出「文件被人换过」——
+            # 换过之后下游还照着旧的引用跑，出来的东西看着正常但用的是另一张图。
+            from . import registry_v34 as REG
+            n = 0
+            for t in tasks:
+                if os.path.isfile(pj.p(*t["output"].split("/"))):
+                    try:
+                        REG.promote(pj, t["key"], t["output"])
+                        n += 1
+                    except Exception as exc:            # noqa: BLE001
+                        job.log(key, f"⚠️ {t['key']} 登记失败：{exc}")
+            if n:
+                job.log(key, f"已登记 {n} 张资产图的版本和指纹")
         if left:
             job.set_item(key, state="failed", msg=f"还有 {left} 项没做成")
             with st_lock:

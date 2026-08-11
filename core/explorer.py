@@ -108,8 +108,8 @@ def _category_of(pj: Project, a: dict) -> str:
 def _asset_rel(pj: Project, a: dict) -> str:
     """这个资产的图落在哪。两套体系的目录分法不一样，别写死一套。"""
     if system_of(pj) == "v34":
-        from .run_v34 import _asset_out
-        return _asset_out(a)
+        from .run_v34 import asset_out
+        return asset_out(pj, a)     # 带当前版本号
     return S.asset_output_rel(a)
 
 
