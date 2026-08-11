@@ -74,11 +74,51 @@ def _spend_index(pj: Project) -> dict:
     return idx
 
 
+def system_of(pj: Project) -> str:
+    """这个项目用哪套生产体系。老项目没这个字段，回落 v61。
+
+    产物页读错体系不会报错，只会**什么都看不到** —— 资产库空的、按段看空的，
+    人会以为是没跑成，实际是读错了文件名。
+    """
+    return (pj.meta() or {}).get("system") or "v61"
+
+
+def _assets_stage(pj: Project) -> str:
+    return "n4_assets" if system_of(pj) == "v34" else "s4_assets"
+
+
+# V3.4 用 family 分资产（CHAR/LOOK/CT/PROP_SPEC…），比 V6.1 的五类细。
+# 归到同一套显示分类里，资产库的分组和排序就不用分两套写。
+# 不映射的话 by_category 会是空的 —— 资产在列表里有，分组全没了。
+_FAMILY_TO_CAT = {
+    "CHAR": "identity", "PH": "identity", "LOOK": "identity", "CT": "state",
+    "COST": "prop", "LOC": "environment", "SPATIAL": "environment",
+    "PROP_SPEC": "prop", "PROP_INSTANCE": "prop", "PROP_SET": "prop",
+    "VEH": "prop", "CRE": "creature", "GRP": "group", "VFX": "state",
+}
+
+
+def _category_of(pj: Project, a: dict) -> str:
+    if system_of(pj) == "v34":
+        return _FAMILY_TO_CAT.get((a.get("family") or "").upper(), "") \
+            or a.get("category", "")
+    return a.get("category", "")
+
+
+def _asset_rel(pj: Project, a: dict) -> str:
+    """这个资产的图落在哪。两套体系的目录分法不一样，别写死一套。"""
+    if system_of(pj) == "v34":
+        from .run_v34 import _asset_out
+        return _asset_out(a)
+    return S.asset_output_rel(a)
+
+
 def _merged_assets(pj: Project) -> tuple:
     """全剧资产表：按集顺序累加，先出现的定义优先（和 build_tasks 同一套规则）。"""
     order, amap, by_ep = [], {}, {}
+    stage = _assets_stage(pj)
     for ep in _eps.ids(pj) or [""]:
-        for a in (pj.stage_data("s4_assets", ep) or {}).get("assets", []):
+        for a in (pj.stage_data(stage, ep) or {}).get("assets", []):
             aid = a.get("asset_id")
             if not aid:
                 continue
@@ -98,7 +138,8 @@ def assets(pj: Project) -> dict:
     tasks = {t["key"]: t for t in (pj.tasks().get("asset_tasks") or [])}
     prompts = {}
     for ep in _eps.ids(pj) or [""]:
-        for ap in (pj.stage_data("s5_asset_prompts", ep) or {}).get("asset_prompts", []):
+        pstage = "n4b_asset_prompts" if system_of(pj) == "v34" else "s5_asset_prompts"
+        for ap in (pj.stage_data(pstage, ep) or {}).get("asset_prompts", []):
             prompts.setdefault(ap.get("asset_id"), ap)
     reg = {r.get("id"): r for r in pj.registry("asset")}
     spend = _spend_index(pj)
@@ -107,9 +148,9 @@ def assets(pj: Project) -> dict:
     out = []
     for aid in order:
         a = amap[aid]
-        cat = a.get("category", "")
+        cat = _category_of(pj, a)
         t = tasks.get(aid) or {}
-        img = _file(pj, S.asset_output_rel(a))
+        img = _file(pj, _asset_rel(pj, a))
         ap = prompts.get(aid) or {}
         pf = ap.get("filename") or f"{aid}_PROMPT.txt"
         segs = [s for s in (a.get("used_by_segs") or [])]
@@ -155,6 +196,8 @@ def assets(pj: Project) -> dict:
 
 def segments(pj: Project, episode: str) -> dict:
     """按段看（逐集）：一段一行，从段落信息一路到成片。"""
+    if system_of(pj) == "v34":
+        return _segments_v34(pj, episode)
     code = (pj.meta().get("params") or {}).get("project_code") \
         or pj.meta().get("project_code", "PROJ-001")
     segs = (pj.stage_data("s2_segments", episode) or {}).get("segments", [])
@@ -196,8 +239,8 @@ def segments(pj: Project, episode: str) -> dict:
             "refs": [{"image_n": r.get("image_n"), "asset_id": r.get("asset_id"),
                       "control_scope": r.get("control_scope", ""),
                       "name": (amap.get(r.get("asset_id")) or {}).get("name", ""),
-                      "file": _file(pj, S.asset_output_rel(
-                          amap[r["asset_id"]])) if r.get("asset_id") in amap else None}
+                      "file": _file(pj, _asset_rel(pj, amap[r["asset_id"]]))
+                      if r.get("asset_id") in amap else None}
                      for r in (b.get("reference_images") or [])],
             "excluded": b.get("excluded_assets", []),
             "sb_prompt": _text(pj, f"03_提示词/故事板提示词/{sid}_STORYBOARD_PROMPT.txt"),
@@ -228,9 +271,118 @@ def segments(pj: Project, episode: str) -> dict:
                                if c.get("consistent") is False]}
 
 
+def _segments_v34(pj: Project, episode: str) -> dict:
+    """V3.4 的按段看。
+
+    单独写一份而不是在原函数里到处加 if：两套体系的段落数据结构差得远
+    （段号叫 seg_id 不叫 id、状态在 CVS 里不在 segment_states 里、
+    参考图在故事板包里不在绑定表里），混着写会变成一堆看不懂的分支。
+    **返回的形状保持一致**，前端不用分两套渲染。
+    """
+    code = (pj.meta().get("params") or {}).get("project_code") \
+        or pj.meta().get("project_code", "PROJ-001")
+    segs = (pj.stage_data("n10_segs", episode) or {}).get("segs", [])
+    cvs = {c.get("cvs_id"): c for c in
+           (pj.stage_data("n8_cvs", episode) or {}).get("cvs", [])}
+    shots = {s.get("shot_id"): s for s in
+             (pj.stage_data("n9_shots", episode) or {}).get("shots", [])}
+    scst = {}
+    for x in (pj.stage_data("n11_scstate", episode) or {}).get("scstates", []):
+        scst.setdefault(x.get("seg_id"), []).append(x)
+    pkgs = {p.get("seg_id"): p for p in
+            (pj.stage_data("n12_storyboard", episode) or {}).get("sbpkg", [])}
+    plans = {v.get("seg_id"): v for v in
+             (pj.stage_data("n13_video", episode) or {}).get("video_plan", [])}
+    _, amap, _ = _merged_assets(pj)
+    spend = _spend_index(pj)
+    edits = promptfile.ledger(pj)
+
+    rows = []
+    for s in segs:
+        sid = s.get("seg_id", "")
+        pkg = pkgs.get(sid) or {}
+        plan = plans.get(sid) or {}
+        entry, exit_ = cvs.get(s.get("entry_cvs")) or {}, cvs.get(s.get("exit_cvs")) or {}
+        my_shots = [shots[i] for i in (s.get("included_shots") or []) if i in shots]
+        rows.append({
+            "id": sid,
+            "seg": sid.split("-")[-1],
+            "name": s.get("primary_dramatic_task", ""),
+            "time_range": s.get("story_time_range", ""),
+            "story_task": s.get("primary_dramatic_task", ""),
+            "entry_state": s.get("entry_cvs", ""),
+            "core_process": "、".join(s.get("state_change_ownership") or []),
+            "turn": "",
+            "exit_state": s.get("exit_cvs", ""),
+            "next_anchor": s.get("boundary_rationale", ""),
+            "dialogues": [s["dialogue"]] if s.get("dialogue") else [],
+            "states": {"进入": entry.get("story_time", ""),
+                       "退出": exit_.get("story_time", ""),
+                       "禁止出现": exit_.get("forbidden_state", [])},
+            "continuity": {},
+            "axis_note": "、".join(t for t in (s.get("model_native_transition_ids") or [])),
+            "shot_count": len(my_shots),
+            "keyframes": len(pkg.get("kf") or []),
+            # V3.4 的参考图在故事板包的 reference_order 里，不在绑定表
+            "refs": [{"image_n": r.get("image_n"), "asset_id": r.get("asset_id"),
+                      "control_scope": r.get("must_preserve", ""),
+                      "name": (amap.get(r.get("asset_id")) or {}).get("name", ""),
+                      "file": _file(pj, _asset_rel(pj, amap[r["asset_id"]]))
+                      if r.get("asset_id") in amap else None}
+                     for r in (pkg.get("reference_order") or [])],
+            "excluded": [],
+            # 这一层是 V3.4 独有的，单独列出来，否则页面上看不见它存在
+            "scstates": [{"id": x.get("scstate_id"),
+                          "file": _file(pj, f"03b_场景状态图/{code}_{x.get('scstate_id')}.png"),
+                          "prompt": _text(pj, f"03_提示词/场景状态提示词/"
+                                              f"{x.get('scstate_id')}_PROMPT.txt",
+                                          edits=edits)}
+                         for x in scst.get(sid, [])],
+            "sb_prompt": _text(pj, f"03_提示词/故事板提示词/{sid}_STORYBOARD_PROMPT.txt",
+                               edits=edits),
+            "vd_prompt": _text(pj, f"03_提示词/视频提示词/{sid}_VIDEO_PROMPT.txt",
+                               edits=edits),
+            "storyboard": _file(pj, f"04_故事板/{code}_{sid}_STORYBOARD.png"),
+            "video": _file(pj, f"05_分段视频/{code}_{sid}.mp4"),
+            "compiled": bool(plan.get("video_prompt")),
+            "spend": spend.get(sid, {}),
+        })
+
+    def n(f):
+        return sum(1 for r in rows if f(r))
+
+    total = len(rows)
+    steps = [
+        {"no": 10, "name": "SEG 装箱", "done": total, "total": total or 1},
+        {"no": 11, "name": "场景状态图", "done": n(lambda r: bool(r["scstates"])), "total": total},
+        {"no": 12, "name": "故事板包", "done": n(lambda r: r["keyframes"] > 0), "total": total},
+        {"no": 13, "name": "视频计划", "done": n(lambda r: r["compiled"]), "total": total},
+        {"no": 12, "name": "故事板出图", "done": n(lambda r: r["storyboard"]["exists"]), "total": total},
+        {"no": 13, "name": "分段视频", "done": n(lambda r: r["video"]["exists"]), "total": total},
+    ]
+    audit = pj.stage_data("n14_audit", episode) or {}
+    return {"episode": episode, "rows": rows, "steps": steps,
+            "master": _file(pj, f"06_成片/{code}_{episode}_MASTER.mp4"),
+            "axis_convention": {},
+            # 审计发现的问题挂在这里，和 V6.1 的连续性检查占同一个位置
+            "continuity_bad": [f for f in (audit.get("findings") or [])
+                               if f.get("severity") in ("BLOCK", "WARN")]}
+
+
 _TASK_KINDS = [("asset_tasks", "asset", "资产图", "环节5b"),
                ("storyboard_tasks", "storyboard", "故事板", "环节9"),
                ("video_tasks", "video", "分段视频", "环节10")]
+
+# V3.4 多一类：场景状态图。漏掉它的话那一层的任务在明细里根本不显示 ——
+# 出了图、花了钱，页面上看不见。
+_TASK_KINDS_V34 = [("asset_tasks", "asset", "资产图", "第5环节"),
+                   ("scstate_tasks", "storyboard", "场景状态图", "第11环节"),
+                   ("storyboard_tasks", "storyboard", "故事板", "第12环节"),
+                   ("video_tasks", "video", "分段视频", "第13环节")]
+
+
+def _task_kinds(pj: Project) -> list:
+    return _TASK_KINDS_V34 if system_of(pj) == "v34" else _TASK_KINDS
 
 
 def tasks(pj: Project, episode: str = "") -> dict:
@@ -268,7 +420,7 @@ def tasks(pj: Project, episode: str = "") -> dict:
                     logs[str(e["id"])] = e        # 同一个 id 取最后一次
 
     groups = []
-    for key, kind, label, stage in _TASK_KINDS:
+    for key, kind, label, stage in _task_kinds(pj):
         reg = {str(r.get("id")): r for r in pj.registry(kind)}
         rows = []
         for it in (t.get(key) or []):
