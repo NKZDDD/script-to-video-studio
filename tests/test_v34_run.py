@@ -31,11 +31,19 @@ class FakeLLM:
 
     def __init__(self):
         self.sent = []          # (stage_id, user)
+        # (环节id, 集号) → 这一次调用抛错。按 id 判，别在正文里搜关键词猜 ——
+        # 模板之间互相引用（n4 里就写着「见第五环节的 SPATIAL」），
+        # 关键词匹配会误伤别的环节。
+        self.fail_on = set()
 
     def json_call(self, system, user, required=None, log=None, cancel=None,
                   on_usage=None, **kw):
         stage = self._which(user)
         self.sent.append((stage, user))
+        for sid, ep in self.fail_on:
+            if stage == sid and (not ep or f"只处理 {ep}" in user
+                                 or f"只做这一段】{ep}" in user):
+                raise RuntimeError(f"{sid} 在 {ep} 上炸了（测试注入）")
         if on_usage:
             # 真的 LLM 会回传用量。假的不回传的话，「每次调用都记账」
             # 那条测试就变成在测夹具而不是测代码。
