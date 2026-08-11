@@ -20,7 +20,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
-from . import diagnose, episodes as _eps, run_v34 as R, system_v34 as V
+from . import (diagnose, episodes as _eps, gates_v34 as G, run_v34 as R,
+               system_v34 as V)
 from .apiutil import BATCH_FATAL
 from .llm import LLMCancelled
 from .executor import Job, run_chain
@@ -353,6 +354,18 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
 
     if not (job.aborted or job.cancelled):
         R.build_tasks(pj, params)
+        # 出图出片之前过三道硬闸门。拦下来的都是「做出来看着正常但是错的」，
+        # 在花钱之前停，比出完几百张再人工发现便宜得多。
+        blocked = G.check_all(pj, only_episodes)
+        if blocked:
+            msg = G.blocked_message(blocked)
+            for s in tail:
+                if s["kind"] == "produce":
+                    job.set_item(s["label"], state="failed", msg=msg.splitlines()[0])
+                    with st_lock:
+                        failed.append(s["label"])
+            job.log(steps[0]["label"], msg)
+            tail = [s for s in tail if s["kind"] != "produce"]
     for s in tail:
         if job.aborted:
             break
