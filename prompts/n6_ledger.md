@@ -88,6 +88,24 @@
 遮挡、离画、装进容器**都不改变存在数量**。总数只能由创建、进入/离开世界、
 损毁、消耗、拆分、合并这些事件改变。
 
+## 五（续）、人物位置也是一条状态
+
+Zone、Anchor、支撑关系、姿态、朝向 —— 这五项和伤口、服装一样，
+**有来源事件、有持续规则**，不是每一段重新决定的东西。
+
+```
+没有合法移动事件 → 下一段逐项照抄
+有合法移动事件   → 记一条 state_dimension = "位置" 的账
+```
+
+`position_tracking` 就是这本账的位置那一栏。某一段写 `INHERITED`，
+意思是「这一段没人批准他移动，所以位置和上一段完全一样」。
+
+不记这本账的后果：下游每一段各自决定人站哪，
+于是**上一段还坐在床沿，下一段人已经在门口了，中间没有起身**。
+这种错画面上看不出来 —— 每一格单看都正常，
+只有把整集连起来才发现人在瞬移。
+
 ## 六、持有人、归属、容器不是一回事
 
 - `holder` —— 现在**直接拿着**它的人
@@ -108,7 +126,7 @@
      "reality_thread": "RT_MAIN",
      "source_scene": "SC02", "source_beat": "SC02-B3",
      "affected_entity": "C001 或 PI001 或 SP001",
-     "state_dimension": "外观|持有|空间|身体|环境|情绪",
+     "state_dimension": "外观|持有|空间|位置|身体|环境|情绪",
      "previous_value": "",
      "delta": "改变了什么",
      "result_value": "变成什么",
@@ -121,6 +139,16 @@
        {"seg_id": "{{EPISODE}}-SEG03",
         "visibility": "明确可见|部分可见|被遮挡|画外|尚未激活"}
      ]}
+  ],
+  "position_tracking": [
+    {"character_id": "C001",
+     "timeline": [
+       {"seg_id": "{{EPISODE}}-SEG01", "zone": "A", "anchor_id": "BED_01",
+        "posture_class": "SEATED", "support_binding_id": "BED_01",
+        "orientation_yaw_deg": 90,
+        "changed_by_event": "没有移动事件就写 INHERITED"}
+     ],
+     "inheritance_note": "哪几段之间位置逐项不变、依据是没有移动事件"}
   ],
   "prop_tracking": [
     {"instance_id": "PI001",

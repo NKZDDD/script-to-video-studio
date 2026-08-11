@@ -71,6 +71,33 @@ SBPKG_{{SEGMENT}}
 - `temporal_position` —— 写「本段早段、受伤事件之后、治疗完成之前」这种相对位置，
   **不要写绝对秒数** —— 绝对秒数在第十三环节冻结，两边都写会打架。
 
+## 三（续）、位置连续性：机位可以重新取景，人不能重新站位
+
+每一格都要写清进入时的位置状态、相对上一格的差异、以及有没有移动事件。
+
+**`authorized_movement_event_id = NONE` 时，这一格只能改变**：
+机位投影、表演、视线、手势、动作阶段。
+
+**不能改变**：人物真实的 Zone、Anchor、支撑关系。
+
+提示词里必须原样带上这两句：
+
+```
+CAMERA MAY REFRAME; ENTITIES MAY NOT REBLOCK.
+DO NOT MOVE SUBJECTS FOR VISIBILITY OR COMPOSITION.
+```
+
+为什么要写成硬规矩：关键帧是「同一个世界的不同观察」，
+但模型很容易把「换机位」理解成「可以重新安排人站哪」——
+尤其是当它想让三个人同框、想露全身、想做对峙构图的时候。
+**那种画面看起来更好，所以人工验收抓不到**，只有把整段连起来看才发现
+上一格还坐着、下一格人已经在对面了。
+
+一个动作确实要求人物离开座位进入另一个区域时，至少给出起身阶段
+或者路线阶段，或者让这段移动在**可信的遮挡期间**完成；
+目标那一格仍然要绑定终点 CVS。
+**遮挡不是瞬移许可证。**
+
 ## 四、转场锚点
 
 **硬切**只需要三样：切走那一格、精确切点、接进来那一格。
@@ -170,7 +197,16 @@ Image 1 = SCST_{{EPISODE}}_SC01_01 本段场景状态图
            "container": "", "visibility_bucket": "明确可见"}
         ],
         "count_lock": "PS001：可见1 + 遮挡1 = 2",
-        "entity_world_xyz": [{"id": "C001", "xyz": [2.4, 1.2, 0], "yaw": 90}],
+        "entity_position_state": [
+          {"id": "C001", "zone": "A", "anchor_id": "BED_01",
+           "root_or_pivot_xyz_m": [2.4, 1.2, 0], "orientation_yaw_deg": 90,
+           "posture_class": "SEATED", "support_binding_id": "BED_01",
+           "current_barrier_side": "BED_01 的右侧",
+           "route_progress": "沿 R1 走到 60%；没在移动就写 NONE"}
+        ],
+        "position_delta_from_previous_kf": "相对上一格变了哪几维；没变写 NONE",
+        "authorized_movement_event_id": "有合法移动才填 VT 编号，否则必须写 NONE",
+        "exit_position_state": "这一格结束时的位置；和进入相同就写 SAME",
         "spatial_id": "SP001", "loc_view": "SP001_V1",
         "view_coverage_status": "COVERED|NEW_VIEW_REQUIRED",
         "camera_reveal_envelope": "这一格镜头运动/人物转身可能显露的最大范围",

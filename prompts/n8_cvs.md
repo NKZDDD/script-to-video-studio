@@ -108,6 +108,47 @@ CVS_A（稳定）── VT ──→ CVS_B（稳定）
 但**关键结果必须进终点 CVS**。墙从完好到炸开，中间的爆炸半程可以不画，
 但终点必须定义墙的损坏结果，不能让视频自由决定。
 
+## 六、位置也是状态：没有移动事件就不许换位
+
+**人物的 Zone、Anchor、支撑关系、姿态、朝向，和伤口、服装一样是持续状态。**
+下一个 CVS 里没有合法移动事件，这五项就**逐项照抄上一个 CVS**。
+
+画面里暂时看不见某个人，**不许**把他的 Anchor 改到「更方便拍摄」的位置。
+
+### 位置要变，必须写成一条完整的移动
+
+```
+坐在桌后
+→ 起身完成（解除支撑）
+→ 沿桌后通道走
+→ 穿过批准的桌端空隙
+→ 进入观众区
+→ 到位并建立站姿
+```
+
+禁止的写法：
+
+```
+坐在桌后 → 下一个 CVS 直接在前排过道争吵
+```
+
+所以位置一变，对应那条 VT 必须填全：`authorized_movers`（谁被批准移动）、
+`release_support_action`（怎么起来的）、`route_id`（走哪条路）、
+`barrier_or_portal_crossing`（穿哪个口）、`completion_condition`（什么算到位）。
+**`authorized_movers` 里没有这个人，就不许改他的位置。**
+
+### 三条最容易犯的
+
+- **不许穿过实心物**。会议桌、墙、病床护栏、座椅排都是空间拓扑，不是背景装饰。
+  跨越只能走批准的门、桌端空隙，或者剧情明确写了的破坏事件。
+- **坐/躺/跪不是普通姿态**，它们绑着一个支撑实体。
+  没有 `release_support_action` 就不许把人画成站在别处 ——
+  **镜头拉远也取消不了座椅关系。**
+- **情绪升级、对白变化、把照片摔出去、换机位，都不自动授权换位。**
+  为了让三个人同框、为了露全身、为了做对峙构图**把人挪到房间中央** ——
+  这是模型最爱走的捷径，也是这一节要拦的东西。
+  剧情没给移动时间就保留原 Anchor，或者回去改导演的走位设计。
+
 ## 输出 schema
 
 ```json
@@ -122,10 +163,18 @@ CVS_A（稳定）── VT ──→ CVS_B（稳定）
      "characters": [
        {"character_id": "C001",
         "active_visual_asset_id": "当前生效的 CT/LOOK/PH，取最高一层",
-        "zone_id": "A", "anchor": "BED_01",
-        "root_xyz": [2.4, 1.2, 0],
-        "posture": "", "support_points": "双脚着地 / 右手扶床沿",
-        "body_orientation_yaw": 90,
+        "world_position_state": {
+          "zone": "A", "anchor_id": "BED_01",
+          "root_or_pivot_xyz_m": [2.4, 1.2, 0],
+          "orientation_yaw_deg": 90,
+          "posture_class": "STANDING|SEATED|KNEELING|LYING|MOVING",
+          "support_binding_id": "坐/躺/跪/被扶时必填，指向支撑实体；站着填空",
+          "support_relation": "SEATED_ON|LYING_ON|LEANING_ON|STANDING_ON|HELD_BY|NONE",
+          "contact_points": "双脚着地 / 右手扶床沿",
+          "current_barrier_side": "在哪个障碍物的哪一侧，比如 DESK_01 的后侧",
+          "movement_state": "STABLE|TRANSITIONING",
+          "last_authorized_movement_event_id": "上一次合法移动的事件号，没动过就空"
+        },
         "gaze_target": "",
         "hand_occupancy": {"left": "空", "right": "PI001"},
         "physical_condition": "",
@@ -168,6 +217,12 @@ CVS_A（稳定）── VT ──→ CVS_B（稳定）
      "synchronized_state_deltas": ["同时改变的几件事"],
      "first_contact": "第一次接触发生在哪个点",
      "completion_condition": "什么算完成",
+     "authorized_movers": ["这条过渡里**允许改变位置**的人物ID；没人移动就空数组"],
+     "release_support_action": "从坐/躺/跪起来时必填：怎么解除支撑、什么算起完",
+     "route_id": "跨 Zone 时必填：走第五环节登记过的哪条通路",
+     "barrier_or_portal_crossing": "跨 Zone 时必填：穿的是哪个门/桌端空隙",
+     "movement_cause": "为什么移动 —— 必须是剧情原因，不能是「为了同框」",
+     "minimum_action_time": "这段移动物理上至少要多久，用于核对镜头窗口够不够",
      "irreversible_result": "不可逆的结果 —— 必须已经写进 target_cvs"}
   ],
   "camera_free_check": "确认所有 CVS 里没有景别/机位/构图/画面左右字段"

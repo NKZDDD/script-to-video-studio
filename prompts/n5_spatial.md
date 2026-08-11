@@ -69,7 +69,30 @@ skill 给了四档，从强到弱：
 
 通路当前被障碍挡住时，**不能因为后面会移开就提前当成可用**。
 
-## 五、机位覆盖（`loc_views`）
+## 五、障碍、通口与通路：空间拓扑不是背景装饰
+
+桌子、柜台、病床护栏、墙、玻璃、门、车辆、舞台边缘、围栏 ——
+这些必须**作为拓扑登记**，不能只当成陈设写一句「房间里有张长桌」。
+
+不登记的后果很具体：下游会让人物**直接穿过实心会议桌**出现在对面，
+而且画面上看不出破绽（那一格构图甚至更好）。
+
+三样东西要分清：
+
+| | 是什么 | 不写的后果 |
+|---|---|---|
+| `barriers` | 挡住通行的实体，带 bbox 和两侧分区 | 人物穿桌穿墙 |
+| `portals` | 障碍上**唯一合法**的通口：门、桌端空隙、缺口 | 从任意位置翻过去 |
+| `routes` | 有序锚点串成的通路，带长度、最窄处、**最少耗时** | 三步走完二十米 |
+
+`supports` 单独一项：椅子、病床、轮椅、担架、车辆座位。
+坐、躺、乘车、跪靠**不是普通姿态**，它们绑定一个支撑实体 ——
+人物离开座位前必须先解除支撑，这一层要给出「解除大概要多久」。
+
+`minimum_action_time` 是给第十三环节用的：一段移动物理上要 1.5 秒，
+而镜头窗口只有 0.6 秒，那就是不可能完成的走位，必须回去改导演设计。
+
+## 五（续）、机位覆盖（`loc_views`）
 
 登记这一集需要从哪几个方向看这个空间。每个视角写：机位大致位置、朝向、
 覆盖到哪几个 Zone、能看见哪几个地标。
@@ -102,9 +125,35 @@ skill 给了四档，从强到弱：
         "size": "2.0m x 0.9m x 0.6m",
         "relation": "床头贴 +X 侧墙，右侧距床头柜 0.4m"}
      ],
+     "barriers": [
+       {"barrier_id": "DESK_01", "name": "发布会长桌", "zone_id": "B",
+        "bbox": "3.6m x 0.8m x 0.75m 的实心体",
+        "blocks_which_entities": ["人物", "手推车"],
+        "side_a_zone": "B", "side_b_zone": "C",
+        "note": "实心，不可穿越；只能走两端空隙"}
+     ],
+     "portals": [
+       {"portal_id": "DESK_01_GAP_E", "kind": "gap|door|window|stair",
+        "belongs_to_barrier": "DESK_01",
+        "width_m": 0.9, "open_state": "常通|需要开门|被堵住",
+        "side_a_zone": "B", "side_b_zone": "C"}
+     ],
+     "supports": [
+       {"support_id": "CHAIR_03", "kind": "chair|bed|wheelchair|stretcher|vehicle",
+        "anchor_id": "CHAIR_03", "zone_id": "B",
+        "seat_xyz": [3.1, 2.2, 0.45],
+        "body_axis": "坐姿朝 +X",
+        "relation": "SEATED_ON",
+        "release_note": "起身需要向后推椅并转身，约 1.5 秒"}
+     ],
      "routes": [
        {"route_id": "R1", "path": ["DOOR_01", "A", "BED_01"],
-        "description": "从门口到床边", "blocked_by": ""}
+        "description": "从门口到床边",
+        "crosses_portals": ["跨障碍时必须列出走的是哪几个 Portal"],
+        "length_m": 4.2,
+        "clearance": "最窄处 0.9m，够一个人通过",
+        "minimum_action_time": "走完至少要多久 —— 下游用它核对镜头窗口够不够",
+        "blocked_by": ""}
      ],
      "landmarks": ["不同机位都看得见、用来对齐的东西"],
      "fixed_structures": [

@@ -131,6 +131,9 @@ NATIVE_CUT > 完全遮挡 > 黑场/闪光/全失焦 > 甩镜 > 叠化 > 人物�
      "performance_focus": "这个镜头要抓住的表演",
      "information_reveal": "这个镜头让观众知道了什么",
      "estimated_duration": 2.4,
+     "position_state_source": "这一镜的人物位置取自哪个 CVS —— 镜头只投影，不改位置",
+     "authorized_movement": "这一镜里有没有正在进行的合法移动；没有写 NONE",
+     "movement_time_check": "有移动时：这段移动最少要多久 vs 本镜时长够不够",
      "new_view_needed": "需要第五环节没登记的观察方向就写明；否则空"}
   ],
   "transitions": [

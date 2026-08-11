@@ -67,6 +67,33 @@ CVS（谁在哪、什么状态）
 12. **机位规则** —— 中性中全景，稳定机位
 13. **输出限制** —— 画面内不得出现文字、字幕、水印、UI
 
+## 四（续）、位置差异继承：只有被批准的人能动
+
+每份 SCSTATE 提示词**先声明上一个稳定状态，再声明唯一合法的差异**：
+
+```
+【上一个稳定状态】SCST_…_SC01_01
+【位置不变的人】C005 —— Zone、Anchor、支撑、朝向、障碍侧全部沿用
+【被批准移动的人】C001
+【对应的移动事件】VT_EP01_03
+【起点 / 路线 / 终点】BED_01 → R1 → DOOR_01
+【支撑的解除或获得】解除 BED_01 的 SEATED_ON
+【禁止的位置变化】C005 不许离开床尾；任何人不许出现在桌前
+```
+
+规则：
+
+- **相邻 SCSTATE 默认继承全部人物的 Zone、Anchor、支撑、朝向、障碍侧。**
+- **只有 `authorized_movers` 里的人**允许改变位置。
+- **情绪升级、对白变化、把照片摔出去、换机位，都不自动授权换位。**
+- 为了让三人同框、为了露全身、为了做对峙构图，**不许把人物移到房间中央**。
+- 一个机位看不全所有人时，允许人物部分可见、被遮挡或者离画；
+  也可以换一个中性观察机位 —— 但**不许改变人在世界里的位置**。
+
+**SCSTATE 是世界状态的验证图，不是宣传剧照。**
+生成出来的图和 CVS 的位置冲突时，这张 SCSTATE 作废重生，
+**不许把错误的位置回写进 CVS**。
+
 ## 五、参考图角色映射（Image 编号必须写）
 
 **出图模型收到的是 N 张没有标签的图，它只知道第 1 张、第 2 张。**
@@ -112,9 +139,23 @@ Image 2 = S001 雅加达私人医院（场景）
     {"scstate_id": "SCST_{{EPISODE}}_SC01_01",
      "source_cvs": "CVS_{{EPISODE}}_SC01_01",
      "story_time": "", "reality_thread": "RT_MAIN",
+     "previous_scstate": "上一个稳定状态的编号；本段第一个就写 NONE",
+     "unchanged_position_states": [
+       {"id": "C005", "why": "没有被批准移动，逐项沿用上一状态的位置"}
+     ],
+     "authorized_movers": ["这一状态里**允许改变位置**的人物ID；没人动就空数组"],
+     "authorized_movement_event": "对应第八环节的 VT 编号；没人动就写 NONE",
+     "movement_start_route_end": "起点 Anchor → 走哪条 Route → 终点 Anchor",
+     "support_release_or_acquisition": "解除了哪个支撑 / 获得了哪个支撑",
+     "forbidden_position_delta": [
+       "这一状态里**绝对不许**发生的位置变化，比如「C001 不许离开床沿」"
+     ],
      "reference_assets": ["C001", "S001", "PI001"],
      "reference_role_map": [
        {"image_n": 1, "asset_id": "C001", "asset_name": "Aisyah",
+        "who_what_visible": "这张图是谁/是什么 + 画面里能看见什么（必填）",
+        "story_time_state": "故事时间与当前状态（必填）",
+        "applicable_scope": "这张图的权威覆盖到哪（必填）",
         "must_preserve": "", "must_transform": "",
         "must_not_copy": "", "does_not_control": ""}
      ],

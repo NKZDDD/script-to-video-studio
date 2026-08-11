@@ -42,6 +42,29 @@
 4. 人物关系和情绪支不支持这个距离和接触？
 5. 关键动作在空间里够不够得着？
 
+## 二（续）、走位改变要写成一条能走通的路
+
+`blocking` 里某个人的位置和上一拍不同时，`blocking_change` 必须填全：
+
+```
+起点锚点 → 解除支撑 → 走哪条 Route → 穿哪个 Portal → 终点锚点 → 什么算到位
+```
+
+外加一项 `cause`：**为什么移动**。这一项只接受剧情原因。
+「为了让三个人同框」「为了露出全身」「为了做对峙构图」都不算 ——
+那是构图需求，应该用机位解决，不是搬人。
+
+三条硬规矩：
+
+- **不许穿过实心物。** 会议桌、墙、病床护栏、座椅排在第五环节登记成
+  `barriers`，跨越只能走登记过的 `portals`（门、桌端空隙），
+  或者剧情明确写了的破坏事件。
+- **坐、躺、乘车、跪靠不是普通姿态**，它们绑定一个支撑实体。
+  起身必须先 `release_support`，**镜头拉远也取消不了座椅关系**。
+- **剧情没给移动时间就别移动。** 保留原锚点，或者改成用机位和视线
+  表达关系。第五环节给了每条通路的 `minimum_action_time`，
+  走不完的走位到第十三环节会被拦下来重做。
+
 ## 三、表演意图（`performance_intent`）—— 写得能演，不写情绪标签
 
 ```
@@ -106,7 +129,19 @@
      "root_xyz": [2.4, 1.2, 0],
      "body_orientation_yaw": 90,
      "gaze_target": "C005 的脸",
-     "posture": "站立|坐|跪|躺|倚靠",
+     "posture_class": "STANDING|SEATED|KNEELING|LYING|MOVING",
+     "support_binding_id": "坐/躺/跪/被扶时指向支撑实体；站着填空",
+     "current_barrier_side": "在哪个障碍物的哪一侧",
+     "blocking_change": {
+       "moved": "这一拍这个人有没有改变位置：true/false",
+       "start_anchor": "起点锚点",
+       "release_support": "要先解除哪个支撑；不涉及就空",
+       "route_id": "走第五环节登记过的哪条通路",
+       "barrier_or_portal_crossing": "跨障碍时穿的是哪个 Portal",
+       "end_anchor": "终点锚点",
+       "completion": "什么算走到位了",
+       "cause": "为什么移动 —— 必须是剧情原因，不能是「为了构图」"
+     },
      "hand_occupancy": {"left": "空", "right": "PI001 授权书"},
      "route": "R1 或空（不移动）",
      "distance_to": [{"character_id": "C005", "meters": 1.5}],
