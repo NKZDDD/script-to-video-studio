@@ -165,6 +165,18 @@ def _system_of(v) -> str:
     return s if s in SYSTEMS else "v61"
 
 
+# 新建项目用哪套。和上面那个默认值**故意不一样**：
+# 读老项目的 meta 缺字段，只能是 v61（它们本来就是那套跑出来的）；
+# 建新项目缺字段，那是调用方没传，应该给现在在用的那套 —— 用一个函数管两件事，
+# 就会出现「批量建剧全建成了旧体系」而且不报错。批量建剧接口原本就是这么漏的。
+NEW_SYSTEM = "v34"
+
+
+def _new_system(v) -> str:
+    s = str(v or "").strip().lower()
+    return s if s in SYSTEMS else NEW_SYSTEM
+
+
 def system_of(pj: Project) -> str:
     """这个项目用哪套体系。
 
@@ -730,6 +742,7 @@ def api_post(path: str, body: dict) -> dict:
                 pj.save_meta({"title": stem,
                               "project_code": f"{code_prefix}-{seq:03d}",
                               "episode": episode, "params": defaults,
+                              "system": _new_system(body.get("system")),
                               "source_file": fname})
                 from core.store import write_text
                 write_text(pj.p("01_剧本与分段", "原始剧本.txt"), text)
@@ -751,7 +764,7 @@ def api_post(path: str, body: dict) -> dict:
                 "episode": body.get("episode", "EP01"),
                 # 用哪套生产体系。建项目时定，之后不改 —— 两套的产物文件名、
                 # 环节表、任务结构都不一样，中途换等于把已有产物全作废。
-                "system": _system_of(body.get("system")),
+                "system": _new_system(body.get("system")),
                 "params": body.get("params", {}),
                 "source_file": body.get("source_file", "")}
         # script / text 两个名字都收：批量建剧那个接口用的是 text，

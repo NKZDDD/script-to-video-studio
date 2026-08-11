@@ -39,13 +39,62 @@ REQUIRED_VARS = {
 }
 
 
+def required_vars(name: str) -> list:
+    """这份模板里不能删的占位符。
+
+    V6.1 的是上面那张手写表（历史原因，占位符和依赖不是一一对应）。
+    V3.4 的**从环节图推导**：依赖了哪份产物，模板里就必须用对应的占位符 ——
+    再手抄一份表，迟早和依赖表对不上，然后校验就成了摆设。
+    """
+    if name in REQUIRED_VARS:
+        return REQUIRED_VARS[name]
+    from . import system_v34 as V34
+    for sid, (tpl, deps, _req) in V34.LLM_SPEC.items():
+        if tpl == name:
+            return [V34.placeholder_of(d) for d in deps]
+    return []
+
+
+def _systems() -> list:
+    """两套体系的 (体系名, 环节表, 环节规格)。
+
+    模板注册表要认全两套 —— 只认 V6.1 的话，V3.4 那 15 份模板在设置页里
+    看不见也改不了，而模板是这套体系里最需要改的东西。
+    打包自检就是这么发现的：模板文件在 exe 里，接口不认。
+    """
+    from . import system_v34 as V34
+    return [("v61", S.STAGES, S._LLM_SPEC), ("v34", V34.STAGES, V34.LLM_SPEC)]
+
+
+def system_of_template(name: str) -> str:
+    """这份模板属于哪套体系。_common 两套共用。"""
+    if name == "_common":
+        return ""
+    for sys_id, _stages, spec in _systems():
+        if any(tpl == name for tpl, _, _ in spec.values()):
+            return sys_id
+    return ""
+
+
 def _spec(name: str) -> tuple:
     """(环节号, 环节名, 必需输出字段)。_common 不属于任何环节。"""
-    for sid, (tpl, _deps, req) in S._LLM_SPEC.items():
-        if tpl == name:
-            st = next(x for x in S.STAGES if x["id"] == sid)
-            return st["no"], st["name"], req
+    for _sys, stages, spec in _systems():
+        for sid, (tpl, _deps, req) in spec.items():
+            if tpl == name:
+                st = next((x for x in stages if x["id"] == sid), {})
+                return st.get("no", 0), st.get("name", name), req
     return 0, "所有环节共用的系统提示词", []
+
+
+def all_template_names() -> list:
+    """两套体系的全部模板名，按体系分组保持顺序。"""
+    names = []
+    for _sys, _stages, spec in _systems():
+        for tpl, _, _ in spec.values():
+            if tpl not in names:
+                names.append(tpl)
+    names.append("_common")
+    return names
 
 
 def _paths(name: str, pj=None) -> tuple:
@@ -66,24 +115,25 @@ def _layers(name: str, pj=None) -> dict:
 def catalog(pj=None) -> list:
     """所有模板 + 各自的状态。pj 给了就带上本剧那一层。"""
     out = []
-    names = [tpl for tpl, _, _ in S._LLM_SPEC.values()] + ["_common"]
+    names = all_template_names()
     for name in names:
         L = _layers(name, pj)
         no, label, req = _spec(name)
         cur = S.load_prompt(name, pj)
         out.append({
             "name": name,
+            "system": system_of_template(name),
             "stage_no": no,
             "label": label,
             # customized 指「相对内置有没有被改过」，给列表打标用
             "customized": L["effective"] != "builtin",
             "chars": len(cur),
             "vars": sorted(set(re.findall(r"\{\{(\w+)\}\}", cur))),
-            "required_vars": REQUIRED_VARS.get(name, []),
+            "required_vars": required_vars(name),
             "required_fields": req,
             **L,
         })
-    out.sort(key=lambda x: (x["stage_no"] or 99, x["name"]))
+    out.sort(key=lambda x: (x["system"] or "zz", x["stage_no"] or 99, x["name"]))
     return out
 
 
@@ -95,7 +145,7 @@ def read(name: str, pj=None, scope: str = "") -> dict:
       project  本剧改写（没有就拿「全局或内置」当起点 —— 那才是它现在实际继承的）
       ''       只看，不编辑：给最终生效的那份
     """
-    if name not in REQUIRED_VARS:
+    if name not in all_template_names():
         raise ValueError(f"没有这个模板：{name}")
     L = _layers(name, pj)
     no, label, req = _spec(name)
@@ -104,11 +154,12 @@ def read(name: str, pj=None, scope: str = "") -> dict:
     p = read_text(L["project_path"]) if L["has_project"] else ""
     inherited = g or b               # 本剧那层没有时，它继承的是这个
     text = {"global": g or b, "project": p or inherited}.get(scope, p or g or b)
-    return {"name": name, "stage_no": no, "label": label, "scope": scope,
+    return {"name": name, "system": system_of_template(name),
+            "stage_no": no, "label": label, "scope": scope,
             "text": text, "builtin": b, "global_text": g,
             "project_text": p, "inherited": inherited,
             "customized": L["effective"] != "builtin",
-            "required_vars": REQUIRED_VARS.get(name, []),
+            "required_vars": required_vars(name),
             "required_fields": req,
             "vars": sorted(set(re.findall(r"\{\{(\w+)\}\}", text))),
             **L}
@@ -132,7 +183,7 @@ def check(name: str, text: str) -> dict:
     have = set(re.findall(r"\{\{(\w+)\}\}", effective))
     orig = set(re.findall(r"\{\{(\w+)\}\}", builtin_effective))
 
-    missing = [v for v in REQUIRED_VARS.get(name, []) if v not in have]
+    missing = [v for v in required_vars(name) if v not in have]
     if missing:
         errors.append(
             "少了必需的占位符 " + "、".join(f"{{{{{v}}}}}" for v in missing)
@@ -168,7 +219,7 @@ def check(name: str, text: str) -> dict:
 
 
 def _target(name: str, pj=None, scope: str = "global") -> str:
-    if name not in REQUIRED_VARS:
+    if name not in all_template_names():
         raise ValueError(f"没有这个模板：{name}")
     b, g, p = _paths(name, pj)
     if scope == "project":

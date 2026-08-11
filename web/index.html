@@ -183,10 +183,11 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <div><label>目录名</label><input id="spName" placeholder="XYQY-002_新剧"></div>
       <div><label>项目编号</label><input id="spCode" value="PROJ-001"></div>
       <div><label>集数</label><input id="spEp" value="EP01"></div>
+      <!-- 新建只给 V3.4。V6.1 的代码没删，老项目照常打开、照常跑完，
+           但不再拿它开新剧 —— 两套并列摆着只会让人建错，建完还改不了。 -->
       <div><label>生产体系 <span class="muted">建完不能改</span></label>
         <select id="spSystem">
-          <option value="v61">V6.1 十二环节（跑过真项目）</option>
-          <option value="v34">V3.4 电影级十七章（多一层场景状态图）</option>
+          <option value="v34">V3.4 电影级十七章</option>
         </select></div>
     </div>
     <div class="muted" style="margin-top:6px" id="spSystemNote"></div>
@@ -625,6 +626,7 @@ async function boot() {
   BOOT = await api.get('/api/bootstrap');
   $('#projDir').textContent = BOOT.projects_dir;
   renderProjects();
+  systemNote();      // 只剩一个选项，onchange 永远不触发，说明得自己填上
   renderProviders();
   renderDefaults();
   PT_GLOBAL.list().catch(() => {});
@@ -1102,6 +1104,8 @@ $('#saveParams').onclick = async () => {
 // 这个项目用哪套生产体系。建项目时定，之后不改 —— 两套的产物文件名、
 // 环节表、任务结构都不一样，中途换等于把已有产物全作废。
 // 老项目 meta 里没有这个字段，回落 v61（它们本来就是那套跑出来的）。
+// 新建项目用哪套。老项目照旧按各自 meta 里记的那套跑。
+const DEFAULT_SYS = 'v34';
 function projSystem() {
   const p = (BOOT.projects || []).find(x => x.root === PROJ);
   return (p && p.system) || 'v61';
@@ -2005,7 +2009,11 @@ function makePromptEditor(host, scope) {
       return;
     }
     const d = await api.get('/api/prompts', args());
-    $$$('sel').innerHTML = d.items.map(x => {
+    // 只列当前体系的模板。两套加起来 24 份，环节号还会撞（n1 和 s1 都是「环节1」），
+    // 全铺出来只会让人改错那份。没开项目时按新建项目的默认体系走。
+    const sys = PROJ ? projSystem() : ($('#spSystem') || {}).value || DEFAULT_SYS;
+    const items = d.items.filter(x => !x.system || x.system === sys);
+    $$$('sel').innerHTML = items.map(x => {
       const tag = scope === 'project'
         ? (x.has_project ? ' · 本剧已改' : (x.has_global ? ' · 继承全局' : ''))
         : (x.has_global ? ' · 已改写' : '');
@@ -2275,6 +2283,7 @@ $('#npCreate').onclick = async () => {
   const r = await api.post('/api/project/create_batch', {
     files, code_prefix: $('#npCode').value.trim() || 'PROJ',
     episode: $('#npEp').value, params: BOOT.config.defaults || {},
+    system: DEFAULT_SYS,   // 不传的话服务端只能猜，猜错就是整批建成旧体系
   });
   $('#npCreate').disabled = false;
   if (r.error) return alert(r.error);
@@ -2288,7 +2297,7 @@ $('#npCreate').onclick = async () => {
 
 // 体系是建项目时定死的，所以选之前把差别说清楚 —— 建完再发现选错，
 // 只能重建项目重跑，前面花的钱全白花。
-$('#spSystem').onchange = () => {
+function systemNote() {
   const v = $('#spSystem').value;
   const s = (BOOT.systems || {})[v] || {};
   const n = (s.stages || []).filter(x => x.kind === 'llm').length;
@@ -2296,7 +2305,8 @@ $('#spSystem').onchange = () => {
     `${s.name || v}：${n} 个文字环节。${s.note || ''}`
     + '　建完不能改 —— 两套的产物文件名、环节表、任务结构都不一样，'
     + '中途换等于把已有产物全作废。';
-};
+}
+$('#spSystem').onchange = systemNote;
 
 $('#spCreate').onclick = async () => {
   const name = $('#spName').value.trim();
