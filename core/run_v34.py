@@ -640,6 +640,74 @@ def write_prompt_files(pj: Project, episode: str) -> int:
     return n
 
 
+# ---------------------------------------------------------------- 交付
+
+def build_review_checklist(pj: Project, episode: str = "") -> dict:
+    """人工复核清单：程序不判定内容好坏，只把该看的点摆出来。
+
+    和第十四环节的审计是两件事：审计查**结构性矛盾**（程序和模型能查的），
+    这里列的是**只有人能判**的（脸像不像、演得对不对、转场看着糊不糊）。
+    """
+    eps = [episode] if episode else (_eps.ids(pj) or [""])
+    rows = []
+    for ep in eps:
+        segs = segments_of(pj, ep)
+        plans = {v.get("seg_id"): v for v in
+                 (pj.stage_data("n13_video", ep) or {}).get("video_plan", [])}
+        cvs = {c.get("cvs_id"): c for c in
+               (pj.stage_data("n8_cvs", ep) or {}).get("cvs", [])}
+        vids = {v.get("id"): v for v in pj.registry("video")}
+        audit = {f.get("affected_segs") and f["affected_segs"][0]: f
+                 for f in (pj.stage_data("n14_audit", ep) or {}).get("findings", [])}
+        for s in segs:
+            sid = s["seg_id"]
+            plan = plans.get(sid) or {}
+            exit_cvs = cvs.get(s.get("exit_cvs")) or {}
+            rows.append({
+                "episode": ep, "segment_id": sid,
+                "video": vids.get(sid, {}).get("file_ref", "（未生成）"),
+                "check_layers": {
+                    "技术状态": "文件能播、时长和画幅对",
+                    "人物身份一致性": "对照资产的 identity_anchors，脸有没有变",
+                    "当前状态连续性": f"进入={s.get('entry_cvs', '')} / "
+                                      f"退出={s.get('exit_cvs', '')}",
+                    "转场执行": "、".join(s.get("model_native_transition_ids") or [])
+                                or "（这一段没有转场）",
+                    "转场是不是模型一次出的": "有没有看起来像后期拼的痕迹",
+                    "空间与走位": "人物位置、朝向、与固定物的关系有没有跳",
+                    "首次显露": "镜头拉远/转身时，下半身、背面、鞋有没有变样",
+                    "动作没有重演": "签字、跌倒、拔针这类完成过的动作有没有又来一次",
+                },
+                "forbidden_future": exit_cvs.get("forbidden_state", []),
+                "transition_failures": [
+                    w.get("failure_signature", "")
+                    for w in (plan.get("transition_windows") or [])
+                    if w.get("failure_signature")],
+                "audit_finding": audit.get(sid, {}).get("what", ""),
+                "verdict": "",      # 人工填：pass / L1 / L2 / L3
+                "note": "",
+            })
+    out = {"system": "v34", "episodes": eps,
+           "levels": {
+               "L1 可接受偏差": "背景人物少量变化、非核心褶皱、轻微机位偏移 → 直接固定",
+               "L2 可定向修订": "节奏、动作方向、道具短暂消失、局部口型、转场略糊 → "
+                                "只改出错的那个时间窗口，重出这一段",
+               "L3 结构性错误": "身份错误、关键节点缺失、因果改变、不可逆状态被恢复、"
+                                "提前剧透、转场跨段 → 按依赖链回溯重做"},
+           "rows": rows}
+    pj.save_stage("d1_review", out, episode)
+    return out
+
+
+def assemble(pj: Project, params: dict, log: Callable = print,
+             episode: str = "") -> dict:
+    """拼接成片。拼接本身（排序、concat、流拷贝失败退回重编码）是体系无关的，
+    直接复用，只把成片文件名换成这套体系的。"""
+    from .stages import assemble as _assemble
+    return _assemble(pj, params, log, episode,
+                     master_name=lambda code, ep: f"{code}_{ep}_MASTER.mp4")
+
+
 def _usage(pj: Project, stage_id: str, episode: str, target: str = "") -> Callable:
     def rec(u: dict) -> None:
         ledger.record(pj.root, kind="llm", stage=stage_id, episode=episode,

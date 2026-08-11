@@ -38,8 +38,31 @@ class FakeProv:
     def generate_video(self, task, out, **kw):
         self.made.append(out)
         os.makedirs(os.path.dirname(out), exist_ok=True)
-        open(out, "wb").write(b"mp4")
+        # 写真的 mp4，不是几个字节的占位 —— 否则最后拼接那一步永远失败，
+        # 而拼接正是这条链的终点，用假文件等于那一步从没被测过。
+        shutil.copyfile(_tiny_mp4(), out)
         return {"provider": "fake", "model": "m"}
+
+
+_TINY = []
+
+
+def _tiny_mp4():
+    """生成一个 0.2 秒的黑场 mp4，全测试共用一份。"""
+    if _TINY:
+        return _TINY[0]
+    import subprocess
+    import tempfile
+    from core.stages import find_ffmpeg
+    ff = find_ffmpeg()
+    if not ff:
+        raise unittest.SkipTest("没有 ffmpeg，拼接那一步测不了")
+    p = os.path.join(tempfile.mkdtemp(prefix="tinymp4-"), "tiny.mp4")
+    subprocess.run([ff, "-v", "error", "-y", "-f", "lavfi",
+                    "-i", "color=c=black:s=64x64:d=0.2", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", p], check=True)
+    _TINY.append(p)
+    return p
 
 
 class PipelineTests(unittest.TestCase):
@@ -81,6 +104,27 @@ class PipelineTests(unittest.TestCase):
             for task in t[kind]:
                 self.assertTrue(os.path.isfile(self.pj.p(*task["output"].split("/"))),
                                 f"{task['key']} 的产物没落盘")
+
+    def test_delivery_produces_a_checklist_and_a_master(self):
+        """★ 交付两步以前是个占位，直接标 ok —— 不出清单也不拼片。"""
+        res, job = self._run()
+        self.assertEqual(res["status"], "done", res)
+        review = self.pj.stage_data("d1_review", EP1) or {}
+        self.assertTrue(review.get("rows"), "没生成人工复核清单")
+        self.assertEqual(review["system"], "v34")
+        row = review["rows"][0]
+        for k in ("人物身份一致性", "转场执行", "首次显露", "动作没有重演"):
+            self.assertIn(k, row["check_layers"], f"复核清单少了「{k}」这一项")
+        masters = [f for f in os.listdir(self.pj.p("06_成片"))
+                   if f.endswith(".mp4")]
+        self.assertTrue(masters, "没拼出成片")
+        self.assertTrue(any("MASTER" in m for m in masters), masters)
+
+    def test_master_uses_the_v34_name(self):
+        """成片文件名两套体系不一样；产物页按名字找，对不上就显示「没成片」。"""
+        self._run()
+        names = os.listdir(self.pj.p("06_成片"))
+        self.assertTrue(any(n.endswith(f"_{EP1}_MASTER.mp4") for n in names), names)
 
     def test_production_order_assets_then_scstate_then_board_then_video(self):
         """★ 顺序错了不报错，只是参考图指不到文件、或者同一角色出两张脸。"""

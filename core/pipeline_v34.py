@@ -77,9 +77,10 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
         for ep in eps:
             steps.append({"kind": "llm", "stage": "n14", "episode": ep,
                           "soft": True, "label": _label("n14", ep)})
-        steps.append({"kind": "deliver", "stage": "d2", "episode": "",
-                      "only": list(eps) if eps else None,
-                      "label": _label("d2") + _scope_tag(eps, pj)})
+        for sid in ("d1", "d2"):
+            steps.append({"kind": "deliver", "stage": sid, "episode": "",
+                          "only": list(eps) if eps else None,
+                          "label": _label(sid) + _scope_tag(eps, pj)})
     return steps
 
 
@@ -252,11 +253,38 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         return "ok"
 
     def do_deliver(s: dict) -> str:
-        key = s["label"]
+        key, sid = s["label"], s["stage"]
         if halt(s):
             return "aborted"
-        job.set_item(key, state="ok", msg="交付步骤（拼接由 V6.1 的 assemble 复用）")
-        return "ok"
+        log = lambda m, _k=key: job.log(_k, m)
+        job.set_item(key, state="running")
+        try:
+            if sid == "d1":
+                only = s.get("only") or []
+                n = 0
+                for ep in (only or _eps.ids(pj) or [""]):
+                    n += len(R.build_review_checklist(pj, ep).get("rows", []))
+                job.set_item(key, state="ok", msg=f"{n} 段待人工复核")
+            else:
+                r = R.assemble(pj, params, log,
+                               (s.get("only") or [""])[0] if len(s.get("only") or []) == 1 else "")
+                got = r.get("masters") or [r]
+                done = [x for x in got if x.get("master")]
+                job.set_item(key, state="ok" if done else "failed",
+                             msg=(f"拼好 {len(done)} 集" if done
+                                  else r.get("msg") or "没有可拼接的分段视频"))
+                if not done:
+                    with st_lock:
+                        failed.append(key)
+                    return "failed"
+            return "ok"
+        except Exception as exc:                        # noqa: BLE001
+            d = diagnose.build(exc, stage=f"stage:{sid}", target="交付")
+            diagnose.record(pj.root, d)
+            job.set_item(key, state="failed", diag=d, msg=diagnose.one_line(d))
+            with st_lock:
+                failed.append(key)
+            return "failed"
 
     def do_freeze(s: dict) -> str:
         """第 0 章：把执行模式和模型能力档位冻结进项目。

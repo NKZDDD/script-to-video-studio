@@ -1735,11 +1735,15 @@ def find_ffmpeg() -> str:
 
 
 def assemble(pj: Project, params: dict, log: Callable = print,
-             episode: str = "") -> dict:
+             episode: str = "", master_name: Optional[Callable] = None) -> dict:
     """环节12：按段号排序、硬切拼接、生成成片。
 
     一部剧有 40 集就出 40 个成片，绝不能把所有集拼成一个文件。
     不指定 episode 时逐集拼接，返回 {"masters": [...]}。
+
+    master_name(code, ep) 决定成片文件名 —— 两套体系的命名不一样，
+    但拼接本身（排序、concat 清单、流拷贝失败退回重编码）是体系无关的，
+    没必要复制一份。
     """
     from . import episodes as _eps
     eps = _eps.ids(pj)
@@ -1747,7 +1751,7 @@ def assemble(pj: Project, params: dict, log: Callable = print,
         outs, failed = [], []
         for e in eps:
             try:
-                outs.append(dict(assemble(pj, params, log, e), episode=e))
+                outs.append(dict(assemble(pj, params, log, e, master_name), episode=e))
             except RuntimeError as exc:
                 failed.append(f"{e}：{exc}")
                 log(f"{e} 跳过 —— {exc}")
@@ -1773,7 +1777,8 @@ def assemble(pj: Project, params: dict, log: Callable = print,
     with open(concat, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
 
-    master = pj.p("06_成片", f"{code}_{ep}_MASTER_V01_FIXED.mp4")
+    master = pj.p("06_成片", (master_name(code, ep) if master_name
+                              else f"{code}_{ep}_MASTER_V01_FIXED.mp4"))
     ff = find_ffmpeg()
     if not ff:
         return {"concat": pj.rel(concat), "master": "", "count": len(exist),
