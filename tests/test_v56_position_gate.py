@@ -283,5 +283,76 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("为了构图", t, "没说清哪些理由不算移动理由")
 
 
+
+class AuthorizeEndpointTests(unittest.TestCase):
+    """闸门必须有页面出口。
+
+    以前拦截文案写着「去项目设置里显式授权」，而那个地方**根本不存在** ——
+    四道闸门任何一道判定有问题，页面上就走不下去，只能手改 project.json。
+    闸门是加了，出口忘了开。
+    """
+
+    def setUp(self):
+        self.pj = new_project()
+        self.pj.save_meta(dict(self.pj.meta(), system="v34"))
+        self.pj.save_stage("n8_cvs", {"cvs": [
+            cvs("A1", who("C001", zone="B")),
+            cvs("A2", who("C001", zone="C")),
+        ], "vt": []}, "")
+
+    def tearDown(self):
+        shutil.rmtree(self.pj.root, ignore_errors=True)
+
+    def _post(self, path, **body):
+        from server.app import api_post
+        return api_post(path, dict(body, project_root=self.pj.root))
+
+    def test_gates_endpoint_reports_every_gate_not_only_the_blocking_ones(self):
+        """通过的那几道也要列出来 —— 只报被拦的，人不知道另外几道查过没有。"""
+        r = self._post("/api/gates")
+        names = {g["gate"] for g in r["gates"]}
+        self.assertEqual(names, set(G.GATES))
+        pos = next(g for g in r["gates"] if g["gate"] == "position_state")
+        self.assertTrue(pos["blocking"])
+        self.assertTrue(pos["problems"])
+
+    def test_authorize_then_the_gate_stops_blocking(self):
+        self._post("/api/gates/authorize", gate="position_state",
+                   why="这一段是闪回，位置本来就断开")
+        r = self._post("/api/gates")
+        pos = next(g for g in r["gates"] if g["gate"] == "position_state")
+        self.assertFalse(pos["blocking"])
+        self.assertEqual(r["blocking_count"], 0)
+
+    def test_the_reason_and_time_are_kept(self):
+        """★ 放行是会被忘掉的。忘了之后「为什么这集允许瞬移」没人答得上。"""
+        self._post("/api/gates/authorize", gate="position_state", why="这一段是闪回")
+        pos = next(g for g in self._post("/api/gates")["gates"]
+                   if g["gate"] == "position_state")
+        self.assertIn("闪回", pos["authorized"]["why"])
+        self.assertTrue(pos["authorized"]["at"])
+
+    def test_revoke_puts_the_gate_back(self):
+        self._post("/api/gates/authorize", gate="position_state", why="先放过")
+        self._post("/api/gates/authorize", gate="position_state", revoke=True)
+        pos = next(g for g in self._post("/api/gates")["gates"]
+                   if g["gate"] == "position_state")
+        self.assertTrue(pos["blocking"])
+        self.assertIsNone(pos["authorized"])
+
+    def test_v61_projects_have_no_gates(self):
+        self.pj.save_meta(dict(self.pj.meta(), system="v61"))
+        self.assertEqual(self._post("/api/gates")["gates"], [])
+
+    def test_the_block_message_points_at_somewhere_that_exists(self):
+        """★ 文案指向的地方必须真的有。指向不存在的地方比不指更糟。"""
+        msg = G.blocked_message({"position_state": ["随便一条"]})
+        self.assertIn("闸门", msg)
+        self.assertNotIn("项目设置里显式授权", msg)
+        html = io.open(os.path.join(ROOT, "web", "index.html"),
+                       encoding="utf-8").read()
+        self.assertIn("出图出片前的闸门", html)
+        self.assertIn("/api/gates/authorize", html)
+
 if __name__ == "__main__":
     unittest.main()

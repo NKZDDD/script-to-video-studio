@@ -1048,6 +1048,54 @@ def api_post(path: str, body: dict) -> dict:
         n = diagnose.clear(pj.root, body.get("stage", ""), body.get("target", ""))
         return {"ok": True, "cleared": n}
 
+    if path == "/api/gates":
+        """现在有哪几道闸门拦着，各拦了什么，已经授权放行的是哪几道。
+
+        以前拦截文案里写着「去项目设置里显式授权」，但那个地方**根本不存在** ——
+        任何一道闸门判定有问题，页面上就走不下去了，只能手改 project.json。
+        闸门是我加的，出口忘了开。
+        """
+        pj = proj_of(body)
+        if system_of(pj) != "v34":
+            return {"ok": True, "system": "v61", "gates": [], "note": "V6.1 没有这几道闸门"}
+        from core import gates_v34 as G
+        only = body.get("only_episodes") or None
+        auth = ((pj.meta() or {}).get("capability") or {}).get("authorizations") or {}
+        blocked = G.check_all(pj, only)
+        # 逐道都报：被拦的要给明细，已放行的要显示当初写的理由和时间 ——
+        # 放行是会被忘掉的，忘了之后「为什么这一集允许瞬移」就没人答得上。
+        out = []
+        for gate, label in G.GATES.items():
+            problems = {"audit_block": G.audit_gate,
+                        "visual_coverage": G.coverage_gate,
+                        "object_count": G.object_count_gate,
+                        "position_state": G.position_gate}[gate](pj, only)
+            out.append({"gate": gate, "label": label,
+                        "problems": problems,
+                        "blocking": gate in blocked,
+                        "authorized": auth.get(gate) or None})
+        return {"ok": True, "system": "v34", "gates": out,
+                "blocking_count": len(blocked)}
+
+    if path == "/api/gates/authorize":
+        """显式放行一道闸门，或者撤销放行。
+
+        必须写理由，理由和时间一起写进 meta.capability.authorizations ——
+        这是一次改配置的动作，会留在冻结记录里，不是运行时随手点一下跳过。
+        """
+        pj = proj_of(body)
+        from core import gates_v34 as G
+        gate = (body.get("gate") or "").strip()
+        if body.get("revoke"):
+            meta = pj.meta() or {}
+            cap = dict(meta.get("capability") or {})
+            auth = dict(cap.get("authorizations") or {})
+            removed = auth.pop(gate, None)
+            cap["authorizations"] = auth
+            pj.save_meta(dict(meta, capability=cap))
+            return {"ok": True, "revoked": bool(removed)}
+        return {"ok": True, "authorized": G.authorize(pj, gate, body.get("why", ""))}
+
     if path == "/api/job/cancel":
         job = JOBS.get(body["id"])
         if job:
