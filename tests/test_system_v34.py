@@ -27,8 +27,14 @@ class GraphTests(unittest.TestCase):
             self.assertTrue(s.get("task_key"), f"{sid} 没写 task_key")
 
     def test_scopes_match_the_mapping_doc(self):
-        """范围写错会让成本翻好几倍：逐集的东西写成逐段，一集多跑 5 倍。"""
-        self.assertEqual(V.SERIES_STAGES, {"n1", "n2", "n3"})
+        """范围写错会让成本翻好几倍：逐集的东西写成逐段，一集多跑 5 倍。
+
+        只有两个环节是全剧级：故事真相和人物世界规则 —— 它们要看全篇、
+        而且跨集不变。叙事结构（n3）虽然是 skill 的第 3 章，但它按集拆：
+        40 集的 Scene/Beat 一次调用出不完，场次也不跨集。
+        """
+        self.assertEqual(V.SERIES_STAGES, {"n1", "n2"})
+        self.assertEqual(V.scope_of("n3"), "episode")
         self.assertEqual(V.SEGMENT_STAGES, {"n11", "n12", "n13"})
         for sid in V.SERIES_STAGES:
             self.assertEqual(V.scope_of(sid), "series", sid)

@@ -26,10 +26,15 @@ STAGES = [
     # ---- 全剧一次：故事层 --------------------------------------------------
     {"id": "n1", "no": 1, "name": "源解析与故事真相", "kind": "llm",
      "scope": "series", "out": "n1_truth"},
-    {"id": "n2", "no": 2, "name": "叙事结构（场次与节拍）", "kind": "llm",
-     "scope": "series", "out": "n2_narrative"},
-    {"id": "n3", "no": 3, "name": "人物与世界规则", "kind": "llm",
-     "scope": "series", "out": "n3_rules"},
+    {"id": "n2", "no": 2, "name": "人物与世界规则", "kind": "llm",
+     "scope": "series", "out": "n2_rules"},
+
+    # ---- 逐集：叙事层 ------------------------------------------------------
+    # 叙事结构是 skill 的第 3 章，但排在人物规则（第 4 章）后面：
+    # 拆场次和节拍要用到人物的长期动机，而且它按集拆 —— 40 集的 Scene/Beat
+    # 一次调用出不完，也没必要（场次不跨集）。id 顺序 = 执行顺序，不是章号顺序。
+    {"id": "n3", "no": 3, "name": "叙事结构（场次与节拍）", "kind": "llm",
+     "scope": "episode", "out": "n3_narrative"},
 
     # ---- 逐集：视觉与状态层 ------------------------------------------------
     {"id": "n4", "no": 4, "name": "资产系统", "kind": "llm",
@@ -87,17 +92,19 @@ LLM_SPEC = {
         "events[]", "events[].event_id", "events[].story_time",
         "story_truth", "reality_threads[]", "episode_ranges[]",
     ]),
-    "n2": ("n2_narrative", ["n1_truth"], [
+    "n2": ("n2_rules", ["n1_truth"], [
+        "characters[]", "characters[].character_id", "characters[].long_term_motive",
+        "characters[].relationships", "characters[].arc",
+        "characters[].physical_limits", "characters[].performance_boundary",
+        "world_rules[]", "cultural_rules[]",
+    ]),
+    "n3": ("n3_narrative", ["n1_truth", "n2_rules"], [
         "scenes[]", "scenes[].scene_id", "scenes[].objective", "scenes[].turn",
         "scenes[].outcome", "scenes[].entry_state", "scenes[].exit_state",
         "beats[]", "beats[].beat_id", "beats[].meaningful_change",
-        "beats[].state_delta",
+        "beats[].change_kind", "beats[].state_delta", "beats[].shot_need",
     ]),
-    "n3": ("n3_rules", ["n1_truth"], [
-        "characters[]", "characters[].character_id", "characters[].long_term_motive",
-        "world_rules[]", "performance_constraints[]",
-    ]),
-    "n4": ("n4_assets", ["n1_truth", "n2_narrative", "n3_rules"], [
+    "n4": ("n4_assets", ["n1_truth", "n2_rules", "n3_narrative"], [
         "assets[]", "assets[].asset_id", "assets[].family", "assets[].name",
         "assets[].decision", "assets[].decision_reason",
         "assets[].parent_asset_id", "assets[].reference_assets",
@@ -106,7 +113,7 @@ LLM_SPEC = {
         "costume_contracts[]", "prop_specs[]", "prop_instances[]",
         "production_order",
     ]),
-    "n5": ("n5_spatial", ["n2_narrative", "n4_assets"], [
+    "n5": ("n5_spatial", ["n3_narrative", "n4_assets"], [
         "spatial_masters[]", "spatial_masters[].spatial_id",
         "spatial_masters[].world_origin", "spatial_masters[].axis",
         "spatial_masters[].unit", "spatial_masters[].zones",
@@ -114,12 +121,12 @@ LLM_SPEC = {
         "spatial_masters[].landmarks", "spatial_masters[].fixed_structures",
         "loc_views[]",
     ]),
-    "n6": ("n6_ledger", ["n2_narrative", "n4_assets", "n5_spatial"], [
+    "n6": ("n6_ledger", ["n3_narrative", "n4_assets", "n5_spatial"], [
         "ledger[]", "ledger[].event_id", "ledger[].affected_entity",
         "ledger[].state_dimension", "ledger[].result_value",
         "ledger[].activation_event", "ledger[].persistence_class",
     ]),
-    "n7": ("n7_directing", ["n2_narrative", "n3_rules", "n5_spatial", "n6_ledger"], [
+    "n7": ("n7_directing", ["n3_narrative", "n2_rules", "n5_spatial", "n6_ledger"], [
         "scene_directing[]", "beat_directing[]",
         "blocking[]", "blocking[].character_id", "blocking[].zone",
         "blocking[].anchor", "blocking[].root_xyz", "blocking[].body_orientation_yaw",
@@ -166,10 +173,33 @@ LLM_SPEC = {
 # 逐段跑的环节：一段一次调用，一段失败不毒掉整集。
 SEGMENT_STAGES = {"n11", "n12", "n13"}
 # 全剧只跑一次的环节。
-SERIES_STAGES = {"n1", "n2", "n3"}
+SERIES_STAGES = {"n1", "n2"}
 
 # 出图出片各步消费 tasks.json 里的哪个键，以及排在谁后面。
 PRODUCE_ORDER = ["p1", "p2", "p3", "p4"]
+
+
+# 每个环节的模板里都能用的占位符，不用声明依赖。
+COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
+                       "IMAGE_SIZE", "SEG_COUNT")
+
+
+def placeholder_of(out_name: str) -> str:
+    """产物名 → 模板里引用它的占位符。`n4_assets` → `ASSETS`。
+
+    定成可推导的而不是手写一张对照表：手写的表迟早和依赖表对不上，
+    对不上的后果是模板里的 `{{ASSETS}}` 永远填不上、原样发给模型 ——
+    模型看到一个大括号占位符，通常会假装那里有内容继续往下编。
+    """
+    return out_name.split("_", 1)[1].upper() if "_" in out_name else out_name.upper()
+
+
+def placeholders_for(stage_id: str) -> set:
+    """这个环节的模板里**允许**出现哪些占位符。"""
+    if stage_id not in LLM_SPEC:
+        return set(COMMON_PLACEHOLDERS)
+    _, deps, _ = LLM_SPEC[stage_id]
+    return set(COMMON_PLACEHOLDERS) | {placeholder_of(d) for d in deps}
 
 
 def by_id() -> dict:
