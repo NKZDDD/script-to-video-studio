@@ -156,6 +156,24 @@ def proj_of(body: dict) -> Project:
     return Project(root)
 
 
+SYSTEMS = ("v61", "v34")
+
+
+def _system_of(v) -> str:
+    """建项目时选的生产体系。认不出的一律回落 v61 —— 那是跑过真项目的那套。"""
+    s = str(v or "").strip().lower()
+    return s if s in SYSTEMS else "v61"
+
+
+def system_of(pj: Project) -> str:
+    """这个项目用哪套体系。
+
+    老项目的 meta 里没有这个字段，回落 v61 —— 它们本来就是 V6.1 跑出来的，
+    换一套体系去读会把产物全判成「还没做」，然后重跑一遍花第二份钱。
+    """
+    return _system_of((pj.meta() or {}).get("system"))
+
+
 def resolve_chain(cfg: dict, kind: str, override=None) -> list:
     """某一类活（asset/storyboard/video）按优先级用哪几家。
 
@@ -272,11 +290,20 @@ def api_get(path: str, q: dict) -> dict:
         if up.get("access_key"):
             up["access_key"] = up["access_key"][:4] + "…"
         pub["upload"] = up
+        from core import system_v34 as V34
         return {"config": pub,
                 "providers_configured": {k: bool(v.get("api_key"))
                                          for k, v in (cfg.get("providers") or {}).items()},
                 "capabilities": list_capabilities(),
+                # 两套体系的环节表都下发，前端按项目的 system 挑一套显示。
+                # 不在这里挑：切项目不用重新拉一遍 bootstrap。
                 "stages": S.STAGES,
+                "systems": {
+                    "v61": {"name": "V6.1 十二环节", "stages": S.STAGES,
+                            "note": "跑过真项目的那一套"},
+                    "v34": {"name": "V3.4 电影级十七章", "stages": V34.STAGES,
+                            "note": "多一层场景状态图；转场按六类原生机制选，"
+                                    "不再只会硬切"}},
                 "projects": list_projects(cfg["projects_dir"]),
                 "projects_dir": cfg["projects_dir"],
                 # 程序目录 / 数据目录 / 配置位置，让人一眼知道更新程序会不会碰到数据
@@ -546,6 +573,12 @@ def api_post(path: str, body: dict) -> dict:
         """先看清这一次会做什么、跳过什么，再决定点不点「开始」。"""
         from core import pipeline
         pj = proj_of(body)
+        if system_of(pj) == "v34":
+            from core import pipeline_v34
+            return pipeline_v34.preview(
+                pj, include_produce=body.get("include_produce", True),
+                include_deliver=body.get("include_deliver", True),
+                only_episodes=body.get("only_episodes"))
         return pipeline.preview(pj,
                                include_produce=body.get("include_produce", True),
                                include_deliver=body.get("include_deliver", True),
@@ -600,6 +633,25 @@ def api_post(path: str, body: dict) -> dict:
 
         job = JOBS.create("pipeline", 1, 1, project_root=pj.root,
                           project_name=os.path.basename(pj.root), provider="pipeline")
+        if system_of(pj) == "v34":
+            from core import pipeline_v34
+            pipeline_v34.start(
+                job, pj,
+                llm_factory=lambda: build_llm(cfg, body.get("llm")),
+                provider_factory=lambda kind: chains[kind],
+                params=params, jobs=JOBS,
+                concurrency=int(body.get("concurrency")
+                                or (cfg.get("defaults") or {}).get("concurrency", 3)),
+                max_retry=int(body.get("max_retry")
+                              or (cfg.get("defaults") or {}).get("max_retry", 2)),
+                include_produce=body.get("include_produce", True),
+                include_deliver=body.get("include_deliver", True),
+                only_episodes=body.get("only_episodes"),
+                ep_concurrency=int(body.get("llm_episodes")
+                                   or (cfg.get("defaults") or {}).get("llm_episodes", 4)),
+                seg_concurrency=int(body.get("llm_segments")
+                                    or (cfg.get("defaults") or {}).get("llm_segments", 4)))
+            return {"ok": True, "job_id": job.id, "system": "v34"}
         pipeline.start(
             job, pj,
             llm_factory=lambda: build_llm(cfg, body.get("llm")),
@@ -692,6 +744,9 @@ def api_post(path: str, body: dict) -> dict:
         meta = {"title": body.get("title") or name,
                 "project_code": body.get("project_code", "PROJ-001"),
                 "episode": body.get("episode", "EP01"),
+                # 用哪套生产体系。建项目时定，之后不改 —— 两套的产物文件名、
+                # 环节表、任务结构都不一样，中途换等于把已有产物全作废。
+                "system": _system_of(body.get("system")),
                 "params": body.get("params", {}),
                 "source_file": body.get("source_file", "")}
         # script / text 两个名字都收：批量建剧那个接口用的是 text，

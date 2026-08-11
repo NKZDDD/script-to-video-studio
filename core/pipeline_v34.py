@@ -314,6 +314,54 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     return _finish(job, failed, bad_eps)
 
 
+def start(job: Job, pj, **kw) -> None:
+    threading.Thread(target=run, args=(job, pj), kwargs=kw, daemon=True).start()
+
+
+def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
+            only_episodes: Optional[list] = None) -> dict:
+    """不跑，只说清「这一次会做什么、跳过什么」。点之前先看一眼，别花冤枉钱。
+
+    逐段环节的待办按**段**算而不是按环节算：一集十几段时，
+    「还要跑 1 个环节」和「还要跑 13 次调用」差着一个数量级。
+    """
+    steps = plan(pj, include_produce=include_produce,
+                 include_deliver=include_deliver, only_episodes=only_episodes)
+    todo, skip, calls = [], [], 0
+    for s in steps:
+        if s["kind"] == "llm":
+            sid, ep = s["stage"], s.get("episode", "")
+            if _llm_done(pj, sid, ep):
+                skip.append(s["label"])
+                continue
+            n = 1
+            if V.scope_of(sid) == "segment":
+                segs = {x["seg_id"] for x in R.segments_of(pj, ep)}
+                n = len(segs - R.done_segments(pj, sid, ep)) or 1
+            calls += n
+            todo.append(f"{s['label']}（{n} 次调用）" if n > 1 else s["label"])
+        elif s["kind"] == "produce":
+            n = len(_produce_todo(pj, s["task_key"], s.get("only")))
+            (todo if n else skip).append(
+                f"{s['label']}（{n} 项）" if n else s["label"])
+        else:
+            todo.append(s["label"])
+    return {"system": "v34", "episodes": _eps.ids(pj),
+            "todo": todo, "skip": skip,
+            "llm_calls": calls,
+            "produce": {s["produce"]: len(_produce_todo(pj, s["task_key"], s.get("only")))
+                        for s in steps if s["kind"] == "produce"}}
+
+
+def _produce_todo(pj, task_key: str, only: Optional[list]) -> list:
+    tasks = pj.tasks().get(task_key) or []
+    if only:
+        keep = set(only)
+        tasks = [t for t in tasks if not t.get("episode") or t["episode"] in keep]
+    return [t for t in tasks
+            if not os.path.isfile(pj.p(*t["output"].split("/")))]
+
+
 def _finish(job: Job, failed: list, bad_eps: Optional[set] = None) -> dict:
     """收尾：把状态和「哪些集卡住了」落下来，面板照着改就行。"""
     import time

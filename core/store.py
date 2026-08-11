@@ -165,6 +165,9 @@ def list_projects(base: str) -> list:
             "title": meta.get("title") or name,
             "project_code": meta.get("project_code", ""),
             "episode": meta.get("episode", ""),
+            # 这个项目用哪套生产体系。老项目没有这个字段 —— 它们本来就是
+            # V6.1 跑出来的，回落 v61；换一套去读会把产物全判成「还没做」。
+            "system": meta.get("system") or "v61",
             "updated": time.strftime("%Y-%m-%d %H:%M",
                                      time.localtime(os.path.getmtime(root))),
         })
