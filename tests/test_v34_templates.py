@@ -135,6 +135,72 @@ class SeparationTests(unittest.TestCase):
             self.skipTest("n3_narrative 还没写")
         self.assertIn("不设计镜头", t)
 
+    def test_cvs_template_forbids_camera(self):
+        """★ CVS 混进镜头概念，切一次镜就会静默改变「人物实际站在哪」。"""
+        t = self._text("n8_cvs")
+        if not t:
+            self.skipTest("n8_cvs 还没写")
+        self.assertIn("绝对不许有镜头", t)
+        for word in ("景别", "机位", "构图", "画面左右"):
+            self.assertIn(word, t, f"没点名禁止 {word}")
+        self.assertIn("物理方向", t)
+
+    def test_shot_template_lists_all_six_native_mechanisms(self):
+        """★ 招牌功能。六类机制少写一类，模型就不会用它。"""
+        t = self._text("n9_shots")
+        if not t:
+            self.skipTest("n9_shots 还没写")
+        for m in ("NATIVE_CUT", "SHIELDED_OCCLUSION", "MOTION_BRIDGE",
+                  "OPTICAL_COVER", "NATIVE_DISSOLVE", "VFX_THREAD_TRANSITION"):
+            self.assertIn(m, t, f"六类原生转场里缺 {m}")
+
+    def test_shot_template_requires_three_layer_declaration(self):
+        """只写「电影感转场」或让模型自选机制，结果一定是退化成全片硬切。"""
+        t = self._text("n9_shots")
+        if not t:
+            self.skipTest("n9_shots 还没写")
+        self.assertIn("MODEL_NATIVE_ONLY", t)
+        self.assertIn("剪辑语法", t)
+        self.assertIn("电影感转场", t, "没点破「只写电影感转场」这个失败模式")
+
+    def test_shot_template_says_transitions_cost_real_time(self):
+        """转场不计入时长 → 装箱时算出一个塞不下的 SEG，对白被挤到听不清。"""
+        t = self._text("n9_shots")
+        if not t:
+            self.skipTest("n9_shots 还没写")
+        self.assertIn("转场要占真实时长", t)
+
+    def test_shot_template_derives_screen_direction(self):
+        """画面左右是投影算出来的，不是记下来的物理真相。"""
+        t = self._text("n9_shots")
+        if not t:
+            self.skipTest("n9_shots 还没写")
+        self.assertIn("画面左右是算出来的", t)
+        self.assertIn("跳轴", t)
+
+    def test_seg_template_forbids_splitting_a_transition(self):
+        """★ 一次原生转场拆到两次生成里 = 需要外部拼接，和执行模式直接冲突。"""
+        t = self._text("n10_segs")
+        if not t:
+            self.skipTest("n10_segs 还没写")
+        self.assertIn("完整归属一个 SEG", t)
+        self.assertIn("MODEL_NATIVE_ONLY", t)
+
+    def test_seg_template_forbids_reverse_driving_the_story(self):
+        """按 SEG 剩多少秒去砍剧情，是装箱这一层最严重的错。"""
+        t = self._text("n10_segs")
+        if not t:
+            self.skipTest("n10_segs 还没写")
+        self.assertIn("不许倒过来", t)
+
+    def test_directing_template_checks_physical_feasibility(self):
+        """走位排出来做不到，等到出图才发现就晚了。"""
+        t = self._text("n7_directing")
+        if not t:
+            self.skipTest("n7_directing 还没写")
+        self.assertIn("五道检查", t)
+        self.assertIn("reaction_latency", t)
+
 
 if __name__ == "__main__":
     unittest.main()
