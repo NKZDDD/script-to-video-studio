@@ -64,6 +64,7 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         # 能力档位必须进提示词，否则冻结了也白冻：第九环节会照着「六类机制
         # 随便挑」写，而模型做不出来 —— 转场糊掉或者变成一个长镜头，不报错。
         "CAPABILITY": _capability_block(pj),
+        "REF_LIMIT": _ref_limit_block(params),
     }
     for out_name, obj in data.items():
         if segment:
@@ -121,6 +122,28 @@ def _capability_block(pj: Project) -> str:
             f"执行模式：{cap.get('transition_execution_mode', 'MODEL_NATIVE_ONLY')}"
             f"（外部剪辑和后期补转场一律禁止；模型做不出来就降到更稳的机制，"
             f"不许改用后期）")
+
+
+def _ref_limit_block(params: dict) -> str:
+    """本次生产的模型一次能吃几张参考图。
+
+    这个数服务商注册表里一直有（灵感鸭 sora-2 只收 1 张，坤鸡 9 张），
+    但从来没告诉过模型 —— 于是 LLM 按剧情需要引 5、6 张，
+    到出图那步才撞上限。V5.6 明确要求把它写进提示词，
+    并且强调**这是容量上限，不是推荐装满的数量**。
+
+    拿不到就明说未知，别编一个数：编大了会让它多引，编小了会让它漏掉
+    真正需要的覆盖图。
+    """
+    lim = params.get("ref_limit")
+    if not lim:
+        return ("本次目标模型一次能吃几张参考图：未知。"
+                "按最小充分集来，不确定就少传 —— 撞上限会直接失败，"
+                "而多传一张互相打架不会报错，只会把画面搞坏。")
+    return (f"本次目标模型一次最多接受 {lim} 张参考图。"
+            f"这是**容量上限，不是推荐装满的数量** —— "
+            f"按最小充分集挑，够用就停。"
+            f"{'超过 5 张时必须逐张写清缺的是哪一项权威。' if lim > 5 else ''}")
 
 
 def _script_for(pj: Project, stage_id: str, episode: str, params: dict) -> str:

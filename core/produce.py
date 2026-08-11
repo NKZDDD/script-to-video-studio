@@ -188,6 +188,84 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
 # 提示词里 `Image 1 = C001 名称` 这种映射行。全角冒号/等号都认。
 _IMAGE_MAP = re.compile(r"[Ii]mage\s*(\d+)\s*[=＝:：]\s*([A-Za-z0-9_\-]+)")
 
+# V5.6 要求每个 Image 槽位写全六字段（第一个是 `Image N = ID`，剩下五个在这）。
+# 只写「控制什么/不控制什么」是不够的 —— 模型知道这张图有权决定哪些维度，
+# 却不知道**这张图是谁**。实跑时就撞过：提示词写了 Image 1 的控制范围，
+# 没说 Image 1 是哪个人，模型把另一个角色的脸套了上去。
+#
+# 标签同时认 V5.6 的英文原文和中文写法：模板是中文写的，但用户可能
+# 直接从 skill 文档里粘英文段落过来。认死一种会把对的判成错的。
+_MAP_FIELDS = (
+    ("who", "这张图是谁/是什么 + 画面可见内容",
+     r"(?:Who\s*/?\s*What[^\n:：]*|是谁[^\n:：]*|身份与可见内容|可见内容)"),
+    ("state", "故事时间 / 当前状态",
+     r"(?:Story\s*Time[^\n:：]*|故事时间[^\n:：]*|时间与当前状态|当前状态)"),
+    # 这两项同时认 V5.6 的 Controls / Does Not Control 和我们原有的
+    # MUST PRESERVE / MUST NOT COPY —— 后者是前者的更细一层拆分，
+    # 表达的是同一件事。只认新写法会把已经写对的提示词判成错的。
+    ("controls", "有权控制的维度",
+     r"(?:Controls|控制的维度|有权控制|MUST\s+PRESERVE)"),
+    ("not_controls", "无权控制的维度",
+     r"(?:Does\s*Not\s*Control|不控制|无权控制|MUST\s+NOT\s+COPY"
+     r"|DOES\s+NOT\s+CONTROL)"),
+    ("scope", "适用范围", r"(?:Applicable\s*Scope|适用范围)"),
+)
+_MAP_FIELD_RE = {
+    key: re.compile(rf"^[\s\-·*]*{pat}\s*[:：]\s*(\S.*)$", re.M | re.I)
+    for key, _label, pat in _MAP_FIELDS
+}
+
+
+def _image_sections(prompt: str) -> dict:
+    """按 `Image N =` 把提示词切成每张图各自的一段。
+
+    切段是必须的：五个字段名在整篇里各出现一次也能匹配上，
+    但那可能全都挂在 Image 1 下面，Image 2 一个字段都没有。
+    不切段的校验会把「只写了第一张」判成合格。
+    """
+    hits = list(_IMAGE_MAP.finditer(prompt or ""))
+    out = {}
+    for i, m in enumerate(hits):
+        n = int(m.group(1))
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(prompt)
+        out.setdefault(n, prompt[m.start():end])
+    return out
+
+
+def check_identity_map(prompt: str, want_refs: list) -> tuple:
+    """V5.6 六字段身份映射。返回 (硬错误, 提醒)。
+
+    和编号校验是两件事，V5.6 也给了两个不同的阻断码：
+      REFERENCE_RESOLUTION_BLOCKED  图没解析出来（缺文件、ID 对不上）
+      REFERENCE_MAPPING_BLOCKED     图对了，但没说清这张图是谁、管什么
+    第二种以前完全没有校验 —— 提示词写得再离谱都照样出图。
+    """
+    want = [(r.get("image_n") or i + 1, str(r.get("asset_id") or ""))
+            for i, r in enumerate(want_refs)]
+    if not want:
+        return "", ""
+    secs = _image_sections(prompt or "")
+    if not secs:
+        return "", ""            # 连编号都没有，由 check_image_map 管，别报两遍
+    bad = []
+    for n, aid in want:
+        sec = secs.get(n)
+        if sec is None:
+            continue             # 编号缺失同样归 check_image_map
+        miss = [label for key, label, _ in _MAP_FIELDS
+                if not _MAP_FIELD_RE[key].search(sec)]
+        if miss:
+            bad.append(f"Image {n}（{aid}）缺：" + "、".join(miss))
+    if not bad:
+        return "", ""
+    return ("REFERENCE_MAPPING_BLOCKED　参考图的身份映射不完整："
+            + "；".join(bad)
+            + "。只写「控制什么」是不够的 —— 模型知道这张图有权决定哪些维度，"
+              "却不知道这张图是谁，就会把别人的脸套上去（实跑撞过）。"
+              "每个 Image 槽位都要写全六项：ID、这张图是谁+画面可见内容、"
+              "故事时间与当前状态、有权控制、无权控制、适用范围。"
+              "去「任务明细」补这一条的映射，或者重跑对应的文字环节。"), ""
+
 
 def check_image_map(prompt: str, want_refs: list) -> tuple:
     """核对提示词里的 Image 编号和程序实际上传顺序是否一致。
@@ -306,11 +384,14 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
                 f"少一张就出图，脸和场景都会跑掉，所以这里停下。"
                 f"多半是环节8 把不存在的东西写进了参考图顺序"
                 f"（比如把本段故事板自己写进去），去「任务明细」看这一条的参考图那栏。")
-        bad_map, map_warn = check_image_map(prompt, want_refs)
-        if bad_map:
-            raise RuntimeError(bad_map)
-        if map_warn:
-            log(f"⚠️ {map_warn}")
+        # 两道校验顺序不能反：编号对不上时六字段校验会因为找不到槽位而漏报，
+        # 报「身份映射不全」也会盖住真正的问题（编号错位）。
+        for bad_map, map_warn in (check_image_map(prompt, want_refs),
+                                  check_identity_map(prompt, want_refs)):
+            if bad_map:
+                raise RuntimeError(bad_map)
+            if map_warn:
+                log(f"⚠️ {map_warn}")
         refs = [to_ref(s, log) for _, s in srcs]
         log(f"参考图×{len(refs)}")
         meta = prov.generate_image(

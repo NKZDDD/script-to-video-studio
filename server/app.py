@@ -295,6 +295,43 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
 MAX_TOKENS_CEILING = 200000
 
 
+def ref_limit_of(cfg: dict, kind: str = "video") -> int:
+    """这条链的首选服务商一次能吃几张参考图。拿不到返回 0（=未知）。
+
+    这个数注册表里一直有，但以前只有出图那一步用它做校验，
+    编提示词的环节完全不知道 —— LLM 按剧情需要引 5、6 张，
+    到出图才撞上限。现在把它送进提示词，让模型自己按上限挑。
+    首选那家的上限就够了：换家重试时上限只会更宽松或差不多，
+    按最紧的那家写反而更安全。
+    """
+    try:
+        chain = resolve_chain(cfg, kind) or []
+        if not chain:
+            return 0
+        pid = chain[0].get("provider") if isinstance(chain[0], dict) else chain[0]
+        caps = {c["id"]: c for c in list_capabilities()}
+        sec = (caps.get(pid) or {}).get(kind) or {}
+        return int(sec.get("max_refs") or 0)
+    except Exception:                                   # noqa: BLE001
+        return 0                                        # 拿不到就说未知，别编
+
+
+def params_of(cfg: dict, pj: Project, with_script: bool = True) -> dict:
+    """跑环节要的那套参数。五个入口以前各拼一遍，漏一项就静默少一项输入。"""
+    meta = pj.meta()
+    params = dict(cfg.get("defaults") or {})
+    params.update(meta.get("params") or {})
+    params.update({"project_code": meta.get("project_code", "PROJ-001"),
+                   "episode": meta.get("episode", "EP01"),
+                   "ref_limit": ref_limit_of(cfg, "video")})
+    if with_script:
+        sp = pj.p("01_剧本与分段", "原始剧本.txt")
+        if os.path.isfile(sp):
+            from core.store import read_text
+            params["script"] = read_text(sp)
+    return params
+
+
 def _max_tokens(v) -> int:
     try:
         n = int(v)
@@ -453,14 +490,7 @@ def api_get(path: str, q: dict) -> dict:
         """跑之前看看这一步到底会发出去什么。不调模型、不写盘、不占资产。"""
         pj = proj_of({"project_root": q["root"][0]})
         meta = pj.meta()
-        params = dict(cfg.get("defaults") or {})
-        params.update(meta.get("params") or {})
-        params.update({"project_code": meta.get("project_code", "PROJ-001"),
-                       "episode": meta.get("episode", "EP01")})
-        sp = pj.p("01_剧本与分段", "原始剧本.txt")
-        if os.path.isfile(sp):
-            from core.store import read_text
-            params["script"] = read_text(sp)
+        params = params_of(cfg, pj)
         if system_of(pj) == "v34":
             from core import run_v34
             return run_v34.preview_prompt(
@@ -649,10 +679,7 @@ def api_post(path: str, body: dict) -> dict:
         from core import pipeline
         pj = proj_of(body)
         meta = pj.meta()
-        params = dict(cfg.get("defaults") or {})
-        params.update(meta.get("params") or {})
-        params.update({"project_code": meta.get("project_code", "PROJ-001"),
-                       "episode": meta.get("episode", "EP01")})
+        params = params_of(cfg, pj, with_script=False)
         # 出图尺寸/画面比例/单段时长：点「开始」时给的值优先于「默认参数」。
         # 这些会被环节8 装配进 tasks.json，所以要在跑之前就定下来。
         for k, v in (body.get("params_override") or {}).items():
@@ -839,14 +866,7 @@ def api_post(path: str, body: dict) -> dict:
         pj = proj_of(body)
         stage_id = body["stage"]
         meta = pj.meta()
-        params = dict(cfg.get("defaults") or {})
-        params.update(meta.get("params") or {})
-        params.update({"project_code": meta.get("project_code", "PROJ-001"),
-                       "episode": meta.get("episode", "EP01")})
-        script_path = pj.p("01_剧本与分段", "原始剧本.txt")
-        if os.path.isfile(script_path):
-            from core.store import read_text
-            params["script"] = read_text(script_path)
+        params = params_of(cfg, pj)
 
         # 逐集环节可以只跑一集，也可以「全部集依次跑」。
         # 依次跑做成一个 job、每集一个条目：进度看得见，中途失败只影响那一集，
@@ -923,10 +943,7 @@ def api_post(path: str, body: dict) -> dict:
     if path == "/api/tasks/rebuild":
         pj = proj_of(body)
         meta = pj.meta()
-        params = dict(cfg.get("defaults") or {})
-        params.update(meta.get("params") or {})
-        params.update({"project_code": meta.get("project_code", "PROJ-001"),
-                       "episode": meta.get("episode", "EP01")})
+        params = params_of(cfg, pj, with_script=False)
         return {"ok": True, "tasks": S.build_tasks(pj, params)}
 
     if path == "/api/generate":
@@ -1045,10 +1062,7 @@ def api_post(path: str, body: dict) -> dict:
     if path == "/api/assemble":
         pj = proj_of(body)
         meta = pj.meta()
-        params = dict(cfg.get("defaults") or {})
-        params.update(meta.get("params") or {})
-        params.update({"project_code": meta.get("project_code", "PROJ-001"),
-                       "episode": meta.get("episode", "EP01")})
+        params = params_of(cfg, pj, with_script=False)
         return {"ok": True,
                 "result": S.assemble(pj, params, episode=(body.get("episode") or "").strip())}
 

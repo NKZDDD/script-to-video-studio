@@ -192,8 +192,12 @@ PRODUCE_ORDER = ["p1", "p2", "p3", "p4"]
 
 
 # 每个环节的模板里都能用的占位符，不用声明依赖。
+# REF_LIMIT：这次生产用的模型一次能吃几张参考图。
+# 服务商注册表里一直有 max_refs（灵感鸭 sora-2 只收 1 张、坤鸡 9 张），
+# 但模型侧从来不知道 —— LLM 按剧情需要引 6 张，到出图那步才撞上限。
+# V5.6 还特别强调：这个数是**容量上限，不是推荐装满的数量**。
 COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
-                       "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY")
+                       "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT")
 
 
 def placeholder_of(out_name: str) -> str:

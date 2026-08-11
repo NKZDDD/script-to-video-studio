@@ -296,6 +296,25 @@ CATALOG = {
         "resume": "改完提示词后在「生产」页点「补失败」；已经出过的图要先删掉才会重做。",
         "resumable": True, "scope": "task", "level": "warn",
     },
+    # V5.6 新增。和 REF_MISSING 是两回事：那边是图找不到，这边是图找到了
+    # 但没说清这张图是谁 —— 后果一样严重，却完全不报错。
+    "REF_MAP_INCOMPLETE": {
+        "title": "参考图身份映射不完整（REFERENCE_MAPPING_BLOCKED）",
+        "why": "出图模型收到的是几张没有标签的图。只告诉它「Image 1 控制服饰、"
+               "不控制姿态」是不够的 —— 它不知道 Image 1 是谁，就会把另一个"
+               "角色的脸套上去。实跑撞过这个，图照出、任务标 ok，"
+               "只能靠肉眼在几百张里发现。",
+        "where": "「任务明细」里这一条的提示词，参考图映射那一段",
+        "fix": ["每个 Image 槽位写全六项，缺一项就停",
+                "Image N = 完整 Canonical Revision ID",
+                "这张图是谁/是什么 + 画面可见内容（模型最缺的就是这一句）",
+                "故事时间 / 当前状态（第几集第几段、事件前后、Clean LOOK 还是 CT）",
+                "有权控制的维度 / 无权控制的维度",
+                "适用范围（哪几个 KF 或哪个绝对时间窗口）",
+                "一张图里有多个人物或多个分格时，按区域逐项写清，不许概括成一个身份"],
+        "resume": "改完提示词后在「生产」页点「补失败」；已经出过的图要先删掉才会重做。",
+        "resumable": True, "scope": "task", "level": "error",
+    },
     "ASSET_SCOPE": {
         "title": "父资产或连续性状态依赖不完整",
         "why": "基础资产不填写父资产。连续性状态资产必须填写唯一主父资产，并让"
@@ -413,6 +432,9 @@ _PATTERNS = [
                      r"|传不上去|没能传上去|上传到对象存储失败|还没配对象存储"
                      r"|对象存储没填|先装 boto3"),
     ("MODEL_NEEDS_REF", r"必须给至少 ?\d* ?张参考图|必须提供 ?\d* ?张参考图|need_image"),
+    # 要排在 REF_MISSING 之前：文案里也有「参考图」，但这条是「图找到了、
+    # 没说清是谁」，改法完全不同（补映射，不是去出图）。
+    ("REF_MAP_INCOMPLETE", r"REFERENCE_MAPPING_BLOCKED|身份映射不完整"),
     ("REF_MISSING", r"参考图文件不存在|固定故事板不存在|no such file|filenotfound"),
     # 这两条要排在 PREREQ_MISSING 前面：它们的文案里也带「请先跑」，
     # 但给的指引更具体（去哪个下拉框选集），别被通用的前置缺失兜走
@@ -519,6 +541,9 @@ NO_FAILOVER_CODES = {
     # 这几条都是「活儿本身缺东西」，换一家服务商也一样缺，别浪费一轮重试
     "GHOST_REF", "ASSET_NO_PROMPT", "NO_REF", "SEG_NOT_COMPILED", "ASSET_SCOPE",
     "PROMPT_REF_MISSING", "ASSET_DEP_CYCLE",
+    # 提示词里没说清哪张图是谁。换一家服务商收到的还是同一段提示词，
+    # 只会把同一个错误重复一遍，还多花一次钱。
+    "REF_MAP_INCOMPLETE",
 }
 
 
