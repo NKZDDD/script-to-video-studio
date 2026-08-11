@@ -93,8 +93,11 @@ class TemplateTests(unittest.TestCase):
                 continue
             self.assertIn("{{EPISODE}}", text,
                           f"{tpl}.md 是{V.scope_of(sid)}级却没提 {{{{EPISODE}}}}")
-            self.assertTrue(
-                "只处理" in text or "只排这一段" in text or "只编译这一段" in text,
+            # 查语义不查措辞：「只**处理/审/编译/排** … 这一集/这一段」。
+            # 第一版在白名单里列了三种具体说法，n14 写「只审」就判成没写 ——
+            # 白名单迟早漏掉一种合理说法，然后逼着模板去迁就测试。
+            self.assertRegex(
+                text, r"只[^\n]{0,24}?(这一集|这一段)",
                 f"{tpl}.md 没写清本次只做哪一集/哪一段")
 
     def test_series_templates_do_not_pretend_to_be_per_episode(self):
