@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
@@ -21,7 +22,7 @@ from typing import Callable, Optional
 from . import diagnose, episodes as _eps, ledger, system_v34 as V
 from .executor import LLM_GATE
 from .llm import LLMCancelled
-from .stages import jd, load_prompt, render
+from .stages import jd, load_prompt, prompt_files, render
 from .store import Project
 
 
@@ -58,6 +59,9 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         "IMAGE_SIZE": params.get("image_size", "1024x1536"),
         "SEG_COUNT": len(segments_of(pj, episode)) if episode else 0,
         "SCRIPT": _script_for(pj, stage_id, episode, params),
+        # 能力档位必须进提示词，否则冻结了也白冻：第九环节会照着「六类机制
+        # 随便挑」写，而模型做不出来 —— 转场糊掉或者变成一个长镜头，不报错。
+        "CAPABILITY": _capability_block(pj),
     }
     for out_name, obj in data.items():
         if segment:
@@ -93,6 +97,28 @@ def _narrow(out_name: str, obj: dict, segment: str) -> dict:
         return obj
     mine = [r for r in rows if isinstance(r, dict) and r.get(id_field) == segment]
     return dict(obj, **{key: mine})
+
+
+def _capability_block(pj: Project) -> str:
+    """给模板看的能力说明。没冻结过就明说，不要装作有。"""
+    cap = capability_of(pj)
+    if not cap:
+        return ("（还没冻结能力档位。按最保守的来：只用 NATIVE_CUT、"
+                "完全遮挡、光学覆盖这三类转场。）")
+    lv = cap.get("native_multishot_support", "UNKNOWN")
+    hint = {"RELIABLE": "这个模型能可靠地一次生成多镜头，六类机制都可以用。",
+            "LIMITED": "多镜头能力有限：优先完全遮挡、黑场闪光失焦、简单甩镜，"
+                       "减少跨人物跨地点的直接混合。",
+            "UNSUPPORTED": "这个模型做不了多镜头。用单镜头连续的机位和走位表达，"
+                           "或者在同一次生成里用完整遮挡完成变化。",
+            "UNKNOWN": "模型的多镜头能力未知 —— **不要假设它行**，按有限档来。"}[lv]
+    return (f"目标视频模型：{cap.get('target_video_model') or '未指定'}\n"
+            f"多镜头能力：{lv} —— {hint}\n"
+            f"**允许使用的转场机制（只能从这几类里选）**："
+            f"{'、'.join(cap.get('allowed_mechanisms') or ['NATIVE_CUT'])}\n"
+            f"执行模式：{cap.get('transition_execution_mode', 'MODEL_NATIVE_ONLY')}"
+            f"（外部剪辑和后期补转场一律禁止；模型做不出来就降到更稳的机制，"
+            f"不许改用后期）")
 
 
 def _script_for(pj: Project, stage_id: str, episode: str, params: dict) -> str:
@@ -276,6 +302,140 @@ def done_segments(pj: Project, stage_id: str, episode: str) -> set:
     key = _result_key(stage_id)
     got = (pj.stage_data(tpl_name, episode) or {}).get(key, [])
     return {c.get("seg_id") for c in got if c.get("seg_id")}
+
+
+# ---------------------------------------------------------------- 第 0 章：能力冻结
+
+# 目标视频模型一次能不能出多镜头。分四档，决定后面允许用哪些转场机制。
+# 不冻结的话，第九环节会照着「六类机制随便挑」写，而模型做不出来 ——
+# 表现是转场糊掉或者干脆变成一个长镜头，不报错。
+CAPABILITY = ("RELIABLE", "LIMITED", "UNSUPPORTED", "UNKNOWN")
+
+# 已知支持一次生成多镜头的模型。认不出的一律 UNKNOWN，按 LIMITED 策略走 ——
+# 不假设模型有多镜头能力，是这一层的默认立场。
+_MULTISHOT = {
+    "seedance-2.5": "RELIABLE",     # 鹤 Seedance 2.5：29 秒 / 30 图，实测能多镜头
+}
+
+
+def detect_capability(model: str) -> str:
+    m = (model or "").lower()
+    for frag, level in _MULTISHOT.items():
+        if frag in m:
+            return level
+    return "UNKNOWN"
+
+
+def freeze_capability(pj: Project, params: dict, video_model: str = "",
+                      log: Callable = print) -> dict:
+    """第 0 章：把这次生产的执行模式和模型能力档位冻结进项目。
+
+    冻结而不是每次现算：中途换模型会让前后两段用不同的转场策略，
+    接起来就是断的。要换模型就显式改这份配置，别让它随手漂。
+    """
+    meta = pj.meta() or {}
+    frozen = dict(meta.get("capability") or {})
+    level = frozen.get("native_multishot_support") or detect_capability(video_model)
+    cap = {
+        "target_video_model": video_model or frozen.get("target_video_model", ""),
+        "seg_duration": int(params.get("duration", 15)),
+        "aspect_ratio": params.get("ratio", "9:16"),
+        "transition_execution_mode": "MODEL_NATIVE_ONLY",
+        "external_transition_editing": "FORBIDDEN",
+        "external_shot_assembly": "FORBIDDEN",
+        "native_multishot_support": level,
+        "allowed_mechanisms": allowed_mechanisms(level),
+        "frozen_at": frozen.get("frozen_at") or _now(),
+    }
+    pj.save_meta(dict(meta, capability=cap))
+    log(f"能力冻结：{cap['target_video_model'] or '（未指定模型）'} → "
+        f"多镜头 {level}；允许的转场机制 {len(cap['allowed_mechanisms'])} 类")
+    if level in ("UNSUPPORTED", "UNKNOWN"):
+        log("  这一档只用最稳的几类转场。要放开，去项目参数里把 "
+            "native_multishot_support 改成 RELIABLE —— 但先拿一段试出来再改。")
+    return cap
+
+
+def allowed_mechanisms(level: str) -> list:
+    """按能力档位决定允许哪些原生转场机制。
+
+    降级只往「更稳」的方向走，绝不往「改用外部剪辑」走 ——
+    那是项目配置层面的事，不能在这里静默切换。
+    """
+    cut = ["NATIVE_CUT"]
+    safe = cut + ["SHIELDED_OCCLUSION", "OPTICAL_COVER"]
+    return {
+        "RELIABLE": safe + ["MOTION_BRIDGE", "NATIVE_DISSOLVE",
+                            "VFX_THREAD_TRANSITION"],
+        "LIMITED": safe,
+        # 不支持多镜头：只能一个镜头连续拍，或者在同一次生成里用完整遮挡
+        "UNSUPPORTED": cut,
+        "UNKNOWN": safe,        # 不假设它行，按 LIMITED 策略
+    }[level if level in CAPABILITY else "UNKNOWN"]
+
+
+def capability_of(pj: Project) -> dict:
+    return (pj.meta() or {}).get("capability") or {}
+
+
+def _now() -> str:
+    import time
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def preview_prompt(pj: Project, stage_id: str, params: dict,
+                   episode: str = "", segment: str = "") -> dict:
+    """跑之前先看看这一步到底会发出去什么。**不调模型、不写盘。**
+
+    刻意和真跑共用同一个 build_user —— 分开写迟早飘，那样预览就成了安慰剂。
+    返回的形状和 V6.1 那套一致，前端不用分两套渲染。
+    """
+    from .llm import rough_tokens
+    if stage_id not in V.LLM_SPEC:
+        raise ValueError(f"环节 {stage_id} 不是 LLM 环节，没有提示词可预览")
+    tpl_name, _, required = V.LLM_SPEC[stage_id]
+    scope = V.scope_of(stage_id)
+    out = {"stage": stage_id, "template": tpl_name, "episode": "", "segment": "",
+           "segments": [], "required_fields": required, "missing": [], "note": "",
+           "layers": list(prompt_files(tpl_name, pj)), "system": "", "user": "",
+           "chars": 0, "tokens": 0, "unfilled": []}
+
+    if scope != "series":
+        avail = _eps.ids(pj)
+        if not avail:
+            out["missing"] = ["第1环节「源解析与故事真相」（还没切集）"]
+            return out
+        episode = episode if episode in avail else avail[0]
+    else:
+        episode = ""
+    out["episode"] = episode
+
+    miss = missing_deps(pj, stage_id, episode)
+    if miss:
+        out["missing"] = miss
+        return out
+
+    if scope == "segment":
+        segs = [s["seg_id"] for s in segments_of(pj, episode)]
+        out["segments"] = segs
+        if not segs:
+            out["missing"] = ["第10环节「SEG 包装」（段落表是空的）"]
+            return out
+        segment = segment if segment in segs else segs[0]
+        out["segment"] = segment
+        out["note"] = (f"这一集共 {len(segs)} 段，每段一次调用；"
+                       f"下面是 {segment} 这一段的。")
+    else:
+        segment = ""
+
+    user = build_user(pj, stage_id, params, episode, segment)
+    out["system"] = load_prompt("_common", pj)
+    out["user"] = user
+    out["chars"] = len(user)
+    out["tokens"] = rough_tokens(user)
+    # 填不上的占位符会原样发给模型，模型看到大括号通常会假装那里有内容继续编
+    out["unfilled"] = sorted(set(re.findall(r"\{\{(\w+)\}\}", user)))
+    return out
 
 
 # ---------------------------------------------------------------- 跨集共享资产

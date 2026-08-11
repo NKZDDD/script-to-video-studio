@@ -95,7 +95,8 @@ class PipelineTests(unittest.TestCase):
     def test_assets_wait_for_every_episode(self):
         """★ 资产图必须等所有集的资产提示词齐了 —— 否则同一角色会出两张脸。"""
         steps = P.plan(self.pj)
-        self.assertEqual([s["stage"] for s in steps][:2], ["n1", "n2"])
+        # n0 冻结能力档位排最前 —— 第九环节要按它决定允许用哪几类转场
+        self.assertEqual([s["stage"] for s in steps][:3], ["n0", "n1", "n2"])
         R.run_stage(self.pj, "n1", llm=self.llm, params=PARAMS, log=lambda *a: None)
         steps = P.plan(self.pj)
         labels = [s["label"] for s in steps]

@@ -193,7 +193,7 @@ PRODUCE_ORDER = ["p1", "p2", "p3", "p4"]
 
 # 每个环节的模板里都能用的占位符，不用声明依赖。
 COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
-                       "IMAGE_SIZE", "SEG_COUNT")
+                       "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY")
 
 
 def placeholder_of(out_name: str) -> str:

@@ -39,8 +39,8 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
       场景状态图 → 故事板 → 视频，每一步都拿上一步当参考图；
       交付放最后。
     """
-    steps = [{"kind": "llm", "stage": "n1", "episode": "",
-              "label": _label("n1")}]
+    steps = [{"kind": "freeze", "stage": "n0", "episode": "", "label": _label("n0")}]
+    steps.append({"kind": "llm", "stage": "n1", "episode": "", "label": _label("n1")})
     steps.append({"kind": "llm", "stage": "n2", "episode": "",
                   "label": _label("n2")})
 
@@ -258,9 +258,32 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         job.set_item(key, state="ok", msg="交付步骤（拼接由 V6.1 的 assemble 复用）")
         return "ok"
 
+    def do_freeze(s: dict) -> str:
+        """第 0 章：把执行模式和模型能力档位冻结进项目。
+
+        必须在第九环节之前 —— 那一步要按能力档位决定允许用哪几类转场。
+        不冻结的话它会照着「六类随便挑」写，而模型做不出来：
+        转场糊掉或者变成一个长镜头，不报错。
+        """
+        key = s["label"]
+        if halt(s):
+            return "aborted"
+        chain = provider_factory("video")
+        chain = [chain] if isinstance(chain, dict) else chain
+        model = (chain[0] or {}).get("model", "") if chain else ""
+        R.freeze_capability(pj, params, model, log=lambda m: job.log(key, m))
+        job.set_item(key, state="ok")
+        return "ok"
+
     # ---- 跑：全剧级串行，逐集并行，出图出片在所有集之后 -------------------
-    head = [s for s in steps if s["kind"] == "llm" and not s.get("episode")]
+    head = [s for s in steps
+            if s["kind"] in ("freeze", "llm") and not s.get("episode")]
     for s in head:
+        if s["kind"] == "freeze":
+            if do_freeze(s) == "aborted":
+                _finish(job, failed, bad_eps)
+                return
+            continue
         if do_llm(s) == "aborted":
             _finish(job, failed, bad_eps)
             return
@@ -329,7 +352,9 @@ def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
                  include_deliver=include_deliver, only_episodes=only_episodes)
     todo, skip, calls = [], [], 0
     for s in steps:
-        if s["kind"] == "llm":
+        if s["kind"] == "freeze":
+            (skip if R.capability_of(pj) else todo).append(s["label"])
+        elif s["kind"] == "llm":
             sid, ep = s["stage"], s.get("episode", "")
             if _llm_done(pj, sid, ep):
                 skip.append(s["label"])

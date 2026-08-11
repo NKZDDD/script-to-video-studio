@@ -411,6 +411,11 @@ def api_get(path: str, q: dict) -> dict:
         if os.path.isfile(sp):
             from core.store import read_text
             params["script"] = read_text(sp)
+        if system_of(pj) == "v34":
+            from core import run_v34
+            return run_v34.preview_prompt(
+                pj, (q.get("stage") or ["n1"])[0], params,
+                (q.get("episode") or [""])[0], (q.get("segment") or [""])[0])
         return S.preview_prompt(pj, (q.get("stage") or ["s1"])[0], params,
                                 (q.get("episode") or [""])[0],
                                 (q.get("segment") or [""])[0])
