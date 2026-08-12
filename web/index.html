@@ -417,6 +417,13 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
            HTTPS_PROXY 和 Windows 系统代理，机器上挂着 Clash 之类的东西时
            请求会悄悄绕一圈，而那些工具常在 100 秒左右掐断长连接 ——
            表现成「服务商挂了」，之前为这个排了很久。 -->
+      <!-- 超时以前只能手改 config.json，页面上完全没有。
+           而它恰恰是长输出环节最需要调的一个：环节1/3 要吃整本剧本，
+           模型思考几分钟不吐字是正常的。 -->
+      <div><label>超时（秒）
+          <span class="muted">流式=两块数据之间；非流式=整次生成</span></label>
+        <input id="llmTimeout" type="number" min="60" max="3600" step="60"
+               value="900"></div>
       <div><label>网络 <span class="muted">长请求被掐断先试强制直连</span></label>
         <select id="llmProxyMode">
           <option value="">跟随系统与环境代理</option>
@@ -709,6 +716,7 @@ async function boot() {
   $('#llmBase').value = l.base_url || 'https://api.paisio.online';
   $('#llmModel').value = l.model || 'gpt-5.6-sol';
   $('#llmMaxTok').value = l.max_tokens || 16000;
+  $('#llmTimeout').value = l.timeout || 900;
   $('#llmStream').checked = l.stream === true;
   const p = (l.proxy || '').trim();
   $('#llmProxyMode').value = !p ? '' : (p === 'direct' ? 'direct' : 'custom');
@@ -1754,20 +1762,41 @@ $('#doAssemble').onclick = async () => {
 function renderProviders() {
   $('#provBox').innerHTML = BOOT.capabilities.map(c => {
     const has = BOOT.providers_configured[c.id];
+    // 保存过的值要回显。以前这里写死 c.default_base_url，
+    // 改过自定义端点的人再点一次保存就被默认值盖掉了，而且一声不吭。
+    const saved = (BOOT.providers_public || {})[c.id] || {};
     const blocks = ['image','video'].filter(k => c[k]).map(k =>
       `<div class="muted" style="margin-top:4px"><b>${k === 'image' ? '出图' : '出片'}</b>：
         ${(c[k].models||[]).slice(0,6).join(' / ')}${(c[k].models||[]).length>6?' …':''}<br>${c[k].notes||''}</div>`).join('');
+    // 出图出片是「提交任务 → 轮询结果」，超时是**等出片的总时长**，
+    // 和 LLM 那个超时完全是两回事。视频默认给 2400 秒：
+    // 29 秒的多镜头片子排队加生成，十几分钟很常见，
+    // 调小了会在快出来的时候把它判成失败，钱照花、东西没拿到。
+    const isVideo = !!c.video;
     return `<div class="card" style="background:var(--panel2);margin-bottom:10px">
       <h2>${c.name} <span class="pill ${has?'s-ok':''}">${has?'已配置':'未配置'}</span></h2>
       <div class="grid g2">
-        <div><label>Base URL</label><input data-pv="${c.id}" data-f="base_url" value="${c.default_base_url}"></div>
+        <div><label>Base URL</label><input data-pv="${c.id}" data-f="base_url" value="${esc(saved.base_url || c.default_base_url)}"></div>
         <div><label>API Key</label><input data-pv="${c.id}" data-f="api_key" type="password" placeholder="${has?'已保存，留空不改':'粘贴 key'}"></div>
+        <div><label>等出结果最多多久（秒）
+          <span class="muted">提交后轮询的总时长，不是连接超时</span></label>
+          <input data-pv="${c.id}" data-f="poll_timeout" type="number" min="60" max="7200" step="60"
+                 value="${saved.poll_timeout || (isVideo ? 2400 : 900)}"></div>
+        <div><label>每隔几秒查一次</label>
+          <input data-pv="${c.id}" data-f="poll_interval" type="number" min="2" max="60"
+                 value="${saved.poll_interval || (isVideo ? 10 : 5)}"></div>
       </div>${blocks}
       <div class="row" style="margin-top:8px"><button class="btn sm" data-save="${c.id}">保存</button></div></div>`;
   }).join('');
   $$('#provBox [data-save]').forEach(b => b.onclick = async () => {
     const id = b.dataset.save, obj = {};
-    $$(`#provBox [data-pv="${id}"]`).forEach(i => { if (i.value) obj[i.dataset.f] = i.value; });
+    // 数字字段要转成数字：存成字符串的话 int() 那边虽然能吃，
+    // 但 config.json 里会出现 "poll_timeout": "2400"，看着像手改坏的
+    const NUM = ['poll_timeout', 'poll_interval'];
+    $$(`#provBox [data-pv="${id}"]`).forEach(i => {
+      if (!i.value) return;
+      obj[i.dataset.f] = NUM.includes(i.dataset.f) ? +i.value : i.value;
+    });
     await api.post('/api/config', {providers: {[id]: obj}});
     BOOT = await api.get('/api/bootstrap'); renderProviders();
   });
@@ -1776,6 +1805,7 @@ $('#saveLlm').onclick = async () => {
   const mode = $('#llmProxyMode').value;
   const llm = {base_url: $('#llmBase').value, model: $('#llmModel').value,
                max_tokens: +$('#llmMaxTok').value || 16000,
+               timeout: +$('#llmTimeout').value || 900,
                proxy: mode === 'custom' ? $('#llmProxy').value.trim() : mode,
                stream: $('#llmStream').checked};
   if ($('#llmKey').value) llm.api_key = $('#llmKey').value;

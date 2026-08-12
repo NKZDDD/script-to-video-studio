@@ -282,7 +282,7 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
     if not c.get("api_key"):
         raise ValueError("LLM 未配置 api_key（在「分析引擎」页签保存）")
     return LLM(c["api_key"], c.get("base_url", "https://api.paisio.online"),
-               c.get("model", "claude-sonnet-5"), timeout=int(c.get("timeout", 900)),
+               c.get("model", "claude-sonnet-5"), timeout=_timeout(c.get("timeout")),
                proxy=c.get("proxy", ""), max_tokens=_max_tokens(c.get("max_tokens")),
                stream=c.get("stream", False) is True)
 
@@ -330,6 +330,34 @@ def params_of(cfg: dict, pj: Project, with_script: bool = True) -> dict:
             from core.store import read_text
             params["script"] = read_text(sp)
     return params
+
+
+def _timeout(v) -> int:
+    """LLM 超时。夹在 [60, 3600]。
+
+    太小的坏处很具体：环节1/3 要吃整本剧本，模型思考几分钟不吐字是正常的，
+    非流式下会被判成读超时，然后（更糟）当成网络抖动重试 ——
+    白等三轮，还可能让上游重复计费。
+    太大的坏处是卡死的请求要等一小时才放手。
+    """
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 900
+    return max(60, min(n, 3600))
+
+
+def _poll(v, lo: int, hi: int, default: int) -> int:
+    """出图出片的轮询参数。夹住范围。
+
+    等出结果的总时长调小了最坑：视频在快出来的时候被判成失败，
+    钱照花、东西没拿到，而且报错长得像服务商挂了。
+    """
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(n, hi))
 
 
 def _max_tokens(v) -> int:
@@ -381,6 +409,13 @@ def api_get(path: str, q: dict) -> dict:
                 },
                 "providers_configured": {k: bool(v.get("api_key"))
                                          for k, v in (cfg.get("providers") or {}).items()},
+                # 各家保存过的**非密钥**设置。以前只回一个「配了没」的布尔值，
+                # 于是页面上 base_url 永远显示默认值 —— 改过自定义端点的人
+                # 再点一次保存就被默认值盖掉了，而且一声不吭。
+                "providers_public": {
+                    k: {f: v[f] for f in ("base_url", "poll_timeout",
+                                          "poll_interval") if f in v}
+                    for k, v in (cfg.get("providers") or {}).items()},
                 "capabilities": list_capabilities(),
                 # 两套体系的环节表都下发，前端按项目的 system 挑一套显示。
                 # 不在这里挑：切项目不用重新拉一遍 bootstrap。
@@ -561,6 +596,10 @@ def api_post(path: str, body: dict) -> dict:
                 for pid, pv in v.items():
                     pv = {kk: vv for kk, vv in pv.items()
                           if not (kk in SECRET and not str(vv).strip())}
+                    if "poll_timeout" in pv:
+                        pv["poll_timeout"] = _poll(pv["poll_timeout"], 60, 7200, 900)
+                    if "poll_interval" in pv:
+                        pv["poll_interval"] = _poll(pv["poll_interval"], 2, 60, 5)
                     cur["providers"].setdefault(pid, {}).update(pv)
             elif isinstance(v, dict):
                 v = {kk: vv for kk, vv in v.items()
@@ -572,6 +611,8 @@ def api_post(path: str, body: dict) -> dict:
                 # 一直躺着个 999999，页面回显也是它，人会以为这个值是有效的。
                 if k == "llm" and "max_tokens" in v:
                     v["max_tokens"] = _max_tokens(v["max_tokens"])
+                if k == "llm" and "timeout" in v:
+                    v["timeout"] = _timeout(v["timeout"])
                 cur.setdefault(k, {}).update(v)
             else:
                 cur[k] = v
