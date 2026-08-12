@@ -377,5 +377,66 @@ class RunTests(unittest.TestCase):
                           "n7", "n8", "n9", "n10"})
 
 
+
+class EmptyScriptTests(unittest.TestCase):
+    """★ 剧本没进去的时候必须停，而且要说对是哪儿的问题。
+
+    真实故障：环节1 的提示词 3246 字，其中 3177 字是模板本身 ——
+    剧本压根没进去。模型照着空输入吐了 215 token 的空壳，
+    缺 `characters[]`，JSON 校验重试两次，三次调用全废。
+
+    最糟的不是白花钱，是**报错指错了方向**：诊断给的是
+    「拆剧本的模型没按格式回答 → 换个更强的模型 / 剧本太长先拆开」，
+    而真实情况正好相反。照那条建议换十个模型也一样。
+    """
+
+    def setUp(self):
+        self.pj = new_project()
+        self.llm = FakeLLM()
+
+    def tearDown(self):
+        shutil.rmtree(self.pj.root, ignore_errors=True)
+
+    def _params(self, script):
+        return dict(PARAMS, script=script)
+
+    def test_an_empty_script_stops_before_spending_anything(self):
+        with self.assertRaises(RuntimeError) as cm:
+            R.run_stage(self.pj, "n1", llm=self.llm, params=self._params(""),
+                        log=lambda *a, **k: None)
+        self.assertIn("剧本", str(cm.exception))
+        self.assertEqual(self.llm.sent, [], "已经把空提示词发出去了")
+
+    def test_a_whitespace_only_script_counts_as_empty(self):
+        for blank in ("   ", "\n\n\t", ""):
+            with self.assertRaises(RuntimeError):
+                R.run_stage(self.pj, "n1", llm=self.llm,
+                            params=self._params(blank), log=lambda *a, **k: None)
+
+    def test_the_message_does_not_send_people_to_swap_models(self):
+        """★ 这条报错的全部价值就是指对方向。"""
+        with self.assertRaises(RuntimeError) as cm:
+            R.run_stage(self.pj, "n1", llm=self.llm, params=self._params(""),
+                        log=lambda *a, **k: None)
+        msg = str(cm.exception)
+        self.assertIn("原始剧本.txt", msg)
+        from core import diagnose as D
+        self.assertEqual(D.code_of(msg), "SCRIPT_EMPTY")
+        entry = D.CATALOG["SCRIPT_EMPTY"]
+        self.assertTrue(any("不要" in f and "更强的模型" in f
+                            for f in entry["fix"]),
+                        "没写清「别去换模型」—— 那正是上次被误导的方向")
+
+    def test_stages_that_do_not_use_the_script_are_unaffected(self):
+        """只查真的用到 {{SCRIPT}} 的环节，别拦住不相干的。"""
+        self.assertTrue(R.needs_script("n1"))
+        self.assertTrue(R.needs_script("n3"))
+        for sid in ("n2", "n4", "n5", "n6", "n7"):
+            self.assertFalse(R.needs_script(sid), sid)
+        R.check_inputs(self.pj, "n2", self._params(""))     # 不该抛
+
+    def test_a_real_script_passes_the_check(self):
+        R.check_inputs(self.pj, "n1", self._params(SCRIPT))
+
 if __name__ == "__main__":
     unittest.main()

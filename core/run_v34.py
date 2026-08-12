@@ -277,6 +277,45 @@ def segments_of(pj: Project, episode: str) -> list:
     return [s for s in segs if s.get("seg_id")]
 
 
+def needs_script(stage_id: str, pj: Project = None) -> bool:
+    """这个环节的模板里有没有 {{SCRIPT}}。看模板本身，不写死一张表。
+
+    写死的话，有人在页面上给别的环节加了 {{SCRIPT}} 就查不到了。
+    """
+    tpl_name, _, _ = V.LLM_SPEC[stage_id]
+    return "{{SCRIPT}}" in load_prompt(tpl_name, pj)
+
+
+def check_inputs(pj: Project, stage_id: str, params: dict,
+                 episode: str = "") -> None:
+    """跑之前把这一步的输入验一遍，缺了就停，别拿空输入去调模型。
+
+    实跑撞过：剧本没进去，提示词只剩模板（3246 字里 3177 字是模板本身），
+    模型照着空输入吐了个 215 token 的骨架，缺 `characters[]`，
+    于是 JSON 校验重试两次、三次调用全废。
+
+    最糟的不是白花钱，是**报错指错了方向** —— 诊断给的是
+    「换个更强的模型 / 剧本太长先拆开」，而真实情况正好相反：剧本是空的。
+    照着那条建议去换模型，换十个也一样。
+
+    `missing_deps` 查的是上游产物，剧本是**唯一没人查的输入**，这里补齐。
+    """
+    if not needs_script(stage_id, pj):
+        return
+    script = _script_for(pj, stage_id, episode, params)
+    if script.strip():
+        return
+    where = "01_剧本与分段/原始剧本.txt" if V.scope_of(stage_id) == "series" \
+        else f"{episode} 这一集的正文"
+    raise RuntimeError(
+        f"{stage_id} 要用剧本，但拿到的是空的（{where}）。"
+        f"发出去的话提示词里只有模板、没有剧本，模型只能编一个空壳，"
+        f"然后卡在「输出缺少必需字段」上白花三次调用 —— "
+        f"而那个报错会让你以为是模型不行。"
+        f"去「项目」页确认剧本正文在不在；"
+        f"逐集环节的话看环节1 的切集结果有没有把这一集切空。")
+
+
 def missing_deps(pj: Project, stage_id: str, episode: str = "") -> list:
     """跑之前先看依赖齐没齐，返回还缺哪几个环节（给人看的名字）。"""
     _, deps, _ = V.LLM_SPEC[stage_id]
@@ -315,6 +354,7 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     miss = missing_deps(pj, stage_id, episode)
     if miss:
         raise RuntimeError(f"{stage_id} 的前置还没跑：{'、'.join(miss)}")
+    check_inputs(pj, stage_id, params, episode)
 
     user = build_user(pj, stage_id, params, episode)
     tag = f"{episode} " if episode else "全剧 "
