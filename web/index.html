@@ -242,6 +242,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <button class="btn" id="autoRun">开始 / 继续</button>
       <button class="btn ghost sm" id="autoStop" style="display:none">停下</button>
     </div>
+    <div class="muted" id="autoCapHint" style="margin-top:6px;line-height:1.7"></div>
     <div class="muted" id="autoRangeHint" style="margin-top:6px;line-height:1.7"></div>
     <div id="autoPlan" style="margin-top:8px"></div>
     <pre class="log" id="autoLog" style="max-height:220px;margin-top:8px;display:none"></pre>
@@ -608,6 +609,49 @@ function effectiveBlock(capability, blockName, model) {
   const modelOpt = ((base.model_options || {})[model]) || {};
   return {...base, ...modelOpt};
 }
+// 上面那三个下拉的选项是**跟着模型走**的，不是跟着服务商走。
+// 不显示来源的话会撞上一个很费解的情况：明明知道 seedance 2.5 能出 29 秒，
+// 下拉里却只有 15 —— 因为链上首选的是别的模型，而整家声明的上限就是 15。
+// （paisio 故意没把 29 写成整家通用值：切回旧模型时前端还允许选 29，
+//   要到付费请求发出去才收到 400。）
+function capHint(ch) {
+  const line = (kind, block, what) => {
+    const chain = ch[kind] || [];
+    if (!chain.length) return `<b>${what}</b>：这一类还没排服务商`;
+    const first = chain[0];
+    const c = BOOT.capabilities.find(x => x.id === first.provider);
+    const eff = effectiveBlock(c, block, first.model);
+    const name = (c && c.name) || first.provider;
+    let s = `<b>${what}</b>：${esc(name)}`;
+    if (first.model) s += ` / <code>${esc(first.model)}</code>`;
+    const d = eff.durations || [];
+    if (block === 'video' && d.length) {
+      s += `　最长 <b>${Math.max(...d.map(Number))}</b> 秒`;
+      // 链上还有别家时，秒数取交集 —— 后面那家给不了 29，29 就会被交掉。
+      // 这条不说清，人会以为是程序漏了。
+      const others = chain.slice(1).map(x => {
+        const cc = BOOT.capabilities.find(y => y.id === x.provider);
+        return (effectiveBlock(cc, block, x.model).durations || []).map(Number);
+      }).filter(l => l.length);
+      const inter = others.reduce((a, b) => a.filter(x => b.includes(x)),
+                                  d.map(Number));
+      if (others.length && inter.length < d.length)
+        s += `　<span style="color:#fbbf24">⚠ 链上还有 ${chain.length - 1} 家，`
+           + `秒数取交集后只剩到 ${inter.length ? Math.max(...inter) : '—'} 秒`
+           + `（要用长段就让这一类只排一家）</span>`;
+    }
+    const sz = eff.sizes || [];
+    if (block === 'image' && sz.length) s += `　${sz.length} 种尺寸`;
+    if (eff.max_refs) s += `　参考图上限 ${eff.max_refs} 张`;
+    if (eff.ref_mode === 'url') s += `　<span style="color:#fbbf24">`
+      + `（这个模型只收公网链接，得配好对象存储）</span>`;
+    return s;
+  };
+  return [line('asset', 'image', '出图'), line('video', 'video', '出片')]
+    .join('<br>')
+    + '<br><span class="muted">选项跟着<b>模型</b>变，不是跟着服务商 —— '
+    + '换模型回来这里就变了。</span>';
+}
 function paramChoices() {
   const cross = (kind, block, field) => {
     const chain = (BOOT.config.chains || {})[kind] || [];
@@ -847,6 +891,7 @@ function renderAuto() {
   $('#autoSize').innerHTML  = opt(capOf('asset','image').sizes || ['1024x1536'], d.image_size);
   $('#autoRatio').innerHTML = opt(capOf('video','video').ratios || ['9:16'], d.ratio);
   $('#autoDur').innerHTML   = opt(capOf('video','video').durations || [15], d.duration);
+  $('#autoCapHint').innerHTML = capHint(ch);
   const bad = CHAIN_KINDS.some(([k]) => !(ch[k] || []).length);
   $('#autoRun').disabled = bad;
   $('#autoRun').title = bad ? '先去「设置 → 出图出片优先级」把三类活各排一条队' : '';
