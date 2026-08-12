@@ -112,7 +112,12 @@ LLM_SPEC = {
         "characters[]", "characters[].character_id", "characters[].long_term_motive",
         "characters[].relationships", "characters[].arc",
         "characters[].physical_limits", "characters[].performance_boundary",
-        "world_rules[]", "cultural_rules[]",
+        "world_rules[]",
+        # cultural_rules 是**对象**不是数组（模板 schema 里就是一个 dict）。
+        # 写成 cultural_rules[] 的话 check_keys 要求「非空 list」，
+        # 模型照着 schema 答出一个 dict 就永远过不了 —— 重试两次然后失败，
+        # 报错还说「输出缺少必需字段」，让人以为是模型不听话。
+        "cultural_rules",
     ]),
     "n3": ("n3_narrative", ["n1_truth", "n2_rules"], [
         # scenes[].episode 是**必需**的：叙事结构改成全剧一次做之后，
@@ -131,7 +136,9 @@ LLM_SPEC = {
         "assets[].identity_anchors", "assets[].appearance",
         "assets[].output_spec", "assets[].dependency_order",
         "costume_contracts[]", "prop_specs[]", "prop_instances[]",
-        "production_order",
+        # 是数组。不标 [] 只要求「键存在」，模型给个空数组也算过 ——
+        # 而空的生产顺序等于没有依赖分层，出图会乱序。
+        "production_order[]",
     ]),
     "n4b": ("n4b_asset_prompts", ["n1_truth", "n4_assets"], [
         "asset_prompts[]", "asset_prompts[].asset_id",
@@ -154,7 +161,9 @@ LLM_SPEC = {
     ]),
     "n7": ("n7_directing", ["n3_narrative", "n2_rules", "n5_spatial", "n6_ledger"], [
         "scene_directing[]", "beat_directing[]",
-        "blocking[]", "blocking[].character_id", "blocking[].zone",
+        # 字段名要和模板 schema 里的**一模一样**：模板写的是 zone_id。
+        # 写成 zone 的话模型答对了也过不了。
+        "blocking[]", "blocking[].character_id", "blocking[].zone_id",
         "blocking[].anchor", "blocking[].root_xyz", "blocking[].body_orientation_yaw",
         "performance_intent[]",
     ]),
