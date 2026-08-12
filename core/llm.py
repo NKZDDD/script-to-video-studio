@@ -103,7 +103,20 @@ def extract_json(text: str) -> Any:
                 depth -= 1
                 if depth == 0:
                     return json.loads(text[start:i + 1])
-    raise LLMError("回复中未找到可解析的 JSON")
+    # 把模型实际回了什么带上。只说「没找到 JSON」等于什么都没说 ——
+    # 它到底是写了一段散文、拒答了、还是用了别的围栏，改法完全不同：
+    #   散文/解说   → 模板或 _common 里的「只输出 JSON」被改掉了
+    #   拒答/安全语 → 内容触发了审核，要改剧本措辞
+    #   围栏不对    → 模型习惯问题，提示词里加一句示例
+    # 不带原文的话，这三种在日志里长得一模一样。
+    body = (text or "").strip()
+    head = re.sub(r"\s+", " ", body[:200])
+    tail = re.sub(r"\s+", " ", body[-120:]) if len(body) > 320 else ""
+    raise LLMError(
+        f"回复中未找到可解析的 JSON。模型实际回了 {len(body)} 字，"
+        f"开头是：{head or '（空）'}"
+        + (f" …… 结尾是：{tail}" if tail else "")
+        + "。完整原文见项目里的 07_检查与记录/失败原文/")
 
 
 def check_keys(data: Any, required: list) -> list:

@@ -126,5 +126,50 @@ class LLMRetryLogTests(unittest.TestCase):
         self.assertIn("不是传输中断", "\n".join(logs))
 
 
+
+class UnparseableJsonTests(unittest.TestCase):
+    """★ 「回复中未找到可解析的 JSON」必须带上模型实际回了什么。
+
+    真跑撞到过：n1 输出 2700 字、38 秒答完，然后只报一句「没找到 JSON」。
+    那句话什么都没说 —— 模型到底是写了散文、拒答了、还是用了别的围栏，
+    三种情况在日志里长得一模一样，改法却完全不同：
+
+      散文/解说   → 模板或 _common 里的「只输出 JSON」被改掉了
+      拒答/安全语 → 内容触发审核，要改剧本措辞
+      围栏不对    → 提示词里加一句示例
+
+    不带原文就只能靠猜，而每猜一次是一整轮调用的钱。
+    """
+
+    def _err(self, text):
+        from core.llm import extract_json, LLMError
+        with self.assertRaises(LLMError) as cm:
+            extract_json(text)
+        return str(cm.exception)
+
+    def test_it_quotes_the_beginning_of_the_reply(self):
+        msg = self._err("好的，我来帮你分析这个剧本。首先这是一个都市情感故事…")
+        self.assertIn("我来帮你分析", msg)
+        self.assertIn("字", msg)
+
+    def test_it_says_how_long_the_reply_was(self):
+        self.assertIn("2000 字", self._err("啊" * 2000))
+
+    def test_a_long_reply_also_shows_the_end(self):
+        """结尾常常是关键：被截断的话尾部是半句话。"""
+        msg = self._err("头" * 200 + "中" * 200 + "尾巴在这里")
+        self.assertIn("尾巴在这里", msg)
+
+    def test_an_empty_reply_says_so_instead_of_showing_nothing(self):
+        self.assertIn("（空）", self._err("   \n\t "))
+
+    def test_it_points_at_the_saved_raw_output(self):
+        """截断的开头看不出全貌时，得知道去哪看完整的。"""
+        self.assertIn("失败原文", self._err("随便回一句"))
+
+    def test_newlines_do_not_break_the_one_line_log(self):
+        msg = self._err("第一行\n\n第二行\n第三行")
+        self.assertNotIn("\n", msg.split("开头是：")[1][:40])
+
 if __name__ == "__main__":
     unittest.main()
