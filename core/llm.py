@@ -72,37 +72,72 @@ def rough_tokens(text: str) -> int:
     return int(len(text or "") / CHARS_PER_TOKEN)
 
 
-def extract_json(text: str) -> Any:
-    """从 LLM 回复中提取 JSON：```json 围栏优先，其次首个 {..} / [..] 平衡块。"""
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if m:
-        return json.loads(m.group(1).strip())
-    # 平衡扫描
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        if start < 0:
+def _balanced(text: str, opener: str, closer: str):
+    """从第一个 opener 开始找配平的那一段。找不到返回 None（说明没写完）。"""
+    start = text.find(opener)
+    if start < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
             continue
-        depth = 0
-        in_str = False
-        esc = False
-        for i in range(start, len(text)):
-            ch = text[i]
-            if in_str:
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_str = False
-                continue
-            if ch == '"':
-                in_str = True
-            elif ch == opener:
-                depth += 1
-            elif ch == closer:
-                depth -= 1
-                if depth == 0:
-                    return json.loads(text[start:i + 1])
+        if ch == '"':
+            in_str = True
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def _truncated(body: str, n: int) -> "LLMFatal":
+    """输出写到一半断了。这和「格式不对」是两回事，报错必须分开。"""
+    tail = re.sub(r"\s+", " ", body[-120:])
+    return LLMFatal(
+        f"模型的输出**没写完**就断了：收到 {n} 字，JSON 一直没有闭合，"
+        f"最后停在「…{tail}」。\n"
+        f"这不是格式不对，也不是模型不听话 —— 是这一步的输出太大，"
+        f"在写到一半时被截断了。重试同一个提示词多半还是同样的结果。\n"
+        f"能试的几条：把「分析引擎」的流式关掉（部分中转站的长响应会被切断）；"
+        f"换一个输出上限更高的模型；或者先只跑一集（「只测第一集」），"
+        f"让这一步要产出的东西少一些。完整原文见项目里的 07_检查与记录/失败原文/。")
+
+
+def extract_json(text: str) -> Any:
+    """从 LLM 回复中提取 JSON：```json 围栏优先，其次首个 {..} / [..] 平衡块。
+
+    **截断要单独认出来。** 以前的写法在外层对象没配平时会「退而求其次」
+    去找第一个 `[`，于是把 JSON 里某个恰好完整的内层数组（比如 entities）
+    当成整个文档返回 —— 校验随后报「输出缺少必需字段」。
+    实跑就这么骗了一整轮：三次全是输出被截断，程序却报了两种不同的错，
+    指向「模型没按 schema 输出」这个完全错误的方向。
+    """
+    body = (text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", body)
+    if fenced:
+        return json.loads(fenced.group(1).strip())
+    # 开了围栏却没闭合 = 写到一半断了
+    if re.search(r"```(?:json)?\s", body):
+        raise _truncated(body, len(body))
+    if "{" in body:
+        blk = _balanced(body, "{", "}")
+        if blk is not None:
+            return json.loads(blk)
+        # 有 { 但配不平 —— 就是没写完。**不许**再去找 []，
+        # 那样会捞出一个内层数组冒充整个文档。
+        raise _truncated(body, len(body))
+    blk = _balanced(body, "[", "]")
+    if blk is not None:
+        return json.loads(blk)
     # 把模型实际回了什么带上。只说「没找到 JSON」等于什么都没说 ——
     # 它到底是写了一段散文、拒答了、还是用了别的围栏，改法完全不同：
     #   散文/解说   → 模板或 _common 里的「只输出 JSON」被改掉了
