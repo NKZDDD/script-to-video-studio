@@ -29,26 +29,36 @@ STAGES = [
     {"id": "n2", "no": 2, "name": "人物与世界规则", "kind": "llm",
      "scope": "series", "out": "n2_rules"},
 
-    # ---- 逐集：叙事层 ------------------------------------------------------
-    # 叙事结构是 skill 的第 3 章，但排在人物规则（第 4 章）后面：
-    # 拆场次和节拍要用到人物的长期动机，而且它按集拆 —— 40 集的 Scene/Beat
-    # 一次调用出不完，也没必要（场次不跨集）。id 顺序 = 执行顺序，不是章号顺序。
+    # ---- 全剧一次：叙事与视觉基座 ------------------------------------------
+    # 这一段原来是逐集的，V5.6 对照下来是错的。三条硬依据：
+    #   · 「维护**唯一** Continuity Ledger」（SKILL.md 第 8 节）
+    #   · 「LONG_TERM：**跨 Episode** 或长期存在」（references/03）
+    #   · 「按 Project → Episode → Scene → Beat 解析」（SKILL.md 第 3 节）
+    #
+    # 逐集做的实际后果：EP05 的账本对 EP01 一无所知 —— 主角在第 1 集留下的
+    # 永久伤疤，到第 5 集这本账里根本不存在。模板里写着「LONG_TERM 跨集持续」，
+    # 而接线交付不了。
+    #
+    # 还有一层：跨集连续性和**逐集并发**天然冲突。要求 EP05 看得到 EP01 的账，
+    # 但四集是并排跑的。把全剧级的东西全部前移，逐集层就不再有共享状态，
+    # 并发才是安全的 —— 这也是资产提示词重复编写那个坑的根源。
     {"id": "n3", "no": 3, "name": "叙事结构（场次与节拍）", "kind": "llm",
-     "scope": "episode", "out": "n3_narrative"},
-
-    # ---- 逐集：视觉与状态层 ------------------------------------------------
+     "scope": "series", "out": "n3_narrative"},
     {"id": "n4", "no": 4, "name": "资产系统", "kind": "llm",
-     "scope": "episode", "out": "n4_assets"},
+     "scope": "series", "out": "n4_assets"},
     # n4 只产出资产表（外观、锚点、依赖），不产出能直接投喂出图模型的正文。
-    # 单独一个环节而不是让 n4 顺手写，是因为资产库全剧共享：提示词一个资产
-    # 只写一次，EP02 不该把 EP01 已经写过的重写一遍 —— 白花钱，还会越写越飘。
+    # 分成两个环节：资产表要全剧一次定完（同一个角色只出一张图），
+    # 提示词正文另算 —— 两件事的输出量差一个量级，合在一起一次答不完。
     {"id": "n4b", "no": 4, "name": "资产生产提示词编译", "kind": "llm",
-     "scope": "episode", "out": "n4b_asset_prompts"},
-
+     "scope": "series", "out": "n4b_asset_prompts"},
     {"id": "n5", "no": 5, "name": "空间主表", "kind": "llm",
-     "scope": "episode", "out": "n5_spatial"},
+     "scope": "series", "out": "n5_spatial"},
     {"id": "n6", "no": 6, "name": "连续性总账", "kind": "llm",
-     "scope": "episode", "out": "n6_ledger"},
+     "scope": "series", "out": "n6_ledger"},
+
+    # ---- 逐集：导演与镜头层 ------------------------------------------------
+    # 从这里开始才逐集。Scene/Beat 归哪一集是上面 n3 定的，
+    # 这一层只做「把本集的场次变成走位、状态、镜头」，集与集之间不共享状态。
     {"id": "n7", "no": 7, "name": "导演设计", "kind": "llm",
      "scope": "episode", "out": "n7_directing"},
     {"id": "n8", "no": 8, "name": "标准视觉状态与视觉过渡", "kind": "llm",
@@ -105,7 +115,11 @@ LLM_SPEC = {
         "world_rules[]", "cultural_rules[]",
     ]),
     "n3": ("n3_narrative", ["n1_truth", "n2_rules"], [
-        "scenes[]", "scenes[].scene_id", "scenes[].objective", "scenes[].turn",
+        # scenes[].episode 是**必需**的：叙事结构改成全剧一次做之后，
+        # 逐集环节靠它挑出「本集该做哪几场」。缺了的话 n7 拿到全剧的场次，
+        # 会把别的集的戏排进这一集 —— 而且不报错。
+        "scenes[]", "scenes[].scene_id", "scenes[].episode",
+        "scenes[].objective", "scenes[].turn",
         "scenes[].outcome", "scenes[].entry_state", "scenes[].exit_state",
         "beats[]", "beats[].beat_id", "beats[].meaningful_change",
         "beats[].change_kind", "beats[].state_delta", "beats[].shot_need",
@@ -182,10 +196,13 @@ LLM_SPEC = {
     ]),
 }
 
-# 逐段跑的环节：一段一次调用，一段失败不毒掉整集。
-SEGMENT_STAGES = {"n11", "n12", "n13"}
-# 全剧只跑一次的环节。
-SERIES_STAGES = {"n1", "n2"}
+# 这两个集合**从环节表推导**，不再手写。
+# 手写的话它和 STAGES 是两处真相，改范围时必然漏一个 ——
+# 漏掉的后果是产物存到错的目录，下游取到空字典然后自己编，全程不报错。
+SEGMENT_STAGES = {s["id"] for s in STAGES
+                  if s["kind"] == "llm" and s["scope"] == "segment"}
+SERIES_STAGES = {s["id"] for s in STAGES
+                 if s["kind"] == "llm" and s["scope"] == "series"}
 
 # 出图出片各步消费 tasks.json 里的哪个键，以及排在谁后面。
 PRODUCE_ORDER = ["p1", "p2", "p3", "p4"]

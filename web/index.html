@@ -258,6 +258,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
   </div>
   <div class="card" id="healthCard">
     <h2>项目进度与续跑 <span class="tag">以磁盘为准，重启服务也不丢</span></h2>
+    <div id="migrateTip" class="alert err" style="margin-bottom:12px;display:none"></div>
     <div id="healthTip" class="alert warn" style="margin-bottom:12px">加载中…</div>
     <div id="healthSteps"></div>
     <div id="healthFails" style="margin-top:12px"></div>
@@ -715,6 +716,29 @@ async function refreshProject() {
   renderTasks(true).catch(() => {});      // 任务明细读磁盘，随时可看
   ppFillStages();                         // 提示词预览的环节/集下拉
   renderGates().catch(() => {});          // 闸门状态。不在这刷就只有点过「开始」才看得见
+  renderMigrate(d.need_migrate || []);
+}
+
+// 老 v34 项目的叙事结构/资产/空间/总账停在集目录里。不迁的话程序去项目根
+// 找不到，会判成「还没跑」然后把已经花过钱的环节重跑一遍。
+// 只提示不自动迁：迁移会动产物。
+function renderMigrate(need) {
+  const box = $('#migrateTip');
+  if (!need.length) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  box.innerHTML = '这个项目是按旧的分层跑的，有 <b>' + need.length
+    + '</b> 份产物还停在各集目录里（' + need.map(esc).join('、') + '）。<br>'
+    + '新版把它们改成了<b>全剧一份</b>（连续性总账必须全剧唯一，'
+    + '否则第 5 集看不到第 1 集留下的永久状态）。<br>'
+    + '<b>不迁移的话，程序会把这几个环节判成「还没跑」，重跑一遍花第二份钱。</b>'
+    + '<div style="margin-top:8px"><button class="btn ghost sm" id="doMigrate">'
+    + '合并搬到全剧层（老文件留 .bak）</button></div>';
+  $('#doMigrate').onclick = async () => {
+    const r = await api.post('/api/project/migrate_v56', {project_root: PROJ});
+    if (r.error) return alert(r.error);
+    alert('迁好了：\n' + (r.log || []).join('\n') + '\n\n' + (r.note || ''));
+    openProject(PROJ);
+  };
 }
 
 // ---------- 集清单

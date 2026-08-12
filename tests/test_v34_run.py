@@ -93,11 +93,21 @@ _FIXTURES = {
                            "relationships": [], "arc": "a",
                            "physical_limits": [], "performance_boundary": "b"}],
            "world_rules": [], "cultural_rules": {}},
-    "n3": {"scenes": [{"scene_id": "SC01", "objective": "o", "turn": "t",
-                       "outcome": "r", "entry_state": "e", "exit_state": "x"}],
-           "beats": [{"beat_id": "SC01-B1", "meaningful_change": "c",
-                      "change_kind": "knowledge", "state_delta": "d",
-                      "shot_need": "n"}]},
+    # 叙事结构现在是全剧一次做完的，所以假产物也要横跨两集 ——
+    # 只给一集的话，「裁成本集」那条测试永远是绿的（裁不裁都一样）。
+    "n3": {"scope": "full_series",
+           "scenes": [{"scene_id": "SC01", "episode": "EP01", "objective": "o",
+                       "turn": "t", "outcome": "r", "entry_state": "e",
+                       "exit_state": "x"},
+                      {"scene_id": "SC02", "episode": "EP02", "objective": "o",
+                       "turn": "t", "outcome": "r", "entry_state": "e",
+                       "exit_state": "x"}],
+           "beats": [{"beat_id": "SC01-B1", "scene_id": "SC01",
+                      "meaningful_change": "c", "change_kind": "knowledge",
+                      "state_delta": "d", "shot_need": "n"},
+                     {"beat_id": "SC02-B1", "scene_id": "SC02",
+                      "meaningful_change": "c", "change_kind": "knowledge",
+                      "state_delta": "d", "shot_need": "n"}]},
     "n4": {"assets": [{"asset_id": "C001", "family": "CHAR", "name": "甲",
                        "decision": "must", "decision_reason": "r",
                        "parent_asset_id": "", "reference_assets": [],
@@ -172,9 +182,11 @@ class RunTests(unittest.TestCase):
 
     def _run_series_and_episode(self, ep):
         quiet = lambda *a, **k: None
-        for sid in ("n1", "n2"):
+        # 全剧层：叙事结构、资产、空间、总账都在这里一次做完
+        for sid in ("n1", "n2", "n3", "n4", "n4b", "n5", "n6"):
             R.run_stage(self.pj, sid, llm=self.llm, params=PARAMS, log=quiet)
-        for sid in ("n3", "n4", "n5", "n6", "n7", "n8", "n9", "n10"):
+        # 逐集层：从导演设计开始才分集
+        for sid in ("n7", "n8", "n9", "n10"):
             R.run_stage(self.pj, sid, llm=self.llm, params=PARAMS,
                         episode=ep, log=quiet)
 
@@ -186,9 +198,13 @@ class RunTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(self.pj.stage_path("n1_truth")),
                         "全剧级产物没落在项目根")
         self.assertFalse(os.path.isfile(self.pj.stage_path("n1_truth", EP1)))
-        self.assertTrue(os.path.isfile(self.pj.stage_path("n4_assets", EP1)),
+        # 资产表、空间主表、连续性总账都改成全剧一份了（V5.6：唯一 Ledger）
+        self.assertTrue(os.path.isfile(self.pj.stage_path("n4_assets")),
+                        "资产表没落在项目根 —— 它是全剧一份的")
+        self.assertFalse(os.path.isfile(self.pj.stage_path("n4_assets", EP1)))
+        self.assertTrue(os.path.isfile(self.pj.stage_path("n7_directing", EP1)),
                         "逐集产物没落在集目录")
-        self.assertFalse(os.path.isfile(self.pj.stage_path("n4_assets")))
+        self.assertFalse(os.path.isfile(self.pj.stage_path("n7_directing")))
 
     def test_episode_split_happens_right_after_n1(self):
         R.run_stage(self.pj, "n1", llm=self.llm, params=PARAMS, log=lambda *a: None)
@@ -215,16 +231,22 @@ class RunTests(unittest.TestCase):
 
     # ---------------------------------------------------------------- 提示词
 
-    def test_per_episode_stage_only_gets_its_own_script(self):
-        """★ 逐集环节发全剧剧本 = 40 集发 40 遍，且会拿别集情节填这一集。"""
+    def test_per_episode_stage_only_gets_its_own_episode(self):
+        """★ 逐集环节拿到全剧产物时必须裁成本集。
+
+        叙事结构改成全剧一份之后，n7 收到的是**全剧的场次**。
+        不裁的话它会把别的集的戏排进这一集 —— 而且不报错。
+        """
         self._run_series_and_episode(EP2)
-        user = self.llm.user_for("n3")
-        # 只看【本集正文】那一段。别处出现别集的字样是正常的 ——
-        # {{TRUTH}} 里带着每集的切集锚点，那是一行标题不是正文。
-        body = user.split("【本集正文】")[-1]
-        self.assertIn("甲在雨里跌倒", body)
-        self.assertNotIn("甲走进病房", body, "把别的集的正文也发过去了")
-        self.assertLess(len(body), len(SCRIPT), "正文段落比整部剧本还长")
+        # 直接看裁剪函数：在提示词正文里 parse JSON 太脆，
+        # 一个大括号位置变了断言就碎，测的也不是真正想钉的东西。
+        whole = self.pj.stage_data("n3_narrative", "")
+        got = R._narrow_episode("n3_narrative", whole, EP2)
+        eps = {s.get("episode") for s in got.get("scenes", [])}
+        self.assertEqual(eps, {EP2},
+                         f"本集的导演设计会收到别的集的场次：{eps}")
+        self.assertTrue(whole.get("scenes"), "假模型没产出场次，这条测了个寂寞")
+        self.assertLess(len(got["scenes"]), len(whole["scenes"]), "根本没裁")
 
     def test_series_stage_gets_the_whole_script(self):
         R.run_stage(self.pj, "n1", llm=self.llm, params=PARAMS, log=lambda *a: None)
@@ -347,9 +369,12 @@ class RunTests(unittest.TestCase):
         from core import ledger
         self._run_series_and_episode(EP1)
         rows = [r for r in ledger.load(self.pj.root) if r.get("kind") == "llm"]
-        self.assertEqual(len(rows), 10, "10 次调用应该有 10 条账")
+        self.assertEqual(
+            len(rows), 11,
+            "11 次调用应该有 11 条账 —— 全剧层 7 次 + 逐集层 4 次")
         self.assertEqual({r["stage"] for r in rows},
-                         {"n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9", "n10"})
+                         {"n1", "n2", "n3", "n4", "n4b", "n5", "n6",
+                          "n7", "n8", "n9", "n10"})
 
 
 if __name__ == "__main__":

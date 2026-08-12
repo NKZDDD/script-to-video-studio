@@ -33,8 +33,10 @@ class GraphTests(unittest.TestCase):
         而且跨集不变。叙事结构（n3）虽然是 skill 的第 3 章，但它按集拆：
         40 集的 Scene/Beat 一次调用出不完，场次也不跨集。
         """
-        self.assertEqual(V.SERIES_STAGES, {"n1", "n2"})
-        self.assertEqual(V.scope_of("n3"), "episode")
+        self.assertEqual(V.SERIES_STAGES,
+                         {"n1", "n2", "n3", "n4", "n4b", "n5", "n6"})
+        self.assertEqual(V.scope_of("n3"), "series")
+        self.assertEqual(V.scope_of("n7"), "episode")
         self.assertEqual(V.SEGMENT_STAGES, {"n11", "n12", "n13"})
         for sid in V.SERIES_STAGES:
             self.assertEqual(V.scope_of(sid), "series", sid)

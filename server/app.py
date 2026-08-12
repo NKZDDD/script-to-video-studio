@@ -418,8 +418,17 @@ def api_get(path: str, q: dict) -> dict:
                 # 逐集环节看的是「这一集做了没」；不指定集时看第一集，只为渲染流程图
                 sub = "" if st["id"] in S.SERIES_STAGES else (ep or (episodes.ids(pj) or [""])[0])
                 stage_state[st["id"]] = os.path.isfile(pj.stage_path(st["out"], sub))
+        # 老 v34 项目的叙事结构/资产/空间/总账停在集目录里。V5.6 对照下来
+        # 这几份该是全剧一份的，程序现在去项目根找 —— 找不到会判成
+        # 「还没跑」然后把已经花过钱的七个环节重跑一遍。
+        # 只**发现**不自动迁：迁移会动产物，得让人点一下。
+        need_migrate = []
+        if system_of(pj) == "v34":
+            from core import migrate_v56
+            need_migrate = migrate_v56.pending(pj)
         return {"meta": pj.meta(), "tasks_summary": done, "stages_done": stage_state,
-                "root": pj.root, "episodes": episodes.summary(pj), "episode": ep}
+                "root": pj.root, "episodes": episodes.summary(pj), "episode": ep,
+                "need_migrate": need_migrate}
 
     if path == "/api/episodes":
         """集清单：环节1 切出来的结果，含每集字数和切分时的问题。"""
@@ -847,6 +856,19 @@ def api_post(path: str, body: dict) -> dict:
         from core.store import write_text
         write_text(pj.p("01_剧本与分段", "原始剧本.txt"), script)
         return {"ok": True, "root": root, "chars": len(script)}
+
+    if path == "/api/project/migrate_v56":
+        """把老 v34 项目的五份产物从集目录合并搬到项目根。
+
+        不迁的话程序去项目根找不到，判成「还没跑」，
+        然后把已经花过钱的七个环节重跑一遍。
+        老文件改名成 .bak 留着 —— 迁错了还能拿回来。
+        """
+        pj = proj_of(body)
+        from core import migrate_v56
+        lines = []
+        r = migrate_v56.run(pj, log=lines.append)
+        return {**r, "log": lines}
 
     if path == "/api/project/script":
         """给已存在的项目更新剧本正文。"""

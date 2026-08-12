@@ -87,6 +87,21 @@ def _assets_stage(pj: Project) -> str:
     return "n4_assets" if system_of(pj) == "v34" else "s4_assets"
 
 
+def _scope_keys(pj: Project, stage_out: str) -> list:
+    """这份产物存在哪几个 episode 键下面。
+
+    V3.4 里资产表和资产提示词是**全剧一份**的，存在项目根下（键是 ""）；
+    V6.1 里是逐集的。按集去读全剧级产物，结果是**一条都读不到而且不报错** ——
+    资产库空着，人会以为是没跑成。
+    """
+    if system_of(pj) == "v34":
+        from . import system_v34 as V
+        src = next((s for s in V.STAGES if s.get("out") == stage_out), None)
+        if src and src.get("scope") == "series":
+            return [""]
+    return _eps.ids(pj) or [""]
+
+
 # V3.4 用 family 分资产（CHAR/LOOK/CT/PROP_SPEC…），比 V6.1 的五类细。
 # 归到同一套显示分类里，资产库的分组和排序就不用分两套写。
 # 不映射的话 by_category 会是空的 —— 资产在列表里有，分组全没了。
@@ -117,7 +132,7 @@ def _merged_assets(pj: Project) -> tuple:
     """全剧资产表：按集顺序累加，先出现的定义优先（和 build_tasks 同一套规则）。"""
     order, amap, by_ep = [], {}, {}
     stage = _assets_stage(pj)
-    for ep in _eps.ids(pj) or [""]:
+    for ep in _scope_keys(pj, stage):
         for a in (pj.stage_data(stage, ep) or {}).get("assets", []):
             aid = a.get("asset_id")
             if not aid:
@@ -137,8 +152,8 @@ def assets(pj: Project) -> dict:
     order, amap, by_ep = _merged_assets(pj)
     tasks = {t["key"]: t for t in (pj.tasks().get("asset_tasks") or [])}
     prompts = {}
-    for ep in _eps.ids(pj) or [""]:
-        pstage = "n4b_asset_prompts" if system_of(pj) == "v34" else "s5_asset_prompts"
+    pstage = "n4b_asset_prompts" if system_of(pj) == "v34" else "s5_asset_prompts"
+    for ep in _scope_keys(pj, pstage):
         for ap in (pj.stage_data(pstage, ep) or {}).get("asset_prompts", []):
             prompts.setdefault(ap.get("asset_id"), ap)
     reg = {r.get("id"): r for r in pj.registry("asset")}

@@ -1,10 +1,18 @@
 # 第四环节｜资产系统
 
-> **本次只处理 {{EPISODE}} 这一集。** 但**资产库是全剧共享的** ——
-> 下面【已有资产】列出前面几集建好的，同一个对象**必须沿用原编号**。
-> 换了编号就会另出一张脸，这是整套流程最不能出的错。
+> **一次建全剧的资产表。** 资产库全剧共享：同一个对象**只有一个编号、
+> 只出一张图**，跨集人脸才一致。
+>
+> 全剧一次建，是因为一个角色的造型演进（Clean LOOK → 受伤 CT → 康复）
+> 跨集展开。按集分开建，每一集只看得到自己那一段，
+> 建出来的就是几套互不相干的编号。
+>
+> **但不要提前物化所有未来资产**：每条资产写清它**首次出现在哪一集**
+> （`first_episode`）和被哪些段用到（`used_by_segs`）。
+> 只生产 EP01 时，后面几集的资产登记为蓝图、不出图 ——
+> 避免资产爆炸、未来剧透和无效返工。
 
-建立这一集需要的全部视觉资产，并判断哪些真的要出图。本环节**不排镜头、
+建立全剧需要的全部视觉资产，并判断哪些真的要出图。本环节**不排镜头、
 不决定站位**（那是第七环节），也**不生成图片**。
 
 ## 一、资产家族与依赖拓扑
@@ -123,15 +131,16 @@ CT 的规矩：**当前状态优先于干净状态**。有伤就不许退回没�
 
 ```json
 {
-  "episode": "{{EPISODE}}",
+  "scope": "full_series",
   "assets": [
     {"asset_id": "C001",
      "family": "CHAR|PH|COST|LOOK|CT|LOC|PROP_SPEC|PROP_INSTANCE|PROP_SET|VEH|CRE|GRP|VFX",
      "name": "",
      "decision": "must|conditional|skip",
      "decision_reason": "",
-     "first_seg": "{{EPISODE}}-SEG01",
-     "used_by_segs": ["{{EPISODE}}-SEG01"],
+     "first_episode": "EP01",
+     "first_seg": "EP01-SEG01",
+     "used_by_segs": ["EP01-SEG01", "EP03-SEG02"],
      "parent_asset_id": "状态类填父资产；父资产填空",
      "reference_assets": ["父资产排第一，再加画面里必然出现的其它已建资产"],
      "identity_anchors": "绝对不能变的特征",
@@ -172,7 +181,7 @@ CT 的规矩：**当前状态优先于干净状态**。有伤就不许退回没�
   "dynamic_elements": [{"name": "", "reason": "为什么不单独生产"}],
   "skipped": [{"name": "", "reason": ""}],
   "production_order": ["按 dependency_order 排好的 asset_id 序列"],
-  "reuse_note": "这一集沿用了前面哪些集的哪些资产"
+  "blueprint_note": "哪些资产是后面几集才首次出现的 —— 登记为蓝图，只生产 EP01 时不出这些图"
 }
 ```
 
@@ -187,5 +196,5 @@ CT 的规矩：**当前状态优先于干净状态**。有伤就不许退回没�
 【人物与世界规则（第二环节）】
 {{RULES}}
 
-【本集叙事结构（第三环节）】
+【全剧叙事结构（第三环节）】
 {{NARRATIVE}}

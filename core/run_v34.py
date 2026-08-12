@@ -47,12 +47,8 @@ def deps_data(pj: Project, stage_id: str, episode: str = "") -> dict:
 
 
 def mapping(pj: Project, stage_id: str, params: dict, data: dict,
-            episode: str = "", segment: str = "", claim: bool = False) -> dict:
-    """模板里 {{X}} 各填什么。真跑和预览共用这一个，分开写迟早飘。
-
-    claim 只在**真跑**时为 True：第四环节下要把这一集写的资产认领下来，
-    别的集就不会重复写。预览必须是 False —— 看一眼不该改变下一次真跑的结果。
-    """
+            episode: str = "", segment: str = "") -> dict:
+    """模板里 {{X}} 各填什么。真跑和预览共用这一个，分开写迟早飘。"""
     m = {
         # 项目参数只发白名单里的几项。以前是「除了剧本全发」，结果配置里
         # 删掉的旧旋钮还留在 config.json 里照样发过去，模型当成指令执行。
@@ -71,35 +67,62 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         "REF_LIMIT": _ref_limit_block(params),
     }
     for out_name, obj in data.items():
+        # 三层裁剪，各管一件事：
+        #   按集   全剧级产物 → 只剩本集（叙事结构、总账）
+        #   按段   逐集产物   → 只剩本段（装箱、场景状态图、故事板）
+        #   按用途 这个环节真正要哪几部分（PRODUCT_NEEDS）
+        if V.scope_of(stage_id) != "series":
+            obj = _narrow_episode(out_name, obj, episode)
         if segment:
             obj = _narrow(out_name, obj, segment)
         # 逐段裁剪之后再按环节投影：两件事都是「只发这一步真正要的」，
         # 但一个按段切、一个按用途切，顺序无所谓，都做才完整。
         obj = project_product(stage_id, out_name, obj)
-        if stage_id == "n4b" and out_name == "n4_assets":
-            obj = _n4b_worklist(pj, episode, obj, claim)
         m[V.placeholder_of(out_name)] = jd(obj)
     return m
 
 
-def _n4b_worklist(pj: Project, episode: str, obj: dict, claim: bool) -> dict:
-    """第四环节下的【待写清单】：只留这一集真正要写的资产。
+# 全剧级产物里，哪些数组是按集标了号的。逐集环节拿到之后要裁成只剩本集。
+#
+# 叙事结构、连续性总账这些改成全剧一份之后，逐集环节收到的是**全剧全量**。
+# 不裁两个后果，都不报错：
+#   · n7 导演拿到全剧的场次，会把别的集的戏排进这一集
+#   · 40 集的总账发 40 遍，钱按集翻倍
+# 空间主表和资产表**不裁** —— 它们本来就是全剧共享的参照，
+# 裁掉会让跨集复用的地点和角色在本集"消失"，模型于是重新发明一个。
+_EP_INDEXED = {
+    "n3_narrative": [("scenes", "episode"), ("beats", "episode"),
+                     ("episode_arcs", "episode")],
+    "n6_ledger": [("ledger", "episode")],
+}
 
-    资产提示词是**全剧共用一份**的（同一个角色只出一张图，跨集人脸才一致），
-    但写它的环节是逐集的。不过滤的话，一个贯穿全剧的主角会在 40 集里
-    被重写 40 遍 —— build_tasks 只留第一份，另外 39 次调用纯属白花；
-    更糟的是 C001_PROMPT.txt 是全剧一个文件名，内容变成最后写的那一份，
-    而任务挑的是第一份的参考图顺序，Image 编号就和上传顺序对不上了。
 
-    模板里那句「只剩还没写过提示词的」原本是**假的** —— 过滤函数写了，
-    但没接到填占位符这一步上。这里补上。
+def _narrow_episode(out_name: str, obj: dict, episode: str) -> dict:
+    """把全剧级产物裁成只剩这一集的部分。
+
+    只裁**明确标了集号**的那几个数组。标了集号才裁得准；
+    没标的一律整份留着（宁可多发，也别悄悄少给下游一段上下文）。
     """
-    if not isinstance(obj, dict):
+    if out_name not in _EP_INDEXED or not isinstance(obj, dict) or not episode:
         return obj
-    todo, skipped = assets_to_write(pj, episode, claim=claim)
-    return dict(obj, assets=todo,
-                already_written_do_not_rewrite=[
-                    a.get("asset_id") for a in skipped if a.get("asset_id")])
+    out = dict(obj)
+    for key, field in _EP_INDEXED[out_name]:
+        rows = obj.get(key)
+        if not isinstance(rows, list):
+            continue
+        mine = [r for r in rows if isinstance(r, dict) and r.get(field) == episode]
+        # 一条都没标集号时不裁：那是模型没按 schema 写，
+        # 裁完会得到空数组，下游看到"这一集没有任何场次"然后自己编。
+        if mine or any(isinstance(r, dict) and r.get(field) for r in rows):
+            out[key] = mine
+    # beats 按 scene 归属，scene 已经裁过了，再按 scene_id 收一次更准
+    if out_name == "n3_narrative":
+        ids = {s.get("scene_id") for s in out.get("scenes") or []}
+        beats = obj.get("beats")
+        if ids and isinstance(beats, list):
+            out["beats"] = [b for b in beats
+                            if isinstance(b, dict) and b.get("scene_id") in ids]
+    return out
 
 
 # 逐段产物里，哪个数组按段索引、用哪个键认段号。
@@ -270,12 +293,12 @@ def missing_deps(pj: Project, stage_id: str, episode: str = "") -> list:
 # ---------------------------------------------------------------- 跑一个环节
 
 def build_user(pj: Project, stage_id: str, params: dict,
-               episode: str = "", segment: str = "", claim: bool = False) -> str:
+               episode: str = "", segment: str = "") -> str:
     """这个环节这一次实际会发出去的正文。"""
     tpl_name, _, _ = V.LLM_SPEC[stage_id]
     data = deps_data(pj, stage_id, episode)
     text = render(load_prompt(tpl_name, pj),
-                  mapping(pj, stage_id, params, data, episode, segment, claim))
+                  mapping(pj, stage_id, params, data, episode, segment))
     if segment:
         text += (f"\n\n【只做这一段】{segment}，"
                  f"输出数组里只放这一段，不要带上别的段。")
@@ -293,7 +316,7 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     if miss:
         raise RuntimeError(f"{stage_id} 的前置还没跑：{'、'.join(miss)}")
 
-    user = build_user(pj, stage_id, params, episode, claim=True)
+    user = build_user(pj, stage_id, params, episode)
     tag = f"{episode} " if episode else "全剧 "
     log(f"{tag}{stage_id} 提示词 {len(user)} 字，调 {llm.model}")
     saved = trim_saving(pj, stage_id, episode)
@@ -585,82 +608,11 @@ def preview_prompt(pj: Project, stage_id: str, params: dict,
 
 # ---------------------------------------------------------------- 跨集共享资产
 
-def known_asset_ids(pj: Project, upto_episode: str = "") -> set:
-    """前面几集已经写过提示词的资产。
-
-    资产库全剧共享：同一个角色只出一张图，跨集人脸才一致。所以第二集起
-    只写「本集新出现的」—— 不过滤的话 40 集会把同一个角色的提示词重写 40 遍，
-    白花钱，而且每次重写都可能写飘一点。
-    """
-    ids = set()
-    for ep in _eps.ids(pj):
-        if upto_episode and ep == upto_episode:
-            break
-        for ap in (pj.stage_data("n4b_asset_prompts", ep) or {}).get("asset_prompts", []):
-            if ap.get("asset_id"):
-                ids.add(ap["asset_id"])
-    return ids
-
-
-# 资产认领表的路径和锁。
-# 为什么需要它：资产库是**全剧共享**的（同一个角色只出一张图，跨集人脸才一致），
-# 但写资产提示词的 n4b 是**逐集**环节，而逐集环节默认 4 集并发。
-# 原来靠「读前面几集已经写过哪些」来决定这一集写什么 —— 并发下那几集
-# 可能一个都还没写完，三集同时看到「C001 还没人写」，于是各写一遍：
-#   · 三次 LLM 调用只有一次算数（build_tasks 按 asset_id 去重）
-#   · C001_PROMPT.txt 是全剧一个文件名，内容是最后写的那一集的，
-#     而任务挑的是先出现那一集的参考图顺序 —— Image 编号和上传顺序对不上
-# 所以认领必须是一次原子动作：谁先认到谁写，别人跳过。
-_CLAIM_REL = ("07_检查与记录", "资产认领.json")
-_CLAIM_LOCK = threading.Lock()
-
-
-def _claims(pj: Project) -> dict:
-    from .store import read_json
-    return read_json(pj.p(*_CLAIM_REL), {}) or {}
-
-
-def claim_assets(pj: Project, episode: str, asset_ids: list) -> list:
-    """认领这一集要写的资产，返回**真正归这一集写**的那些。
-
-    进程内用锁 + 锁内重读文件：同一个 job 里的多集并发是我们自己起的线程，
-    锁够用；跨进程同时跑同一个项目本来就会互相覆盖产物，不是这里要解决的。
-    """
-    from .store import write_json
-    with _CLAIM_LOCK:
-        cur = _claims(pj)
-        mine = [a for a in asset_ids if a not in cur]
-        if mine:
-            cur.update({a: episode for a in mine})
-            os.makedirs(pj.p(_CLAIM_REL[0]), exist_ok=True)
-            write_json(pj.p(*_CLAIM_REL), cur)
-        return mine
-
-
-def assets_to_write(pj: Project, episode: str, claim: bool = False) -> tuple:
-    """这一集要写提示词的资产，和跳过的。喂给 n4b 的【待写清单】。
-
-    claim=True 时顺便把它们认领下来（真跑用）。预览不认领 ——
-    看一眼不该改变下一次真跑的结果。
-    """
-    assets = (pj.stage_data("n4_assets", episode) or {}).get("assets", [])
-    done = known_asset_ids(pj, episode)
-    # 已经被别的集认领走的，这一集不写。认领表是权威；
-    # known_asset_ids 只是兜底（老项目没有认领表）。
-    owned = {a: ep for a, ep in _claims(pj).items() if ep != episode}
-    todo, skipped = [], []
-    for a in assets:
-        if a.get("decision") == "skip":
-            continue
-        aid = a.get("asset_id")
-        (skipped if (aid in done or aid in owned) else todo).append(a)
-    if claim and todo:
-        mine = set(claim_assets(pj, episode, [a["asset_id"] for a in todo]))
-        todo, lost = [a for a in todo if a["asset_id"] in mine], \
-                     [a for a in todo if a["asset_id"] not in mine]
-        skipped += lost
-    return todo, skipped
-
+# 注：这里原来有一整套「跨集资产去重」—— known_asset_ids / assets_to_write /
+# 资产认领表 / 进程锁。资产表和资产提示词改成全剧级之后**全部不需要了**：
+# 一张表、一遍提示词，同一个角色天然只有一份定义。
+# 它防的三个坑（重复编写、C001_PROMPT.txt 互相覆盖、并发抢同一个资产）
+# 也随之消失 —— 那些坑本来就是「全剧级的活拆到逐集去做」造出来的。
 
 # ---------------------------------------------------------------- 任务装配
 
@@ -708,14 +660,17 @@ def build_tasks(pj: Project, params: dict) -> dict:
     eps = _eps.ids(pj) or [params.get("episode", "EP01")]
     size = params.get("image_size", "1024x1536")
 
-    # ---- 资产：全剧合并，先出现的定义优先 ----
-    amap, prompts = {}, {}
-    for ep in eps:
-        for a in (pj.stage_data("n4_assets", ep) or {}).get("assets", []):
-            if a.get("asset_id") and a["asset_id"] not in amap:
-                amap[a["asset_id"]] = a
-        for ap in (pj.stage_data("n4b_asset_prompts", ep) or {}).get("asset_prompts", []):
-            prompts.setdefault(ap.get("asset_id"), ap)
+    # ---- 资产：全剧一份，直接读 ----
+    # 以前是「逐集产出、这里按 asset_id 合并去重」。资产表和资产提示词
+    # 改成全剧级之后不需要合并了 —— 一张表、一遍提示词，同一个角色
+    # 天然只有一份定义。跨集去重那套（认领表、known_asset_ids）连同
+    # 它防的那些坑一起没了：重复编写、文件互相覆盖、并发抢同一个资产。
+    amap = {a["asset_id"]: a
+            for a in (pj.stage_data("n4_assets", "") or {}).get("assets", [])
+            if a.get("asset_id")}
+    prompts = {ap["asset_id"]: ap
+               for ap in (pj.stage_data("n4b_asset_prompts", "") or {}).get(
+                   "asset_prompts", []) if ap.get("asset_id")}
 
     from . import registry_v34 as REG
     REG.sync(pj, list(amap.values()))   # 先登记，版本号才查得到
@@ -822,7 +777,10 @@ def write_prompt_files(pj: Project, episode: str) -> int:
     """
     from .produce import write_prompt_txt
     n = 0
-    for ap in (pj.stage_data("n4b_asset_prompts", episode) or {}).get("asset_prompts", []):
+    # 资产提示词是**全剧一份**的，不跟着集走。按集读的话，
+    # 一是每集都会把同一批文件重写一遍，二是 40 集里只有一集读得到
+    # （产物在项目根下），另外 39 集写 0 个文件而且不报错。
+    for ap in (pj.stage_data("n4b_asset_prompts", "") or {}).get("asset_prompts", []):
         if ap.get("prompt"):
             write_prompt_txt(pj, _rel("asset", ap.get("filename")
                                       or f"{ap['asset_id']}_PROMPT.txt"), ap["prompt"])

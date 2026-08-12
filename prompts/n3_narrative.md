@@ -1,6 +1,11 @@
 # 第三环节｜叙事结构（场次与节拍）
 
-> **本次只处理 {{EPISODE}} 这一集。** 场次和节拍不跨集，所有 id 前缀用本集集号。
+> **一次处理全剧。** 按 `Project → Episode → Scene → Beat` 逐层拆，
+> 每个 Scene 必须写清它属于哪一集（`episode` 字段），
+> 集的划分见【故事真相】里的 `episode_ranges`，**不要自己重新分集**。
+>
+> 为什么全剧一次做：场次归属和跨集的因果链是同一件事。
+> 按集分开做，第 5 集就看不到第 1 集埋的伏笔要在哪一场回收。
 
 把故事真相组织成戏剧结构：
 
@@ -87,9 +92,10 @@ Project → Episode → Scene → Beat → Shot 表达需求
 
 ```json
 {
-  "episode": "{{EPISODE}}",
+  "scope": "full_series",
   "scenes": [
     {"scene_id": "SC01",
+     "episode": "EP01",
      "story_time": "", "reality_thread": "RT_MAIN",
      "location_hint": "还没有正式 Location 资产，这里写人看得懂的地点",
      "entry_state": "开场时世界处于什么状态（必须接住上一场的 exit_state）",
@@ -112,7 +118,7 @@ Project → Episode → Scene → Beat → Shot 表达需求
      "shot_need": "要让观众看懂它，画面必须交代什么（不写景别机位）",
      "source_event_ids": ["EV001"]}
   ],
-  "episode_arc": "本集的情绪与信息走向，一段话",
+  "episode_arcs": [{"episode": "EP01", "arc": "这一集的情绪与信息走向，一段话"}],
   "boundary_note": "哪几处场次边界是判断题，为什么这么切"
 }
 ```
@@ -128,5 +134,5 @@ Project → Episode → Scene → Beat → Shot 表达需求
 【人物与世界规则（第二环节）】
 {{RULES}}
 
-【本集正文】
+【全剧剧本正文】
 {{SCRIPT}}

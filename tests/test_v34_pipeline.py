@@ -136,20 +136,29 @@ class PipelineTests(unittest.TestCase):
         self.assertLess(first("场景状态图"), first("故事板"), "场景状态图没排在故事板前")
         self.assertLess(first("故事板"), first("分段视频"), "故事板没排在视频前")
 
-    def test_assets_wait_for_every_episode(self):
-        """★ 资产图必须等所有集的资产提示词齐了 —— 否则同一角色会出两张脸。"""
-        steps = P.plan(self.pj)
-        # n0 冻结能力档位排最前 —— 第九环节要按它决定允许用哪几类转场
-        self.assertEqual([s["stage"] for s in steps][:3], ["n0", "n1", "n2"])
+    def test_the_global_phase_runs_once_and_comes_first(self):
+        """★ 全剧级环节只排一次，而且全部排在逐集之前。
+
+        排两次 = 同一个角色被写两遍提示词、出两张脸；
+        排在逐集之后 = 它依赖的东西那时候还不存在。
+
+        计划是从环节表推导的，不是写死的 —— 写死过一次，
+        把 n3..n6 改成全剧级之后它们整段从计划里消失了，
+        跑起来报的是「第7环节失败」，看不出上游根本没跑。
+        """
         R.run_stage(self.pj, "n1", llm=self.llm, params=PARAMS, log=lambda *a: None)
         steps = P.plan(self.pj)
-        labels = [s["label"] for s in steps]
-        last_prompt = max(i for i, s in enumerate(steps) if s["stage"] == "n4b")
-        asset_img = next(i for i, s in enumerate(steps) if s["stage"] == "p1")
-        self.assertLess(last_prompt, asset_img,
-                        f"资产图排在了某一集的资产提示词前面：{labels[asset_img]}")
-        # 两集的 n4b 都要在前面
-        self.assertEqual(sum(1 for s in steps if s["stage"] == "n4b"), 2)
+        stages = [s["stage"] for s in steps]
+        self.assertEqual(stages[:8],
+                         ["n0", "n1", "n2", "n3", "n4", "n4b", "n5", "n6"])
+        for sid in ("n3", "n4", "n4b", "n5", "n6"):
+            self.assertEqual(stages.count(sid), 1, f"{sid} 排了不止一次")
+        first_ep = min(i for i, s in enumerate(steps) if s.get("episode"))
+        for sid in ("n3", "n4", "n4b", "n5", "n6"):
+            self.assertLess(stages.index(sid), first_ep,
+                            f"{sid} 排在了逐集环节后面")
+        self.assertLess(stages.index("n4b"), stages.index("p1"),
+                        "资产图排在了资产提示词前面")
 
     # ---------------------------------------------------------------- 续跑
 
@@ -177,8 +186,12 @@ class PipelineTests(unittest.TestCase):
     # ---------------------------------------------------------------- 隔离
 
     def test_one_bad_episode_does_not_stop_the_others(self):
-        """★ 集与集之间独立：一集的某个环节失败，别的集照常跑完。"""
-        self.llm.fail_on = {("n5", EP2)}
+        """★ 集与集之间独立：一集的某个环节失败，别的集照常跑完。
+
+        挑 n7 而不是 n5：n5 空间主表已经是全剧级的，它失败是整部剧的事，
+        没有「只坏一集」这回事。逐集层从 n7 才开始。
+        """
+        self.llm.fail_on = {("n7", EP2)}
         res, job = self._run(include_produce=False, include_deliver=False)
         self.assertEqual(res["stuck_episodes"], [EP2])
         # EP01 的后续环节照常做完 —— 标签里的环节号是阿拉伯数字

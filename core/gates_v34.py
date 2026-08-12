@@ -141,21 +141,22 @@ def object_count_gate(pj: Project, only: Optional[list] = None) -> list:
     遮挡、离画、装进容器**都不改变存在数量** —— 对不上账的典型症状是
     道具被遮挡之后复制成两个，或者离画之后凭空消失。
     """
+    # 总账是**全剧一本**（V5.6：维护唯一 Continuity Ledger），
+    # 读项目根下那份，不按集循环 —— 按集读的话 40 集里只有一集读得到，
+    # 另外 39 集拿到空字典、一条都查不出来，而且不报错。
     bad = []
-    for ep in _episodes(pj, only):
-        for track in (pj.stage_data("n6_ledger", ep) or {}).get("prop_tracking", []):
-            iid = track.get("instance_id", "?")
-            lock = track.get("count_lock") or {}
-            total = lock.get("active_total")
-            if total is None:
-                continue        # 没写对账表不算错，写了就得对得上
-            rec = str(lock.get("reconciliation") or "")
-            nums = [int(x) for x in _digits(rec)]
-            if not nums:
-                bad.append(f"{ep} {iid}：写了存在总数 {total}，但没给对账明细")
-            elif sum(nums[:-1]) != nums[-1] or nums[-1] != int(total):
-                bad.append(f"{ep} {iid}：对账对不上 —— {rec}，"
-                           f"但存在总数写的是 {total}")
+    for track in (pj.stage_data("n6_ledger", "") or {}).get("prop_tracking", []):
+        iid = track.get("instance_id", "?")
+        lock = track.get("count_lock") or {}
+        total = lock.get("active_total")
+        if total is None:
+            continue            # 没写对账表不算错，写了就得对得上
+        rec = str(lock.get("reconciliation") or "")
+        nums = [int(x) for x in _digits(rec)]
+        if not nums:
+            bad.append(f"{iid}：写了存在总数 {total}，但没给对账明细")
+        elif sum(nums[:-1]) != nums[-1] or nums[-1] != int(total):
+            bad.append(f"{iid}：对账对不上 —— {rec}，但存在总数写的是 {total}")
     return bad
 
 

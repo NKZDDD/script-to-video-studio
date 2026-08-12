@@ -1,9 +1,12 @@
 # 第六环节｜连续性总账
 
-> **本次只处理 {{EPISODE}} 这一集。**
-
-记录这一集里**每一次状态变化**：什么事件造成的、改了谁的什么、
-从什么变成什么、会持续多久、什么条件下结束。
+> **全剧只有一本总账。** 记录全剧**每一次状态变化**：
+> 什么事件造成的、改了谁的什么、从什么变成什么、会持续多久、
+> 什么条件下结束。每条都要写清它发生在哪一集（`episode`）。
+>
+> 为什么必须全剧一本：`LONG_TERM` 是「跨集持续」、`PERMANENT` 是「不可逆」。
+> 按集分开记，第 5 集这本账里根本不存在第 1 集留下的永久伤疤 ——
+> 那条状态会在第 5 集凭空消失，而且**不报错**。
 
 ## 一、只有一份状态真相
 
@@ -119,11 +122,12 @@ Zone、Anchor、支撑关系、姿态、朝向 —— 这五项和伤口、服�
 
 ```json
 {
-  "episode": "{{EPISODE}}",
+  "scope": "full_series",
   "ledger": [
     {"event_id": "EV012",
      "story_time": "故事内时间",
      "reality_thread": "RT_MAIN",
+     "episode": "EP01",
      "source_scene": "SC02", "source_beat": "SC02-B3",
      "affected_entity": "C001 或 PI001 或 SP001",
      "state_dimension": "外观|持有|空间|位置|身体|环境|情绪",
@@ -136,14 +140,14 @@ Zone、Anchor、支撑关系、姿态、朝向 —— 这五项和伤口、服�
      "natural_decay_rule": "会自然消退的写规律，否则空",
      "visual_asset_binding": "对应哪条状态资产；没有对应资产填空",
      "visibility_by_seg": [
-       {"seg_id": "{{EPISODE}}-SEG03",
+       {"seg_id": "EP01-SEG03",
         "visibility": "明确可见|部分可见|被遮挡|画外|尚未激活"}
      ]}
   ],
   "position_tracking": [
     {"character_id": "C001",
      "timeline": [
-       {"seg_id": "{{EPISODE}}-SEG01", "zone": "A", "anchor_id": "BED_01",
+       {"seg_id": "EP01-SEG01", "zone": "A", "anchor_id": "BED_01",
         "posture_class": "SEATED", "support_binding_id": "BED_01",
         "orientation_yaw_deg": 90,
         "changed_by_event": "没有移动事件就写 INHERITED"}
@@ -153,7 +157,7 @@ Zone、Anchor、支撑关系、姿态、朝向 —— 这五项和伤口、服�
   "prop_tracking": [
     {"instance_id": "PI001",
      "timeline": [
-       {"seg_id": "{{EPISODE}}-SEG01", "holder": "C005", "hand": "右手",
+       {"seg_id": "EP01-SEG01", "holder": "C005", "hand": "右手",
         "owner": "C005", "container": "", "zone": "A",
         "state": "完整", "visibility": "明确可见"}
      ],
@@ -166,11 +170,11 @@ Zone、Anchor、支撑关系、姿态、朝向 —— 这五项和伤口、服�
      "note": "为什么它们必须同时成立"}
   ],
   "forbidden_future_by_seg": [
-    {"seg_id": "{{EPISODE}}-SEG01",
+    {"seg_id": "EP01-SEG01",
      "must_not_appear": ["这一段绝对不许出现的未来状态"]}
   ],
   "carry_in": "从上一集继承进来的、仍然生效的状态",
-  "carry_out": "本集结束时仍然生效、下一集要继承的状态"
+  "cross_episode_states": ["跨集持续的状态：哪一集起、到哪一集止、LONG_TERM 还是 PERMANENT"]
 }
 ```
 
@@ -179,11 +183,11 @@ Zone、Anchor、支撑关系、姿态、朝向 —— 这五项和伤口、服�
 【项目参数】
 {{PARAMS}}
 
-【本集叙事结构（第三环节）】
+【全剧叙事结构（第三环节）】
 {{NARRATIVE}}
 
-【本集资产（第四环节）】
+【全剧资产（第四环节）】
 {{ASSETS}}
 
-【本集空间主表（第五环节）】
+【全剧空间主表（第五环节）】
 {{SPATIAL}}

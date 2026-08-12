@@ -123,7 +123,7 @@ class TaskBuildTests(unittest.TestCase):
 
     def test_asset_without_a_prompt_produces_no_task(self):
         """判了 must 却没写提示词的资产，不会进任务 —— 但那属于上游的账。"""
-        self.pj.save_stage("n4b_asset_prompts", {"asset_prompts": []}, EP1)
+        self.pj.save_stage("n4b_asset_prompts", {"asset_prompts": []}, "")
         t = R.build_tasks(self.pj, PARAMS)
         self.assertEqual(t["asset_tasks"], [])
 
@@ -142,51 +142,45 @@ class TaskBuildTests(unittest.TestCase):
                                 f"{task['key']} 的提示词文件不在：{task['prompt_ref']}")
 
 
-class CrossEpisodeTests(unittest.TestCase):
-    """资产库全剧共享 —— 这一层错了，同一个角色会出两张脸。"""
+class SeriesWideAssetTests(unittest.TestCase):
+    """资产库全剧一份 —— 这一层错了，同一个角色会出两张脸。
+
+    这个类原来叫 CrossEpisodeTests，测的是「第二集要跳过第一集写过的资产」。
+    那套跨集去重连同它的竞争一起删了：资产表和资产提示词改成**全剧级**之后，
+    同一个角色天然只有一份定义，不需要去重，也就没有东西可抢。
+    """
 
     def setUp(self):
         self.pj = new_project()
         self.llm = FakeLLM()
-        for sid in ("n1", "n2"):
+        for sid in ("n1", "n2", "n3", "n4", "n4b"):
             R.run_stage(self.pj, sid, llm=self.llm, params=PARAMS, log=quiet)
 
     def tearDown(self):
         shutil.rmtree(self.pj.root, ignore_errors=True)
 
-    def test_second_episode_skips_assets_already_written(self):
-        """★ 不过滤的话 40 集会把同一个角色的提示词重写 40 遍。"""
-        for sid in ("n3", "n4", "n4b"):
-            R.run_stage(self.pj, sid, llm=self.llm, params=PARAMS,
-                        episode=EP1, log=quiet)
-        for sid in ("n3", "n4"):
-            R.run_stage(self.pj, sid, llm=self.llm, params=PARAMS,
-                        episode=EP2, log=quiet)
-        todo, skipped = R.assets_to_write(self.pj, EP2)
-        self.assertEqual([a["asset_id"] for a in skipped], ["C001"],
-                         "EP01 写过的资产没被跳过")
-        self.assertEqual(todo, [])
+    def test_assets_live_at_the_project_root_not_under_an_episode(self):
+        """★ 放错目录不会报错，只会让下游读到空字典然后自己编。"""
+        self.assertTrue(os.path.isfile(self.pj.stage_path("n4_assets")))
+        self.assertFalse(os.path.isfile(self.pj.stage_path("n4_assets", EP1)))
+        self.assertTrue(os.path.isfile(self.pj.stage_path("n4b_asset_prompts")))
 
-    def test_first_episode_writes_everything(self):
-        for sid in ("n3", "n4"):
-            R.run_stage(self.pj, sid, llm=self.llm, params=PARAMS,
-                        episode=EP1, log=quiet)
-        todo, skipped = R.assets_to_write(self.pj, EP1)
-        self.assertEqual([a["asset_id"] for a in todo], ["C001"])
-        self.assertEqual(skipped, [])
-
-    def test_assets_merge_across_episodes_first_definition_wins(self):
-        """同一个 asset_id 在两集里都出现时，用先出现的定义 —— 否则会换脸。"""
-        for sid in ("n3", "n4", "n4b"):
-            for ep in (EP1, EP2):
-                R.run_stage(self.pj, sid, llm=self.llm, params=PARAMS,
-                            episode=ep, log=quiet)
-        self.pj.save_stage("n4_assets", {"assets": [
-            {"asset_id": "C001", "family": "CHAR", "name": "后来改的名字",
-             "decision": "must", "reference_assets": [], "used_by_segs": []}]}, EP2)
+    def test_each_asset_gets_exactly_one_task(self):
         t = R.build_tasks(self.pj, PARAMS)
         keys = [x["key"] for x in t["asset_tasks"]]
-        self.assertEqual(keys.count("C001"), 1, "同一个资产排了两条任务")
+        self.assertEqual(len(keys), len(set(keys)), "同一个资产排了两条任务")
+        self.assertIn("C001", keys)
+
+    def test_prompt_files_are_written_once_regardless_of_episode(self):
+        """★ 资产提示词按集写的话，40 集会把同一批文件重写 40 遍。
+
+        更糟的是产物在项目根下，按集读时 40 集里只有一集读得到，
+        另外 39 集写 0 个文件而且不报错。
+        """
+        before = R.write_prompt_files(self.pj, EP1)
+        self.assertGreater(before, 0, "第一集一个提示词文件都没写出来")
+        self.assertEqual(R.write_prompt_files(self.pj, EP2), before,
+                         "换一集就写不出资产提示词了 —— 说明还在按集读")
 
 
 if __name__ == "__main__":

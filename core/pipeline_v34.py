@@ -41,9 +41,14 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
       交付放最后。
     """
     steps = [{"kind": "freeze", "stage": "n0", "episode": "", "label": _label("n0")}]
-    steps.append({"kind": "llm", "stage": "n1", "episode": "", "label": _label("n1")})
-    steps.append({"kind": "llm", "stage": "n2", "episode": "",
-                  "label": _label("n2")})
+    # 全剧级环节**从环节表推导**，不写死。
+    # 写死的代价踩过：把 n3..n6 改成全剧级之后，它们既不在写死的头部里、
+    # 也不在逐集列表里 —— 整段直接从计划里消失，跑起来是「第7环节失败」，
+    # 报错指向下游，看不出上游根本没跑。
+    for s in V.STAGES:
+        if s["kind"] == "llm" and V.scope_of(s["id"]) == "series":
+            steps.append({"kind": "llm", "stage": s["id"], "episode": "",
+                          "label": _label(s["id"])})
 
     eps = _eps.ids(pj)
     if only_episodes:
