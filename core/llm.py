@@ -363,14 +363,38 @@ class LLM:
         raise LLMError(f"重试耗尽: {last}")
 
     # ---------------------------------------------------------------- 两种收法
+    @staticmethod
+    def _err_body(text: str) -> str:
+        """错误响应里真正有用的那一句。
+
+        中转站挂在 CDN 后面时，出错返回的是**整页 HTML** —— 直接截 200 字
+        会得到一堆 `<!--[if lt IE 7]>`，而真正的那一句
+        （比如「524: A timeout occurred」）在几百字之后，被埋掉了。
+        实跑就这么埋过一次：日志里全是 IE 条件注释，
+        看不出这是 Cloudflare 入口超时而不是模型慢。
+        """
+        s = (text or "").strip()
+        head = s[:400].lower()
+        if "<html" not in head and "<!doctype" not in head:
+            return s[:300]
+        m = re.search(r"<title[^>]*>(.*?)</title>", s, re.S | re.I)
+        title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+        m2 = re.search(r"(\d{3}:\s*[A-Z][^<\r\n]{0,80})", s)
+        line = m2.group(1).strip() if m2 else ""
+        got = "；".join(x for x in (title, line) if x)
+        if not got:
+            got = re.sub(r"<[^>]+>", " ", s)
+            got = re.sub(r"\s+", " ", got).strip()[:200]
+        return got + "（原文是一整页 HTML 错误页，这里只摘了要点）"
+
     def _check_status(self, r) -> None:
         if r.status_code in (429, 502, 503, 504):
-            raise _Retryable(f"HTTP {r.status_code}: {r.text[:200]}")
+            raise _Retryable(f"HTTP {r.status_code}: {self._err_body(r.text)}")
         if r.status_code >= 400:
             if not r.encoding or r.encoding.lower() in ("iso-8859-1", "latin-1"):
                 r.encoding = "utf-8"
-            txt = r.text[:400]
-            low = txt.lower()
+            txt = self._err_body(r.text)
+            low = (r.text or "")[:800].lower()
             # 先判 stream_options（更具体），再判 stream —— 顺序反了会误退化成非流式
             if "stream_options" in low or "include_usage" in low:
                 raise _NoStreamOptions(f"HTTP {r.status_code}: {txt}")

@@ -279,6 +279,17 @@ CATALOG = {
         "resume": "网络恢复之后点「开始」，只补没做完的",
         "resumable": True, "scope": "batch", "level": "error",
     },
+    "GATEWAY_TIMEOUT": {
+        "title": "中转站的入口先超时了（HTTP 52x），不是模型慢",
+        "why": "很多中转站挂在 Cloudflare 后面。Cloudflare 要求源站在大约 100 秒内开始回数据，超了就自己返回 524，这时候模型那边其实还在算。",
+        "where": "设置 → 分析引擎 → 「流式输出」",
+        "fix": ["**把「流式输出」打开** —— 这是这一条最主要的解法。流式下数据一直在流，Cloudflare 看得见就不会超时；实测同一步非流式 100 秒内 524，流式跑 406 秒照样出结果",
+                "**不要**去调「超时（秒）」或轮询超时 —— 那是我们这边等多久，和中转站入口的限制没关系，调到一小时也一样 524",
+                "已经开了流式还 524 的：换一个 LLM 通道（小裴 aicopy 之类），不同中转站的入口配置不一样",
+                "或者用「只测第一集」，让这一步要产出的东西少一些、快一些"],
+        "resume": "开了流式回「生产」页点「开始 / 继续」，做过的不重做。",
+        "resumable": True, "scope": "stage", "level": "error",
+    },
     "TIMEOUT": {
         "title": "等太久了还没出结果",
         "why": "程序一直在问服务商「好了没」，问到设定的最长等待时间还是没结果。"
@@ -492,6 +503,10 @@ _PATTERNS = [
     ("LLM_TRUNCATED", r"被长度上限截断|finish_reason.{0,4}length|max_tokens|没写完.{0,4}就断了|JSON 一直没有闭合"),
     ("LLM_SCHEMA_FAIL", r"JSON 输出校验失败|输出缺少必需字段|未找到可解析的 JSON"),
     ("LLM_EMPTY", r"回复内容为空|无 choices"),
+    # 52x 要排在 TIMEOUT 之前：现象都是「等太久」，但 52x 是**中转站入口**
+    # 超时（Cloudflare 那 100 秒），调我们这边的超时完全没用 ——
+    # 而 TIMEOUT 的修法正是「把等待上限调大」，指反了。
+    ("GATEWAY_TIMEOUT", r"HTTP 52[234]|A timeout occurred|origin (web )?server"),
     ("TIMEOUT", r"超时|timed? ?out"),
     ("NETWORK", r"网络错误|connection|dns|ssl|proxy|unreachable"),
     ("DISK", r"permission denied|being used by another process|no space|disk"),
