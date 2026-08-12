@@ -279,6 +279,22 @@ CATALOG = {
         "resume": "网络恢复之后点「开始」，只补没做完的",
         "resumable": True, "scope": "batch", "level": "error",
     },
+    "UPSTREAM_DOWN": {
+        "title": "服务商那边暂时不可用",
+        "why": "接口回了 500/502/503 —— 是服务商自己（或它背后的上游）"
+               "此刻过载或在维护，不是你的 key、参数或提示词有问题。"
+               "程序已经自动重试过几次（每次间隔翻倍），还是同一个回答。\n"
+               "和「发太快被限流」不一样：限流是 429，调小并发就好；"
+               "这个是对方整体不可用，调什么都没用。",
+        "where": "「生产」页的服务商优先级；或者等一会儿",
+        "fix": ["先等几分钟再点一次「开始 / 继续」—— 这类多数十几分钟内自己好",
+                "急的话去「设置 → 出图出片优先级」把这一类换成另一家，"
+                "或者「分析引擎」换一个 Base URL",
+                "同一家一直 503：去它的网站或群里看有没有在公告维护",
+                "**不用**改 key、改参数、改提示词 —— 那几样都不是原因"],
+        "resume": "过一会儿点「开始 / 继续」，做过的不会重做。",
+        "resumable": True, "scope": "batch", "level": "error",
+    },
     "GATEWAY_TIMEOUT": {
         "title": "中转站的入口先超时了（HTTP 52x），不是模型慢",
         "why": "很多中转站的域名挂在 Cloudflare 后面。它是挡在域名前面的一道转发层，**你的每一个请求都过它**，和请求的是文字还是图片没关系。"
@@ -510,6 +526,9 @@ _PATTERNS = [
     # 超时（Cloudflare 那 100 秒），调我们这边的超时完全没用 ——
     # 而 TIMEOUT 的修法正是「把等待上限调大」，指反了。
     ("GATEWAY_TIMEOUT", r"HTTP 52[234]|A timeout occurred|origin (web )?server"),
+    # 50x 是服务商自己过载/维护，和 429（你发太快）、52x（入口超时）
+    # 是三件不同的事，混在一起会让人去调错的东西。
+    ("UPSTREAM_DOWN", r"HTTP 50[023]|Service temporarily unavailable|temporarily unavailable|Bad Gateway|internal server error"),
     ("TIMEOUT", r"超时|timed? ?out"),
     ("NETWORK", r"网络错误|connection|dns|ssl|proxy|unreachable"),
     ("DISK", r"permission denied|being used by another process|no space|disk"),

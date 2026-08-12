@@ -96,5 +96,47 @@ class HtmlErrorBodyTests(unittest.TestCase):
         self.assertEqual(LLM._err_body(None), "")
 
 
+
+class UpstreamDownTests(unittest.TestCase):
+    """★ 50x / 52x / 429 是三件不同的事，混在一起会让人去调错的东西。
+
+      429  你发太快了        → 调小并发
+      52x  中转站入口超时     → 开流式
+      50x  对方自己过载/维护  → 等一会儿或换一家
+
+    实跑撞到过 503 报成「没见过的错误」—— 这是最常见的失败之一，
+    而「没见过」会让人以为出了什么怪事，去翻 key、翻参数、翻提示词。
+    """
+
+    def test_503_is_recognised(self):
+        self.assertEqual(
+            D.code_of('HTTP 503: {"error":{"message":"Service temporarily '
+                      'unavailable","type":"api_error"}}'),
+            "UPSTREAM_DOWN")
+
+    def test_500_and_502_too(self):
+        self.assertEqual(D.code_of("HTTP 502: Bad Gateway"), "UPSTREAM_DOWN")
+        self.assertEqual(D.code_of("HTTP 500: internal server error"),
+                         "UPSTREAM_DOWN")
+
+    def test_it_does_not_swallow_the_other_two(self):
+        self.assertEqual(D.code_of("HTTP 524: A timeout occurred"),
+                         "GATEWAY_TIMEOUT")
+        self.assertEqual(D.code_of("HTTP 429: rate limit"), "RATE_LIMITED")
+
+    def test_the_advice_says_not_to_touch_the_key_or_params(self):
+        """★ 「没见过的错误」时人的第一反应就是去翻 key 和参数。
+
+        这条要明确劝住 —— 那几样都不是原因。
+        """
+        fix = "　".join(D.CATALOG["UPSTREAM_DOWN"]["fix"])
+        self.assertIn("不用", fix)
+        self.assertIn("key", fix)
+
+    def test_it_distinguishes_itself_from_rate_limiting(self):
+        why = D.CATALOG["UPSTREAM_DOWN"]["why"]
+        self.assertIn("429", why)
+        self.assertIn("限流", why)
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,13 +7,24 @@
   第 2 次  输出缺少必需字段: ['entities[]', 'events[]', 'story_truth', …]
   第 3 次  同上
 
-第二种是**伪装**。extract_json 在外层 `{` 没配平时会「退而求其次」
-去找第一个 `[` —— 于是把 JSON 里某个恰好完整的内层数组（entities）
-当成整个文档返回，校验自然说「缺 entities[]」。
+第二种是**伪装**，而且是自己造的。extract_json 在外层 `{` 没配平时会
+「退而求其次」去找第一个 `[` —— 于是把 JSON 里某个恰好完整的内层数组
+（entities）当成整个文档返回，校验自然说「缺 entities[]」。
 
-后果不是少报一个错，是**指向完全错误的方向**：看着像模型没按 schema
-输出，实际模型写得很好、只是没写完。照着「模型不听话」去排查，
-会去换模型、改模板、翻提示词 —— 每一轮都是一整次调用的钱。
+后果不是少报一个错，是**指向完全相反的方向**：看着像模型没按 schema 输出，
+实际模型写得挺好、只是没写完。照着「模型不听话」排查，会去换模型、
+改模板、翻提示词 —— 每一轮都是一整次调用的钱。
+
+## 为什么是可重试而不是 Fatal
+
+一开始做成 LLMFatal，理由是「同一个提示词重试多半还是同样的结果」。
+拿真模型跑完之后这个判断被推翻了：同一个模型、同一步、同一份剧本，
+
+  一次断在  8,570 output token（21,114 字）
+  另一次    16,251 output token（40,015 字）**成功**
+
+**是随机的。** 不重试等于白扔掉那个机会，所以改回可重试，
+并且把报错写成模型能照着做的话（「压缩，不是重写」）。
 """
 import io
 import os
@@ -26,15 +37,17 @@ REAL = r"D:\WeChat\WeChat Files\wxid_l3s3w0nc4mx121\FileStorage\File\2026-08"
 
 class TruncationTests(unittest.TestCase):
 
+    def _err(self, text):
+        with self.assertRaises(LLMError) as cm:
+            extract_json(text)
+        return cm.exception
+
     def test_an_unclosed_fence_is_truncation(self):
-        with self.assertRaises(LLMFatal) as cm:
-            extract_json('```json\n{"a": 1, "b": [')
-        self.assertIn("没写完", str(cm.exception))
+        self.assertIn("被截断", str(self._err('```json\n{"a": 1, "b": [')))
 
     def test_an_unbalanced_object_is_truncation(self):
-        with self.assertRaises(LLMFatal) as cm:
-            extract_json('{"a": 1, "entities": [{"id": "E001"}], "events": [{"x"')
-        self.assertIn("没写完", str(cm.exception))
+        e = self._err('{"a": 1, "entities": [{"id": "E001"}], "events": [{"x"')
+        self.assertIn("被截断", str(e))
 
     def test_it_does_not_fall_back_to_an_inner_array(self):
         """★ 这就是伪装的来源。
@@ -43,41 +56,43 @@ class TruncationTests(unittest.TestCase):
         以前会把它当成整个文档返回，然后报「缺少必需字段」。
         """
         cut = '{"project_name": "x", "entities": [{"entity_id": "E001"}], "events": [{'
-        with self.assertRaises(LLMFatal):
-            extract_json(cut)
+        self.assertIn("被截断", str(self._err(cut)))
 
     def test_the_message_says_where_it_stopped(self):
-        """断在哪一句，一眼就能看出是「写到一半」而不是「答错了」。"""
-        msg = ""
-        try:
-            extract_json('{"a": "这是最后没写完的一句话')
-        except LLMFatal as e:
-            msg = str(e)
-        self.assertIn("最后停在", msg)
+        """断在哪一句，一眼看出是「写到一半」而不是「答错了」。"""
+        msg = str(self._err('{"a": "这是最后没写完的一句话'))
+        self.assertIn("停在", msg)
         self.assertIn("这是最后没写完的一句话", msg)
+        self.assertIn("字", msg)
 
-    def test_it_is_fatal_so_the_same_prompt_is_not_retried(self):
-        """★ 截断重试同一个提示词多半还是截断 —— 白花两次调用。
+    def test_it_is_retryable_not_fatal(self):
+        """★ 实测同一步一次 8570 token 断、一次 16251 token 成 —— 是随机的。
 
-        LLMFatal 会被 json_call 直接往上抛，不进「反馈重试」那条路。
+        做成 Fatal 等于白扔掉重试那次可能成功的机会。
         """
-        self.assertTrue(issubclass(LLMFatal, LLMError))
-        try:
-            extract_json("```json\n{")
-        except LLMFatal:
-            pass
-        else:
-            self.fail("没抛 LLMFatal")
+        self.assertNotIsInstance(self._err('```json\n{'), LLMFatal)
 
-    def test_the_message_suggests_things_that_actually_help(self):
-        msg = ""
-        try:
-            extract_json("```json\n{")
-        except LLMFatal as e:
-            msg = str(e)
-        self.assertIn("流式", msg)
-        self.assertIn("只测第一集", msg)
-        self.assertNotIn("缺少必需字段", msg)
+    def test_the_message_tells_the_model_to_compress_not_rewrite(self):
+        """★ 这段话会被当成下一次的反馈附在提示词后面。
+
+        写「请重新输出」模型会从头再编一遍，同样长；
+        写「压到最短、别复述原文」它才知道该往哪个方向改。
+        """
+        msg = str(self._err('```json\n{'))
+        self.assertIn("更紧凑", msg)
+        self.assertIn("压到最短", msg)
+        self.assertIn("不要复述剧本原文", msg)
+
+    def test_user_facing_advice_lives_in_the_catalog_not_the_exception(self):
+        """★ 用户该做什么不能塞进异常消息 —— 那会被模型当成任务要求。
+
+        「把流式关掉」「只测第一集」是给人看的，写进反馈里模型会照着执行。
+        """
+        msg = str(self._err('```json\n{'))
+        for user_advice in ("流式", "只测第一集", "换一个"):
+            self.assertNotIn(user_advice, msg, f"「{user_advice}」不该出现在给模型的反馈里")
+        from core import diagnose as D
+        self.assertIn("流式输出", "　".join(D.CATALOG["LLM_TRUNCATED"]["fix"]))
 
 
 class NormalParsingTests(unittest.TestCase):
@@ -100,8 +115,8 @@ class NormalParsingTests(unittest.TestCase):
         """没有 JSON 和写了一半是两回事，报错也该不一样。"""
         with self.assertRaises(LLMError) as cm:
             extract_json("好的，我来帮你分析这个剧本。")
-        self.assertNotIsInstance(cm.exception, LLMFatal)
         self.assertIn("未找到", str(cm.exception))
+        self.assertNotIn("被截断", str(cm.exception))
 
 
 @unittest.skipUnless(os.path.isdir(REAL), "没有那三份真实失败原文")
@@ -112,8 +127,9 @@ class RealWorldTests(unittest.TestCase):
         for f in ("n1_01.txt", "n1_02.txt", "n1_03.txt"):
             body = io.open(os.path.join(REAL, f), encoding="utf-8").read()
             body = body.split("-" * 60 + "\n", 1)[1]
-            with self.assertRaises(LLMFatal, msg=f):
+            with self.assertRaises(LLMError, msg=f) as cm:
                 extract_json(body)
+            self.assertIn("被截断", str(cm.exception), f)
 
 
 if __name__ == "__main__":
