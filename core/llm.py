@@ -144,7 +144,6 @@ def extract_json(text: str) -> Any:
     #   拒答/安全语 → 内容触发了审核，要改剧本措辞
     #   围栏不对    → 模型习惯问题，提示词里加一句示例
     # 不带原文的话，这三种在日志里长得一模一样。
-    body = (text or "").strip()
     head = re.sub(r"\s+", " ", body[:200])
     tail = re.sub(r"\s+", " ", body[-120:]) if len(body) > 320 else ""
     raise LLMError(
@@ -293,6 +292,10 @@ class LLM:
                 f"上限 {self.max_tokens} token，{mode}")
             # 网络路径必须报出来。不报的话，代理掐连接会被当成服务商挂了。
             log(f"网络：{proxy_note}")
+            # 配置被夹住过就说一句。只在设置页提示的话，看日志的人看不到 ——
+            # 而看日志的时候才是他在纳闷「我填的明明是别的数」。
+            for n in getattr(self, "config_notes", ()) or ():
+                log(f"注意：{n}")
         for attempt in range(retries):
             try:
                 body = dict(base, stream=use_stream)

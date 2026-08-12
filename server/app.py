@@ -281,10 +281,16 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
         c.setdefault("base_url", ((cfg.get("providers") or {}).get(pid, {})).get("base_url", ""))
     if not c.get("api_key"):
         raise ValueError("LLM 未配置 api_key（在「分析引擎」页签保存）")
-    return LLM(c["api_key"], c.get("base_url", "https://api.paisio.online"),
-               c.get("model", "claude-sonnet-5"), timeout=_timeout(c.get("timeout")),
-               proxy=c.get("proxy", ""), max_tokens=_max_tokens(c.get("max_tokens")),
-               stream=c.get("stream", False) is True)
+    notes: list = []
+    mt = _max_tokens(c.get("max_tokens"), note=notes.append)
+    llm = LLM(c["api_key"], c.get("base_url", "https://api.paisio.online"),
+              c.get("model", "claude-sonnet-5"), timeout=_timeout(c.get("timeout")),
+              proxy=c.get("proxy", ""), max_tokens=mt,
+              stream=c.get("stream", False) is True)
+    # 被夹住的话让每次调用的日志都带上一句 —— 只在设置页说一次，
+    # 跑起来看日志的人看不到，而看日志的时候才是他在纳闷「怎么是 200000」
+    llm.config_notes = notes
+    return llm
 
 
 # 各家的真实上限都在 20 万 token 以内。填 999999 这种值网关会拿它去做
@@ -360,14 +366,29 @@ def _poll(v, lo: int, hi: int, default: int) -> int:
     return max(lo, min(n, hi))
 
 
-def _max_tokens(v) -> int:
+def _max_tokens(v, note=None) -> int:
+    """夹到合法范围。
+
+    **夹住不能是静默的。** 这个项目里最难查的错全是「悄悄少给了一点」，
+    而我在这儿自己犯了一次：页面上填 999999，日志里显示 200000，
+    人只会以为程序藏了个限制，不知道是自己那个值被改掉了。
+    所以 note 给了就在被夹住时回报一句。
+
+    另外这个上限不是性能约束：200000 远高于任何现役模型的输出能力，
+    夹到它等于没夹 —— 真撞到它，说明那个值本来就不是个真数。
+    """
     try:
         n = int(v)
     except (TypeError, ValueError):
         return 16000
     if n <= 0:
         return 0                      # 0 = 不传这个参数，走服务商默认
-    return max(1024, min(n, MAX_TOKENS_CEILING))
+    out = max(1024, min(n, MAX_TOKENS_CEILING))
+    if note and out != n:
+        note(f"「单次输出上限」你填的是 {n:,}，不在合法范围内，按 {out:,} 发出。"
+             f"这不会让输出变短 —— {MAX_TOKENS_CEILING:,} 已经远高于"
+             f"任何现役模型的实际输出能力，撞不到它。")
+    return out
 
 
 # ====================================================================== 路由

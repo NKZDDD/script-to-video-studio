@@ -112,5 +112,50 @@ class ProviderEchoTests(unittest.TestCase):
         self.assertIn("saved.base_url || c.default_base_url", HTML)
 
 
+
+class ClampIsNotSilentTests(unittest.TestCase):
+    """★ 夹住配置不能悄悄来。
+
+    这个项目里最难查的错全是「悄悄少给了一点」，而我在 max_tokens 上
+    自己犯了一次：页面填 999999，日志显示 200000，人只会以为程序藏了个
+    限制，不知道是自己那个值被改掉了 —— 于是去纠结「为什么有限制」，
+    而真正要修的（输出被中转站截断）完全在另一个方向。
+    """
+
+    def test_it_reports_when_it_clamps(self):
+        from server.app import _max_tokens
+        said = []
+        self.assertEqual(_max_tokens(999999, said.append), 200000)
+        self.assertTrue(said, "夹住了却一声不吭")
+        self.assertIn("999,999", said[0])
+        self.assertIn("200,000", said[0])
+
+    def test_it_says_the_clamp_does_not_shorten_the_output(self):
+        """★ 说了「被夹住」还不够，得说清这不是变短的原因。
+
+        不说的话人会以为「原来是它把我的输出截断了」，
+        然后一直在这个参数上打转。
+        """
+        from server.app import _max_tokens
+        said = []
+        _max_tokens(999999, said.append)
+        self.assertIn("不会让输出变短", said[0])
+
+    def test_it_stays_quiet_when_the_value_is_fine(self):
+        from server.app import _max_tokens
+        said = []
+        self.assertEqual(_max_tokens(99999, said.append), 99999)
+        self.assertEqual(said, [], "没夹住却报了一句，会变成噪音")
+
+    def test_the_note_reaches_the_run_log_not_just_the_settings_page(self):
+        """★ 看日志的时候才是他在纳闷「怎么是 200000」。
+
+        只在设置页提示的话，跑起来看日志的人看不到。
+        """
+        src = io.open(os.path.join(ROOT, "core", "llm.py"), encoding="utf-8").read()
+        self.assertIn('getattr(self, "config_notes"', src)
+        app = io.open(os.path.join(ROOT, "server", "app.py"), encoding="utf-8").read()
+        self.assertIn("llm.config_notes = notes", app)
+
 if __name__ == "__main__":
     unittest.main()
