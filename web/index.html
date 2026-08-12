@@ -2213,9 +2213,9 @@ function makePromptEditor(host, scope) {
     const sys = PROJ ? projSystem() : ($('#spSystem') || {}).value || DEFAULT_SYS;
     const items = d.items.filter(x => !x.system || x.system === sys);
     $$$('sel').innerHTML = items.map(x => {
-      const tag = scope === 'project'
+      const tag = (scope === 'project'
         ? (x.has_project ? ' · 本剧已改' : (x.has_global ? ' · 继承全局' : ''))
-        : (x.has_global ? ' · 已改写' : '');
+        : (x.has_global ? ' · 已改写' : '')) + (x.stale ? ' ⚠ 基于旧版' : '');
       return `<option value="${esc(x.name)}">${
         x.stage_no ? '环节' + x.stage_no + '　' : '　　　'}${esc(x.label)}　（${
         esc(x.name)}.md${tag}）</option>`;
@@ -2231,9 +2231,13 @@ function makePromptEditor(host, scope) {
                    c.project_path ? (c.has_project ? '<b>本剧</b>' : '本剧(无)') : null]
       .filter(Boolean).join(' → ');
     const eff = {builtin: '内置', global: '全局', project: '本剧'}[c.effective];
+    // 改写是**粘性**的，永远盖住内置。程序升级重写了内置模板之后，
+    // 带着旧改写的机器上那些改动一条都不生效，而且一声不吭 ——
+    // 换机器、复用配置时最容易撞上，所以必须显著地报出来。
     $$$('state').innerHTML =
       `<span class="chip ${c.effective === 'builtin' ? '' : 'on'}">当前生效：${eff}</span>`
-      + `<span class="muted" style="margin-left:6px">${chain}</span>`;
+      + `<span class="muted" style="margin-left:6px">${chain}</span>`
+      + (c.stale ? `<div class="alert err" style="margin-top:8px">⚠ ${esc(c.stale)}</div>` : '');
     const v = (list, cls) => list.map(x =>
       `<span class="chip ${cls}">{{${esc(x)}}}</span>`).join('');
     $$$('meta').innerHTML =

@@ -103,6 +103,50 @@ def _paths(name: str, pj=None) -> tuple:
     return b, g, p
 
 
+# 改写版是「基于哪一版内置改的」。存改写时记下当时内置那份的指纹，
+# 之后内置模板一改，就能认出这份改写已经落后了。
+#
+# 为什么必须有：改写是**粘性**的 —— 它永远盖住内置。程序升级把内置模板
+# 重写了（比如这一轮把五份从逐集改成全剧级、参考图映射从四段改成六字段），
+# 带着旧改写的机器上那些改动**一条都不生效，而且一声不吭**。
+# 换机器、复用配置时最容易撞上。
+_STAMP = "_改写基准.json"
+
+
+def _stamp_path(pj=None) -> str:
+    from . import paths
+    return os.path.join(paths.prompts_dir(), _STAMP) if pj is None else \
+        os.path.join(S.project_prompt_dir(pj), _STAMP)
+
+
+def _stamps(pj=None) -> dict:
+    from .store import read_json
+    return read_json(_stamp_path(pj), {}) or {}
+
+
+def sha(text: str) -> str:
+    import hashlib
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _stale(name: str, L: dict, pj=None) -> str:
+    """这份改写是不是基于旧版内置改的。返回给人看的一句话，没问题返回空。"""
+    if L["effective"] == "builtin":
+        return ""
+    # 基准记在改写所在的那一层：全局改写记在数据目录，本剧改写记在项目里
+    rec = _stamps(pj if L["effective"] == "project" else None).get(name) or {}
+    cur = sha(read_text(L["builtin_path"])) if os.path.isfile(L["builtin_path"]) else ""
+    base = rec.get("builtin_sha")
+    if not base:
+        return ("这份改写没记录基于哪一版内置改的（存它的时候还没有这个机制）。"
+                "程序升级过的话，内置模板的新改动**不会**生效 —— 对一下再决定留不留。")
+    if base != cur:
+        return (f"内置模板在你改写之后**又更新过**。你这份是基于旧版改的，"
+                f"新版的改动一条都不会生效。对一下差异，或者还原成内置版再改一遍。"
+                f"（改写记于 {rec.get('at', '?')}）")
+    return ""
+
+
 def _same(a: str, b: str) -> bool:
     """两个路径指的是不是同一个文件。Windows 上不区分大小写。"""
     if not a or not b:
@@ -149,6 +193,7 @@ def catalog(pj=None) -> list:
             "vars": sorted(set(re.findall(r"\{\{(\w+)\}\}", cur))),
             "required_vars": required_vars(name),
             "required_fields": req,
+            "stale": _stale(name, L, pj),
             **L,
         })
     out.sort(key=lambda x: (x["system"] or "zz", x["stage_no"] or 99, x["name"]))
@@ -179,6 +224,7 @@ def read(name: str, pj=None, scope: str = "") -> dict:
             "customized": L["effective"] != "builtin",
             "required_vars": required_vars(name),
             "required_fields": req,
+            "stale": _stale(name, L, pj),
             "vars": sorted(set(re.findall(r"\{\{(\w+)\}\}", text))),
             **L}
 
@@ -268,7 +314,28 @@ def save(name: str, text: str, force: bool = False, pj=None,
     dst = _target(name, pj, scope)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     write_text(dst, text)
+    _remember_base(name, pj, scope)
     return {"ok": True, **r, "saved_to": dst, **read(name, pj, scope)}
+
+
+def _remember_base(name: str, pj=None, scope: str = "global") -> None:
+    """记下这份改写是基于哪一版内置改的。
+
+    不记的话，程序升级重写了内置模板，带着旧改写的机器上那些改动
+    一条都不生效，而且一声不吭 —— 换机器、复用配置时最容易撞上。
+    """
+    import time
+    from .store import write_json
+    b = _paths(name, pj)[0]
+    if not os.path.isfile(b):
+        return
+    key_pj = None if scope == "global" else pj
+    cur = _stamps(key_pj)
+    cur[name] = {"builtin_sha": sha(read_text(b)),
+                 "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    dst = _stamp_path(key_pj)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    write_json(dst, cur)
 
 
 def reset(name: str, pj=None, scope: str = "global") -> dict:
