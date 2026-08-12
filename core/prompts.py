@@ -103,10 +103,28 @@ def _paths(name: str, pj=None) -> tuple:
     return b, g, p
 
 
+def _same(a: str, b: str) -> bool:
+    """两个路径指的是不是同一个文件。Windows 上不区分大小写。"""
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
 def _layers(name: str, pj=None) -> dict:
-    """三层各是什么状态，以及最终生效的是哪一层。"""
+    """三层各是什么状态，以及最终生效的是哪一层。
+
+    源码方式跑（以及配置放在程序目录的老装法）时，数据目录**就是程序目录**，
+    于是「全局改写」和「内置」指向同一个文件。不识别这种重合的后果有三个，
+    一个比一个糟：
+      · 24 份模板全被标成「已改写」，看不出到底改过哪几份
+      · 点「保存」是在改**源码里的内置模板**，而不是存一份改写
+      · 点「还原」会 os.remove 那个路径 —— **把内置模板删掉**
+    打包成 exe 之后两者不同（内置在解压的临时目录里），所以只在开发时踩。
+    """
     b, g, p = _paths(name, pj)
-    has_g, has_p = os.path.isfile(g), bool(p) and os.path.isfile(p)
+    collide = _same(b, g)
+    has_g = os.path.isfile(g) and not collide
+    has_p = bool(p) and os.path.isfile(p) and not _same(b, p)
     eff = "project" if has_p else ("global" if has_g else "builtin")
     return {"builtin_path": b, "global_path": g, "project_path": p,
             "has_global": has_g, "has_project": has_p, "effective": eff}
@@ -225,10 +243,20 @@ def _target(name: str, pj=None, scope: str = "global") -> str:
     if scope == "project":
         if not p:
             raise ValueError("要改本剧的模板得先打开一个项目")
-        return p
-    if scope != "global":
+        dst = p
+    elif scope == "global":
+        dst = g
+    else:
         raise ValueError(f"作用域只能是 global 或 project：{scope}")
-    return g
+    # 改写的目标不能就是内置那份。重合时保存等于改源码、
+    # 还原等于把内置模板删掉 —— 后者是不可逆的。
+    if _same(b, dst):
+        raise ValueError(
+            f"改写目标和内置模板是同一个文件（{dst}）。"
+            f"这是源码方式跑、且数据目录就是程序目录时才会出现的情况 —— "
+            f"保存会直接改掉源码里的内置模板，还原会把它删掉。"
+            f"用 --data 指定一个单独的数据目录，或者直接编辑 prompts/ 下那份。")
+    return dst
 
 
 def save(name: str, text: str, force: bool = False, pj=None,
