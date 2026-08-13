@@ -120,6 +120,19 @@ def _llm_done(pj, stage_id: str, episode: str) -> bool:
     return bool(pj.stage_data(tpl, ep))
 
 
+def _mark_stopped(job: Job, rest: list) -> None:
+    """把这一轮不会再跑的步骤标出来，别留在 pending。
+
+    只动还是 pending 的那些 —— 已经 ok / failed / skipped 的是事实，
+    盖掉就等于篡改结果。
+    """
+    stopped = "熔断停止" if job.aborted else "已取消"
+    for s in rest:
+        cur = (job.items.get(s["label"]) or {}).get("state")
+        if cur in (None, "pending"):
+            job.set_item(s["label"], state="cancelled", msg=stopped)
+
+
 def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         params: dict, jobs=None, concurrency: int = 3, max_retry: int = 2,
         include_produce: bool = True, include_deliver: bool = True,
@@ -355,8 +368,12 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     tail = [s for s in rest if not (s["kind"] == "llm" and s.get("episode"))]
 
     def run_episode(ep: str) -> None:
-        for s in by_ep[ep]:
+        for i, s in enumerate(by_ep[ep]):
             if job.aborted or job.cancelled:
+                # 剩下的一个个标出来。直接 return 会让它们留在 pending，
+                # 而 pending 的字面意思是「等会儿会跑」—— 整个 job 都停了
+                # 还这么显示，人会以为程序卡住了在干等。
+                _mark_stopped(job, by_ep[ep][i:])
                 return
             do_llm(s)
 
@@ -385,8 +402,9 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                         failed.append(s["label"])
             job.log(steps[0]["label"], msg)
             tail = [s for s in tail if s["kind"] != "produce"]
-    for s in tail:
-        if job.aborted:
+    for i, s in enumerate(tail):
+        if job.aborted or job.cancelled:
+            _mark_stopped(job, tail[i:])
             break
         if s["kind"] == "produce":
             do_produce(s)
