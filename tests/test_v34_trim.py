@@ -65,10 +65,37 @@ class ProjectionTests(unittest.TestCase):
         self.assertNotIn("episode_ranges", got)
 
     def test_episode_ranges_are_dropped_after_splitting(self):
-        """切集用的行号边界，切完就没人需要了。"""
-        for sid in ("n2", "n3", "n4", "n4b"):
+        """切集用的行号边界，切完就没人需要了 —— 除了 n3。"""
+        for sid in ("n2", "n4", "n4b"):
             self.assertNotIn("episode_ranges",
                              R.project_product(sid, "n1_truth", TRUTH), sid)
+
+    def test_the_narrative_stage_keeps_the_episode_list(self):
+        """★ n3 是例外：它要给每一场标集号，裁掉集清单就没法标。
+
+        这是重定级时留下的洞 —— 一边把 scenes[].episode 设成必需字段，
+        一边把「有哪几集」从它的输入里裁掉了。
+        """
+        got = R.project_product("n3", "n1_truth", TRUTH)
+        self.assertIn("episode_ranges", got)
+        self.assertIn("scenes[].episode", V.LLM_SPEC["n3"][2],
+                      "n3 不再要求标集号的话，这条裁剪规则可以放宽")
+
+    def test_the_narrative_stage_drops_the_asset_layer_rules(self):
+        """★ n3 的提示词实测 69,798 字，RULES 独占 39%。
+
+        服饰/建筑/货币/称谓（cultural_rules）是资产层要的，
+        拆场次和节拍用不上。
+        """
+        rules = {"characters": [{"character_id": "C001"}],
+                 "world_rules": [{"rule_id": "W01"}],
+                 "cultural_rules": {"everyday_dress": "很长的一段描述" * 50},
+                 "forbidden_global": ["x"], "separation_note": "y"}
+        got = R.project_product("n3", "n2_rules", rules)
+        self.assertIn("characters", got, "人物动机是拆场次的依据，不能裁")
+        self.assertIn("world_rules", got)
+        self.assertNotIn("cultural_rules", got)
+        self.assertLess(len(jd(got)), len(jd(rules)) // 2)
 
     def test_the_asset_system_still_gets_the_state_deltas(self):
         """★ 连续性状态资产就是从状态变化来的 —— 这一份不能裁。

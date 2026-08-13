@@ -249,12 +249,31 @@ PRODUCT_NEEDS = {
         "project_name", "story_type", "cultural_setting", "dialogue_language",
         "worldview", "era", "main_conflict", "open_design"]},
 
-    # episode_ranges 是切集用的行号边界，切完集就没人需要了。
-    # state_deltas 是逐事件的视觉状态变化明细，那是第六环节的账本要的东西；
-    # 人物动机和世界规则靠 action/result 就够，不需要每件事的外观增量。
+    # 逐条的依据（裁剪是「悄悄少发」，半年后要能查为什么）：
+    #   episode_ranges       切集用的行号边界，切完就没人需要了
+    #   open_design          skill 说它是「未描述的鞋款、墙面材质、非关键手机型号」
+    #                        这类纯视觉决定，**不改变故事**（references/01:271）——
+    #                        写人物动机和世界规则用不上
+    #   events[].state_deltas 逐事件的外观增量，是第六环节账本要的；
+    #                        人物弧光靠 action/result 就够
     ("n2", "n1_truth"): {"drop": ["episode_ranges", "open_design",
                                   "events[].state_deltas"]},
-    ("n3", "n1_truth"): {"drop": ["episode_ranges", "events[].state_deltas"]},
+    # n3 **必须**留着 episode_ranges：它改成全剧级之后要给每一场标集号
+    # （scenes[].episode 是必需字段），裁掉集清单它就不知道有哪几集了。
+    # 这是重定级时留下的洞，实跑撞过：模型只吐 373 字就交白卷，
+    # 报「输出缺少必需字段 scenes[]」—— 一边加了「必须标集号」、
+    # 一边把集清单裁掉，而且完全不报错。
+    # tests/test_trim_vs_template.py 现在会守着这一条。
+    ("n3", "n1_truth"): {"drop": ["events[].state_deltas", "open_design"]},
+    # skill 第 3 章「叙事结构」只讲 Scene/Beat 的定义，
+    # 服饰/建筑/货币/称谓一个字没提 —— 那些归资产层（SKILL.md:82、89）。
+    #   cultural_rules   服饰/建筑/货币/称谓/礼节，资产层要的
+    #   forbidden_global 画面禁令，不影响场次怎么分
+    #   separation_note  环节2 写给人看的自述（「我把哪些状态挪走了」），
+    #                    不是给下游的数据
+    # 不裁的话 RULES 在 n3 的提示词里独占 39%（实测 27,789 字）。
+    ("n3", "n2_rules"): {"drop": ["cultural_rules", "forbidden_global",
+                                  "separation_note"]},
     # 资产系统要看状态变化（连续性状态资产就是从这儿来的），所以留着 state_deltas
     ("n4", "n1_truth"): {"drop": ["episode_ranges"]},
 }
