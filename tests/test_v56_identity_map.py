@@ -134,10 +134,42 @@ class WiringTests(unittest.TestCase):
     def test_both_checks_run_before_generating(self):
         src = io.open(os.path.join(ROOT, "core", "produce.py"),
                       encoding="utf-8").read()
-        self.assertIn("check_identity_map(prompt, want_refs)", src)
-        i = src.index("check_image_map(prompt, want_refs)")
-        j = src.index("check_identity_map(prompt, want_refs)")
+        i = src.index("check_image_map(prompt, want_refs, who, ref)")
+        j = src.index("check_identity_map(prompt, want_refs, who, ref)")
         self.assertLess(i, j, "编号校验要排在六字段校验前面，否则会盖住真问题")
+
+    def test_the_error_says_whose_prompt_is_at_fault(self):
+        """★ 报错必须说清是**哪个资产**的提示词，不然人会去改错文件。
+
+        真实误导：报错写「Image 1（PS001）缺…」，人就去找 PS001_PROMPT.txt ——
+        而那是被引用的那张图，它自己完全正确（道具外观规格，原创设计，
+        本来就没有参考图）。要改的是引用它的那个资产。
+        """
+        bad, _ = PR.check_identity_map(
+            "Image 1 = PS001 奖杯\n"
+            "  有权控制：外观\n  无权控制：机位\n",
+            [{"image_n": 1, "asset_id": "PS001"}],
+            who="PI001", ref="03_提示词/资产生产提示词/PI001_PROMPT.txt")
+        self.assertIn("PI001", bad)
+        self.assertIn("PI001_PROMPT.txt", bad)
+        self.assertIn("不是被它引用的那张图", bad)
+
+    def test_the_numbering_error_says_it_too(self):
+        bad, _ = PR.check_image_map(
+            "Image 1 = 别的东西\nImage 2 = 又一个",
+            [{"image_n": 1, "asset_id": "C001"},
+             {"image_n": 2, "asset_id": "C005"}],
+            who="ST012", ref="03_提示词/资产生产提示词/ST012_PROMPT.txt")
+        self.assertIn("ST012", bad)
+
+    def test_a_prompt_with_no_image_lines_is_left_alone(self):
+        """★ 原创设计的资产（道具规格、空镜）本来就没有参考图。
+
+        模板也写着「没有参考图的资产整段省略」—— 拿它去要求六字段是错的。
+        """
+        real = ("资产名称：混双大满贯奖杯外观规格。输出结构：正、侧、45度三视图，"
+                "纯色背景。身份绑定：大型银色双耳冠军杯。")
+        self.assertEqual(PR.check_identity_map(real, [], "PS001"), ("", ""))
 
     def test_the_block_has_a_diagnosis_entry_and_no_failover(self):
         """换一家服务商收到的还是同一段提示词，只会把错误重复一遍还多花钱。"""

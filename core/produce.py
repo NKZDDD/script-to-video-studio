@@ -232,7 +232,8 @@ def _image_sections(prompt: str) -> dict:
     return out
 
 
-def check_identity_map(prompt: str, want_refs: list) -> tuple:
+def check_identity_map(prompt: str, want_refs: list, who: str = "",
+                      ref: str = "") -> tuple:
     """V5.6 六字段身份映射。返回 (硬错误, 提醒)。
 
     和编号校验是两件事，V5.6 也给了两个不同的阻断码：
@@ -258,7 +259,9 @@ def check_identity_map(prompt: str, want_refs: list) -> tuple:
             bad.append(f"Image {n}（{aid}）缺：" + "、".join(miss))
     if not bad:
         return "", ""
-    return ("REFERENCE_MAPPING_BLOCKED　参考图的身份映射不完整："
+    return ("REFERENCE_MAPPING_BLOCKED　参考图的身份映射不完整。"
+            + _whose(who, ref)
+            + "缺的是："
             + "；".join(bad)
             + "。只写「控制什么」是不够的 —— 模型知道这张图有权决定哪些维度，"
               "却不知道这张图是谁，就会把别人的脸套上去（实跑撞过）。"
@@ -267,7 +270,22 @@ def check_identity_map(prompt: str, want_refs: list) -> tuple:
               "去「任务明细」补这一条的映射，或者重跑对应的文字环节。"), ""
 
 
-def check_image_map(prompt: str, want_refs: list) -> tuple:
+def _whose(who: str, ref: str) -> str:
+    """出问题的是哪一条任务、该去改哪个文件。
+
+    不写这一句的代价是真实踩过的：报错只说「Image 1（PS001）缺…」，
+    人就去找 PS001 的提示词 —— 而那是**被引用的那张图**，它自己没问题。
+    要改的是引用它的那个资产。
+    """
+    if not who:
+        return ""
+    return (f"出问题的是 **{who}** 这一条的提示词"
+            + (f"（{ref}）" if ref else "")
+            + "，不是被它引用的那张图。")
+
+
+def check_image_map(prompt: str, want_refs: list, who: str = "",
+                    ref: str = "") -> tuple:
     """核对提示词里的 Image 编号和程序实际上传顺序是否一致。
 
     出图模型收到的是 N 张**没有标签**的图，它只知道第 1 张、第 2 张。
@@ -288,8 +306,9 @@ def check_image_map(prompt: str, want_refs: list) -> tuple:
         return "", ""
     got = _IMAGE_MAP.findall(prompt or "")
     if not got:
-        head = ("提示词里没有 `Image N = 资产ID` 的参考图映射，"
-                f"但这一条要传 {len(want)} 张参考图（{'、'.join(a for _, a in want)}）。")
+        head = (_whose(who, ref)
+                + "提示词里没有 `Image N = 资产ID` 的参考图映射，"
+                + f"但这一条要传 {len(want)} 张参考图（{'、'.join(a for _, a in want)}）。")
         if len(want) >= 2:
             return (head + "两张以上参考图却不说哪张是谁，模型只能猜，"
                     "必然把其中一张的身份用到别处 —— 所以这里停下。"
@@ -313,7 +332,8 @@ def check_image_map(prompt: str, want_refs: list) -> tuple:
                         + "、".join(str(n) for n in extra)
                         + f"（这一条只有 {len(want)} 张）")
     if problems:
-        return ("参考图编号和实际上传顺序对不上：" + "；".join(problems)
+        return ("参考图编号和实际上传顺序对不上。" + _whose(who, ref)
+                + "；".join(problems)
                 + f"。实际上传顺序是 {'、'.join(f'Image {n}={a}' for n, a in want)}。"
                   "编号错位等于每张参考图都被错误归属（拿场景图去沿用人脸），"
                   "出来的东西看着正常但全是错的，所以这里停下。"
@@ -386,8 +406,9 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
                 f"（比如把本段故事板自己写进去），去「任务明细」看这一条的参考图那栏。")
         # 两道校验顺序不能反：编号对不上时六字段校验会因为找不到槽位而漏报，
         # 报「身份映射不全」也会盖住真正的问题（编号错位）。
-        for bad_map, map_warn in (check_image_map(prompt, want_refs),
-                                  check_identity_map(prompt, want_refs)):
+        who, ref = task["key"], task.get("prompt_ref") or ""
+        for bad_map, map_warn in (check_image_map(prompt, want_refs, who, ref),
+                                  check_identity_map(prompt, want_refs, who, ref)):
             if bad_map:
                 raise RuntimeError(bad_map)
             if map_warn:
