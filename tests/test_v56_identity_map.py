@@ -318,5 +318,40 @@ class RefLimitTests(unittest.TestCase):
         self.assertGreaterEqual(src.count("params_of(cfg, pj"), 5)
 
 
+
+class NewlineGuidanceTests(unittest.TestCase):
+    """★ 模板必须说清「六项要分行，在 JSON 字符串里用 \n」。
+
+    这是 41 条被拦的**真正原因**（不是压缩指令 —— 那个只在截断重试时才发出，
+    而换到不截断的通道之后压缩指令根本没发过）：
+
+    模板把六字段示例放在普通 ``` 块里、多行缩进给出，但模型要把它塞进
+    JSON 的 "prompt" 字符串 —— 那需要 \n 转义，而模板一个字都没提。
+    模型选了最自然的写法：一段连续文字。64 份提示词一个换行都没有。
+
+    合并成一段的后果：两张以上参考图时分不清哪一项归哪张，
+    而那正是 V5.6 六字段要解决的问题。
+    """
+
+    NEEDS_NEWLINE = ("n4b_asset_prompts", "n11_scstate",
+                     "n12_storyboard", "n13_video")
+
+    def test_every_prompt_writing_stage_explains_newlines(self):
+        for name in self.NEEDS_NEWLINE:
+            t = _tpl(name)
+            self.assertIn("关于换行", t, f"{name} 没说要分行")
+            self.assertIn("\n", t, f"{name} 没说在 JSON 字符串里怎么分行")
+
+    def test_it_says_why_merging_is_bad(self):
+        """光说「要分行」不够 —— 模型得知道合并了会坏在哪。"""
+        for name in self.NEEDS_NEWLINE:
+            t = _tpl(name)
+            self.assertIn("不许把六项合并成一段连续文字", t, name)
+            self.assertIn("平均融合", t, name)
+
+    def test_it_cites_the_measured_failure(self):
+        """带上实测数字，模型和人都更容易当真。"""
+        self.assertIn("41 条", _tpl("n4b_asset_prompts"))
+
 if __name__ == "__main__":
     unittest.main()
