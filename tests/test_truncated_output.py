@@ -72,16 +72,19 @@ class TruncationTests(unittest.TestCase):
         """
         self.assertNotIsInstance(self._err('```json\n{'), LLMFatal)
 
-    def test_the_message_tells_the_model_to_compress_not_rewrite(self):
-        """★ 这段话会被当成下一次的反馈附在提示词后面。
+    def test_the_message_tells_the_model_what_may_and_may_not_be_compressed(self):
+        """★ 压缩指令必须划清界限：压描述，不压结构。
 
-        写「请重新输出」模型会从头再编一遍，同样长；
-        写「压到最短、别复述原文」它才知道该往哪个方向改。
+        真实后果：n4b 被截断重试之后，模型照着「压到最短」把六字段的
+        六行标签压成了一段连续文字 —— 64 份提示词一个换行都没有，
+        然后出图那层的逐项校验把 41 条全拦下了。
+        压缩指令和结构要求直接冲突，不划界限就是这个下场。
         """
         msg = str(self._err('```json\n{'))
         self.assertIn("更紧凑", msg)
-        self.assertIn("压到最短", msg)
-        self.assertIn("不要复述剧本原文", msg)
+        self.assertIn("压描述，不压结构", msg)
+        self.assertIn("逐项分行", msg)
+        self.assertIn("不许合并成一段话", msg)
 
     def test_user_facing_advice_lives_in_the_catalog_not_the_exception(self):
         """★ 用户该做什么不能塞进异常消息 —— 那会被模型当成任务要求。

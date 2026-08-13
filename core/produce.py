@@ -232,14 +232,46 @@ def _image_sections(prompt: str) -> dict:
     return out
 
 
+_HAS_CONTROL = re.compile(
+    r"身份绑定|严格继承|继承|有权控制|Controls|MUST\s+PRESERVE", re.I)
+_HAS_DENY = re.compile(
+    r"禁止改变|不照搬|不得照搬|不许照搬|无权控制|不控制"
+    r"|Does\s*Not\s*Control|MUST\s+NOT\s+COPY", re.I)
+
+
+def _who_is_named(sec: str, aid: str) -> bool:
+    """这张图「是谁/是什么」说清了没有。分行和行内两种写法都算。
+
+      分行  是谁/是什么 + 画面可见内容：成年男性正面半身…
+      行内  Image 1=PH001 Isabel身份；Image 2=COST001女款礼服
+
+    行内那种是模型被要求压缩之后的自然产物，语义上是完整的。
+    只认分行的话会把「其实说清了」判成「没说清」，然后拦住整批生产 ——
+    实测 41 条全被拦，而它们大体是对的。
+    """
+    if _MAP_FIELD_RE["who"].search(sec):
+        return True
+    m = re.search(r"[Ii]mage\s*\d+\s*[=＝:：]\s*" + re.escape(aid)
+                  + r"([^\n；;。]*)", sec)
+    return bool(m and len(m.group(1).strip(" \u3000,，、")) >= 2)
+
+
+def _authority_split(sec: str) -> bool:
+    """「能控制什么」和「不能控制什么」两头都说到了没有。"""
+    return bool(_HAS_CONTROL.search(sec)) and bool(_HAS_DENY.search(sec))
+
+
 def check_identity_map(prompt: str, want_refs: list, who: str = "",
-                      ref: str = "") -> tuple:
+                       ref: str = "") -> tuple:
     """V5.6 六字段身份映射。返回 (硬错误, 提醒)。
 
-    和编号校验是两件事，V5.6 也给了两个不同的阻断码：
-      REFERENCE_RESOLUTION_BLOCKED  图没解析出来（缺文件、ID 对不上）
-      REFERENCE_MAPPING_BLOCKED     图对了，但没说清这张图是谁、管什么
-    第二种以前完全没有校验 —— 提示词写得再离谱都照样出图。
+    **按危害分级，不是缺一项就停。** V5.6 的硬拦条件写的是「语义映射不完整」，
+    它点名的风险是身份说不清（「无法消歧时阻断」）。
+    「没按六行分开写」不等于「说不清」。
+
+      硬停  任何一张图说不出它是谁       —— 张冠李戴的根源
+      硬停  ≥2 张却没有权威划分         —— 多图打架，全局一句管不住
+      提醒  单张、身份清楚，缺时间/范围   —— 全局约束覆盖得住，不值得拦生产
     """
     want = [(r.get("image_n") or i + 1, str(r.get("asset_id") or ""))
             for i, r in enumerate(want_refs)]
@@ -248,27 +280,41 @@ def check_identity_map(prompt: str, want_refs: list, who: str = "",
     secs = _image_sections(prompt or "")
     if not secs:
         return "", ""            # 连编号都没有，由 check_image_map 管，别报两遍
-    bad = []
+
+    nameless, thin, soft = [], [], []
     for n, aid in want:
         sec = secs.get(n)
         if sec is None:
-            continue             # 编号缺失同样归 check_image_map
-        miss = [label for key, label, _ in _MAP_FIELDS
-                if not _MAP_FIELD_RE[key].search(sec)]
-        if miss:
-            bad.append(f"Image {n}（{aid}）缺：" + "、".join(miss))
-    if not bad:
-        return "", ""
-    return ("REFERENCE_MAPPING_BLOCKED　参考图的身份映射不完整。"
-            + _whose(who, ref)
-            + "缺的是："
-            + "；".join(bad)
-            + "。只写「控制什么」是不够的 —— 模型知道这张图有权决定哪些维度，"
-              "却不知道这张图是谁，就会把别人的脸套上去（实跑撞过）。"
-              "每个 Image 槽位都要写全六项：ID、这张图是谁+画面可见内容、"
-              "故事时间与当前状态、有权控制、无权控制、适用范围。"
-              "去「任务明细」补这一条的映射，或者重跑对应的文字环节。"), ""
+            continue             # 编号缺失归 check_image_map
+        if not _who_is_named(sec, aid):
+            nameless.append(f"Image {n}（{aid}）")
+            continue
+        if len(want) >= 2 and not _authority_split(sec):
+            thin.append(f"Image {n}（{aid}）")
+        gone = [label for key, label, _ in _MAP_FIELDS
+                if key in ("state", "scope")
+                and not _MAP_FIELD_RE[key].search(sec)]
+        if gone:
+            soft.append(f"Image {n}（{aid}）少了 " + "、".join(gone))
 
+    if nameless:
+        return ("REFERENCE_MAPPING_BLOCKED　有参考图没说清它是谁。"
+                + _whose(who, ref)
+                + "说不清的是：" + "；".join(nameless)
+                + "。出图模型收到的是几张没有标签的图 —— 只说「这张图控制服饰」"
+                  "不够，它不知道这张图是哪个人，多人场景必然张冠李戴（实跑撞过）。"
+                  "每个 Image 编号后面要紧跟这张图是谁/是什么，"
+                  "比如 `Image 1 = C002 甲，成年男性正面半身`。"), ""
+    if thin:
+        return ("REFERENCE_MAPPING_BLOCKED　多张参考图没有逐张划分权威。"
+                + _whose(who, ref)
+                + "这几张只说了是谁、没说各自管什么：" + "；".join(thin)
+                + f"。这一条要传 {len(want)} 张，全局写一句「禁止改变…」管不住 —— "
+                  "模型不知道该从哪张拿脸、从哪张拿衣服、哪张的构图不许照搬，"
+                  "结果是几张平均融合。逐张写清有权控制和无权控制。"), ""
+    return "", ("；".join(soft) + "。这几项不影响这一次出图，但缺了容易让未来状态"
+                "提前用上（伤口在受伤前出现），或者一张图的权威被无限扩张。"
+                if soft else "")
 
 def _whose(who: str, ref: str) -> str:
     """出问题的是哪一条任务、该去改哪个文件。

@@ -62,14 +62,65 @@ Image 2 = ST008 病房
         self.assertIn("这张图是谁", bad)
         self.assertEqual(warn, "", "这条必须硬停，不能只提醒")
 
-    def test_each_of_the_five_fields_is_required(self):
-        """五项里少任何一项都要拦 —— 逐项验，别只验第一项。"""
-        for label in ("是谁/是什么 + 画面可见内容", "故事时间 / 当前状态",
-                      "有权控制", "无权控制", "适用范围"):
+    def test_identity_and_authority_are_hard_stops(self):
+        """★ 按危害分级：说不清身份、多图没划权威 → 硬停。"""
+        for label in ("是谁/是什么 + 画面可见内容", "有权控制", "无权控制"):
             hacked = "\n".join(l for l in FULL.splitlines()
                                if not l.strip().startswith(label))
             bad, _ = PR.check_identity_map(hacked, REFS)
             self.assertTrue(bad, f"删掉「{label}」竟然通过了")
+
+    def test_time_and_scope_are_only_warnings(self):
+        """★ 时间和范围缺了只提醒，不拦生产。
+
+        一律硬拦的代价是真实的：实测 41 条资产提示词全被拦住，
+        而其中 35 条身份说得清清楚楚、只是没写「故事时间」这一行。
+        为一行标签停掉整批生产不成比例 —— V5.6 的硬拦条件是
+        「语义映射不完整」，指的是身份说不清。
+        """
+        for label in ("故事时间 / 当前状态", "适用范围"):
+            hacked = "\n".join(l for l in FULL.splitlines()
+                               if not l.strip().startswith(label))
+            bad, warn = PR.check_identity_map(hacked, REFS)
+            self.assertEqual(bad, "", f"删掉「{label}」不该硬停")
+            self.assertTrue(warn, f"删掉「{label}」也该有提醒")
+
+    def test_the_inline_form_counts_as_naming_the_image(self):
+        """★ 模型压缩之后会写成行内，「是谁」这一项语义上是完整的。
+
+        取自实跑的 LK001：
+            Image 1=PH001 Isabel身份；Image 2=COST001女款礼服
+        两张图各是谁都点名了 —— 报错不该说「没说清它是谁」。
+        （这一条仍会因为「两张图没逐张划分权威」被拦，那是另一回事。）
+        """
+        inline = ("参考图角色映射：Image 1=PH001 Isabel身份；"
+                  "Image 2=COST001女款礼服。身份绑定：继承PH001；固定低马尾。"
+                  "禁止改变：身份、发型、裤长、鞋履。")
+        bad, _ = PR.check_identity_map(
+            inline, [{"image_n": 1, "asset_id": "PH001"},
+                     {"image_n": 2, "asset_id": "COST001"}])
+        self.assertNotIn("没说清它是谁", bad, "行内写法被误判成没说清身份")
+        self.assertIn("没有逐张划分权威", bad)
+
+    def test_a_single_reference_in_the_inline_form_passes(self):
+        """★ 单张 + 行内说清了是谁 → 放过。
+
+        实测 41 条里有 35 条是这种，一律硬拦等于停掉整批生产。
+        """
+        one = ("参考图角色映射：Image 1=PS001奖杯规格。身份绑定：严格继承PS001。"
+               "禁止改变：改尺寸。输出限制：不照搬参考构图。")
+        bad, warn = PR.check_identity_map(
+            one, [{"image_n": 1, "asset_id": "PS001"}])
+        self.assertEqual(bad, "")
+        self.assertTrue(warn, "缺时间和范围该有提醒")
+
+    def test_a_bare_id_with_nothing_after_it_is_still_a_hard_stop(self):
+        """★ 光有编号和 ID、后面什么都不说 —— 那才是真的没说清。"""
+        bare = "Image 1 = PH001\nImage 2 = COST001\n身份绑定：继承\n禁止改变：脸"
+        bad, _ = PR.check_identity_map(
+            bare, [{"image_n": 1, "asset_id": "PH001"},
+                   {"image_n": 2, "asset_id": "COST001"}])
+        self.assertIn("没说清它是谁", bad)
 
     def test_fields_are_counted_per_image_not_per_prompt(self):
         """★ 五项在整篇里各出现一次也能匹配上，但可能全挂在 Image 1 下面。
@@ -145,14 +196,15 @@ class WiringTests(unittest.TestCase):
         而那是被引用的那张图，它自己完全正确（道具外观规格，原创设计，
         本来就没有参考图）。要改的是引用它的那个资产。
         """
+        # 用一个真会硬停的输入：光有编号和 ID，后面什么都不说
         bad, _ = PR.check_identity_map(
-            "Image 1 = PS001 奖杯\n"
-            "  有权控制：外观\n  无权控制：机位\n",
+            "Image 1 = PS001\n身份绑定：继承\n禁止改变：尺寸\n",
             [{"image_n": 1, "asset_id": "PS001"}],
             who="PI001", ref="03_提示词/资产生产提示词/PI001_PROMPT.txt")
         self.assertIn("PI001", bad)
         self.assertIn("PI001_PROMPT.txt", bad)
         self.assertIn("不是被它引用的那张图", bad)
+        self.assertIn("PS001", bad, "没说是哪一张图有问题")
 
     def test_the_numbering_error_says_it_too(self):
         bad, _ = PR.check_image_map(
