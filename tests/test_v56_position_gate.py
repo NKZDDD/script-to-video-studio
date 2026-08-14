@@ -154,6 +154,46 @@ class CvsPositionTests(unittest.TestCase):
         self._save([cvs("A1", who("C001"))])
         self.assertEqual(G.position_gate(self.pj), [])
 
+    def test_a_scene_cut_is_not_a_teleport(self):
+        """★ 换场不是瞬移。
+
+        实跑报了 18 处「无事件瞬移」，一半是 SC01→SC02、SC04→SC05 这种：
+        不同时间、不同地点，人当然在别处 —— 那是剪辑。
+
+        V5.6 举的例子（坐在发布会桌后 → 直接在观众区争吵）发生在
+        **同一场发布会之内**。要求跨场次也给移动事件是无理的，
+        而误报的代价很实在：真问题被一屏噪音淹掉，人干脆整道闸门放行。
+        """
+        self._save([
+            dict(cvs("A1", who("C001", zone="B", anchor="DESK_01")),
+                 scene_id="EP01-SC01"),
+            dict(cvs("A2", who("C001", zone="C", anchor="AISLE_01",
+                               posture="STANDING", support="")),
+                 scene_id="EP01-SC02"),
+        ])
+        self.assertEqual(G.position_gate(self.pj), [])
+
+    def test_within_one_scene_it_still_blocks(self):
+        """写了 scene_id 不是免检牌 —— 同一场之内照样逐项对账。"""
+        self._save([
+            dict(cvs("A1", who("C001", zone="B", anchor="DESK_01")),
+                 scene_id="EP01-SC01"),
+            dict(cvs("A2", who("C001", zone="C", anchor="AISLE_01",
+                               posture="STANDING", support="")),
+                 scene_id="EP01-SC01"),
+        ])
+        bad = G.position_gate(self.pj)
+        self.assertEqual(len(bad), 1, bad)
+        self.assertIn("无事件瞬移", bad[0])
+
+    def test_without_scene_ids_it_compares_conservatively(self):
+        """没写场次号就照旧比 —— 宁可误报，也别让漏写字段变成免检。"""
+        self._save([
+            cvs("A1", who("C001", zone="B")),
+            dict(cvs("A2", who("C001", zone="C")), scene_id="EP01-SC02"),
+        ])
+        self.assertTrue(G.position_gate(self.pj))
+
 
 class KeyframePositionTests(unittest.TestCase):
     """相邻关键帧之间：Camera may reframe; entities may not reblock."""

@@ -228,10 +228,12 @@ def _moved_dims(a: dict, b: dict) -> list:
 
 
 def _cvs_position_problems(pj: Project, ep: str) -> list:
-    """相邻 CVS 之间：位置变了就必须有一条被批准的移动事件。
+    """**同一场次内**相邻 CVS 之间：位置变了就必须有一条被批准的移动事件。
 
     移动事件在第八环节的 vt[] 里（视觉过渡），它得写清
     起点、解除支撑、走哪条 Route、穿哪个 Portal、终点。
+
+    跨场次不查 —— 换场是剪辑，不是瞬移。
     """
     d = pj.stage_data("n8_cvs", ep) or {}
     cvs = [c for c in (d.get("cvs") or []) if isinstance(c, dict)]
@@ -246,6 +248,15 @@ def _cvs_position_problems(pj: Project, ep: str) -> list:
         moves.setdefault(key, []).append(vt)
     bad = []
     for prev, cur in zip(cvs, cvs[1:]):
+        # **跨场次不比。** 换场是剪辑：不同时间、不同地点，人当然在别处。
+        # V5.6 讲的是「同一个连续动作里没有移动事件却换了位置」——
+        # 它举的例子（坐在发布会桌后 → 直接在观众区争吵）就发生在同一场之内。
+        # 不加这一条会报出一屏跨场次误报，真问题被淹掉，
+        # 然后人干脆把整道闸门放行 —— 那比没有闸门更糟。
+        # 没写 scene_id 时保守比一次（宁可误报也别漏掉真瞬移）。
+        ps, cs = str(prev.get("scene_id") or ""), str(cur.get("scene_id") or "")
+        if ps and cs and ps != cs:
+            continue
         pid, cid = str(prev.get("cvs_id") or "?"), str(cur.get("cvs_id") or "?")
         by_prev = {str(c.get("character_id") or ""): c
                    for c in (prev.get("characters") or []) if isinstance(c, dict)}
