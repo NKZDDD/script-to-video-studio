@@ -761,15 +761,6 @@ def api_post(path: str, body: dict) -> dict:
             from core.store import read_text
             params["script"] = read_text(script_path)
 
-        # 出图尺寸和画幅方向必须一致。这两个是各自独立的下拉框，选成
-        # 「1536x1024 + 9:16」是合法输入，一路跑到成片都不报错。
-        # 在花钱之前拦住 —— 跑完再发现，图和片的钱都已经花了。
-        from core import probe as _probe
-        _c = _probe.orientation_conflict(params.get("image_size", ""),
-                                         params.get("ratio", ""))
-        if _c:
-            raise ValueError(_c)
-
         # 出图/出片各自按优先级用哪几家，点「开始」时就定下来。
         # 提前解析一遍：key 没填、链是空的，现在就报，别等跑到第 300 步才发现。
         sel = body.get("provider_sel") or {}

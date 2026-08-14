@@ -659,25 +659,6 @@ function capHint(ch) {
     + '<br><span class="muted">选项跟着<b>模型</b>变，不是跟着服务商 —— '
     + '换模型回来这里就变了。</span>';
 }
-// 图片尺寸和画幅是两个各自独立的下拉框，谁也不管谁。选成
-// 「1536x1024（横）+ 9:16（竖）」是合法输入，一路跑到成片都不报错 ——
-// 而故事板就是出片的参考图，方向反了会裁掉两边或者上下加黑边，
-// 人脸常常正好被裁掉。后端点「开始」时会硬拦，这里提前说一声。
-function orientHint() {
-  const dir = v => {
-    const m = String(v || '').trim().replace('×', 'x').match(/^(\d+)\s*[:x]\s*(\d+)$/);
-    if (!m || !+m[2]) return '';
-    const r = +m[1] / +m[2];
-    return Math.abs(r - 1) < 0.05 ? '方' : (r < 1 ? '竖' : '横');
-  };
-  const sz = $('#autoSize'), ra = $('#autoRatio');
-  if (!sz || !ra) return '';
-  const a = dir(sz.value), b = dir(ra.value);
-  if (!a || !b || a === b || a === '方' || b === '方') return '';
-  return `<br><span style="color:#c0392b">⚠ 图片尺寸是<b>${a}</b>的、`
-       + `画幅是<b>${b}</b>的，方向相反 —— 故事板是出片的参考图，`
-       + `方向反了出片会裁掉人脸，而这要到成片才看得见。点「开始」会被拦下。</span>`;
-}
 function paramChoices() {
   const cross = (kind, block, field) => {
     const chain = (BOOT.config.chains || {})[kind] || [];
@@ -918,9 +899,7 @@ function renderAuto() {
   $('#autoSize').innerHTML  = opt(capOf('asset','image').sizes || ['1024x1536'], d.image_size);
   $('#autoRatio').innerHTML = opt(capOf('video','video').ratios || ['9:16'], d.ratio);
   $('#autoDur').innerHTML   = opt(capOf('video','video').durations || [15], d.duration);
-  $('#autoCapHint').innerHTML = capHint(ch) + orientHint();
-  $('#autoSize').onchange = $('#autoRatio').onchange =
-    () => { $('#autoCapHint').innerHTML = capHint(ch) + orientHint(); };
+  $('#autoCapHint').innerHTML = capHint(ch);
   const bad = CHAIN_KINDS.some(([k]) => !(ch[k] || []).length);
   $('#autoRun').disabled = bad;
   $('#autoRun').title = bad ? '先去「设置 → 出图出片优先级」把三类活各排一条队' : '';

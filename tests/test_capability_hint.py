@@ -75,7 +75,7 @@ class HintWiringTests(unittest.TestCase):
     def test_the_production_page_shows_where_the_choices_come_from(self):
         self.assertIn('id="autoCapHint"', self.html)
         self.assertIn("function capHint(", self.html)
-        self.assertIn("$('#autoCapHint').innerHTML = capHint(ch)", self.html)
+        self.assertIn("$('#autoCapHint').innerHTML = capHint(ch);", self.html)
 
     def test_it_reports_the_max_seconds_and_the_model(self):
         i = self.html.index("function capHint(")
