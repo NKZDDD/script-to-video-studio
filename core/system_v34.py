@@ -222,8 +222,15 @@ PRODUCE_ORDER = ["p1", "p2", "p3", "p4"]
 # 服务商注册表里一直有 max_refs（灵感鸭 sora-2 只收 1 张、坤鸡 9 张），
 # 但模型侧从来不知道 —— LLM 按剧情需要引 6 张，到出图那步才撞上限。
 # V5.6 还特别强调：这个数是**容量上限，不是推荐装满的数量**。
+#
+# EPISODE_DURATION / SEGMENTS_TARGET / SEGMENTS_WHY：**这一集**多长、
+# 该装成几个 SEG。和 DURATION 必须分开 —— DURATION 是一个容器的容量
+# （视频模型一次最多生成多久），不是这一集多长。以前只有 DURATION，
+# 后果实跑撞过一整轮：第九环节是整集级的，它只看得见 15，就把 8 个场次
+# 压成 15 秒，然后第十环节只装出 1 个 SEG，往下全线崩且不报错。
 COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
-                       "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT")
+                       "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT",
+                       "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY")
 
 
 # 每个环节实际需要上游产物的**哪几部分**。

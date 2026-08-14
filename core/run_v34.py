@@ -57,7 +57,18 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
                       if k in params}),
         "EPISODE": episode,
         "SEGMENT": segment,
+        # DURATION 是**一个容器**的秒数（视频模型一次最多生成多久），
+        # 不是这一集多长。这两个数字必须分开发 —— 合成一个的后果实跑撞过：
+        # 第九环节是**整集级**的，它要为一整集设计镜头，而拿到的唯一秒数是 15，
+        # 就把 8 个场次压成了 15 秒的「高密度蒙太奇」（模型自己在
+        # shot_count_rationale 里写了「完整实时演出远超15秒」，它知道装不下）。
+        # 然后第十环节照着 15 秒装出 1 个 SEG，第十二环节被迫在一张纸上画 16 格
+        # （模板上限 3×3），模型扛不住 8 个场次的世界状态就开始瞎填 ——
+        # 审计报的 7 条 BLOCK 里有 5 条是这一个故障的下游。
         "DURATION": params.get("duration", 15),
+        "EPISODE_DURATION": _ep_seconds(pj, episode, params),
+        "SEGMENTS_TARGET": _seg_target(pj, episode, params)[0],
+        "SEGMENTS_WHY": _seg_target(pj, episode, params)[1],
         "IMAGE_SIZE": params.get("image_size", "1024x1536"),
         "SEG_COUNT": len(segments_of(pj, episode)) if episode else 0,
         "SCRIPT": _script_for(pj, stage_id, episode, params),
@@ -80,6 +91,35 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         obj = project_product(stage_id, out_name, obj)
         m[V.placeholder_of(out_name)] = jd(obj)
     return m
+
+
+def _ep_seconds(pj: Project, episode: str, params: dict) -> int:
+    """这一集**总共**多长（秒）。不知道就返回 0。
+
+    第一环节看完全篇按剧情事件定的，存在 episodes.json 的 duration_sec 里。
+    V6.1 一直在用它算段数，V5.6 这边我搭 stage 图时漏搬了 —— 结果第九环节
+    只看得见容器的 15 秒，把整集当成 15 秒来设计。
+
+    返回 0（老项目的产物里没有这个字段）时模板会退回只按容器算，
+    和以前的行为一致 —— 不至于让老项目跑不动。
+    """
+    if not episode:
+        return 0
+    for e in _eps.load(pj).get("episodes", []):
+        if e.get("episode") == episode and e.get("duration_sec"):
+            return int(e["duration_sec"])
+    return 0
+
+
+def _seg_target(pj: Project, episode: str, params: dict) -> tuple:
+    """这一集该切几段，以及这个数是怎么来的。没有集号时返回 (0, "")。
+
+    直接用 V6.1 那份 —— 算法是体系无关的（本集秒数 ÷ 单段秒数），
+    照着重写一遍只会让两边慢慢飘开。
+    """
+    if not episode:
+        return 0, ""
+    return _eps.seg_target(pj, episode, params)
 
 
 # 全剧级产物里，哪些数组是按集标了号的。逐集环节拿到之后要裁成只剩本集。
@@ -367,11 +407,64 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
                             log=log, cancel=cancel,
                             on_usage=_usage(pj, stage_id, episode),
                             on_partial=keep_partial(pj, stage_id, episode))
+    check_runtime(pj, stage_id, out, params, episode, log)
     pj.save_stage(tpl_name, out, "" if V.scope_of(stage_id) == "series" else episode)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode or "全剧")
     if stage_id == "n1":
         _split_episodes(pj, out, params, log)
     return out
+
+
+# 本集时长和实际排出来的时长，差多少算「压过头了」。
+# 给 25% 的余量：镜头时长是估的，取整、转场占时、最后一镜收尾都会有出入。
+# 但整集被压进一个容器时差的是好几倍，这个阈值抓得住，又不会天天误报。
+_TIME_TOL = 0.75
+
+
+def check_runtime(pj: Project, stage_id: str, out: dict, params: dict,
+                  episode: str, log: Callable = print) -> None:
+    """第九环节排出来的总时长，和这一集该有多长，对得上吗。
+
+    这是「不报错、只是错」里最贵的一种，实跑撞过整轮：
+    第九环节只拿得到容器的 15 秒，就把 8 个场次压成 15 秒的
+    「高密度因果蒙太奇」—— 而且它**知道**装不下，自己在
+    shot_count_rationale 里写了「完整实时演出远超15秒」，还是压了。
+
+    压完之后一路不报错：第十环节照 15 秒装出 1 个 SEG，第十二环节
+    在一张纸上画 16 格（模板上限 9 格），模型记不住 8 个场次的世界状态，
+    于是所有格子的 source_scstate 全填第一个、道具状态和 CVS 互相打架。
+    要到第十四环节审计才有人说话，而那时候已经跑了十几个环节。
+
+    所以在这里就停 —— 时间对不上，往下每一步都在错的前提上工作。
+    """
+    if stage_id != "n9":
+        return
+    want = _ep_seconds(pj, episode, params)
+    if not want:
+        return                      # 老项目没存本集秒数，没得比
+    got = _plan_seconds(out)
+    if not got:
+        return                      # 没给时间计划是另一回事，schema 那层管
+    if got >= want * _TIME_TOL:
+        return
+    clip = int(params.get("duration") or 15) or 15
+    raise RuntimeError(
+        f"{episode} 第九环节把整集排成了 {got:g} 秒，"
+        f"但这一集该有 {want} 秒（第一环节按剧情定的）—— 压掉了 "
+        f"{100 - got * 100 / want:.0f}%。\n"
+        f"最常见的原因是把 SEG 容器的 {clip} 秒当成了整集预算。"
+        f"这两个数字不一样：{clip} 秒是视频模型一次最多生成多久，"
+        f"{want} 秒是这一集多长。\n"
+        f"压缩之后往下全线出错而且不报错 —— 第十环节只装得出 1 个 SEG，"
+        f"故事板一张纸要画十几格，模型记不住那么多场次的世界状态，"
+        f"就会把所有格子的场景状态全填成第一个。所以在这里停。")
+
+
+def _plan_seconds(out: dict) -> float:
+    """时间计划铺到了第几秒。取最大的 end —— 不假设它是按顺序写的。"""
+    ends = [float(t["end"]) for t in (out or {}).get("timing_plan") or []
+            if isinstance(t, dict) and isinstance(t.get("end"), (int, float))]
+    return max(ends) if ends else 0.0
 
 
 def keep_partial(pj: Project, stage_id: str, episode: str = "",
