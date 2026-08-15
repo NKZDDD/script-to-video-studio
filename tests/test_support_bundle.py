@@ -207,3 +207,34 @@ class AttributionTests(unittest.TestCase):
         src = inspect.getsource(P)
         self.assertIn('"provider": _host(', src)
         self.assertIn("target=ep or \"全剧\", **who", src)
+
+
+class BothSystemsTests(unittest.TestCase):
+    """两套体系必须都有排错能力 —— 只做一边等于另一边照旧摸黑。
+
+    实际发生过：失败原文、模型归属这些做在了电影级那条执行链上，
+    而通用版（stages.py / pipeline.py）**一份原文都不存** ——
+    JSON 解析不了时模型回了什么直接丢掉，人只能对着一句
+    「未找到可解析的 JSON」猜。这类能力是体系无关的，
+    做在一边就该同时接到另一边。
+    """
+
+    def _src(self, rel):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return io.open(os.path.join(root, rel), encoding="utf-8").read()
+
+    def test_both_execution_layers_keep_the_raw_output(self):
+        for rel in ("core/stages.py", "core/run_v34.py"):
+            self.assertIn("keep_partial(", self._src(rel), rel)
+            self.assertIn("on_partial=", self._src(rel), rel)
+
+    def test_both_pipelines_record_who_answered(self):
+        for rel in ("core/pipeline.py", "core/pipeline_v34.py"):
+            src = self._src(rel)
+            self.assertIn("provider=", src.replace('"provider":', "provider="), rel)
+            self.assertIn("model", src, rel)
+
+    def test_keep_partial_lives_in_the_shared_layer(self):
+        """★ 放在某一套的执行层里，另一套就 import 不到（会绕成循环依赖）。"""
+        from core import store
+        self.assertTrue(callable(store.keep_partial))

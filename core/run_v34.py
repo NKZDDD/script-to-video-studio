@@ -26,7 +26,7 @@ from . import diagnose, episodes as _eps, ledger, system_v34 as V
 from .executor import LLM_GATE
 from .llm import LLMCancelled
 from .stages import jd, load_prompt, prompt_files, render
-from .store import Project, write_text
+from .store import Project, keep_partial, write_text
 
 
 # ---------------------------------------------------------------- 依赖与占位符
@@ -78,6 +78,8 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         "CAPABILITY": _capability_block(pj),
         "REF_LIMIT": _ref_limit_block(params),
     }
+    if stage_id == "n4b":
+        data = dict(data, n4_assets=_n4b_worklist(pj, data.get("n4_assets") or {}))
     for out_name, obj in data.items():
         # 三层裁剪，各管一件事：
         #   按集   全剧级产物 → 只剩本集（叙事结构、总账）
@@ -385,6 +387,99 @@ def build_user(pj: Project, stage_id: str, params: dict,
     return text
 
 
+def _n4b_worklist(pj: Project, a4: dict) -> dict:
+    """n4b 的输入：**要写的留全量，其余压成一行目录。**
+
+    不能直接把已写过的删掉 —— 模型引用别的资产要靠 ID（LOOK 引 PH、
+    CT 引 LOOK）。看不到就会重新发明一个 ID，出图那层再报「查不到这个资产」。
+    所以留着，但只留 id/family/name 三个字段，一条几十字节而不是八百字符。
+
+    这一步只改**发过去的内容**，不改环节顺序、不改产物结构。
+    """
+    if not isinstance(a4, dict):
+        return a4
+    _, todo, _ = n4b_split(pj)
+    keep = set(todo)
+    full, catalog = [], []
+    for a in a4.get("assets") or []:
+        aid = a.get("asset_id")
+        if aid in keep:
+            full.append(a)
+        elif aid:
+            catalog.append({k: a.get(k) for k in ("asset_id", "family", "name")
+                            if a.get(k)})
+    return dict(a4, assets=full, assets_already_done=catalog)
+
+
+def n4b_split(pj: Project, episode: str = "") -> tuple:
+    """资产表分三份：已经写过的 / 这次要写的 / 根本不用写的。
+
+    返回 (已写的 id 列表, 要写的 id 列表, 不用写的条数)。
+
+    为什么必须增量：n4b 是全剧级的，一次要写全剧所有资产的完整提示词。
+    实测 V6.1 逐集是 17 条 / 14,144 字符 ≈ 8,320 token（装得下），
+    而全剧级 4 集就 33,280 token —— 超过本机实测的输出天花板 19,612。
+    不增量的话，截断之后重跑写的是同一批东西，永远走不完。
+
+    增量之后每一轮只补没写的，截断也在推进。**不改变环节顺序**：
+    n4b 还是一个环节、还在原位、产物文件名不变。
+
+    过滤依据用**已存产物里的 prompt**，不用磁盘上的 txt：
+    txt 是 write_prompt_files 写的，而那个函数只在逐集环节跑完才调
+    （n4b 是全剧级，episode=""），所以 n4b 刚跑完那一刻 txt 还不存在 ——
+    拿它当依据会把刚写好的又判成没写。
+    """
+    assets = (pj.stage_data("n4_assets", "") or {}).get("assets") or []
+    written = {ap.get("asset_id") for ap in
+               (pj.stage_data("n4b_asset_prompts", "") or {}).get("asset_prompts") or []
+               if ap.get("asset_id") and (ap.get("prompt") or "").strip()}
+    done, todo, dropped = [], [], 0
+    for a in assets:
+        aid = a.get("asset_id")
+        if not aid:
+            continue
+        # skill 第五章：只为**当前范围实际需要**且视觉差异有生产价值的状态
+        # 建资产。decision=skip 的出图那一层本来就会丢掉（见 build_tasks），
+        # 在这里写一遍纯属把 token 花在注定要扔的东西上 ——
+        # 而这一步恰恰是最容易被截断的那一步。
+        if a.get("decision") == "skip":
+            dropped += 1
+        elif aid in written:
+            done.append(aid)
+        else:
+            todo.append(aid)
+    return done, todo, dropped
+
+
+def merge_asset_prompts(previous: dict, fresh: dict) -> dict:
+    """按 asset_id 合并。增量跑必须合并，不能用一批补写覆盖整份。
+
+    和 V6.1 的 merge_s5_outputs 是同一件事，逻辑照抄 —— 两套体系的
+    资产提示词都是「全剧一份、分几次写完」，合并规则没有体系差异。
+    """
+    previous, fresh = previous or {}, fresh or {}
+    merged = dict(previous)
+    merged.update(fresh)
+    rows, pos = [], {}
+    for ap in previous.get("asset_prompts") or []:
+        aid = ap.get("asset_id")
+        if not aid or aid in pos:
+            continue
+        pos[aid] = len(rows)
+        rows.append(ap)
+    for ap in fresh.get("asset_prompts") or []:
+        aid = ap.get("asset_id")
+        if not aid:
+            continue
+        if aid in pos:
+            rows[pos[aid]] = ap          # 重写覆盖旧的那一条
+        else:
+            pos[aid] = len(rows)
+            rows.append(ap)
+    merged["asset_prompts"] = rows
+    return merged
+
+
 def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
               episode: str = "", log: Callable = print,
               cancel: Optional[Callable] = None) -> dict:
@@ -396,6 +491,21 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     if miss:
         raise RuntimeError(f"{stage_id} 的前置还没跑：{'、'.join(miss)}")
     check_inputs(pj, stage_id, params, episode)
+
+    if stage_id == "n4b":
+        done, todo, dropped = n4b_split(pj, episode)
+        if dropped:
+            log(f"  {dropped} 个资产 decision=skip，不写提示词"
+                f"（出图那一层本来也会丢掉，写了是白写）")
+        if done:
+            log(f"  {len(done)} 个资产已经写过提示词，这次不重写")
+        if not todo:
+            log("  没有新资产要写提示词，直接跳过（不调模型、不花钱）")
+            prev = pj.stage_data("n4b_asset_prompts", "") or {"asset_prompts": []}
+            diagnose.clear(pj.root, "stage:n4b", "全剧")
+            return prev
+        log(f"  这次要写 {len(todo)} 个：{'、'.join(todo[:8])}"
+            f"{'…' if len(todo) > 8 else ''}")
 
     user = build_user(pj, stage_id, params, episode)
     tag = f"{episode} " if episode else "全剧 "
@@ -409,6 +519,11 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
                             on_usage=_usage(pj, stage_id, episode),
                             on_partial=keep_partial(pj, stage_id, episode, llm=llm))
     check_runtime(pj, stage_id, out, params, episode, log)
+    if stage_id == "n4b":
+        # **必须合并，不能覆盖。** 这一步现在是增量的：输入只给还没写过的，
+        # 所以模型回来的也只有那几条。直接存盘会把前几轮写好的全冲掉 ——
+        # 而且不报错，只是资产提示词越跑越少。
+        out = merge_asset_prompts(pj.stage_data("n4b_asset_prompts", "") or {}, out)
     pj.save_stage(tpl_name, out, "" if V.scope_of(stage_id) == "series" else episode)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode or "全剧")
     if stage_id == "n1":
@@ -466,50 +581,6 @@ def _plan_seconds(out: dict) -> float:
     ends = [float(t["end"]) for t in (out or {}).get("timing_plan") or []
             if isinstance(t, dict) and isinstance(t.get("end"), (int, float))]
     return max(ends) if ends else 0.0
-
-
-def keep_partial(pj: Project, stage_id: str, episode: str = "",
-                 segment: str = "", llm=None) -> Callable:
-    """返回一个「把即将丢弃的模型输出存下来」的回调。
-
-    为什么必须存：断流和 JSON 校验不过时，收到的内容原本是直接丢掉的。
-    结果是你只知道「收到 9091 字然后断了」，但不知道断在第几个字段、
-    模型是不是正在写某个超长数组、还是根本跑偏了 ——
-    而那是排「老是断在中途」唯一有用的证据。一次断三遍就是丢三份。
-
-    存在 07_检查与记录/失败原文/ 下，文件名带环节和段号，同一次跑多次失败
-    各存一份（带序号），不互相覆盖。
-
-    **文件头要写清是谁答的。** 这一份多半会被单独发给别人看，
-    脱离了当时的日志 —— 不写模型和线路的话，收到的人第一句话就得回问
-    「你用的哪个模型」，一来一回半天。时间同理：对得上日志才查得下去。
-    """
-    seq = itertools.count(1)
-
-    def save(text: str, why: str) -> None:
-        who = "_".join(x for x in (stage_id, episode, segment) if x)
-        name = f"{who}_{next(seq):02d}.txt"
-        path = pj.p("07_检查与记录", "失败原文", name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        head = (f"环节 {stage_id}　{episode or '全剧'}"
-                f"{('　' + segment) if segment else ''}\n"
-                f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"模型：{getattr(llm, 'model', '') or '（没记到）'}"
-                f"　线路：{_host(getattr(llm, 'base_url', '')) or '（没记到）'}"
-                f"　流式：{'开' if getattr(llm, 'stream', None) else '关'}"
-                f"　输出上限：{getattr(llm, 'max_tokens', '') or '（没设）'}\n"
-                f"原因：{why}\n"
-                f"收到 {len(text)} 字\n"
-                + "-" * 60 + "\n")
-        write_text(path, head + text)
-
-    return save
-
-
-def _host(base_url: str) -> str:
-    """从 base_url 取域名当「哪条线路」。**不含 key**，可以安全落盘外发。"""
-    s = str(base_url or "").split("//", 1)[-1]
-    return s.split("/", 1)[0] or ""
 
 
 def _split_episodes(pj: Project, out: dict, params: dict, log: Callable) -> None:

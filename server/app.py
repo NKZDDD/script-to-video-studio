@@ -158,6 +158,30 @@ def proj_of(body: dict) -> Project:
 
 SYSTEMS = ("v61", "v34")
 
+# 两套体系对外只有这两个名字。**别再用别的说法。**
+#
+# 名字一度有三层在打架：内部 id 叫 `v34`、界面写「V3.4」、而实际在跑的
+# skill 已经是 V5.6 —— 同一套东西三个叫法，讨论问题时谁都不确定在说哪个。
+#
+# 内部 id **不许改**：它是 project.json 里 `system` 字段的值，改了所有
+# 已建项目会被判成「另一套体系」，产物全部重跑、钱重花一遍。
+# 所以只统一显示名，id 原样留着。
+#
+# skill_version 是**当前**基于的 skill 版本，升级时改这里一处；
+# 项目建立时会把它抄进 project.json，这样老项目也知道自己按哪版跑的。
+SYSTEM_LABELS = {
+    "v34": {"name": "电影级十七章", "skill_version": "V5.6",
+            "note": "17 章 / 15 次 LLM 调用，逐段落到场景状态图与故事板包"},
+    "v61": {"name": "通用十二环节", "skill_version": "V6.1",
+            "note": "12 环节 / 8 次 LLM 调用，逐集逐段直接编故事板"},
+}
+
+
+def system_label(sid: str) -> str:
+    """给人看的全名，例如「电影级十七章（V5.6）」。"""
+    s = SYSTEM_LABELS.get(sid or "")
+    return f"{s['name']}（{s['skill_version']}）" if s else (sid or "未知体系")
+
 
 def _system_of(v) -> str:
     """建项目时选的生产体系。认不出的一律回落 v61 —— 那是跑过真项目的那套。"""
@@ -507,12 +531,14 @@ def api_get(path: str, q: dict) -> dict:
                 # 两套体系的环节表都下发，前端按项目的 system 挑一套显示。
                 # 不在这里挑：切项目不用重新拉一遍 bootstrap。
                 "stages": S.STAGES,
+                # 名字**只从 SYSTEM_LABELS 取**，别在这里另写一份 ——
+                # 以前这里写「V3.4 电影级十七章」而实际跑的是 skill V5.6，
+                # 三处名字对不上，讨论问题时谁都不确定在说哪一套。
                 "systems": {
-                    "v61": {"name": "V6.1 十二环节", "stages": S.STAGES,
-                            "note": "跑过真项目的那一套"},
-                    "v34": {"name": "V3.4 电影级十七章", "stages": V34.STAGES,
-                            "note": "多一层场景状态图；转场按六类原生机制选，"
-                                    "不再只会硬切"}},
+                    "v61": dict(SYSTEM_LABELS["v61"], name=system_label("v61"),
+                                stages=S.STAGES),
+                    "v34": dict(SYSTEM_LABELS["v34"], name=system_label("v34"),
+                                stages=V34.STAGES)},
                 "projects": list_projects(cfg["projects_dir"]),
                 "projects_dir": cfg["projects_dir"],
                 # 程序目录 / 数据目录 / 配置位置，让人一眼知道更新程序会不会碰到数据

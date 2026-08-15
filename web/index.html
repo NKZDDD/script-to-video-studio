@@ -183,11 +183,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <div><label>目录名</label><input id="spName" placeholder="XYQY-002_新剧"></div>
       <div><label>项目编号</label><input id="spCode" value="PROJ-001"></div>
       <div><label>集数</label><input id="spEp" value="EP01"></div>
-      <!-- 新建只给 V3.4。V6.1 的代码没删，老项目照常打开、照常跑完，
-           但不再拿它开新剧 —— 两套并列摆着只会让人建错，建完还改不了。 -->
+      <!-- 新建只给电影级十七章。通用十二环节的代码没删，老项目照常打开、
+           照常跑完，但不再拿它开新剧 —— 两套并列摆着只会让人建错，
+           建完还改不了。名字以 SYSTEM_LABELS 为准，别在这里另写。 -->
       <div><label>生产体系 <span class="muted">建完不能改</span></label>
         <select id="spSystem">
-          <option value="v34">V3.4 电影级十七章</option>
+          <option value="v34">电影级十七章（V5.6）</option>
         </select></div>
     </div>
     <div class="muted" style="margin-top:6px" id="spSystemNote"></div>
@@ -299,7 +300,9 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <div class="row" style="margin-top:10px"><button class="btn ghost sm" id="saveParams">保存参数</button></div>
   </div>
   <div class="card">
-    <h2>十二环节 <span class="tag">1-8 调 LLM 分析｜5b/9/10 出图出片｜11-12 本地</span></h2>
+    <!-- 标题跟着项目的体系走。写死「十二环节」的后果：跑十七章的项目时
+         标题是错的，而下面列的又是十七章的环节 —— 自相矛盾。 -->
+    <h2 id="stagesTitle">环节 <span class="tag" id="stagesTag"></span></h2>
     <div id="stageList"></div>
   </div>
   <div class="card"><h2>运行日志</h2><pre class="log" id="flowLog">—</pre></div>
@@ -1045,7 +1048,7 @@ $('#autoPreview').onclick = async () => {
   </div>`;
 };
 // ---------------------------------------------------------------- 闸门
-// 只有 V3.4 项目有这几道。拦住时必须能在页面上放行 ——
+// 只有电影级十七章的项目有这几道。拦住时必须能在页面上放行 ——
 // 否则闸门就是死路：判定有问题之后只能手改 project.json。
 async function renderGates() {
   const card = $('#gatesCard');
@@ -1325,9 +1328,9 @@ function sysStages() {
 }
 function sysName() {
   const s = (BOOT.systems || {})[projSystem()];
-  return (s && s.name) || 'V6.1 十二环节';
+  return (s && s.name) || '通用十二环节（V6.1）';
 }
-// 全剧只跑一次的环节。V3.4 的环节表自带 scope，V6.1 的没有，按 id 兜底。
+// 全剧只跑一次的环节。十七章的环节表自带 scope，十二环节的没有，按 id 兜底。
 const perEpisode = s =>
   typeof s === 'object' ? (s.scope ? s.scope !== 'series' : s.id !== 's1')
                         : s !== 's1';
@@ -1335,6 +1338,9 @@ const perEpisode = s =>
 function renderStages(done) {
   const multi = (EPS.episodes || []).length > 1;
   const stages = sysStages();
+  const sys = (BOOT.systems || {})[projSystem()] || {};
+  $('#stagesTitle').firstChild.nodeValue = (sys.name || '环节') + ' ';
+  $('#stagesTag').textContent = sys.note || '';
   $('#stageList').innerHTML =
     `<div class="muted" style="margin-bottom:6px">本剧用的是 <b>${esc(sysName())}</b>
      —— 建项目时定的，之后不改（两套的产物和任务结构不一样）。</div>`

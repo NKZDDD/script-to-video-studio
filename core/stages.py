@@ -23,7 +23,7 @@ from .executor import LLM_GATE
 from .llm import LLM, LLMCancelled, rough_tokens
 from .providers import ImageTask, VideoTask, build as build_provider
 from .apiutil import resolve_ref
-from .store import Project, read_text, write_text
+from .store import Project, keep_partial, read_text, write_text
 
 # 出图出片执行层搬到了 core/produce.py（体系无关，见那边的文件头说明）。
 # 这里转发进来：调用方写 stages.make_image_worker 照旧能用，
@@ -774,7 +774,12 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     try:
         with LLM_GATE.slot():
             out = llm.json_call(system, user, required=required, log=log,
-                                validator=validator, cancel=cancel, on_usage=_usage)
+                                validator=validator, cancel=cancel, on_usage=_usage,
+                                # 收到什么必须留档。不留的话「JSON 解析不了」
+                                # 就只剩一句话，看不出模型是写了散文、拒答了、
+                                # 还是写到一半断了 —— 那三种改法完全不同。
+                                on_partial=keep_partial(pj, stage_id, episode,
+                                                        llm=llm))
     except BaseException:
         if stage_id == "s5" and not force:
             # 没写成，把领走的资产放回去，让下一集或重跑能接手
@@ -1127,7 +1132,8 @@ def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
                     system=load_prompt("_common", pj), user=build_user(seg),
                     required=required,
                     log=lambda m, _s=sid: log(f"    {_s}: {m}"), cancel=cancel,
-                    on_usage=_usage_of(pj, stage_id, episode, sid))
+                    on_usage=_usage_of(pj, stage_id, episode, sid),
+                    on_partial=keep_partial(pj, stage_id, episode, sid, llm=llm))
             item = out[key][0]
             item["id"] = sid
             if on_item:

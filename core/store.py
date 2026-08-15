@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # 同一把可重入锁保护所有 JSON 读写。
 # 必须连读也锁住：Windows 上 os.replace 目标文件若被别的线程打开着读，会 WinError 5。
@@ -172,3 +173,48 @@ def list_projects(base: str) -> list:
                                      time.localtime(os.path.getmtime(root))),
         })
     return out
+
+
+# ------------------------------------------------ 失败原文（两套体系共用）
+def keep_partial(pj: Project, stage_id: str, episode: str = "",
+                 segment: str = "", llm=None) -> Callable:
+    """返回一个「把即将丢弃的模型输出存下来」的回调。
+
+    为什么必须存：断流和 JSON 校验不过时，收到的内容原本是直接丢掉的。
+    结果是你只知道「收到 9091 字然后断了」，但不知道断在第几个字段、
+    模型是不是正在写某个超长数组、还是根本跑偏了 ——
+    而那是排「老是断在中途」唯一有用的证据。一次断三遍就是丢三份。
+
+    存在 07_检查与记录/失败原文/ 下，文件名带环节和段号，同一次跑多次失败
+    各存一份（带序号），不互相覆盖。
+
+    **文件头要写清是谁答的。** 这一份多半会被单独发给别人看，
+    脱离了当时的日志 —— 不写模型和线路的话，收到的人第一句话就得回问
+    「你用的哪个模型」，一来一回半天。时间同理：对得上日志才查得下去。
+    """
+    seq = itertools.count(1)
+
+    def save(text: str, why: str) -> None:
+        who = "_".join(x for x in (stage_id, episode, segment) if x)
+        name = f"{who}_{next(seq):02d}.txt"
+        path = pj.p("07_检查与记录", "失败原文", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        head = (f"环节 {stage_id}　{episode or '全剧'}"
+                f"{('　' + segment) if segment else ''}\n"
+                f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"模型：{getattr(llm, 'model', '') or '（没记到）'}"
+                f"　线路：{_host(getattr(llm, 'base_url', '')) or '（没记到）'}"
+                f"　流式：{'开' if getattr(llm, 'stream', None) else '关'}"
+                f"　输出上限：{getattr(llm, 'max_tokens', '') or '（没设）'}\n"
+                f"原因：{why}\n"
+                f"收到 {len(text)} 字\n"
+                + "-" * 60 + "\n")
+        write_text(path, head + text)
+
+    return save
+
+
+def _host(base_url: str) -> str:
+    """从 base_url 取域名当「哪条线路」。**不含 key**，可以安全落盘外发。"""
+    s = str(base_url or "").split("//", 1)[-1]
+    return s.split("/", 1)[0] or ""

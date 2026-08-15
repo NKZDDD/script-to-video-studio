@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from . import diagnose, episodes as _eps, probe, stages as S
+from .store import _host
 from .apiutil import BATCH_FATAL
 from .llm import LLMCancelled
 from .executor import LLM_GATE, Job, run_chain
@@ -337,7 +338,10 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             return "cancelled"
         except Exception as exc:                     # noqa: BLE001
             kind = getattr(exc, "kind", "")
+            # 服务商和模型都要记：只记模型的话，同一个模型名在两条线路上
+            # 表现可能完全不同（截断、限流、字段支持），事后分不出是哪一条。
             diag = diagnose.build(exc, stage=f"stage:{s['stage']}", target=ep or s["stage"],
+                                  provider=_host(getattr(box["llm"], "base_url", "")),
                                   model=getattr(box["llm"], "model", ""))
             diagnose.record(pj.root, diag)
             job.set_item(key, state="failed", msg=diagnose.one_line(diag), diag=diag)
