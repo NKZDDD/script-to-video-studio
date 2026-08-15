@@ -426,7 +426,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
         want = (task.get("params") or {}).get("size", "1024x1536")
-        if os.path.isfile(out):
+        if probe.have_output(out):
             # 跳过也要重新量一遍：不然「比例不对」的提醒会被这次跳过悄悄清掉，
             # 而文件其实还是那个躺倒的文件。以磁盘上的东西为准。
             return {"skipped": True, "msg": "已经有了，跳过（做出来的就不再动）",
@@ -492,7 +492,7 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
         out = pj.p(*task["output"].split("/"))
         p = task.get("params") or {}
         want = p.get("ratio", "9:16")
-        if os.path.isfile(out):
+        if probe.have_output(out):
             # 同上：跳过时也重新量，别把「比例不对」的提醒清没了
             return {"skipped": True, "msg": "已经有了，跳过",
                     "warn": _ratio_warn(pj, out, want, "video", task["key"],

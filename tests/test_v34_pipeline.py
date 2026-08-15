@@ -32,7 +32,10 @@ class FakeProv:
         self.made.append(out)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         from PIL import Image
-        Image.new("RGB", (8, 8), (30, 60, 90)).save(out)
+        # 别用 8x8：那种图只有一百来字节，会被「0 字节产物」那道校验判成空壳
+        # （probe.have_output 有个 512 字节的下限）。真实的出图是几百 KB，
+        # 夹具太小就会让「跳过已完成」这类测试测的是另一件事。
+        Image.new("RGB", (256, 256), (30, 60, 90)).save(out)
         return {"provider": "fake", "model": "m"}
 
     def generate_video(self, task, out, **kw):

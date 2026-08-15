@@ -68,6 +68,28 @@ class _NoStreamOptions(RuntimeError):
 CHARS_PER_TOKEN = 2.0
 
 
+def stop_note(reason: str, usage: Optional[dict] = None) -> str:
+    """模型为什么停下来，以及有多少输出 token 花在了思考上。
+
+    以前这两个都只在「回复内容为空」和 finish_reason=length 两种情况下才用，
+    其余一律丢掉。而排「写到一半就断」时，需要的恰恰就是它们：
+
+      · reason=length  → 真的撞上限了，调大上限或者把活拆小
+      · reason=stop 但 JSON 没闭合 → 模型「以为」自己写完了，
+        或者中转站截断了却没设这个字段。**调上限没有任何用**，
+        往那个方向排查是白费时间 —— 实跑在这上面耗过一整轮。
+      · 思考 token 占掉一大半 → 输出预算其实没花在正文上
+
+    这些字段本来就在响应里，不记下来纯属浪费。
+    """
+    u = usage or {}
+    det = u.get("completion_tokens_details") or {}
+    bits = [f"结束原因={reason or '（服务商没给）'}"]
+    if det.get("reasoning_tokens"):
+        bits.append(f"其中思考 {det['reasoning_tokens']} token")
+    return "　" + "，".join(bits)
+
+
 def rough_tokens(text: str) -> int:
     return int(len(text or "") / CHARS_PER_TOKEN)
 
@@ -457,7 +479,7 @@ class LLM:
                 except Exception:                       # noqa: BLE001
                     pass                                # 存盘失败不能盖掉真错误
         started = time.time()
-        parts, reason, ticks = [], "", 0
+        parts, reason, ticks, skipped = [], "", 0, []
         closed = False              # 有没有正常收到 [DONE] / finish_reason
         usage = None                # 服务商回传的真实 token 数（可能没有）
 
@@ -505,7 +527,13 @@ class LLM:
                 try:
                     d = json.loads(chunk)
                 except ValueError:
-                    continue                       # 心跳/注释行，跳过
+                    # 心跳/注释行，跳过 —— 但**要数**。
+                    # 这里丢的可能是正文块，而丢了之后一点痕迹都没有：
+                    # 收到的字数少一截，JSON 于是配不平，看上去和
+                    # 「模型没写完」一模一样，两者的修法却完全相反。
+                    # 排到「是不是我们没收全」的时候，没有这个数就只能猜。
+                    skipped.append(chunk[:120])
+                    continue
                 ch = (d.get("choices") or [{}])[0]
                 piece = ((ch.get("delta") or {}).get("content")
                          or (ch.get("message") or {}).get("content") or "")
@@ -535,20 +563,39 @@ class LLM:
             # 流没有正常收尾就断了（既没 [DONE] 也没 finish_reason）。
             # 这跟「模型答得不合格」是两回事：不该拿去反馈重试，该当网络问题重试。
             # 尤其别在这时候报「回复内容为空」—— 那会让人以为是模型拒答。
+            secs = int(time.time() - started)
+            # 一个字都没收到，和「写到一半断了」是两回事，别混成一句话：
+            # 前者是模型还在思考、线上一直没有字节，被空闲超时切掉 ——
+            # 流式救不了它（思考期本来就不吐字），要减小的是**输入**。
+            # 后者才是传输中途出问题。指错方向的代价很实在：
+            # 前一种去调输出上限、开关流式，全是白费。
             raise _Retryable(
-                f"连接在流传输中途断开：只收到 {n} 字就没了"
-                f"（等了 {int(time.time()-started)} 秒，没有收到正常的结束标记）。"
-                f"这是传输中断，不是模型答错，会自动重试。")
+                (f"连接断开时一个字都还没收到（等了 {secs} 秒）。"
+                 f"这多半是模型的思考期超过了中转站的空闲上限 —— "
+                 f"它在吐第一个 token 之前不发任何数据，流式也盖不住这段静默。"
+                 f"会自动重试。" if n == 0 else
+                 f"连接在流传输中途断开：只收到 {n} 字就没了"
+                 f"（等了 {secs} 秒，没有收到正常的结束标记）。"
+                 f"这是传输中断，不是模型答错，会自动重试。"))
         if log:
             secs = int(time.time() - started)
             if usage:
                 log(f"生成完成：输出 {n} 字，用了 {secs} 秒。"
                     f"服务商记账 输入 {usage.get('prompt_tokens', '?')} token"
                     f"（其中缓存 {(usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0)}）"
-                    f"／输出 {usage.get('completion_tokens', '?')} token")
+                    f"／输出 {usage.get('completion_tokens', '?')} token"
+                    + stop_note(reason, usage))
             else:
                 log(f"生成完成：输出 {n} 字（约 {rough_tokens(''.join(parts))} token），"
-                    f"用了 {secs} 秒。这家没回传 usage，以上是估算")
+                    f"用了 {secs} 秒。这家没回传 usage，以上是估算"
+                    + stop_note(reason, usage))
+            if skipped:
+                # 正常情况下这是 0。不是 0 就得看一眼跳过的到底是心跳还是正文 ——
+                # 如果是正文，那 JSON 配不平的原因是**我们没收全**，
+                # 不是模型没写完，而这两件事的修法完全相反。
+                log(f"⚠️ 有 {len(skipped)} 个 data: 块解析不了被跳过了，"
+                    f"头一个是：{skipped[0]!r}　"
+                    f"—— 如果那不是心跳行，说明收到的正文少了一截")
         return self._finish("".join(parts), reason, usage)
 
     def _plain_once(self, sess, url, headers, body, proxies, tmo, log=None,
@@ -557,16 +604,18 @@ class LLM:
         self._check_status(r)
         data = r.json()
         u = data.get("usage") or {}
+        choices = data.get("choices") or []
+        reason = (choices[0].get("finish_reason") or "") if choices else ""
         if on_usage:
             on_usage(dict(u, model=self.model, seconds=0))
         if log and u:
             log(f"服务商记账 输入 {u.get('prompt_tokens', '?')} token"
-                f"／输出 {u.get('completion_tokens', '?')} token")
-        choices = data.get("choices") or []
+                f"／输出 {u.get('completion_tokens', '?')} token"
+                + stop_note(reason, u))
         if not choices:
             raise LLMError(f"无 choices: {json.dumps(data, ensure_ascii=False)[:300]}")
         return self._finish((choices[0].get("message") or {}).get("content") or "",
-                            choices[0].get("finish_reason") or "", u)
+                            reason, u)
 
     def json_call(self, system: str, user: str, required: Optional[list] = None,
                   json_retries: int = 2, log=print, cancel=None,

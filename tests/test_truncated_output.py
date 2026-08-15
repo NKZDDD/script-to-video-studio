@@ -95,7 +95,55 @@ class TruncationTests(unittest.TestCase):
         for user_advice in ("流式", "只测第一集", "换一个"):
             self.assertNotIn(user_advice, msg, f"「{user_advice}」不该出现在给模型的反馈里")
         from core import diagnose as D
-        self.assertIn("流式输出", "　".join(D.CATALOG["LLM_TRUNCATED"]["fix"]))
+        fix = "　".join(D.CATALOG["LLM_TRUNCATED"]["fix"])
+        self.assertIn("流式", fix)
+        self.assertIn("只测第一集", fix)
+
+    def test_it_never_tells_you_to_turn_streaming_off(self):
+        """★ 这条建议曾经写反过，代价很实在。
+
+        非流式期间没有字节流动，中间那层会以为连接死了，
+        在 100 秒左右直接掐断（HTTP 524）—— 关流式**加重**长输出的截断，
+        而卡里一度写着「先把流式输出关掉再试一次」，把人往反方向指了一整轮。
+        """
+        from core import diagnose as D
+        fix = "　".join(D.CATALOG["LLM_TRUNCATED"]["fix"])
+        for backwards in ("关掉流式", "流式输出关掉", "关闭流式"):
+            self.assertNotIn(backwards, fix)
+        self.assertIn("不要关流式", fix)
+
+    def test_it_says_which_field_to_look_at(self):
+        """★ length 和 stop 的修法完全相反，不说看哪个字段就只能猜。"""
+        from core import diagnose as D
+        c = D.CATALOG["LLM_TRUNCATED"]
+        blob = c["why"] + "　".join(c["fix"])
+        self.assertIn("结束原因", blob)
+        self.assertIn("length", blob)
+
+    def test_it_does_not_invent_a_time_threshold(self):
+        """★ 「用时接近 300 秒就是被切了」这条我写进去过，是错的。
+
+        本机 74 次调用的实况：362 秒的成了、302 秒的断了；
+        输出 17113 token 的成了、16942 的断了。时间和 token 两个维度上
+        成功和失败都重叠，没有干净的阈值。
+        给一个假阈值比不给更糟 —— 人会照着它去调一个根本没接线的旋钮。
+        """
+        from core import diagnose as D
+        c = D.CATALOG["LLM_TRUNCATED"]
+        blob = c["why"] + "　".join(c["fix"])
+        self.assertIn("别在耗时上找规律", blob)
+        self.assertNotIn("300 秒", blob)
+        self.assertNotIn("时间墙", blob)
+
+    def test_it_says_max_tokens_may_not_be_enforced(self):
+        """★ 实测：配的 16000，实际输出到过 19612。
+
+        不写这一句，人会一直加大那个数 —— 而这家网关压根不看它。
+        """
+        from core import diagnose as D
+        blob = D.CATALOG["LLM_TRUNCATED"]["why"]
+        self.assertIn("不执行 max_tokens", blob)
+        self.assertIn("19612", blob)
 
 
 class NormalParsingTests(unittest.TestCase):

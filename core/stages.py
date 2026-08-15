@@ -1667,7 +1667,7 @@ def health(pj: Project, episode: str = "") -> dict:
                      if not episode or t.get("episode", episode) == episode]
             item["total"] = len(items)
             item["done"] = sum(1 for t in items
-                               if os.path.isfile(pj.p(*t["output"].split("/"))))
+                               if probe.have_output(pj.p(*t["output"].split("/"))))
             item["action"] = "生产页 → 开始"
         else:
             if st["id"] == "s11":
@@ -1767,7 +1767,7 @@ def assemble(pj: Project, params: dict, log: Callable = print,
         (v for v in pj.registry("video")
          if v.get("file_ref") and (not episode or str(v.get("id", "")).startswith(f"{ep}-"))),
         key=lambda v: v.get("id", ""))
-    exist = [v for v in vids if os.path.isfile(pj.p(*v["file_ref"].split("/")))]
+    exist = [v for v in vids if probe.have_output(pj.p(*v["file_ref"].split("/")))]
     if not exist:
         raise RuntimeError(f"{ep} 没有可拼接的分段视频")
     lines = ["file '" + os.path.relpath(pj.p(*v["file_ref"].split("/")),

@@ -400,7 +400,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <h2>分析引擎（环节 1-8 的 LLM）</h2>
     <div class="grid g3">
       <div><label>Base URL</label><input id="llmBase" placeholder="https://api.paisio.online"></div>
-      <div><label>API Key</label><input id="llmKey" type="password" placeholder="留空则复用同域服务商的 key"></div>
+      <div><label>API Key</label><input id="llmKey" type="password" placeholder="留空则使用同域服务商的 LLM Key"></div>
       <div><label>模型</label>
         <input id="llmModel" list="llmModelList" placeholder="gpt-5.6-sol">
         <datalist id="llmModelList"></datalist></div>
@@ -592,6 +592,14 @@ const api = {
                               body: JSON.stringify(b)}).then(r => r.json()),
 };
 let BOOT = null, PROJ = null, DETAIL = null;   // DETAIL = 正在看明细的 job id
+
+function providerReady(id, capability, model='') {
+  const status = (BOOT.provider_keys_configured || {})[id];
+  if (!status) return !!BOOT.providers_configured[id];
+  if (id === 'chaomo' && capability === 'image' && model)
+    return !!status[/4k/i.test(model) ? 'image_4k' : 'image_1k'];
+  return !!status[capability];
+}
 
 // 只放「真的要人来定」的。镜头数 5-8、关键帧 4-6、故事板格数、单集分钟
 // 都不在这儿 —— 那是给模型判断用的创作区间（skill 规定的），写在提示词模板里，
@@ -870,12 +878,12 @@ let AUTO = null;                       // 正在跑的流水线 job id
 // 用「设置 → 出图出片优先级」里存好的链，这里只显示不重复选
 function renderAuto() {
   const ch = BOOT.config.chains || {};
-  const rows = CHAIN_KINDS.map(([kind, label]) => {
+  const rows = CHAIN_KINDS.map(([kind, label, cap]) => {
     const c = ch[kind] || [];
     if (!c.length) return `<div>· ${label}：<b style="color:#e88">还没排服务商</b>
       —— 去「设置 → 出图出片优先级」配一下</div>`;
     const names = c.map((x, i) => {
-      const nokey = !BOOT.providers_configured[x.provider];
+      const nokey = !providerReady(x.provider, cap, x.model);
       return `<span title="${i ? '备选' + i : '首选'}">${esc(x.provider)}/${esc(x.model)}${
         nokey ? '（未填key，会跳过）' : ''}</span>`;
     }).join(' → ');
@@ -1761,7 +1769,18 @@ $('#doAssemble').onclick = async () => {
 // ---------- 设置
 function renderProviders() {
   $('#provBox').innerHTML = BOOT.capabilities.map(c => {
-    const has = BOOT.providers_configured[c.id];
+    const split = c.id === 'chaomo';
+    const fields = split
+      ? [['llm_api_key','LLM Key','llm'], ['image_1k_api_key','图片 1K Key','image_1k'],
+         ['image_4k_api_key','图片 4K Key','image_4k'], ['video_api_key','视频 Key','video']]
+      : [['api_key','API Key','image']];
+    const status = (BOOT.provider_keys_configured || {})[c.id] || {};
+    const ready = fields.filter(x => status[x[2]]).length;
+    const has = ready > 0;
+    const state = split ? (ready ? `已配置 ${ready}/4` : '未配置') : (has ? '已配置' : '未配置');
+    const keyBoxes = fields.map(([field, label, cap]) =>
+      `<div><label>${label}</label><input data-pv="${c.id}" data-f="${field}" type="password"
+        placeholder="${status[cap] ? '已保存，留空不改' : '粘贴 key'}"></div>`).join('');
     // 保存过的值要回显。以前这里写死 c.default_base_url，
     // 改过自定义端点的人再点一次保存就被默认值盖掉了，而且一声不吭。
     const saved = (BOOT.providers_public || {})[c.id] || {};
@@ -1774,10 +1793,10 @@ function renderProviders() {
     // 调小了会在快出来的时候把它判成失败，钱照花、东西没拿到。
     const isVideo = !!c.video;
     return `<div class="card" style="background:var(--panel2);margin-bottom:10px">
-      <h2>${c.name} <span class="pill ${has?'s-ok':''}">${has?'已配置':'未配置'}</span></h2>
+      <h2>${c.name} <span class="pill ${has?'s-ok':''}">${state}</span></h2>
       <div class="grid g2">
         <div><label>Base URL</label><input data-pv="${c.id}" data-f="base_url" value="${esc(saved.base_url || c.default_base_url)}"></div>
-        <div><label>API Key</label><input data-pv="${c.id}" data-f="api_key" type="password" placeholder="${has?'已保存，留空不改':'粘贴 key'}"></div>
+        ${keyBoxes}
         <div><label>等出结果最多多久（秒）
           <span class="muted">提交后轮询的总时长，不是连接超时</span></label>
           <input data-pv="${c.id}" data-f="poll_timeout" type="number" min="60" max="7200" step="60"
@@ -1808,6 +1827,11 @@ $('#saveLlm').onclick = async () => {
                timeout: +$('#llmTimeout').value || 900,
                proxy: mode === 'custom' ? $('#llmProxy').value.trim() : mode,
                stream: $('#llmStream').checked};
+  const matched = BOOT.capabilities.find(c => {
+    try { return $('#llmBase').value.includes(new URL(c.default_base_url).host); }
+    catch (_) { return false; }
+  });
+  if (matched) llm.provider = matched.id;
   if ($('#llmKey').value) llm.api_key = $('#llmKey').value;
   await api.post('/api/config', {llm});
   BOOT = await api.get('/api/bootstrap'); alert('已保存');
@@ -1818,7 +1842,7 @@ $('#loadLlmModels').onclick = async () => {
   const p = BOOT.capabilities.find(c => base.includes(new URL(c.default_base_url).host));
   if (!p) return $('#llmHint').textContent = '这个 Base URL 不在已配置的服务商里，手填模型名即可';
   $('#llmHint').textContent = '拉取中…';
-  const r = await api.get('/api/models', {provider: p.id});
+  const r = await api.get('/api/models', {provider: p.id, kind: 'llm'});
   const ms = (r.models || []).filter(m => /gpt|claude|gemini|grok|deepseek|qwen/i.test(m));
   $('#llmModelList').innerHTML = ms.map(m => `<option value="${esc(m)}">`).join('');
   $('#llmHint').textContent = `${p.id} 有 ${r.models.length} 个模型，其中 ${ms.length} 个可当分析引擎（点输入框看候选）`;
@@ -1834,8 +1858,8 @@ function chainRow(kind, cap, i, sel) {
     <select class="c-prov" data-cap="${cap}" style="min-width:190px">
       <option value="">（不用）</option>
       ${opts.map(c => `<option value="${c.id}"${(sel||{}).provider === c.id ? ' selected' : ''}
-        ${BOOT.providers_configured[c.id] ? '' : ' data-nokey="1"'}>${esc(c.name)}${
-        BOOT.providers_configured[c.id] ? '' : '（未填key）'}</option>`).join('')}
+        ${providerReady(c.id, cap) ? '' : ' data-nokey="1"'}>${esc(c.name)}${
+        providerReady(c.id, cap) ? '' : `（未填${cap === 'video' ? '视频' : '图片'}key）`}</option>`).join('')}
     </select>
     <select class="c-model" style="min-width:190px"></select>
     <span class="c-hint muted" style="font-size:11px"></span>

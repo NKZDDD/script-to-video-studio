@@ -94,6 +94,31 @@ def _webp_size(f) -> Optional[tuple]:
     return None
 
 
+# 小于这个字节数的图/片一定不是真结果。最小的合法 PNG 也有 67 字节，
+# 几十字节的多半是一段 JSON 或 HTML 错误页被当成图存下来了。
+# apiutil.MIN_BYTES 是同一条线（落盘那一侧），两边分开定义避免互相 import。
+MIN_OUTPUT_BYTES = 512
+
+
+def have_output(path: str) -> bool:
+    """这个产物**真的**做出来了吗 —— 存在还不够，还得不是个空壳。
+
+    「文件在不在」是全程判断「做过没有」的唯一依据（跳过、补失败、拼接
+    都靠它）。而 0 字节的文件把这个依据变成了陷阱：
+
+      服务商说任务成功、给了下载链接，链接返回 200 但 body 是空的
+      → 我们建出一个 0KB 文件 → 注册表记成 generated
+      → 比例检查量不出尺寸所以也不吭声
+      → 下一次跑 isfile() 是真，**这一条永远被跳过**
+
+    结果是进度显示 100%、成片里那一段永远缺着。真实发生过（V6.1 资产图）。
+    """
+    try:
+        return os.path.getsize(path) >= MIN_OUTPUT_BYTES
+    except OSError:
+        return False
+
+
 def image_size(path: str) -> Optional[tuple]:
     """返回 (宽, 高)；认不出格式或文件坏了就返回 None。"""
     try:

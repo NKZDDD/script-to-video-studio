@@ -32,7 +32,14 @@ from .. import paths
 from .base import ImageTask, Provider, VideoTask   # noqa: F401  对外导出
 
 # 内置的显示顺序：实测稳的排前面。没列到的按文件名排在后面。
-_BUILTIN_ORDER = ["paisio", "lingganya", "zeroapi", "m86", "aicopy", "kunji", "octopus"]
+#
+# 这张表还有第二个用途，比排序重要得多：exe 里扫不到目录时按它逐个 import
+# （见 _load_builtin）。所以**新加一家内置服务商必须写进来**，
+# 否则它在 exe 里可能整家缺席 —— 页面上只是少一个选项，不报错。
+# 这里漏过 ake 和 yishou，一直没被发现，是因为 exe 里目录恰好扫得到；
+# 哪天扫不到就会一次性少四家。加一家就往这里加一行。
+_BUILTIN_ORDER = ["paisio", "lingganya", "zeroapi", "m86", "aicopy", "kunji",
+                  "octopus", "ake", "yishou", "chaomo", "xiaobalong"]
 
 REGISTRY: dict = {}          # id → 类
 ALIASES: dict = {}           # 别名 → id

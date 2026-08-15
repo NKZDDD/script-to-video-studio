@@ -20,8 +20,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
-from . import (diagnose, episodes as _eps, gates_v34 as G, run_v34 as R,
-               system_v34 as V)
+from . import (diagnose, episodes as _eps, gates_v34 as G, probe,
+               run_v34 as R, system_v34 as V)
 from .apiutil import BATCH_FATAL
 from .llm import LLMCancelled
 from .executor import Job, run_chain
@@ -223,7 +223,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             tasks = [t for t in tasks
                      if not t.get("episode") or t["episode"] in only]
         todo = [t for t in tasks
-                if not os.path.isfile(pj.p(*t["output"].split("/")))]
+                if not probe.have_output(pj.p(*t["output"].split("/")))]
         if not todo:
             job.set_item(key, state="skipped",
                          msg="没有要做的（都做过了，或前置还没产出任务）")
@@ -269,7 +269,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             from . import registry_v34 as REG
             n = 0
             for t in tasks:
-                if os.path.isfile(pj.p(*t["output"].split("/"))):
+                if probe.have_output(pj.p(*t["output"].split("/"))):
                     try:
                         REG.promote(pj, t["key"], t["output"])
                         n += 1
@@ -462,7 +462,7 @@ def _produce_todo(pj, task_key: str, only: Optional[list]) -> list:
         keep = set(only)
         tasks = [t for t in tasks if not t.get("episode") or t["episode"] in keep]
     return [t for t in tasks
-            if not os.path.isfile(pj.p(*t["output"].split("/")))]
+            if not probe.have_output(pj.p(*t["output"].split("/")))]
 
 
 def _finish(job: Job, failed: list, bad_eps: Optional[set] = None) -> dict:

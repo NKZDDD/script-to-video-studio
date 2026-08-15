@@ -211,6 +211,44 @@ def resolve_ref(ref: str, project_root: str, max_side: int = 1024) -> str:
 
 # ---------------------------------------------------------------- HTTP
 
+# 小于这个字节数的图/片一定不是真结果。最小的合法 PNG 也有 67 字节，
+# 而服务商出问题时给的是 0 字节，或者几十字节的一段 JSON/HTML 错误页。
+MIN_BYTES = 512
+
+
+def _check_saved(dest: str, src: str) -> None:
+    """落盘之后验一遍。**0 字节的文件是最坏的一种失败。**
+
+    它不报错：文件建出来了，注册表记成 generated，比例检查量不出尺寸
+    所以也不吭声，而下一次跑 `os.path.isfile()` 是真 —— 于是这一条
+    **永远被跳过**，成片里那一段永远缺着，而进度显示 100%。
+
+    服务商侧真实发生过：任务查询说成功、给了下载链接，链接返回 200 但
+    body 是空的。不验的话我们就把这个空文件当成交付物收下了。
+    """
+    try:
+        n = os.path.getsize(dest)
+    except OSError as exc:
+        raise ApiError(f"结果文件没能落盘：{dest}（{exc}）") from exc
+    if n >= MIN_BYTES:
+        return
+    head = ""
+    if n:
+        try:
+            with open(dest, "rb") as f:
+                head = f.read(200).decode("utf-8", "replace").strip()
+        except OSError:
+            pass
+    os.remove(dest)         # **必须删掉**，留着下次会被当成「已经做过了」跳过
+    raise ApiError(
+        f"服务商说做好了，但取回来的文件只有 {n} 字节（正常的图至少几十 KB）—— "
+        f"这不是一张图，已经删掉，不会被当成做好了。\n"
+        f"来源：{src}\n"
+        + (f"文件内容：{head!r}\n" if head else "文件是空的。\n")
+        + f"这种情况要拿「来源」那个链接去问服务商：任务标成成功了，"
+          f"但下载地址返回的是空的。")
+
+
 def _retry_after(resp) -> float:
     """读 Retry-After 头（秒或 HTTP 日期，只处理秒）。"""
     v = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
@@ -336,13 +374,14 @@ class HttpSession:
         raise ApiError(f"任务超时({timeout}s): {task_id}")
 
     def save_item(self, item: str, dest: str) -> str:
-        """结果（http / data URI / 裸base64）落盘。"""
+        """结果（http / data URI / 裸base64）落盘。落完必须验一遍大小。"""
         os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+        src = "内嵌数据"
         if item.startswith("data:"):
             with open(dest, "wb") as f:
                 f.write(base64.b64decode(item.split(",", 1)[1]))
-            return dest
-        if item.startswith("http"):
+        elif item.startswith("http"):
+            src = item
             headers = self._headers() if item.startswith(self.base_url) else None
             r = requests.get(item, headers=headers, timeout=self.timeout,
                              proxies=self._proxies(), stream=True)
@@ -353,7 +392,8 @@ class HttpSession:
             with open(dest, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1 << 20):
                     f.write(chunk)
-            return dest
-        with open(dest, "wb") as f:
-            f.write(base64.b64decode(item))
+        else:
+            with open(dest, "wb") as f:
+                f.write(base64.b64decode(item))
+        _check_saved(dest, src)
         return dest

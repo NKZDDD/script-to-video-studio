@@ -1,0 +1,106 @@
+# -*- coding: utf-8 -*-
+import unittest
+
+from core.apiutil import ApiError, TASK_FATAL
+from core.providers import REGISTRY, resolve_id
+from core.providers.base import ImageTask, VideoTask
+from core.providers.chaomo import ChaomoProvider, _to_ratio, _to_size
+
+
+def _stub(provider, reply):
+    """拦下 session.request，记下发出去的 body/files，返回假响应。"""
+    seen = {}
+
+    def fake(method, path, json_body=None, files=None, retries=3, timeout=None):
+        seen.update(method=method, path=path, body=json_body, files=files, retries=retries)
+        return reply
+
+    provider.session.request = fake
+    provider.session.save_item = lambda item, dest: dest
+    return seen
+
+
+class ChaomoTests(unittest.TestCase):
+    def test_registered_and_aliased(self):
+        self.assertIn("chaomo", REGISTRY)
+        for alias in ("chaomoapi", "超模", "cm"):
+            self.assertEqual(resolve_id(alias), "chaomo")
+
+    def test_ref_mode_differs_by_media(self):
+        """视频只收链接、图片走 multipart —— 声明反了参考图会被静默丢掉。"""
+        p = ChaomoProvider()
+        self.assertTrue(p.needs_url("", "video"))
+        self.assertFalse(p.needs_url("", "image"))
+        self.assertFalse(p.needs_bytes(""))
+
+    def test_size_is_a_resolution_tier_not_pixels(self):
+        # 这家视频的 size 是档位；给像素/2K 也要归档，别原样发出去
+        self.assertEqual(_to_size("720p"), "720p")
+        self.assertEqual(_to_size("1920x1080"), "1080p")
+        self.assertEqual(_to_size("2K"), "1080p")
+        self.assertEqual(_to_size("3840x2160"), "4k")
+        self.assertEqual(_to_size(""), "720p")
+
+    def test_ratio_converts_pixels(self):
+        self.assertEqual(_to_ratio("9:16"), "9:16")
+        self.assertEqual(_to_ratio("1024x1536"), "2:3")
+        self.assertEqual(_to_ratio(""), "9:16")
+
+    def test_video_body_uses_content_blocks(self):
+        """参考素材必须是 content 块 —— 发 images[] 不报错但会被忽略。"""
+        p = ChaomoProvider(api_key="k")
+        seen = _stub(p, {"id": "t1", "status": "completed", "data": [{"url": "https://x/v.mp4"}]})
+        p.generate_video(VideoTask(prompt="走路", refs=["https://a/1.jpg"], duration=8,
+                                   resolution="720p", model="seedance2"), "out.mp4")
+        body = seen["body"]
+        self.assertEqual(body["seconds"], "8")          # 字符串，不是 int
+        self.assertIsInstance(body["seconds"], str)
+        self.assertEqual(body["size"], "720p")          # 档位，不是像素
+        self.assertNotIn("images", body)                # 别家的写法，这家会忽略
+        self.assertEqual(body["content"], [{
+            "type": "image_url", "role": "reference_image",
+            "image_url": {"url": "https://a/1.jpg"},
+        }])
+
+    def test_video_duration_clamped(self):
+        p = ChaomoProvider(api_key="k")
+        seen = _stub(p, {"id": "t1", "status": "completed", "data": [{"url": "https://x/v.mp4"}]})
+        p.generate_video(VideoTask(prompt="x", duration=30, model="seedance2"), "out.mp4")
+        self.assertEqual(seen["body"]["seconds"], "15")
+
+    def test_video_rejects_local_refs_before_paying(self):
+        p = ChaomoProvider(api_key="k")
+        with self.assertRaises(ApiError) as raised:
+            p.generate_video(VideoTask(prompt="x", refs=["data:image/png;base64,abc"],
+                                       model="seedance2"), "out.mp4")
+        self.assertEqual(raised.exception.kind, TASK_FATAL)
+
+    def test_text_to_image_uses_ratio_not_size(self):
+        p = ChaomoProvider(api_key="k")
+        seen = _stub(p, {"data": [{"url": "https://x/i.png"}]})
+        p.generate_image(ImageTask(prompt="猫", size="9:16", model="gpt-image2-1K"), "out.png")
+        body = seen["body"]
+        self.assertEqual(body["ratio"], "9:16")
+        self.assertNotIn("size", body)
+        self.assertNotIn("aspect_ratio", body)
+        self.assertEqual(body["n"], 1)
+        self.assertTrue(body["async"])
+        self.assertEqual(seen["path"], "/v1/images/generations")
+
+    def test_image_with_refs_goes_multipart_image_bracket(self):
+        """有参考图必须走 /v1/images/edits，字段名是 image[]（不是 image / images）。"""
+        p = ChaomoProvider(api_key="k")
+        seen = _stub(p, {"data": [{"url": "https://x/i.png"}]})
+        tiny = "data:image/png;base64,iVBORw0KGgo="
+        p.generate_image(ImageTask(prompt="改背景", refs=[tiny], size="1:1",
+                                   model="gpt-image2-1K"), "out.png")
+        self.assertEqual(seen["path"], "/v1/images/edits")
+        self.assertIsNone(seen["body"])
+        names = [f[0] for f in seen["files"]]
+        self.assertIn("image[]", names)
+        self.assertNotIn("image", names)
+        self.assertNotIn("images", names)
+
+
+if __name__ == "__main__":
+    unittest.main()

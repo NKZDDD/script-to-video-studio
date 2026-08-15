@@ -12,7 +12,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from core import diagnose, docparse, episodes, stages as S
+from core import diagnose, docparse, episodes, probe, stages as S
 from core.executor import GATE, LLM_GATE, JobManager, run_batch, run_chain
 from core.llm import LLM
 from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provider,
@@ -186,6 +186,55 @@ def system_of(pj: Project) -> str:
     return _system_of((pj.meta() or {}).get("system"))
 
 
+_CHAOMO_KEY_FIELDS = {
+    "llm": "llm_api_key",
+    "image_1k": "image_1k_api_key",
+    "image_4k": "image_4k_api_key",
+    "video": "video_api_key",
+}
+_KEY_LABELS = {"llm": "LLM", "image": "图片", "image_1k": "图片 1K",
+               "image_4k": "图片 4K", "video": "视频"}
+
+
+def _media_capability(kind: str) -> str:
+    return "video" if kind == "video" else "image"
+
+
+def _provider_key_slot(provider_id: str, capability: str, model: str = "") -> str:
+    pid = resolve_provider_id(provider_id or "")
+    if pid == "chaomo" and capability == "image":
+        return "image_4k" if "4k" in str(model).lower() else "image_1k"
+    return capability
+
+
+def _provider_api_key(provider_id: str, provider_cfg: dict, capability: str,
+                      model: str = "") -> str:
+    """取某种能力真正该用的 key；超模没有可跨能力复用的通用 key。"""
+    pid = resolve_provider_id(provider_id or "")
+    slot = _provider_key_slot(pid, capability, model)
+    field = _CHAOMO_KEY_FIELDS.get(slot) if pid == "chaomo" else "api_key"
+    return str((provider_cfg or {}).get(field or "api_key") or "").strip()
+
+
+def _provider_key_status(provider_id: str, provider_cfg: dict) -> dict:
+    """只返回有没有配置，不把密钥本身送到浏览器。"""
+    out = {cap: bool(_provider_api_key(provider_id, provider_cfg, cap))
+           for cap in ("llm", "image_1k", "image_4k", "video")}
+    out["image"] = out["image_1k"] or out["image_4k"]
+    return out
+
+
+def _llm_provider_id(llm_cfg: dict) -> str:
+    """优先按 Base URL 识别，避免页面换了域名却残留旧 provider。"""
+    host = (urlparse(str(llm_cfg.get("base_url") or "")).hostname or "").lower()
+    if host:
+        for item in list_capabilities():
+            known = (urlparse(item.get("default_base_url") or "").hostname or "").lower()
+            if known and known == host:
+                return resolve_provider_id(item.get("id") or "")
+    return resolve_provider_id(llm_cfg.get("provider") or "") or "paisio"
+
+
 def resolve_chain(cfg: dict, kind: str, override=None) -> list:
     """某一类活（asset/storyboard/video）按优先级用哪几家。
 
@@ -197,14 +246,18 @@ def resolve_chain(cfg: dict, kind: str, override=None) -> list:
     if isinstance(raw, dict):
         raw = [raw]
     out, skipped = [], []
+    capability = _media_capability(kind)
     for sel in raw:
         pid = resolve_provider_id((sel or {}).get("provider") or "")
         if not pid:
             continue
-        if not ((cfg.get("providers") or {}).get(pid, {}) or {}).get("api_key"):
-            skipped.append(pid)
+        saved = ((cfg.get("providers") or {}).get(pid, {}) or {})
+        model = (sel or {}).get("model") or ""
+        slot = _provider_key_slot(pid, capability, model)
+        if not _provider_api_key(pid, saved, capability, model):
+            skipped.append(f"{pid}（{_KEY_LABELS[slot]} Key）")
             continue
-        out.append(resolve_provider_cfg(cfg, sel))
+        out.append(resolve_provider_cfg(cfg, sel, kind))
     if not out:
         extra = f"（{'、'.join(skipped)} 没填 key，已跳过）" if skipped else ""
         raise ValueError(f"「{kind}」还没有可用的服务商{extra}。"
@@ -229,14 +282,15 @@ def preflight_models(chains: dict) -> list:
             pid, model = pcfg.get("provider", ""), pcfg.get("model", "")
             if not model:
                 continue
-            if pid not in cache:
+            cache_key = (pid, _provider_key_slot(pid, _media_capability(kind), model))
+            if cache_key not in cache:
                 try:
-                    cache[pid] = set(build_provider(
+                    cache[cache_key] = set(build_provider(
                         pid, pcfg.get("api_key", ""), pcfg.get("base_url", ""),
                         pcfg.get("proxy", "")).list_models())
                 except Exception:                       # noqa: BLE001
-                    cache[pid] = set()                  # 拉不到就不判，别误伤
-            avail = cache[pid]
+                    cache[cache_key] = set()            # 拉不到就不判，别误伤
+            avail = cache[cache_key]
             if not avail or model in avail:
                 continue
             # 给出最接近的几个，多半就是后缀或连字符/下划线的差别
@@ -253,7 +307,7 @@ def preflight_models(chains: dict) -> list:
     return problems
 
 
-def resolve_provider_cfg(cfg: dict, sel: dict) -> dict:
+def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
     """页面选择 + config 里保存的凭据 → 完整服务商配置。"""
     # 别名归一：同一家常有几个叫法（鹤 / 派系 / pis 都是 api.paisio.online），
     # 老配置里写的可能是别名，认了才不会报「未知服务商」。
@@ -263,8 +317,14 @@ def resolve_provider_cfg(cfg: dict, sel: dict) -> dict:
     out = dict(saved)
     out.update({k: v for k, v in sel.items() if v not in (None, "")})
     out["provider"] = pid
-    if not out.get("api_key"):
-        raise ValueError(f"服务商 {pid} 未配置 api_key（在「服务商」页签保存）")
+    capability = _media_capability(kind)
+    slot = _provider_key_slot(pid, capability, out.get("model", ""))
+    key = _provider_api_key(pid, out, capability, out.get("model", ""))
+    if not key:
+        label = _KEY_LABELS[slot]
+        raise ValueError(f"服务商 {pid} 未配置{label} Key（在「服务商」页签保存）")
+    # worker 仍只接收统一的 api_key；在进入 worker 前完成按能力路由。
+    out["api_key"] = key
     # 参考图上传配置是全局共用的（一个对象存储服务所有服务商），
     # 但某家自己的上传端点能不能用是按家配的
     out["upload"] = dict(cfg.get("upload") or {})   # 上传配置全局共用一份
@@ -276,9 +336,11 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
     # False 是 stream 的有效覆盖值，不能像空字符串一样过滤掉。
     c.update({k: v for k, v in (override or {}).items() if v not in (None, "")})
     if not c.get("api_key"):
-        pid = c.get("provider") or "paisio"
-        c["api_key"] = ((cfg.get("providers") or {}).get(pid, {})).get("api_key", "")
-        c.setdefault("base_url", ((cfg.get("providers") or {}).get(pid, {})).get("base_url", ""))
+        pid = _llm_provider_id(c)
+        saved = ((cfg.get("providers") or {}).get(pid, {}) or {})
+        c["api_key"] = _provider_api_key(pid, saved, "llm")
+        if not c.get("base_url"):
+            c["base_url"] = saved.get("base_url", "")
     if not c.get("api_key"):
         raise ValueError("LLM 未配置 api_key（在「分析引擎」页签保存）")
     notes: list = []
@@ -416,6 +478,9 @@ def api_get(path: str, q: dict) -> dict:
         from core.llm import _env_proxy, mask_url
         env_p = _env_proxy()
         mode = (lm.get("proxy") or "").strip()
+        saved_providers = cfg.get("providers") or {}
+        key_status = {pid: _provider_key_status(pid, saved_providers.get(pid, {}))
+                      for pid in set(PROVIDER_REGISTRY) | set(saved_providers)}
         return {"config": pub,
                 # 实际生效的网络路径。前端算不出来 —— 环境变量和系统代理
                 # 只有服务端看得见。不回显的话代理就是隐形的。
@@ -428,8 +493,9 @@ def api_get(path: str, q: dict) -> dict:
                         f"跟随系统/环境代理 {mask_url(env_p)}" if env_p else
                         "直连（系统与环境都没有代理）"),
                 },
-                "providers_configured": {k: bool(v.get("api_key"))
-                                         for k, v in (cfg.get("providers") or {}).items()},
+                "providers_configured": {pid: any(status.values())
+                                         for pid, status in key_status.items()},
+                "provider_keys_configured": key_status,
                 # 各家保存过的**非密钥**设置。以前只回一个「配了没」的布尔值，
                 # 于是页面上 base_url 永远显示默认值 —— 改过自定义端点的人
                 # 再点一次保存就被默认值盖掉了，而且一声不吭。
@@ -465,7 +531,7 @@ def api_get(path: str, q: dict) -> dict:
             done[key] = {
                 "total": len(items),
                 "done": sum(1 for t in items
-                            if os.path.isfile(pj.p(*t["output"].split("/")))),
+                            if probe.have_output(pj.p(*t["output"].split("/")))),
             }
         ep = (q.get("episode") or [""])[0]
         stage_state = {}
@@ -526,7 +592,14 @@ def api_get(path: str, q: dict) -> dict:
     if path == "/api/models":
         pid = q["provider"][0]
         pc = (cfg.get("providers") or {}).get(pid, {})
-        prov = build_provider(pid, pc.get("api_key", ""), pc.get("base_url", ""))
+        capability = (q.get("kind") or ["image"])[0]
+        model = (q.get("model") or [""])[0]
+        key = _provider_api_key(pid, pc, capability, model)
+        if capability == "llm" and _llm_provider_id(cfg.get("llm") or {}) == pid:
+            key = (cfg.get("llm") or {}).get("api_key") or key
+        if not key:
+            raise ValueError(f"服务商 {pid} 未配置{_KEY_LABELS.get(capability, '')} Key")
+        prov = build_provider(pid, key, pc.get("base_url", ""))
         return {"models": prov.list_models()}
 
     if path == "/api/paths":
@@ -610,7 +683,8 @@ def api_post(path: str, body: dict) -> dict:
         cur = load_config()
         # 密钥类字段「留空 = 不改」。前端拿到的是掩码后的值，
         # 直接 update 会把已保存的密钥覆盖成空。
-        SECRET = ("api_key", "secret_key", "access_key")
+        SECRET = ("api_key", "llm_api_key", "image_api_key", "image_1k_api_key",
+                  "image_4k_api_key", "video_api_key", "secret_key", "access_key")
         for k, v in body.items():
             if k == "providers" and isinstance(v, dict):
                 cur.setdefault("providers", {})
@@ -1033,7 +1107,7 @@ def api_post(path: str, body: dict) -> dict:
     if path == "/api/generate":
         pj = proj_of(body)
         kind = body["kind"]                    # asset | storyboard | video
-        pcfg = resolve_provider_cfg(cfg, body.get("provider_sel") or {})
+        pcfg = resolve_provider_cfg(cfg, body.get("provider_sel") or {}, kind)
         conc = int(body.get("concurrency") or (cfg.get("defaults") or {}).get("concurrency", 3))
         retry = int(body.get("max_retry") or (cfg.get("defaults") or {}).get("max_retry", 2))
         only = set(body.get("only") or [])
@@ -1071,7 +1145,7 @@ def api_post(path: str, body: dict) -> dict:
         if ov:
             items = [dict(t, params=dict(t.get("params") or {}, **ov)) for t in items]
         # 未完成数（已存在的会在 worker 里跳过，这里只用于提示）
-        todo = sum(1 for t in items if not os.path.isfile(pj.p(*t["output"].split("/"))))
+        todo = sum(1 for t in items if not probe.have_output(pj.p(*t["output"].split("/"))))
 
         # 手动跑也走优先级链：首选挂了自动换下一家补剩下的
         chain = resolve_chain(cfg, kind, body.get("chain") or [pcfg])
@@ -1105,7 +1179,7 @@ def api_post(path: str, body: dict) -> dict:
                             project_name=os.path.basename(pj.root),
                             provider=p["provider"], model=p.get("model", "")),
                         key_of=lambda t: t["key"],
-                        done_of=lambda t: os.path.isfile(pj.p(*t["output"].split("/"))),
+                        done_of=lambda t: probe.have_output(pj.p(*t["output"].split("/"))),
                         max_retry=retry, log=lambda m: parent.log(kind, m))
                     r["attempts"] += one["attempts"]
                     r["left"] += one["left"]
@@ -1201,15 +1275,21 @@ def api_post(path: str, body: dict) -> dict:
     if path == "/api/selftest":
         out = {}
         for pid, pc in (cfg.get("providers") or {}).items():
-            if not pc.get("api_key"):
-                out[pid] = {"ok": False, "msg": "未配置 key"}
-                continue
-            try:
-                models = build_provider(pid, pc["api_key"], pc.get("base_url", "")).list_models()
-                out[pid] = {"ok": bool(models), "count": len(models),
-                            "msg": f"{len(models)} 个模型" if models else "拉取失败"}
-            except Exception as exc:                     # noqa: BLE001
-                out[pid] = {"ok": False, "msg": str(exc)[:150]}
+            capabilities = (("image_1k", "image_4k", "video") if pid == "chaomo"
+                            else ("image",))
+            for capability in capabilities:
+                name = f"{pid}/{capability}" if pid == "chaomo" else pid
+                key = _provider_api_key(pid, pc, capability)
+                if not key:
+                    out[name] = {"ok": False,
+                                 "msg": f"未配置{_KEY_LABELS[capability]} Key"}
+                    continue
+                try:
+                    models = build_provider(pid, key, pc.get("base_url", "")).list_models()
+                    out[name] = {"ok": bool(models), "count": len(models),
+                                 "msg": f"{len(models)} 个模型" if models else "拉取失败"}
+                except Exception as exc:                 # noqa: BLE001
+                    out[name] = {"ok": False, "msg": str(exc)[:150]}
         try:
             llm = build_llm(cfg)
             out["llm"] = {"ok": True, "msg": f"{llm.model} @ {llm.base_url}"}

@@ -30,7 +30,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
-from . import diagnose, episodes as _eps, stages as S
+from . import diagnose, episodes as _eps, probe, stages as S
 from .apiutil import BATCH_FATAL
 from .llm import LLMCancelled
 from .executor import LLM_GATE, Job, run_chain
@@ -136,7 +136,7 @@ def _produce_todo(pj, task_key: str, only: Optional[list] = None) -> list:
             items = [t for t in items if t["key"] in used] if used else items
         else:
             items = [t for t in items if not t.get("episode") or t["episode"] in want]
-    return [t for t in items if not os.path.isfile(pj.p(*t["output"].split("/")))]
+    return [t for t in items if not probe.have_output(pj.p(*t["output"].split("/")))]
 
 
 def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
