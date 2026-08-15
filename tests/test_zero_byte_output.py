@@ -33,11 +33,8 @@ class SaveGuardTests(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def _save(self, raw: bytes):
-        import base64
-        c = apiutil.ApiClient("https://example.com", "k") \
-            if hasattr(apiutil, "ApiClient") else None
+        """直接测校验本身，不去构造一个真的 HTTP 会话。"""
         dest = os.path.join(self.dir, "out.png")
-        # 直接测校验本身，不去构造一个真的 HTTP 客户端
         with open(dest, "wb") as f:
             f.write(raw)
         apiutil._check_saved(dest, "https://example.com/x.png")
@@ -72,6 +69,61 @@ class SaveGuardTests(unittest.TestCase):
 
     def test_a_real_file_passes(self):
         self._save(b"\x89PNG\r\n\x1a\n" + b"\x00" * 2000)
+
+
+class RetryTests(unittest.TestCase):
+    """取空了要重取 —— 多数「0 字节」其实是下载太早。
+
+    不少家的任务状态先翻成「成功」，文件才慢半拍写进他们的对象存储。
+    等两秒再取一次基本就有了。不重取的话，这种一过性的问题会变成
+    一条硬失败，人还得跑去问服务商 —— 而服务商那边查出来是好的。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _session(self, sizes):
+        """造一个 HttpSession，让第 N 次下载写 sizes[N] 个字节。"""
+        s = object.__new__(apiutil.HttpSession)
+        calls = {"n": 0}
+
+        def fake(item, dest):
+            i = min(calls["n"], len(sizes) - 1)
+            calls["n"] += 1
+            with open(dest, "wb") as f:
+                f.write(b"\x00" * sizes[i])
+            apiutil._check_saved(dest, item)
+            return dest
+
+        s._save_once = fake                     # type: ignore[attr-defined]
+        return s, calls
+
+    def test_an_empty_first_try_is_retried_and_succeeds(self):
+        """★ 多数 0 字节其实是下载太早，等两秒就有了。"""
+        s, calls = self._session([0, 50_000])
+        dest = os.path.join(self.dir, "a.png")
+        s.save_item("https://x/a.png", dest, retries=3)
+        self.assertEqual(calls["n"], 2, "第一次空了应该再取一次")
+        self.assertTrue(probe.have_output(dest))
+
+    def test_it_gives_up_and_reports_after_all_tries(self):
+        """一直是空的，那才是真要去问服务商。"""
+        s, calls = self._session([0])
+        dest = os.path.join(self.dir, "b.png")
+        with self.assertRaises(apiutil.ApiError):
+            s.save_item("https://x/b.png", dest, retries=2)
+        self.assertEqual(calls["n"], 2)
+
+    def test_inline_data_is_not_retried(self):
+        """★ data URI 是响应里带的，重取没有意义 —— 白等几秒。"""
+        s, calls = self._session([0])
+        dest = os.path.join(self.dir, "c.png")
+        with self.assertRaises(apiutil.ApiError):
+            s.save_item("data:image/png;base64,AAAA", dest, retries=3)
+        self.assertEqual(calls["n"], 1)
 
 
 class DoneCheckTests(unittest.TestCase):

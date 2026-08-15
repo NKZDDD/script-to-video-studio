@@ -373,8 +373,28 @@ class HttpSession:
             time.sleep(interval)
         raise ApiError(f"任务超时({timeout}s): {task_id}")
 
-    def save_item(self, item: str, dest: str) -> str:
-        """结果（http / data URI / 裸base64）落盘。落完必须验一遍大小。"""
+    def save_item(self, item: str, dest: str, retries: int = 3) -> str:
+        """结果（http / data URI / 裸base64）落盘。落完必须验一遍大小。
+
+        **http 的取空了要重取。** 不少家的任务状态先翻成「成功」，
+        文件才慢半拍写进他们的对象存储 —— 我们紧接着就去下载，
+        于是拿到一个 200 + 空 body。等两秒再取一次基本就有了。
+        取不到才报错，那时候才是真的要去问服务商。
+        （data URI 和 base64 是响应里带的，重取没有意义，不重试。）
+        """
+        last = None
+        for attempt in range(max(1, retries) if item.startswith("http") else 1):
+            try:
+                return self._save_once(item, dest)
+            except ApiError as exc:
+                if "字节" not in str(exc):
+                    raise                       # 不是空文件，是别的错，别在这儿吞
+                last = exc
+                if attempt < retries - 1:
+                    time.sleep(2 * (attempt + 1))
+        raise last                              # type: ignore[misc]
+
+    def _save_once(self, item: str, dest: str) -> str:
         os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
         src = "内嵌数据"
         if item.startswith("data:"):
