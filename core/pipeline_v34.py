@@ -90,6 +90,12 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
     return steps
 
 
+def _host(base_url: str) -> str:
+    """从 base_url 取出域名，当作「哪条线路」。不含 key，可以安全落盘。"""
+    s = str(base_url or "").split("//", 1)[-1]
+    return s.split("/", 1)[0] or ""
+
+
 def _label(stage_id: str, episode: str = "") -> str:
     s = V.by_id()[stage_id]
     head = f"{episode} " if episode else ""
@@ -172,10 +178,17 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
 
         log = lambda m, _k=key: job.log(_k, m)
         job.set_item(key, state="running")
+        # 失败记录里要认得出是**哪个模型、哪条线路**答成这样的。
+        # 出图出片那边一直带着（executor 传 job.provider/job.model），
+        # 分析引擎这边一直没带 —— 于是 failures.json 里 provider/model 是空的，
+        # 而分析环节恰恰是最常出问题的一层。
+        llm = llm_factory()
+        who = {"provider": _host(getattr(llm, "base_url", "")),
+               "model": getattr(llm, "model", "")}
         try:
             if V.scope_of(sid) == "segment":
                 _, seg_failed, cancelled = R.run_segment_stage(
-                    pj, sid, llm=llm_factory(), params=params, episode=ep,
+                    pj, sid, llm=llm, params=params, episode=ep,
                     log=log, cancel=lambda: job.cancelled,
                     seg_concurrency=seg_concurrency)
                 if cancelled:
@@ -189,7 +202,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                         failed.append(key)
                     return "failed"     # soft：不拉黑整集
             else:
-                R.run_stage(pj, sid, llm=llm_factory(), params=params,
+                R.run_stage(pj, sid, llm=llm, params=params,
                             episode=ep, log=log, cancel=lambda: job.cancelled)
             if ep:
                 R.write_prompt_files(pj, ep)
@@ -199,7 +212,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             job.set_item(key, state="cancelled", msg="已取消")
             return "cancelled"
         except Exception as exc:                        # noqa: BLE001
-            d = diagnose.build(exc, stage=f"stage:{sid}", target=ep or "全剧")
+            d = diagnose.build(exc, stage=f"stage:{sid}", target=ep or "全剧", **who)
             diagnose.record(pj.root, d)
             job.set_item(key, state="failed", diag=d, msg=diagnose.one_line(d))
             with st_lock:

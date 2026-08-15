@@ -145,3 +145,65 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttributionTests(unittest.TestCase):
+    """一份原文单独发出去时，收到的人得知道是谁答的。
+
+    这一份多半会脱离当时的日志被单独转发 —— 不写模型和线路的话，
+    收到的人第一句话就得回问「你用的哪个模型」，一来一回半天。
+    """
+
+    def setUp(self):
+        self.pj = new_project()
+
+    def tearDown(self):
+        shutil.rmtree(self.pj.root, ignore_errors=True)
+
+    class _LLM:
+        model = "gpt-5.6-sol"
+        base_url = "https://api.paisio.online/v1"
+        stream = True
+        max_tokens = 16000
+
+    def test_the_raw_file_header_names_the_model_and_route(self):
+        from core import run_v34 as R
+        R.keep_partial(self.pj, "n4b", "", "", llm=self._LLM())("{", "截断")
+        head = io.open(self.pj.p("07_检查与记录", "失败原文", "n4b_01.txt"),
+                       encoding="utf-8").read()[:400]
+        for want in ("gpt-5.6-sol", "api.paisio.online", "流式：开",
+                     "输出上限：16000", "时间："):
+            self.assertIn(want, head, want)
+
+    def test_the_header_never_leaks_the_key(self):
+        """★ 这份是要外发的 —— 只记域名，不记完整 base_url 里可能带的东西。"""
+        from core import run_v34 as R
+
+        class Keyed:
+            model = "m"
+            base_url = "https://api.x.com/v1?key=sk-REALKEY"
+            stream = False
+            max_tokens = 1
+        R.keep_partial(self.pj, "n1", "", "", llm=Keyed())("{", "截断")
+        head = io.open(self.pj.p("07_检查与记录", "失败原文", "n1_01.txt"),
+                       encoding="utf-8").read()
+        self.assertNotIn("sk-REALKEY", head)
+
+    def test_missing_llm_info_says_so_instead_of_lying(self):
+        from core import run_v34 as R
+        R.keep_partial(self.pj, "n1", "", "")("{", "截断")
+        head = io.open(self.pj.p("07_检查与记录", "失败原文", "n1_01.txt"),
+                       encoding="utf-8").read()
+        self.assertIn("没记到", head)
+
+    def test_llm_failures_record_which_model_answered(self):
+        """★ 出图出片一直带着服务商，分析引擎这一层一直是空的 ——
+
+        而分析环节恰恰是最常出问题的那一层。
+        """
+        import inspect
+
+        from core import pipeline_v34 as P
+        src = inspect.getsource(P)
+        self.assertIn('"provider": _host(', src)
+        self.assertIn("target=ep or \"全剧\", **who", src)
