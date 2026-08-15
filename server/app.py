@@ -1206,6 +1206,21 @@ def api_post(path: str, body: dict) -> dict:
         n = diagnose.clear(pj.root, body.get("stage", ""), body.get("target", ""))
         return {"ok": True, "cleared": n}
 
+    if path == "/api/support/bundle":
+        """一键打包排错资料。**key 一律不出包**（core/support.redact）。
+
+        「该发哪个文件」用户猜不出来，猜错就是来回好几轮：
+        发截图看不出模型回了什么，发产物看不出是哪一步断的。
+        """
+        import time as _t
+
+        from core import support
+        pj = proj_of(body)
+        name = f"排错资料_{os.path.basename(pj.root)}_{_t.strftime('%m%d_%H%M')}.zip"
+        r = support.bundle(pj.root, cfg, pj.p("07_检查与记录", name))
+        return {"ok": True, "name": name, "rel": pj.rel(r["path"]),
+                "files": r["files"], "size": r["size"], "missing": r["missing"]}
+
     if path == "/api/gates":
         """现在有哪几道闸门拦着，各拦了什么，已经授权放行的是哪几道。
 

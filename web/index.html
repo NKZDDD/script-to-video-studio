@@ -1256,11 +1256,36 @@ async function renderHealth() {
           warn ? '知道了，不用管' : '这个我已经处理了'}</button>
       </div>
     </div>`;}).join('') : '';
+  // 自己搞不定时该发什么给开发者 —— 这件事用户猜不出来，
+  // 猜错就是来回好几轮（发截图看不出模型回了什么，发产物看不出断在哪一步）。
+  // 所以在有报错的时候直接给一个按钮，一次打包好、key 已脱敏。
+  if (g.length) $('#healthFails').innerHTML += `
+    <div class="alert warn" style="margin-top:10px">
+      <b>照着改还是不行？</b> 点下面这个，把排错要用的东西打成一个包发给开发者 ——
+      里面是<b>模型实际回了什么</b>、诊断记录、用量账本、当时的配置和程序版本。
+      <span class="muted">API key 和对象存储密钥会被自动隐去，剧本正文和图片不打包。</span>
+      <div class="row" style="margin-top:6px">
+        <button class="btn ghost sm" id="mkBundle">打包排错资料</button>
+        <span class="muted" id="bundleMsg"></span>
+      </div>
+    </div>`;
   $$('#healthFails [data-clearfail]').forEach(b => b.onclick = async () => {
     const grp = g.find(x => x.code === b.dataset.clearfail);
     for (const t of grp.targets) await api.post('/api/failures/clear', {project_root: PROJ, target: t});
     renderHealth();
   });
+  const mk = $('#mkBundle');
+  if (mk) mk.onclick = async () => {
+    mk.disabled = true; $('#bundleMsg').textContent = '打包中…';
+    try {
+      const r = await api.post('/api/support/bundle', {project_root: PROJ});
+      $('#bundleMsg').innerHTML = `已生成 <b>${esc(r.name)}</b>（${r.files} 份，`
+        + `${Math.round(r.size / 1024)} KB）—— 在项目的 <code>07_检查与记录</code> 目录下，直接发这个文件。`;
+    } catch (e) {
+      $('#bundleMsg').textContent = '打包失败：' + e.message;
+    }
+    mk.disabled = false;
+  };
 }
 
 // ---------- 参数
