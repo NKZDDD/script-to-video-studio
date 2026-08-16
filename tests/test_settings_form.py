@@ -52,13 +52,26 @@ class ApiTests(unittest.TestCase):
         by = {f["key"]: f for f in self._get()["fields"]}
         self.assertIn("n12_storyboard", by["storyboard_max_kf_per_sheet"]["used_by"])
 
-    def test_unused_fields_are_visibly_unused(self):
-        """★ 填了也没人看的字段必须能被认出来 ——
+    def test_settings_fields_are_never_marked_unused(self):
+        """★ 这条标反过一次，而标反比不标更糟。
 
-        否则人填完以为生效了，实际上没有任何模板读它。
+        `special_notes`、`dialogue_language` 这些一度显示「暂未被任何模板
+        使用」—— 用户看到就问「为什么这些都没用上」。**它们一直在起作用**：
+        走 {{PROJECT_BRIEF}} 进 `_common`，而 `_common` 是每一次调用都发的
+        系统提示词。只是没有哪份业务模板单独写 {{DIALOGUE_LANGUAGE}}。
         """
         by = {f["key"]: f for f in self._get()["fields"]}
-        self.assertEqual(by["special_notes"]["used_by"], [])
+        for k in ("special_notes", "dialogue_language", "video_audio_mode"):
+            self.assertTrue(by[k]["used_by"], f"{k} 被标成了没人用")
+            self.assertTrue(any("全环节" in u for u in by[k]["used_by"]), k)
+
+    def test_program_side_fields_can_still_be_unused(self):
+        """反过来也要成立：画幅是发给出图接口的参数，**通过代码生效**，
+
+        没有模板读它是对的 —— 全都标成「有人用」就等于这个标记没意义了。
+        """
+        by = {f["key"]: f for f in self._get()["fields"]}
+        self.assertEqual(by["aspect_ratio"]["used_by"], [])
 
     def test_an_empty_mirrored_value_does_not_wipe_the_param(self):
         """★ 只读字段渲染成空的时候会被一起回传；不能把 params 清掉。"""

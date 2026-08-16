@@ -82,6 +82,10 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
     # 放在产物之前合并，让产物占位符能覆盖同名的（实际上不重名，
     # 但顺序写死比"应该不会撞"可靠）。
     from . import settings as _st
+    # 旁白那一段和字幕规则一样，是**按取值生成的整段文字**，不是几个孤立的值 ——
+    # 丢占位符进去的话，没旁白的项目会看到「本项目：否　声音属于：」这种
+    # 半截句子，模型读到空标签会自己去填。
+    m["NARRATION_RULE"] = _st.narration_rule(pj)
     m.update(_st.mapping(pj, params, {
         "episode_duration": _ep_seconds(pj, episode, params),
         "current_episode": episode,

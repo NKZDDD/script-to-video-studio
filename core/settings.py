@@ -120,8 +120,44 @@ FIELDS: list = [
      "group": "字幕", "local": True,
      "why": "勾上之后程序会自动改写「画面内禁止出现文字」那条规则，"
             "不用你手动去改提示词 —— 手改两处散文必然打架。"},
+    # ---- 旁白 / 画外音：**skill 的参数表里也没有这一项**，本地扩展 ----
+    #
+    # 它和「音频模式」是两回事，混了会出错：
+    #   音频模式  = 声音**从哪来**（视频模型原生 / 无声 / 后期做）
+    #   旁白      = 有没有一个**不在画面里说话的人**在讲
+    #
+    # 这一项不说清的后果很具体：第一人称小说改的短剧，正文大半是
+    # 「我抱着他退到窗边」这种内心独白 —— 不告诉模型那是旁白，
+    # 它会把独白当成**角色开口说的台词**，于是画面里的人一直在自言自语。
+    {"key": "narration", "label": "有旁白 / 画外音", "type": "bool",
+     "default": False, "source": "settings", "group": "旁白", "local": True,
+     "why": "和「音频模式」是两件事：那个管声音从哪来，这个管**有没有人在画外讲**。"
+            "第一人称小说改编时不填这一项，内心独白会被当成角色台词，"
+            "画面里的人会一直在自言自语。"},
+    {"key": "narration_style", "label": "旁白形式", "type": "enum",
+     "options": ["first_person_inner", "third_person", "mixed"],
+     "zh": {"first_person_inner": "第一人称内心独白",
+            "third_person": "第三人称旁白", "mixed": "混合"},
+     "default": "first_person_inner", "when": "narration",
+     "source": "settings", "group": "旁白", "local": True},
+    {"key": "narration_voice", "label": "旁白是谁的声音", "type": "text",
+     "when": "narration", "source": "settings", "group": "旁白", "local": True,
+     "hint": "写角色名或编号，如「女主 C001」—— 旁白的声线要和她本人一致",
+     "why": "不指定的话，同一部剧里旁白的声线会在不同段落之间飘。"},
+    {"key": "narration_on_screen", "label": "旁白时画面里的人要不要动嘴",
+     "type": "enum", "options": ["no_lip_sync", "lip_sync"],
+     "zh": {"no_lip_sync": "不动嘴（画外音）", "lip_sync": "对口型（当台词说）"},
+     "default": "no_lip_sync", "when": "narration",
+     "source": "settings", "group": "旁白", "local": True,
+     "why": "**这一条是旁白最容易出错的地方。** 默认不动嘴 —— "
+            "内心独白配上对口型，看起来就是角色在自言自语。"},
+
     {"key": "special_notes", "label": "特殊要求", "type": "text",
-     "source": "settings", "group": "授权", "local": True},
+     "source": "settings", "group": "授权", "local": True,
+     "hint": "选角、颜值、镜头偏好、禁忌…例：男女主颜值按偶像明星级别；不要俯拍",
+     "why": "这里写的东西会进**每一次调用**的系统提示词，全部环节都看得到 —— "
+            "所以适合放「整部剧都要遵守」的要求（选角标准、镜头偏好、禁忌）。"
+            "只针对某一个环节的要求别写这儿，去「提示词」页改那一份模板。"},
 
     # ============================================ V6.0 新增：图像减压与视频承载
     #
@@ -421,7 +457,15 @@ def mapping(pj: Project, params: Optional[dict] = None,
             v = vals.get(k, "")
         if k not in live:
             v = ""
-        out[placeholder_of(k)] = "" if v is None else v
+        # 布尔和枚举要渲染成人话（True → 是；preserve → preserve（严格保持原文）），
+        # 它们在模板里是中文句子的一部分。
+        # **数字和自由文本保持原样** —— 转成字符串会让拿这个值算数的地方出错。
+        if v is None or v == "":
+            out[placeholder_of(k)] = ""
+        elif f["type"] in ("bool", "enum"):
+            out[placeholder_of(k)] = show(f, v)
+        else:
+            out[placeholder_of(k)] = v
     return out
 
 
@@ -460,6 +504,32 @@ def subtitle_rule(pj: Project) -> str:
     return (f"**本项目字幕烧录进画面**：{lang}字幕，放在画面底部安全区内，"
             f"不遮挡人物面部。\n"
             f"除字幕外，画面内仍然禁止出现其他文字、水印、UI 面板。")
+
+
+def narration_rule(pj: Project) -> str:
+    """旁白那一段的正文 —— 和字幕规则一样，**按取值生成**。
+
+    不生成而是丢几个占位符进模板的话，没旁白的项目会看到
+    「本项目：否　声音属于：　画面处理：」这种半截句子 ——
+    模型读到空标签会自己去填，那比不给更糟。
+    """
+    v = load(pj)
+    if not v.get("narration"):
+        return ("**本项目没有旁白。** 一句画外音都不要加 —— "
+                "剧本里的第一人称叙述按台词或表演处理，不要凭空造一个旁白声线。")
+    style = {"first_person_inner": "第一人称内心独白",
+             "third_person": "第三人称旁白",
+             "mixed": "内心独白与第三人称混合"}.get(
+                 v.get("narration_style"), "第一人称内心独白")
+    who = (v.get("narration_voice") or "").strip()
+    lip = v.get("narration_on_screen") == "lip_sync"
+    return (f"**本项目有旁白**：{style}。\n"
+            + (f"旁白是 **{who}** 的声音 —— 声线要和这个角色本人一致，"
+               f"不要换人。\n" if who else
+               "（没指定是谁的声音 —— 同一部剧里保持同一个声线，别在段落之间飘。）\n")
+            + (f"旁白时画面里的人**要对口型**（按台词处理）。"
+               if lip else
+               f"旁白时画面里的人**不动嘴** —— 那是画外音，不是他在说话。"))
 
 
 def brief_block(pj: Project, params: Optional[dict] = None,
@@ -577,11 +647,24 @@ def sanitize(values: dict) -> tuple:
     return ok, dropped
 
 
+# `_common` 是**每一次调用都发**的系统提示词，而 {{PROJECT_BRIEF}} 会把
+# 所有填过的 settings 字段列进去。所以那些字段是**全环节生效**的，
+# 哪怕没有任何一份业务模板单独写 {{DIALOGUE_LANGUAGE}}。
+#
+# 这一条一开始漏了，页面上把「对白语言」「音频模式」这类标成
+# 「暂未被任何模板使用」—— **说反了**：它们一直在起作用，
+# 只是走的是 brief 这条路。标错比不标更糟，人会以为填了没用。
+BRIEF_PLACEHOLDER = "PROJECT_BRIEF"
+
+
 def used_by() -> dict:
-    """哪个设定被哪几份模板用到 —— **扫模板得出，不手写表**。
+    """哪个设定影响哪几个环节 —— **扫模板得出，不手写表**。
+
+    两条路都算：
+      · 某份模板单独写了 {{X}}      → 只影响那几个环节
+      · 走 {{PROJECT_BRIEF}}        → 进系统提示词，**全部环节**都看得到
 
     手写的对照表和实际模板迟早对不上，然后它就成了误导。
-    页面上「这个设定影响哪几个环节」直接用这个。
     """
     import os
     import re
@@ -590,14 +673,27 @@ def used_by() -> dict:
     here = PROMPT_DIR
     want = {placeholder_of(f["key"]) for f in FIELDS}
     out: dict = {p: [] for p in want}
+    brief_in = []
     for fn in sorted(os.listdir(here)):
         if not fn.endswith(".md"):
             continue
         with open(os.path.join(here, fn), encoding="utf-8") as fh:
             text = fh.read()
-        for v in set(re.findall(r"\{\{([A-Z_]+)\}\}", text)):
+        found = set(re.findall(r"\{\{([A-Z_]+)\}\}", text))
+        if BRIEF_PLACEHOLDER in found:
+            brief_in.append(fn[:-3])
+        for v in found:
             if v in want:
                 out[v].append(fn[:-3])
+    # settings 类字段一律进 brief；params/derived 不进（它们在 {{PARAMS}} 里
+    # 或者是只读展示），所以不能无差别地都加上。
+    for f in FIELDS:
+        if f["source"] != "settings":
+            continue
+        p = placeholder_of(f["key"])
+        for name in brief_in:
+            if name not in out[p]:
+                out[p].append(f"{name}（全环节）")
     return out
 
 

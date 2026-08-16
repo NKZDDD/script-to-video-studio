@@ -238,7 +238,8 @@ def _setting_placeholders() -> tuple:
 
 COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
                        "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT",
-                       "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY"
+                       "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY",
+                       "NARRATION_RULE",
                        ) + _setting_placeholders()
 
 
