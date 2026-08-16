@@ -62,9 +62,15 @@ class SingleSourceTests(unittest.TestCase):
         for stale in ("V3.4 电影级十七章", "V6.1 十二环节"):
             self.assertNotIn(stale, html, f"页面上还留着旧叫法：{stale}")
 
-    def test_the_picker_shows_the_new_name(self):
+    def test_the_picker_is_rendered_not_hardcoded(self):
+        """★ 选项写死在 HTML 里 = 分体系打包时「通用版」建不出通用项目。
+
+        名字现在只从 SYSTEM_LABELS 来，选项由 fillSystemPicker 按
+        bootstrap 的 new_ok 渲染。
+        """
         html = _read(os.path.join("web", "index.html"))
-        self.assertIn('<option value="v34">电影级十七章（V6.1）</option>', html)
+        self.assertIn("function fillSystemPicker", html)
+        self.assertNotIn('<option value="v34">', html)
 
     def test_the_stage_heading_is_not_hardcoded_to_twelve(self):
         """★ 写死「十二环节」时，跑十七章的项目标题是错的，

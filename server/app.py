@@ -12,7 +12,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from core import diagnose, docparse, episodes, probe, stages as S
+from core import build_info, diagnose, docparse, episodes, probe, stages as S
 from core.executor import GATE, LLM_GATE, JobManager, run_batch, run_chain
 from core.llm import LLM
 from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provider,
@@ -198,7 +198,11 @@ NEW_SYSTEM = "v34"
 
 def _new_system(v) -> str:
     s = str(v or "").strip().lower()
-    return s if s in SYSTEMS else NEW_SYSTEM
+    if s in SYSTEMS:
+        return s
+    # 这一版限定了体系就用它 —— 不然「通用版」那个包默认建出来是电影级，
+    # 而体系建完不能改，等于白建一个项目。
+    return build_info.only() or NEW_SYSTEM
 
 
 def system_of(pj: Project) -> str:
@@ -534,11 +538,17 @@ def api_get(path: str, q: dict) -> dict:
                 # 名字**只从 SYSTEM_LABELS 取**，别在这里另写一份 ——
                 # 以前这里写「V3.4 电影级十七章」而实际跑的是 skill V5.6，
                 # 三处名字对不上，讨论问题时谁都不确定在说哪一套。
+                # 两套的环节表**都**下发：这一版限定了体系也照样要能打开
+                # 对方建的老项目 —— 拿不到环节表的话，那个项目在页面上
+                # 会显示成「一个环节都没有」。
+                # `new_ok` 才是「新建时能不能选」，由构建标记决定。
                 "systems": {
-                    "v61": dict(SYSTEM_LABELS["v61"], name=system_label("v61"),
-                                stages=S.STAGES),
-                    "v34": dict(SYSTEM_LABELS["v34"], name=system_label("v34"),
-                                stages=V34.STAGES)},
+                    sid: dict(SYSTEM_LABELS[sid], name=system_label(sid),
+                              stages=(V34.STAGES if sid == "v34" else S.STAGES),
+                              new_ok=(not build_info.only()
+                                      or build_info.only() == sid))
+                    for sid in ("v61", "v34")},
+                "flavor": build_info.flavor_name(SYSTEM_LABELS),
                 "projects": list_projects(cfg["projects_dir"]),
                 "projects_dir": cfg["projects_dir"],
                 # 程序目录 / 数据目录 / 配置位置，让人一眼知道更新程序会不会碰到数据

@@ -187,9 +187,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
            照常跑完，但不再拿它开新剧 —— 两套并列摆着只会让人建错，
            建完还改不了。名字以 SYSTEM_LABELS 为准，别在这里另写。 -->
       <div><label>生产体系 <span class="muted">建完不能改</span></label>
-        <select id="spSystem">
-          <option value="v34">电影级十七章（V6.1）</option>
-        </select></div>
+        <select id="spSystem"></select></div>
     </div>
     <div class="muted" style="margin-top:6px" id="spSystemNote"></div>
     <div style="margin-top:10px"><textarea id="spScript" placeholder="粘贴剧本全文…"></textarea></div>
@@ -744,7 +742,8 @@ async function boot() {
   BOOT = await api.get('/api/bootstrap');
   $('#projDir').textContent = BOOT.projects_dir;
   renderProjects();
-  systemNote();      // 只剩一个选项，onchange 永远不触发，说明得自己填上
+  fillSystemPicker();   // 选项从 bootstrap 来，按这一版能建哪几套过滤
+  systemNote();         // 只有一个选项时 onchange 永远不触发，得自己填一次
   renderProviders();
   renderDefaults();
   PT_GLOBAL.list().catch(() => {});
@@ -1524,6 +1523,24 @@ function sysStages() {
   const s = (BOOT.systems || {})[projSystem()];
   return (s && s.stages) || BOOT.stages || [];
 }
+// 新建项目能选哪几套 —— 从 bootstrap 来，按这一版的构建标记过滤。
+// 写死在 HTML 里的后果刚踩过：包里两套模板都在，页面上却只有一个选项，
+// 「通用版」那个包建不出通用项目。
+function fillSystemPicker() {
+  const sel = $('#spSystem');
+  if (!sel) return;
+  const ok = Object.entries(BOOT.systems || {}).filter(([, s]) => s.new_ok !== false);
+  // 拿不到就留空，**不要兜底成某一套** —— 兜底的后果是「通用版」那个包
+  // 在 bootstrap 出问题时默默建出电影级项目，而体系建完不能改。
+  sel.innerHTML = ok.map(([id, s], i) =>
+    `<option value="${esc(id)}"${i === 0 ? ' selected' : ''}>${esc(s.name)}</option>`)
+    .join('');
+  const note = $('#spSystemNote');
+  if (note && ok.length === 1)
+    note.textContent = `这一版只建「${ok[0][1].name}」的项目；`
+      + '另一套体系建的老项目照常打开、照常跑完。';
+}
+
 function sysName() {
   const s = (BOOT.systems || {})[projSystem()];
   return (s && s.name) || '通用十二环节（V6.1）';
