@@ -1877,8 +1877,7 @@ $('#resGauge').onclick = () => {
     '',
     a.note,
   ];
-  alert(lines.join('
-'));
+  alert(lines.join(String.fromCharCode(10)));
 };
 setInterval(tickRes, 4000);
 tickRes();

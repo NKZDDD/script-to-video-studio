@@ -80,6 +80,30 @@ OPTIONAL = {
 HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg", "psutil"]
 
 
+def check_page() -> bool:
+    """打包**之前**先验页面里的 JS 能不能解析。
+
+    语法错的后果不是「某个功能坏了」，是**一行 JS 都不执行**：
+    页面停在初始占位符、按钮全没反应，而且**什么都不报** ——
+    连页面自己的错误捕获都装不上，因为它们就在这段脚本里。
+
+    这次真的打进去了：用户在两台机器上各撞了一次，两边控制台都干净。
+
+    判断逻辑在 core/pagecheck.py，**不在这里另写一份** ——
+    第一版就是各写一份正则，这边那份转义写坏了、findall 返回空列表，
+    于是它「检查了 0 段脚本」然后报成功：闸门装上了，但永远不会拦。
+    """
+    sys.path.insert(0, HERE)
+    from core import pagecheck                             # noqa: PLC0415
+    with io.open(os.path.join(HERE, "web", "index.html"), encoding="utf-8") as f:
+        ok, why = pagecheck.check(f.read())
+    print(f"  {'✓' if ok else '✗'} 页面 JS：{why}")
+    if not ok:
+        print("     打包中止 —— 页面坏了打出去，用户看到的是"
+              "「什么都不动、什么都不报」，比崩掉还难查。")
+    return ok
+
+
 def selfcheck(exe: str) -> bool:
     """真把 exe 跑起来，比对「源码方式有什么」和「exe 里有什么」。
 
@@ -226,6 +250,8 @@ def main() -> int:
         if input("  现在就这样打包？(y/N) ").strip().lower() != "y":
             return 1
     print()
+    if not check_page():
+        return 1
 
     # **只清 build/，不清整个 dist/。**
     # 分体系打包是接连打两次的，把 dist/ 整个删掉会让先打的那个消失 ——
