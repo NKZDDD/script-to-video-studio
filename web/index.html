@@ -621,10 +621,50 @@ const esc = s => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 // 说明里的 **粗体** 转成 <b>。先 esc 再转，顺序反了就是 XSS。
 const mdBold = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+// 每个请求都带超时。
+//
+// 不带的话，后端某一步卡住时 fetch **既不成功也不失败** —— 浏览器控制台
+// 一片干净，页面就停在「加载中…」不动，人完全不知道发生了什么。
+// 实际报过：换台机器打开，项目列表一直「加载中」，两边控制台都没有报错。
+// 超时之后至少能说出「哪个接口、等了多久」。
+const API_TIMEOUT = 30000;
+
+async function _fetch(url, opts, label) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), API_TIMEOUT);
+  try {
+    const r = await fetch(url, {...opts, signal: ac.signal});
+    const text = await r.text();
+    try {
+      const data = JSON.parse(text);
+      // 后端出错时返回的是**合法 JSON**（{"error": "..."}），
+      // 直接当数据用的话，页面会拿着一个残缺对象往下跑 ——
+      // 最后炸在某个不相干的地方（"Cannot read properties of undefined"），
+      // 离真正的原因隔着好几层。这里就把它抛出来。
+      if (!r.ok || (data && data.error))
+        throw new Error(`${label} 出错（HTTP ${r.status}）：`
+                        + (data && data.error ? data.error : text.slice(0, 200)));
+      return data;
+    }
+    catch (e) {
+      if (e instanceof Error && !(e instanceof SyntaxError)) throw e;
+      // 返回的不是 JSON —— 把开头几行带出来，比「Unexpected token」有用得多
+      throw new Error(`${label} 返回的不是 JSON（HTTP ${r.status}）：`
+                      + text.slice(0, 200));
+    }
+  } catch (e) {
+    if (e.name === 'AbortError')
+      throw new Error(`${label} 超过 ${API_TIMEOUT / 1000} 秒没有返回 —— `
+        + '后端卡在这个接口上了。看 exe 那个黑窗口有没有 traceback。');
+    throw e;
+  } finally { clearTimeout(timer); }
+}
+
 const api = {
-  get: (p, q={}) => fetch(p + '?' + new URLSearchParams(q)).then(r => r.json()),
-  post: (p, b={}) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'},
-                              body: JSON.stringify(b)}).then(r => r.json()),
+  get: (p, q={}) => _fetch(p + '?' + new URLSearchParams(q), {}, p),
+  post: (p, b={}) => _fetch(p, {method:'POST',
+                                headers:{'Content-Type':'application/json'},
+                                body: JSON.stringify(b)}, p),
 };
 let BOOT = null, PROJ = null, DETAIL = null;   // DETAIL = 正在看明细的 job id
 
@@ -2841,7 +2881,47 @@ $('#spCreate').onclick = async () => {
   BOOT = await api.get('/api/bootstrap'); renderProjects(); openProject(r.root);
 };
 
-boot();
+// 启动出错时**必须显示出来**。
+// 原来是裸调 boot()：中间任何一步抛异常，后面的渲染全不跑，
+// 页面就永远停在「加载中…」、设置页空白点不动 —— 而 exe 那个黑窗口
+// 什么都不会打（JS 的错只在浏览器控制台里），人根本不知道发生了什么。
+// 全局兜底。boot() 之外还有一堆异步调用（打开项目、轮询、保存设置），
+// 它们抛出来没人接的话就是**静默失败** —— 用户看到的是「点了没反应」。
+window.addEventListener('unhandledrejection', e => showFault('未处理的错误', e.reason));
+window.addEventListener('error', e => showFault('脚本错误', e.error || e.message));
+
+let _faultShown = 0;
+function showFault(kind, err) {
+  console.error(kind, err);
+  if (Date.now() - _faultShown < 3000) return;   // 同一波错只弹一次
+  _faultShown = Date.now();
+  const box = document.querySelector('main') || document.body;
+  const tip = document.createElement('div');
+  tip.className = 'alert err';
+  tip.style.margin = '20px';
+  tip.innerHTML = `<b>${esc(kind)}</b>　—— 这一步没做成，页面上看到的可能不是最新的。<br>`
+    + '<code>' + esc(String(err && (err.message || err))) + '</code>'
+    + '<br><button class="btn ghost sm" onclick="this.parentNode.remove()">知道了</button>';
+  box.insertBefore(tip, box.firstChild);
+}
+
+boot().catch(err => {
+  console.error('启动失败', err);
+  const box = document.querySelector('main') || document.body;
+  const tip = document.createElement('div');
+  tip.className = 'alert err';
+  tip.style.margin = '20px';
+  tip.innerHTML = '<b>页面没能启动完</b>　—— 下面的内容是不完整的，'
+    + '别在这个状态下改设置或开始跑。<br>'
+    + '错误：<code>' + esc(String(err && (err.stack || err.message || err))) + '</code><br>'
+    + '把这段发出来就能定位。刷新一次多半能好；一直这样的话，'
+    + '多半是后端某个接口没返回 JSON。';
+  box.insertBefore(tip, box.firstChild);
+  // 项目列表还挂着「加载中…」的话，改成如实的说法
+  const tb = document.getElementById('projList');
+  if (tb && tb.textContent.includes('加载中'))
+    tb.innerHTML = '<tr><td colspan="5" class="muted">没加载出来（见上面的错误）</td></tr>';
+});
 </script>
 </body>
 </html>
