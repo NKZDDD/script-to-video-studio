@@ -157,8 +157,9 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 <section id="t-proj">
   <div class="card">
     <h2>项目列表 <span class="tag" id="projDir"></span></h2>
-    <table><thead><tr><th>名称</th><th>编号</th><th>集</th><th>更新</th><th></th></tr></thead>
-      <tbody id="projList"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody></table>
+    <table><thead><tr><th>名称</th><th>编号</th><th>体系</th><th>集</th><th>更新</th>
+      <th></th></tr></thead>
+      <tbody id="projList"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody></table>
   </div>
   <div class="card">
     <h2>批量建剧 <span class="tag">一次拖多个剧本 = 一次建多个项目，之后可并行生产</span></h2>
@@ -819,9 +820,17 @@ $('#llmProxyMode').onchange = proxyModeUI;
 
 function renderProjects() {
   const tb = $('#projList');
-  if (!BOOT.projects.length) { tb.innerHTML = '<tr><td colspan="5" class="muted">还没有项目，在下方新建</td></tr>'; return; }
+  if (!BOOT.projects.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">还没有项目，在下方新建</td></tr>'; return; }
+  // **体系单独一列。** 两套的项目可以放在同一个目录里，但产物结构、
+  // 环节表、任务结构完全不一样 —— 列表里看不出来的话，
+  // 你会拿电影级的期待去看一个通用版的项目（或者反过来），
+  // 而这件事一直到跑起来才发现。旧版本建的项目尤其要注意：
+  // 那时候下拉框里写死只有「电影级」一个选项，不管当时想建哪套。
+  const sysName = id => ((BOOT.systems || {})[id] || {}).name || id || '未知';
   tb.innerHTML = BOOT.projects.map(p => `<tr>
-    <td>${p.title}</td><td class="muted">${p.project_code}</td><td class="muted">${p.episode}</td>
+    <td>${p.title}</td><td class="muted">${p.project_code}</td>
+    <td><span class="pill">${esc(sysName(p.system))}</span></td>
+    <td class="muted">${p.episode}</td>
     <td class="muted">${p.updated}</td>
     <td><button class="btn sm" data-root="${p.root.replace(/"/g,'&quot;')}">打开</button></td></tr>`).join('');
   tb.querySelectorAll('button').forEach(b => b.onclick = () => openProject(b.dataset.root));
@@ -829,6 +838,8 @@ function renderProjects() {
 
 async function openProject(root) {
   PROJ = root;
+  PROJ_SYSTEM = '';        // 上一个项目的体系不能带到这一个身上
+
   $('#projTag').textContent = root.split(/[\\/]/).pop();
   await refreshProject();
   renderParams();
@@ -843,6 +854,8 @@ let EPS = {episodes: [], issues: []};
 async function refreshProject() {
   if (!PROJ) return;
   const d = await api.get('/api/project', {root: PROJ, episode: EP});
+  // 先认体系再渲染 —— 环节表、闸门、参数都按它挑，顺序反了会画错一遍
+  PROJ_SYSTEM = d.system || '';
   EPS = d.episodes || {episodes: [], issues: []};
   renderEpisodes();
   renderStages(d.stages_done);
@@ -1410,11 +1423,22 @@ async function renderBrief() {
       <div class="muted" style="font-size:11.5px;margin-top:3px">${uses}${
         f.why ? '<br>' + mdBold(f.why) : ''}</div></div>`;
   };
-  box.innerHTML = r.groups.map(g => {
-    const fs = BRIEF.filter(f => f.group === g);
+  // 常用在上、其余折叠。判据是「换一部剧会不会改」，不是「重不重要」——
+  // 56 个字段一屏铺开的后果实际发生过：人找不到该改哪个，于是一个都不改。
+  const section = (list) => r.groups.map(g => {
+    const fs = list.filter(f => f.group === g);
+    if (!fs.length) return '';
     return `<h3 style="font-size:13px;margin:14px 0 8px;color:var(--dim)">${esc(g)}</h3>
             <div class="grid g2">${fs.map(one).join('')}</div>`;
   }).join('');
+  const basic = BRIEF.filter(f => f.tier !== 'advanced');
+  const adv = BRIEF.filter(f => f.tier === 'advanced');
+  box.innerHTML = section(basic)
+    + (adv.length ? `<details style="margin-top:16px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--dim)">
+          更多设置（${adv.length} 项）—— 出图/出片的调优旋钮、程序算好的值。
+          大多数剧不用动，跑顺了再来碰</summary>
+        <div style="margin-top:4px">${section(adv)}</div></details>` : '');
   wireBriefDeps();
 }
 
@@ -1556,14 +1580,24 @@ $('#saveParams').onclick = async () => {
 // 老项目 meta 里没有这个字段，回落 v61（它们本来就是那套跑出来的）。
 // 新建项目用哪套。老项目照旧按各自 meta 里记的那套跑。
 const DEFAULT_SYS = 'v34';
-function projSystem() {
-  const p = (BOOT.projects || []).find(x => x.root === PROJ);
-  return (p && p.system) || 'v61';
-}
+// 当前项目**实际**用哪套体系 —— 只认后端 /api/project 给的那个值。
+//
+// 原来是从 BOOT.projects 里找：那份列表是**页面加载那一刻**取的，
+// 新建的项目根本不在里面，于是 find 返回 undefined、回落成 'v61'，
+// 页面画了 12 个环节，而后端按 project.json 跑的是电影级 17 章 ——
+// **页面和实际生产是两套，而且不报错**。用户实跑撞到了。
+//
+// 拿不到就返回空：宁可页面上少画点东西，也不能猜一个然后装作确定。
+let PROJ_SYSTEM = '';
+
+function projSystem() { return PROJ_SYSTEM; }
 // 当前体系的环节表。bootstrap 把两套都下发了，切项目不用重新拉一遍。
+// 当前项目的环节表。**体系未知时返回空**，不回落到某一套 ——
+// 回落的后果就是这次的 bug：画出 12 个环节，而实际跑的是 17 章。
+// 宁可这块暂时空着（refreshProject 一回来就有了）。
 function sysStages() {
   const s = (BOOT.systems || {})[projSystem()];
-  return (s && s.stages) || BOOT.stages || [];
+  return (s && s.stages) || [];
 }
 // 新建项目能选哪几套 —— 从 bootstrap 来，按这一版的构建标记过滤。
 // 写死在 HTML 里的后果刚踩过：包里两套模板都在，页面上却只有一个选项，
@@ -1585,7 +1619,8 @@ function fillSystemPicker() {
 
 function sysName() {
   const s = (BOOT.systems || {})[projSystem()];
-  return (s && s.name) || '通用十二环节（V6.1）';
+  // 不知道就说不知道。写死一个名字 = 页面在替后端撒谎。
+  return (s && s.name) || '（体系未知）';
 }
 // 全剧只跑一次的环节。十七章的环节表自带 scope，十二环节的没有，按 id 兜底。
 const perEpisode = s =>
@@ -1595,6 +1630,11 @@ const perEpisode = s =>
 function renderStages(done) {
   const multi = (EPS.episodes || []).length > 1;
   const stages = sysStages();
+  if (!stages.length) {
+    $('#stageList').innerHTML = '<p class="muted">还没读到这个项目用哪套体系 —— '
+      + '刷新一次；一直这样的话，看 project.json 里有没有 system 字段。</p>';
+    return;
+  }
   const sys = (BOOT.systems || {})[projSystem()] || {};
   $('#stagesTitle').firstChild.nodeValue = (sys.name || '环节') + ' ';
   $('#stagesTag').textContent = sys.note || '';

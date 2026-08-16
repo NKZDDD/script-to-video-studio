@@ -570,11 +570,21 @@ def api_get(path: str, q: dict) -> dict:
                             if probe.have_output(pj.p(*t["output"].split("/")))),
             }
         ep = (q.get("episode") or [""])[0]
+        # **按这个项目自己的体系算**，不是写死 V6.1 的环节表。
+        # 写死的后果：v34 项目拿到的是 s1..s8 的完成状态，
+        # 而页面画的是 n1..n14 —— 每一格都显示「没做」，
+        # 已经跑完的环节看起来一个都没跑。
+        sys_id = system_of(pj)
+        if sys_id == "v34":
+            from core import system_v34 as _V34
+            table, series = _V34.STAGES, set(_V34.SERIES_STAGES)
+        else:
+            table, series = S.STAGES, set(S.SERIES_STAGES)
         stage_state = {}
-        for st in S.STAGES:
+        for st in table:
             if st["kind"] == "llm" and st["out"]:
                 # 逐集环节看的是「这一集做了没」；不指定集时看第一集，只为渲染流程图
-                sub = "" if st["id"] in S.SERIES_STAGES else (ep or (episodes.ids(pj) or [""])[0])
+                sub = "" if st["id"] in series else (ep or (episodes.ids(pj) or [""])[0])
                 stage_state[st["id"]] = os.path.isfile(pj.stage_path(st["out"], sub))
         # 老 v34 项目的叙事结构/资产/空间/总账停在集目录里。V5.6 对照下来
         # 这几份该是全剧一份的，程序现在去项目根找 —— 找不到会判成
@@ -586,6 +596,11 @@ def api_get(path: str, q: dict) -> dict:
             need_migrate = migrate_v56.pending(pj)
         return {"meta": pj.meta(), "tasks_summary": done, "stages_done": stage_state,
                 "root": pj.root, "episodes": episodes.summary(pj), "episode": ep,
+                # 这个项目**实际**用哪套 —— 页面必须用这个，不许自己从项目列表里猜。
+                # 猜的后果实跑撞过：新建的项目还不在那份列表里，页面回落成
+                # 「通用十二环节」画了 12 个环节，而后端按 project.json 跑的是
+                # 电影级 17 章。**页面和实际生产是两套**，而且不报错。
+                "system": sys_id,
                 "need_migrate": need_migrate}
 
     if path == "/api/episodes":
@@ -1087,7 +1102,7 @@ def api_post(path: str, body: dict) -> dict:
                        .get("model", ""))
         used = ST.used_by()
         return {
-            "fields": [dict(f, value=(
+            "fields": [dict(f, tier=ST.tier_of(f["key"]), value=(
                 ST.load(pj).get(f["key"]) if f["source"] == "settings"
                 else params.get(f.get("maps_to") or f["key"], "")
                 if f["source"] == "params"

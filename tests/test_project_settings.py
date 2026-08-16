@@ -74,14 +74,14 @@ class DefaultsTests(unittest.TestCase):
         「视觉媒介：真人写实」，读起来像是你的决定。
         """
         brief = ST.brief_block(self.pj)
-        self.assertIn("视觉媒介", brief)
+        self.assertIn("拍成什么形式", brief)
         self.assertIn("（默认，未指定）", brief)
         self.assertIn("不是用户的决定", brief)
 
     def test_filling_one_in_clears_its_default_mark(self):
         ST.save(self.pj, {"visual_medium": "3d"})
         line = [l for l in ST.brief_block(self.pj).splitlines()
-                if l.startswith("- 视觉媒介")][0]
+                if l.startswith("- 拍成什么形式")][0]
         self.assertIn("3d", line)
         self.assertNotIn("默认", line)
 

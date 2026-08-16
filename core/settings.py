@@ -52,7 +52,7 @@ from .store import Project
 # 对着 skill 排查问题时每次都要先做一遍翻译。
 FIELDS: list = [
     # ================================================== 我们还没有的（要你填）
-    {"key": "source_type", "label": "原始文本类型", "type": "enum",
+    {"key": "source_type", "label": "原文是什么", "type": "enum",
      "options": ["screenplay", "novel", "outline", "existing_assets"],
      "zh": {"screenplay": "剧本", "novel": "小说", "outline": "大纲",
             "existing_assets": "已有资产"},
@@ -64,7 +64,7 @@ FIELDS: list = [
      "default": "optimize_pacing", "source": "settings", "group": "授权",
      "why": "skill 第 0 章：**不得在下游自行扩大改编权限**。"
             "定紧了节奏可能拖沓，定松了模型会改人物关系和结局。"},
-    {"key": "visual_medium", "label": "视觉媒介", "type": "enum",
+    {"key": "visual_medium", "label": "拍成什么形式", "type": "enum",
      "options": ["live_action", "3d", "2d", "mixed"],
      "zh": {"live_action": "真人写实", "3d": "3D", "2d": "2D", "mixed": "混合"},
      "default": "live_action", "source": "settings", "group": "项目"},
@@ -77,30 +77,30 @@ FIELDS: list = [
             "地域、服饰、医院、建筑、货币、称谓只服从这一项和故事真相。"},
     {"key": "dialogue_language", "label": "对白语言", "type": "text",
      "default": "中文", "source": "settings", "group": "语言"},
-    {"key": "instruction_language", "label": "Prompt 语言", "type": "text",
+    {"key": "instruction_language", "label": "提示词写成什么语言", "type": "text",
      "default": "中文", "source": "settings", "group": "语言",
      "why": "只管提示词用什么语言写，**不决定剧里的地域和文化**（见上一条）。"},
-    {"key": "video_audio_mode", "label": "音频模式", "type": "enum",
+    {"key": "video_audio_mode", "label": "声音怎么来", "type": "enum",
      "options": ["native_audio", "silent_video", "separate_audio"],
      "zh": {"native_audio": "视频模型原生音频", "silent_video": "无声视频",
             "separate_audio": "后期单独制作"},
      "default": "native_audio", "source": "settings", "group": "语言"},
-    {"key": "native_audio_transition_support", "label": "原生音频转场支持",
+    {"key": "native_audio_transition_support", "label": "视频模型能不能做声音转场",
      "type": "enum", "options": ["yes", "no", "unknown"],
      "zh": {"yes": "支持", "no": "不支持", "unknown": "未知"},
      "default": "unknown", "source": "settings", "group": "语言"},
-    {"key": "costume_asset_mode", "label": "服装资产方式", "type": "enum",
+    {"key": "costume_asset_mode", "label": "衣服要不要单独出图", "type": "enum",
      "options": ["auto", "separate_cost", "direct_look"],
      "zh": {"auto": "自动判断", "separate_cost": "服装单独建资产",
             "direct_look": "直接做完整造型"},
      "default": "auto", "source": "settings", "group": "资产",
      "why": "skill 第 5 章：简单服装走 LOGICAL_ONLY 文字契约、不出图；"
             "关键或复用的才建 Canonical 服装资产。选 direct_look 资产条数最少。"},
-    {"key": "existing_canon", "label": "已有 Canonical 资产", "type": "text",
+    {"key": "existing_canon", "label": "已经定稿、要继续沿用的资产", "type": "text",
      "source": "settings", "group": "资产",
      "why": "**目前只作为说明发给模型，还不能真正继承编号** —— "
             "第四环节缺 EXISTING_CANONICAL 那一档，补上之前别指望它复用。"},
-    {"key": "output_depth", "label": "输出深度", "type": "enum",
+    {"key": "output_depth", "label": "这次做到哪一步", "type": "enum",
      "options": ["production_ready", "plan", "analysis"],
      "zh": {"production_ready": "可直接生产", "plan": "只到方案",
             "analysis": "只做分析"},
@@ -115,7 +115,7 @@ FIELDS: list = [
     {"key": "subtitle_lang", "label": "字幕语言", "type": "text",
      "default": "中文", "when": "subtitle", "source": "settings",
      "group": "字幕", "local": True},
-    {"key": "subtitle_burn", "label": "烧录进画面", "type": "bool",
+    {"key": "subtitle_burn", "label": "字幕直接印在画面上", "type": "bool",
      "default": False, "when": "subtitle", "source": "settings",
      "group": "字幕", "local": True,
      "why": "勾上之后程序会自动改写「画面内禁止出现文字」那条规则，"
@@ -140,11 +140,11 @@ FIELDS: list = [
             "third_person": "第三人称旁白", "mixed": "混合"},
      "default": "first_person_inner", "when": "narration",
      "source": "settings", "group": "旁白", "local": True},
-    {"key": "narration_voice", "label": "旁白是谁的声音", "type": "text",
+    {"key": "narration_voice", "label": "旁白用谁的声音", "type": "text",
      "when": "narration", "source": "settings", "group": "旁白", "local": True,
      "hint": "写角色名或编号，如「女主 C001」—— 旁白的声线要和她本人一致",
      "why": "不指定的话，同一部剧里旁白的声线会在不同段落之间飘。"},
-    {"key": "narration_on_screen", "label": "旁白时画面里的人要不要动嘴",
+    {"key": "narration_on_screen", "label": "念旁白时人物要不要动嘴",
      "type": "enum", "options": ["no_lip_sync", "lip_sync"],
      "zh": {"no_lip_sync": "不动嘴（画外音）", "lip_sync": "对口型（当台词说）"},
      "default": "no_lip_sync", "when": "narration",
@@ -169,7 +169,7 @@ FIELDS: list = [
     # 这一组直接冲着我们撞过的两个问题来：
     #   · 资产提示词一次写不完（物化门控后要写的条数大幅下降）
     #   · 故事板一张纸画 16 格（V6.0 把上限从 3×3=9 改成 **每张 3 格**）
-    {"key": "scstate_materialization_policy", "label": "场景状态图物化策略",
+    {"key": "scstate_materialization_policy", "label": "场景状态要不要出图",
      "type": "enum", "options": ["logical_first", "risk_based", "always_visual"],
      "zh": {"logical_first": "默认只写逻辑合同，不出图",
             "risk_based": "按风险决定出不出图",
@@ -180,7 +180,7 @@ FIELDS: list = [
      "default": "risk_based", "source": "settings", "group": "图像减压",
      "why": "V6.0 第 9 章：SCSTATE 默认是 CVS 派生的**逻辑合同**，"
             "不要求每个 CVS 出图。中间动作、姿势、反应优先标 DEFER_TO_VIDEO。"},
-    {"key": "storyboard_materialization_policy", "label": "故事板物化策略",
+    {"key": "storyboard_materialization_policy", "label": "故事板出多少张",
      "type": "enum", "options": ["anchor_only", "selected_kf", "full_storyboard"],
      "zh": {"anchor_only": "只出入口/结果/高风险锚点",
             "selected_kf": "出挑选过的关键帧",
@@ -193,7 +193,7 @@ FIELDS: list = [
      "why": "**V6.0 定的 3，V6.1 保留。** 我们模板里原来写的「3×3=9」是自编的，V5.6 没给过数字上限。实跑撞过 16 格 —— 模型记不住那么多"
             "场次的世界状态，所有格子的 source_scstate 全填成第一个。"
             "更多关键时刻用有序 Continuation Sheet，不是塞进一张。"},
-    {"key": "image_complexity_budget", "label": "单图复杂度预算", "type": "enum",
+    {"key": "image_complexity_budget", "label": "单张图能有多复杂", "type": "enum",
      "options": ["conservative", "standard", "expanded"],
      "zh": {"conservative": "保守（人少、手部少、构图简单）",
             "standard": "标准", "expanded": "放宽"},
@@ -201,7 +201,7 @@ FIELDS: list = [
      "why": "超预算时 V6.0 要求 SPLIT_ANCHOR / 局部重绘 / LOGICAL_ONLY / "
             "DEFER_TO_VIDEO，**不许靠缩小人物或多塞 Panel 硬塞**。"},
 
-    {"key": "video_execution_reliability", "label": "视频模型执行可靠度",
+    {"key": "video_execution_reliability", "label": "视频模型靠不靠谱",
      "type": "enum", "options": ["high", "medium", "low", "unknown"],
      "zh": {"high": "高（Start 或 Start/End 就够）",
             "medium": "中（2–4 张时间锚点）",
@@ -209,14 +209,14 @@ FIELDS: list = [
      "default": "unknown", "source": "settings", "group": "视频承载",
      "why": "V6.0 第 16 章按它选 Adaptive Execution Set。"
             "**未知不许冒充 HIGH** —— 冒充的代价是参考图不够，视频自己编。"},
-    {"key": "video_reliability_evidence", "label": "可靠度依据", "type": "enum",
+    {"key": "video_reliability_evidence", "label": "上面这个结论是怎么来的", "type": "enum",
      "options": ["user_verified", "project_pilot_verified",
                  "model_profile_only", "unverified"],
      "zh": {"user_verified": "你实测过", "project_pilot_verified": "本项目试跑验证过",
             "model_profile_only": "只是模型档案上写的", "unverified": "没验证"},
      "default": "unverified", "source": "settings", "group": "视频承载",
      "why": "上面那一档是凭什么定的。没验证过就别按 HIGH 走。"},
-    {"key": "image_composite_reliability", "label": "图片合成可靠度",
+    {"key": "image_composite_reliability", "label": "出图模型合成多人/手部靠不靠谱",
      "type": "enum", "options": ["high", "medium", "low", "unknown"],
      "zh": {"high": "高", "medium": "中", "low": "低", "unknown": "未知"},
      "default": "unknown", "source": "settings", "group": "视频承载",
@@ -226,7 +226,7 @@ FIELDS: list = [
     # 视频过了 QC 的尾帧当下一段入口）**整条废掉**，换成这一项。
     # 废掉的原因实跑撞到了：尾帧当参考 + 故事板被减压掉之后，整段没有任何
     # 图片持有 Camera/Blocking/Time 权威，模型只能照着一张动作中间帧自己编。
-    {"key": "canonical_boundary_policy", "label": "相邻段落边界方式",
+    {"key": "canonical_boundary_policy", "label": "两段之间怎么接",
      "type": "enum",
      "options": ["canonical_cut_pair", "shared_stable_anchor",
                  "motivated_hard_cut", "opaque_buffer_pair"],
@@ -239,13 +239,13 @@ FIELDS: list = [
             "当前 LOOK/CT 和 Prop Ledger 编译出来（BNDPLAN / BNDANCHOR），"
             "**不得从上一条视频的尾帧提取或反向生成**。"},
 
-    {"key": "location_view_production_mode", "label": "场景机位生产方式",
+    {"key": "location_view_production_mode", "label": "同一场景的多个机位怎么出",
      "type": "enum",
      "options": ["auto", "compatible_view_batch", "single_view_only"],
      "zh": {"auto": "自动判断", "compatible_view_batch": "兼容机位合并出图",
             "single_view_only": "一次只出一个机位"},
      "default": "auto", "source": "settings", "group": "场景机位"},
-    {"key": "view_batch_output_mode", "label": "合并出图的产物形式",
+    {"key": "view_batch_output_mode", "label": "合并出的图怎么存",
      "type": "enum",
      "options": ["separate_files", "atlas_with_lossless_crop", "unsupported"],
      "zh": {"separate_files": "分成独立文件",
@@ -256,10 +256,10 @@ FIELDS: list = [
             "裁切后的独立 LOC_VIEW —— 不许把整张多机位 Atlas 当一个机位参考。"},
     {"key": "view_batch_max_views", "label": "一次最多合并几个机位",
      "type": "int", "default": 3, "source": "settings", "group": "场景机位"},
-    {"key": "redundancy_overlap_heuristic", "label": "机位重复判定阈值",
+    {"key": "redundancy_overlap_heuristic", "label": "多像算重复机位",
      "type": "text", "default": "0.80", "source": "settings", "group": "场景机位",
      "why": "重叠高于它又没有独有 Zone/关系/消费者的机位会被判成重复图。"},
-    {"key": "derived_view_min_resolution", "label": "裁切后最低分辨率",
+    {"key": "derived_view_min_resolution", "label": "裁出来的单张最低多少像素",
      "type": "text", "source": "settings", "group": "场景机位"},
 
     # ================================================== 镜像生产参数（写回原处）
@@ -293,66 +293,66 @@ FIELDS: list = [
      "source": "derived", "group": "程序算的"},
     # 下面这几项 skill 要求冻结，我们在第 0 章 freeze_capability 里冻了。
     # 列出来是为了「都看得见」，改要去能力冻结那儿改，不在这里编辑。
-    {"key": "native_multishot_support", "label": "多镜头能力档", "type": "text",
+    {"key": "native_multishot_support", "label": "视频模型一次能不能出多镜头", "type": "text",
      "source": "derived", "group": "已冻结"},
-    {"key": "transition_execution_mode", "label": "转场执行模式", "type": "text",
+    {"key": "transition_execution_mode", "label": "转场谁来做", "type": "text",
      "source": "derived", "group": "已冻结"},
-    {"key": "spatial_consistency_mode", "label": "空间一致性档", "type": "text",
+    {"key": "spatial_consistency_mode", "label": "空间用什么方式保证一致", "type": "text",
      "source": "derived", "group": "已冻结",
      "why": "本分支停在 text_only（纯文字坐标合同）。geo_proxy 明确不做 —— "
             "出图模型做不出可靠的几何代理，硬出一张会得到「看起来权威、"
             "实际不准」的参照，比没有更糟。"},
-    {"key": "id_policy", "label": "ID 策略", "type": "text",
+    {"key": "id_policy", "label": "编号规则", "type": "text",
      "source": "derived", "group": "已冻结"},
     # V6.0 新增、且 skill 只给了一个取值的几条 —— 列出来是为了「都看得见」，
     # 没有可选项所以不做成可编辑。
-    {"key": "location_view_coverage_policy", "label": "机位覆盖策略",
+    {"key": "location_view_coverage_policy", "label": "机位按什么排",
      "type": "text", "source": "derived", "group": "已冻结"},
-    {"key": "view_distinctness_policy", "label": "机位去重策略",
+    {"key": "view_distinctness_policy", "label": "重复机位怎么判",
      "type": "text", "source": "derived", "group": "已冻结"},
-    {"key": "story_first_prompt_order", "label": "Story-First 提示词顺序",
+    {"key": "story_first_prompt_order", "label": "提示词先写剧情还是先写技术要求",
      "type": "text", "source": "derived", "group": "已冻结",
      "why": "V6.0 要求 SCSTATE / 故事板 / 视频提示词一律先写"
             "「完整场景剧情 → 确切视觉时刻 → 前/现/后 → 主叙事对象 → "
             "六字段身份映射」，最后才写技术合同。"
             "**隐藏 ID 之后仍必须能理解原文确切时刻与因果。**"},
-    {"key": "video_reference_policy", "label": "视频参考集策略",
+    {"key": "video_reference_policy", "label": "视频参考图怎么挑",
      "type": "text", "source": "derived", "group": "已冻结",
      "why": "参考数量**不以模型上限为目标**；同一时间窗口只能有一个 "
             "Temporal Primary。"},
-    {"key": "scstate_spatial_slice_policy", "label": "场景状态分片策略",
+    {"key": "scstate_spatial_slice_policy", "label": "一个场景太大时怎么拆",
      "type": "text", "source": "derived", "group": "已冻结",
      "why": "同一 CVS 横跨远距离、不同高度、Barrier 或不相容动作轴时，"
             "建立 Zone-Coherent Slice；其他 Zone 实体登记为 OFF-FRAME ACTIVE，"
             "**不得为了同框移动或融合**。"},
     # ---- V6.1 新增的三条固定策略 ----
     {"key": "generated_video_frame_reference_policy",
-     "label": "生成的视频帧可否当参考", "type": "text",
+     "label": "能不能拿生成好的视频截图当参考", "type": "text",
      "source": "derived", "group": "已冻结",
      "why": "**V6.1 定死为 forbidden。** AI 视频生成帧只能作为 QC 证据，"
             "禁止注册为下一 SEG 的 Reference、Temporal Primary 或 Canonical 入口。"
             "违反时 skill 要求返回 GENERATED_FRAME_REFERENCE_FORBIDDEN。"},
-    {"key": "reference_dimension_coverage_gate", "label": "六维覆盖门控",
+    {"key": "reference_dimension_coverage_gate", "label": "删图前必须逐项确认还有出处",
      "type": "text", "source": "derived", "group": "已冻结",
      "why": "**图像减压不得降低一致性维度。** Identity、LOOK/CT、Spatial/Geometry、"
             "Position/Blocking、State/Temporal、Prop/Count/Holder 六维是不可降级"
             "底座，删图之前必须逐维确认仍有唯一来源 —— 连 HIGH 可靠度也不例外。"
             "缺维时返回 REFERENCE_DIMENSION_COVERAGE_GAP。"},
-    {"key": "position_contract_policy", "label": "位置合同策略", "type": "text",
+    {"key": "position_contract_policy", "label": "人物位置能不能随便改", "type": "text",
      "source": "derived", "group": "已冻结",
      "why": "V6.1：没有被批准的移动事件，World Position、Zone、Anchor、Support、"
             "Orientation 一律不可变 —— **删掉 SCSTATE 图片不等于删掉这些合同**。"},
-    {"key": "reveal_coverage_policy", "label": "首次显露覆盖策略",
+    {"key": "reveal_coverage_policy", "label": "第一次露出的部位没定过怎么办",
      "type": "text", "source": "derived", "group": "已冻结",
      "why": "视频首次显露的身体或服饰区域必须已有视觉覆盖，"
             "否则限制 Camera 或阻断生产。"},
-    {"key": "external_transition_editing", "label": "外部补转场",
+    {"key": "external_transition_editing", "label": "允不允许后期补转场",
      "type": "text", "source": "derived", "group": "已冻结"},
-    {"key": "external_shot_assembly", "label": "外部镜头拼接",
+    {"key": "external_shot_assembly", "label": "允不允许后期拼镜头",
      "type": "text", "source": "derived", "group": "已冻结"},
-    {"key": "asset_registry_path", "label": "资产注册表位置", "type": "text",
+    {"key": "asset_registry_path", "label": "资产台账存在哪", "type": "text",
      "source": "derived", "group": "已冻结"},
-    {"key": "registry_snapshot_id", "label": "注册表快照", "type": "text",
+    {"key": "registry_snapshot_id", "label": "台账快照", "type": "text",
      "source": "derived", "group": "已冻结"},
 ]
 
@@ -378,6 +378,34 @@ FIXED_DERIVED = {
 }
 
 BY_KEY = {f["key"]: f for f in FIELDS}
+
+# 「每部剧真的要改的」——只有这些默认展开，其余折叠起来。
+#
+# 判据不是「重不重要」，是**换一部剧会不会改**：
+#   · 视觉风格、文化设定、语言、字幕、旁白 —— 每部剧都不一样
+#   · 特殊要求 —— 那个自由输入口，什么都能写
+#   · 改编权限、拍成什么 —— 开工前定一次，也属于每部剧要过一遍的
+#
+# 折叠起来的不是「不重要」，是**大多数剧不用动**：
+#   · 图像减压 / 视频承载 / 场景机位 —— 调优旋钮，跑顺了再碰
+#   · 生产参数 —— 画幅、时长在「项目参数」那块本来就有一份
+#   · 程序算的、已冻结 —— 只读，看看而已
+#
+# 全铺出来的后果实际发生过：用户说「过于复杂了」。
+# 56 个字段一屏铺开，人找不到该改哪个，于是一个都不改。
+BASIC_KEYS = (
+    "visual_medium", "visual_style", "cultural_setting",
+    "adaptation_authority",
+    "dialogue_language",
+    "subtitle", "subtitle_lang", "subtitle_burn",
+    "narration", "narration_style", "narration_voice", "narration_on_screen",
+    "special_notes",
+)
+
+
+def tier_of(key: str) -> str:
+    """basic = 默认展开；advanced = 收起来。"""
+    return "basic" if key in BASIC_KEYS else "advanced"
 
 
 def placeholder_of(key: str) -> str:
