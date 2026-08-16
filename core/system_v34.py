@@ -228,9 +228,18 @@ PRODUCE_ORDER = ["p1", "p2", "p3", "p4"]
 # （视频模型一次最多生成多久），不是这一集多长。以前只有 DURATION，
 # 后果实跑撞过一整轮：第九环节是整集级的，它只看得见 15，就把 8 个场次
 # 压成 15 秒，然后第十环节只装出 1 个 SEG，往下全线崩且不报错。
+# 项目基础信息的 50 多个字段每个都是一个占位符（{{VISUAL_STYLE}} 这种）。
+# **从 settings 那张表推导，不在这里手抄一份** —— 手抄的迟早和字段表对不上，
+# 然后「模板用了填不上的占位符」这道校验就成了摆设。
+def _setting_placeholders() -> tuple:
+    from . import settings as _st
+    return _st.PLACEHOLDERS
+
+
 COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
                        "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT",
-                       "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY")
+                       "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY"
+                       ) + _setting_placeholders()
 
 
 # 每个环节实际需要上游产物的**哪几部分**。

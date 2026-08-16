@@ -85,6 +85,28 @@ def load_prompt(name: str, pj: Optional[Project] = None) -> str:
     return read_text(builtin)
 
 
+def system_prompt(pj: Optional[Project] = None, params: Optional[dict] = None,
+                  derived: Optional[dict] = None) -> str:
+    """每次调用都发的那份 system prompt（`_common`），**渲染过的**。
+
+    以前是 `load_prompt("_common", pj)` 直接发原文，占位符填不上。
+    所以里面的规则只能是写死的散文 —— 而写死的散文没法按项目设定变化：
+    「画面内禁止出现任何文字、字幕」这一条，遇到「字幕要烧录进画面」的项目
+    就是直接矛盾，结果字幕消失且不报错。现在那一条按设定生成。
+
+    顺手去掉 HTML 注释：那些是写给人看的（解释某条规则为什么这么写），
+    发给模型是纯噪音，而这份东西**每一次调用都发**，噪音要乘以调用次数。
+    """
+    from . import settings as _st
+    text = load_prompt("_common", pj)
+    if pj is not None:
+        m = dict(_st.mapping(pj, params, derived))
+        m["SUBTITLE_RULE"] = _st.subtitle_rule(pj)
+        m["PROJECT_BRIEF"] = _st.brief_block(pj, params, derived)
+        text = render(text, m)
+    return re.sub(r"<!--.*?-->\s*", "", text, flags=re.S)
+
+
 def stage_prompt(stage_id: str, template_name: str,
                  pj: Optional[Project] = None) -> str:
     """业务模板原文 + 程序传输层。环节4的 TXT 保持逐字不改。"""
@@ -750,7 +772,7 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     if stage_id == "s2":
         log(f"{episode} 目标 {seg_n} 段（{seg_why}）→ 成片约 "
             f"{seg_n * int(params.get('duration') or 15)} 秒")
-    system = load_prompt("_common", pj)
+    system = system_prompt(pj, params)
     user = render(stage_prompt(stage_id, tpl_name, pj),
                   _mapping(pj, stage_id, params, data, episode, script))
     tag = f"{episode} " if episode else "全剧 "
@@ -1027,7 +1049,7 @@ def preview_prompt(pj: Project, stage_id: str, params: dict,
             for m in missing if m in _STAGE_OF_OUT] or missing
         return out
 
-    system = load_prompt("_common", pj)
+    system = system_prompt(pj, params)
 
     # 环节7/8 是按段跑的：一段一个提示词，得挑一段看
     if stage_id in ("s7", "s8") and not (
@@ -1129,7 +1151,7 @@ def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
         try:
             with LLM_GATE.slot():
                 out = llm.json_call(
-                    system=load_prompt("_common", pj), user=build_user(seg),
+                    system=system_prompt(pj, params), user=build_user(seg),
                     required=required,
                     log=lambda m, _s=sid: log(f"    {_s}: {m}"), cancel=cancel,
                     on_usage=_usage_of(pj, stage_id, episode, sid),

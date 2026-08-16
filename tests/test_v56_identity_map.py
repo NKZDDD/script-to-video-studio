@@ -277,11 +277,40 @@ class TemplateTests(unittest.TestCase):
         for name in self.MAPPERS:
             self.assertIn("{{REF_LIMIT}}", _tpl(name), name)
 
-    def test_video_forbids_storyboard_plus_scstate(self):
-        """V5.6：SCSTATE 已经被故事板消费掉，默认不再传给视频。"""
+    def test_only_one_temporal_primary_per_window(self):
+        """V6.1 换了说法：不是「禁止某两张同时传」，而是
+
+        **同一时间窗口只能有一个 Temporal Primary**。两张图都想管
+        「这一刻是什么样」，模型会取平均 —— 出来的既不是 A 也不是 B。
+        """
         t = _tpl("n13_video")
-        self.assertIn("故事板 + SCSTATE = 默认禁止同时上传", t)
+        self.assertIn("同一时间窗口只能有一个 Temporal Primary", t)
         self.assertIn("REFERENCE_AUTHORITY_CONFLICT", t)
+
+    def test_generated_video_frames_are_forbidden_as_references(self):
+        """★ V6.1 新增，而且是实跑撞出来的：
+
+        减压之后视频开始拿上一段的尾帧当参考。视频帧是**模型执行的产物**，
+        不是 Canon —— 拿它当下一段的权威，上一次的执行误差就变成了
+        下一段的事实，一段段传下去，而且每段看起来都"接得上"。
+        """
+        t = _tpl("n13_video")
+        self.assertIn("GENERATED_FRAME_REFERENCE_FORBIDDEN", t)
+        self.assertIn("只能作为 QC 证据", t)
+        self.assertIn("BNDPLAN", t)
+
+    def test_the_six_dimension_floor_is_spelled_out(self):
+        """★ V6.1：图像减压**不得降低一致性维度**。
+
+        六维是不可降级底座，删图前必须逐维确认还有来源 ——
+        连 HIGH 可靠度也不例外。少了这条就会减压到整段没人管
+        「谁、穿什么、在哪」。
+        """
+        t = _tpl("n13_video")
+        self.assertIn("REFERENCE_DIMENSION_COVERAGE_GAP", t)
+        self.assertIn("不可降级底座", t)
+        for dim in ("Identity", "LOOK/CT", "Spatial", "Position", "Prop"):
+            self.assertIn(dim, t, dim)
 
     def test_video_warns_against_clean_look_plus_future_ct(self):
         """同时上传干净全身图和未来带伤图会让伤口提前出现。"""

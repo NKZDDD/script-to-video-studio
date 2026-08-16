@@ -37,6 +37,9 @@ GATES = {
     # V5.6 新增。放行它等于允许人物无事件换位 —— 后果是整集连起来看才发现
     # 「上一段还坐着，下一段人已经在对面了」，所以理由要写得比别的更实在。
     "position_state": "人物位置状态门控（无事件瞬移）",
+    # V6.1 新增。模板写了上限，但模板只是"说"——模型不一定听，
+    # 而超格的后果要到审计才看得见，那时候图已经出完了。
+    "sheet_density": "故事板每张最多 3 格",
 }
 
 
@@ -359,14 +362,87 @@ def _kf_position_problems(pj: Project, ep: str) -> list:
 
 # ---------------------------------------------------------------- 汇总
 
+# 每张故事板最多几格。V6.1 从 3×3=9 收到 3。
+# 这个数同时是项目设定（storyboard_max_kf_per_sheet），项目里改了以那个为准；
+# 这里只作为读不到设定时的兜底。
+DEFAULT_MAX_KF_PER_SHEET = 3
+
+
+def _max_kf(pj: Project) -> int:
+    try:
+        from . import settings as _st
+        n = int(_st.load(pj).get("storyboard_max_kf_per_sheet") or 0)
+        return n if n > 0 else DEFAULT_MAX_KF_PER_SHEET
+    except Exception:                                   # noqa: BLE001
+        return DEFAULT_MAX_KF_PER_SHEET
+
+
+def sheet_density_gate(pj: Project, only: Optional[list] = None) -> list:
+    """一张故事板挂了几个关键帧 —— 超了就在出图之前停下。
+
+    「格」= 一个 KF = 那张纸上的一个画格。一张 sheet 出一张图，
+    所以同一个 `sheet_id` 下挂 N 个 KF，就是要模型在一张图里画 N 个时刻。
+
+    实跑撞过 16 格：模型记不住 16 个时刻各自的世界状态，
+    于是所有格子的 `source_scstate` 全填成第一个、道具状态和 CVS 打架、
+    关键帧的时间和它的来源对不上 —— 审计报的 7 条 BLOCK 里 5 条是这么来的。
+    而**画面本身是好看的**，人工一格一格看基本抓不到。
+
+    内容不用减，拆续页就行：8 个关键帧分三张纸画，
+    每张纸模型只需要管 3 个时刻。
+
+    没写 `sheet_id` 时按「整包算一张」保守判 —— 那正是实跑那次的样子
+    （16 个 KF 全挂在一张 SHEET_A 上，或者干脆没分）。
+    """
+    cap = _max_kf(pj)
+    bad = []
+    for ep in _episodes(pj, only):
+        for pkg in (pj.stage_data("n12_storyboard", ep) or {}).get("sbpkg") or []:
+            seg = pkg.get("seg_id") or pkg.get("sbpkg_id") or "?"
+            per: dict = {}
+            for kf in pkg.get("kf") or []:
+                if not isinstance(kf, dict):
+                    continue
+                per.setdefault(str(kf.get("sheet_id") or "（没写 sheet_id）"),
+                               []).append(str(kf.get("kf_id") or "?"))
+            for sheet, kfs in per.items():
+                if len(kfs) <= cap:
+                    continue
+                bad.append(
+                    f"{ep} {seg} 的 {sheet} 挂了 {len(kfs)} 个关键帧"
+                    f"（{'、'.join(kfs[:4])}{'…' if len(kfs) > 4 else ''}），"
+                    f"上限是 {cap} —— 一张图里画这么多格，模型记不住每一格各自的"
+                    f"世界状态，会把所有格子的来源状态填成同一个。"
+                    f"**内容不用减，拆成续页**：每张 {cap} 格，"
+                    f"续页不构成第二套真相。")
+    return bad
+
+
+# 闸门 id → 检查函数。**唯一一份**。
+#
+# 以前 check_all 和 /api/gates 各写了一份，加一道闸门要改两处 ——
+# 漏掉端点那处的表现是 KeyError（还算好的），漏掉 check_all 那处
+# 则是新闸门**根本不生效而且不报错**。加闸门只往这里加一行。
+CHECKS = {
+    "audit_block": lambda pj, only: audit_gate(pj, only),
+    "visual_coverage": lambda pj, only: coverage_gate(pj, only),
+    "object_count": lambda pj, only: object_count_gate(pj, only),
+    "position_state": lambda pj, only: position_gate(pj, only),
+    "sheet_density": lambda pj, only: sheet_density_gate(pj, only),
+}
+
+
+def problems_of(pj: Project, gate: str, only: Optional[list] = None) -> list:
+    """某一道闸门查出来的问题（不管有没有被放行）。"""
+    fn = CHECKS.get(gate)
+    return fn(pj, only) if fn else []
+
+
 def check_all(pj: Project, only: Optional[list] = None) -> dict:
     """跑一遍全部闸门。返回 {闸门: 问题清单}，只含**没被授权放行**的。"""
     out = {}
-    for gate, fn in (("audit_block", audit_gate),
-                     ("visual_coverage", coverage_gate),
-                     ("object_count", object_count_gate),
-                     ("position_state", position_gate)):
-        problems = fn(pj, only)
+    for gate in GATES:
+        problems = problems_of(pj, gate, only)
         if problems and not authorized(pj, gate):
             out[gate] = problems
     return out

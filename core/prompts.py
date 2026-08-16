@@ -93,7 +93,10 @@ def all_template_names() -> list:
         for tpl, _, _ in spec.values():
             if tpl not in names:
                 names.append(tpl)
-    names.append("_common")
+    # 下划线开头的是**跨体系的**，不属于任何环节，所以上面那圈扫不到。
+    # 不列进来的后果：文件在盘上、页面上改不了 —— 而这两份恰恰是最该能改的
+    # （全局规则、抽取提示词）。加新的 _xxx.md 记得往这里加一行。
+    names += ["_common", "_settings_extract"]
     return names
 
 

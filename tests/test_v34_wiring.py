@@ -185,7 +185,12 @@ class TemplateRegistryTests(unittest.TestCase):
             by_sys.setdefault(x["system"], []).append(x["name"])
         self.assertEqual(len(by_sys.get("v34", [])), 15)
         self.assertEqual(len(by_sys.get("v61", [])), 8)
-        self.assertEqual(by_sys.get(""), ["_common"], "_common 是两套共用的")
+        # 下划线开头的是跨体系的，不属于任何一套：
+        # _common 是每次调用都发的全局规则，_settings_extract 是基础信息抽取器
+        self.assertEqual(sorted(by_sys.get("", [])),
+                         ["_common", "_settings_extract"])
+        # 上面那条已经查过跨体系的这一组了，这里不再重复断言一遍
+        self.assertIn("_common", by_sys.get("", []), "_common 是两套共用的")
 
     def test_v34_templates_can_be_read_and_saved(self):
         """★ 光列出来不算数 —— 打开和保存也得走得通。"""

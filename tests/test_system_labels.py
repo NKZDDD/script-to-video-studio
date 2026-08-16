@@ -28,8 +28,19 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(set(app.SYSTEM_LABELS), set(app.SYSTEMS))
 
     def test_the_full_names(self):
-        self.assertEqual(app.system_label("v34"), "电影级十七章（V5.6）")
+        self.assertEqual(app.system_label("v34"), "电影级十七章（V6.1）")
         self.assertEqual(app.system_label("v61"), "通用十二环节（V6.1）")
+
+    def test_the_two_skills_may_share_a_version_number(self):
+        """★ 两套 skill 各自独立编号，**现在恰好都是 V6.1**。
+
+        这不是笔误。区分靠的是「电影级十七章 / 通用十二环节」这两个名字，
+        版本号只是各自 skill 的进度。看到重号别顺手"修"成一个。
+        """
+        self.assertEqual(app.SYSTEM_LABELS["v34"]["skill_version"], "V6.1")
+        self.assertEqual(app.SYSTEM_LABELS["v61"]["skill_version"], "V6.1")
+        self.assertNotEqual(app.SYSTEM_LABELS["v34"]["name"],
+                            app.SYSTEM_LABELS["v61"]["name"])
 
     def test_an_unknown_id_does_not_crash(self):
         self.assertEqual(app.system_label("nope"), "nope")
@@ -53,7 +64,7 @@ class SingleSourceTests(unittest.TestCase):
 
     def test_the_picker_shows_the_new_name(self):
         html = _read(os.path.join("web", "index.html"))
-        self.assertIn('<option value="v34">电影级十七章（V5.6）</option>', html)
+        self.assertIn('<option value="v34">电影级十七章（V6.1）</option>', html)
 
     def test_the_stage_heading_is_not_hardcoded_to_twelve(self):
         """★ 写死「十二环节」时，跑十七章的项目标题是错的，
@@ -82,7 +93,7 @@ class BootstrapTests(unittest.TestCase):
         """页面拿到的名字必须来自 SYSTEM_LABELS，不是另写的一份。"""
         boot = app.api_get("/api/bootstrap", {})
         got = {k: v["name"] for k, v in boot["systems"].items()}
-        self.assertEqual(got, {"v34": "电影级十七章（V5.6）",
+        self.assertEqual(got, {"v34": "电影级十七章（V6.1）",
                                "v61": "通用十二环节（V6.1）"})
 
     def test_each_system_still_carries_its_stage_table(self):

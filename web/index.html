@@ -188,7 +188,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
            建完还改不了。名字以 SYSTEM_LABELS 为准，别在这里另写。 -->
       <div><label>生产体系 <span class="muted">建完不能改</span></label>
         <select id="spSystem">
-          <option value="v34">电影级十七章（V5.6）</option>
+          <option value="v34">电影级十七章（V6.1）</option>
         </select></div>
     </div>
     <div class="muted" style="margin-top:6px" id="spSystemNote"></div>
@@ -293,6 +293,36 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       典型用法：这部剧是印尼语的、是 3D 漫剧不是真人短剧、有特定的称谓和禁忌 ——
       写在这儿，别改全局。
     </p>
+  </div>
+  <div class="card">
+    <h2>项目基础信息
+      <span class="tag">skill 的 50 项参数 —— 填在这里，不要往提示词里粘</span></h2>
+    <p class="muted" style="margin:0 0 10px">
+      往全局提示词里粘一段设定，会和已有规则**打架而且不报错**
+      （踩过：写了「字幕烧录进画面」，和「画面内禁止出现任何文字」冲突，
+      字幕直接消失）。填在这里，程序按取值改写对应规则。<br>
+      <b>可编辑</b> = 存在这个项目里；<b>镜像</b> = 写回生产参数，不存第二份；
+      <b>只读</b> = 程序算的或已冻结。每一项后面标着它影响哪几个环节 —— 那是扫模板得出的。
+    </p>
+    <details style="margin-bottom:12px">
+      <summary style="cursor:pointer;font-size:13px">
+        粘一段【项目基础信息】让模型读成字段（解析 → 预览 → 你挑 → 保存）</summary>
+      <div style="margin-top:8px">
+        <textarea id="briefRaw" style="min-height:110px"
+          placeholder="把【AI电影级短剧项目基础信息】整段粘进来…"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn ghost" id="briefParse">解析</button>
+          <span class="muted" id="briefParseHint">
+            解析**不会**直接改项目 —— 出来的是建议，你勾了才写入</span>
+        </div>
+        <div id="briefPreview"></div>
+      </div>
+    </details>
+    <div id="briefBox"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="saveBrief">保存基础信息</button>
+      <span class="muted" id="briefHint"></span>
+    </div>
   </div>
   <div class="card">
     <h2>项目参数 <span class="tag">影响环节 2/7/8 的编译结果</span></h2>
@@ -589,6 +619,8 @@ const $$ = s => [...document.querySelectorAll(s)];
 // 服务商返回的原始报错里什么都可能有，插进 innerHTML 前必须转义
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// 说明里的 **粗体** 转成 <b>。先 esc 再转，顺序反了就是 XSS。
+const mdBold = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
 const api = {
   get: (p, q={}) => fetch(p + '?' + new URLSearchParams(q)).then(r => r.json()),
   post: (p, b={}) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'},
@@ -759,6 +791,7 @@ async function openProject(root) {
   $('#projTag').textContent = root.split(/[\\/]/).pop();
   await refreshProject();
   renderParams();
+  renderBrief();
   $$('nav button')[1].click();
 }
 
@@ -1296,6 +1329,171 @@ function currentParams() {
   const meta = (BOOT.projects.find(p => p.root === PROJ) || {});
   return Object.assign({}, BOOT.config.defaults || {}, meta.params || {});
 }
+// ---- 项目基础信息（skill 的 50 项参数）--------------------------------
+// schema 从后端来，页面不维护第二份字段表 —— 维护两份就要同步，
+// 漏一处就是「填了没生效」而且不报错。
+let BRIEF = [];
+
+async function renderBrief() {
+  const box = $('#briefBox');
+  if (!PROJ) { box.innerHTML = '<p class="muted">打开项目后看这里</p>'; return; }
+  const r = await api.post('/api/project/settings', {project_root: PROJ});
+  BRIEF = r.fields;
+  const badge = {settings: '', params: '镜像', derived: '只读'};
+  const val = f => f.value === null || f.value === undefined ? '' : f.value;
+  const one = f => {
+    const ro = f.source === 'derived' ? ' disabled' : '';
+    const dk = ` data-bk="${esc(f.key)}"`;
+    let ctl;
+    if (f.type === 'bool')
+      ctl = `<label class="row" style="margin:0;gap:7px"><input type="checkbox"
+             style="width:auto"${dk}${ro}${f.value ? ' checked' : ''}><span class="muted"
+             >${f.value ? '是' : '否'}</span></label>`;
+    else if (f.type === 'enum')
+      ctl = `<select${dk}${ro}>` + (f.options || []).map(o =>
+        `<option value="${esc(o)}"${String(o) === String(val(f)) ? ' selected' : ''}
+         >${esc(o)}${(f.zh || {})[o] ? '（' + esc(f.zh[o]) + '）' : ''}</option>`).join('')
+        + '</select>';
+    else
+      ctl = `<input${dk}${ro} type="${f.type === 'int' ? 'number' : 'text'}"
+             value="${esc(String(val(f)))}" placeholder="${esc(f.hint || '')}">`;
+    // ★ 「影响哪几个环节」是扫模板得出的。空 = 填了也没人看，必须标出来，
+    //   否则人会以为填了就生效。
+    const uses = (f.used_by || []).length
+      ? `<span class="muted">影响：${f.used_by.map(esc).join('、')}</span>`
+      : `<span style="color:var(--dim)">暂未被任何模板使用</span>`;
+    return `<div><label>${esc(f.label)}
+      ${badge[f.source] ? `<span class="pill">${badge[f.source]}</span>` : ''}
+      ${f.local ? '<span class="pill">本地扩展</span>' : ''}</label>
+      ${ctl}
+      <div class="muted" style="font-size:11.5px;margin-top:3px">${uses}${
+        f.why ? '<br>' + mdBold(f.why) : ''}</div></div>`;
+  };
+  box.innerHTML = r.groups.map(g => {
+    const fs = BRIEF.filter(f => f.group === g);
+    return `<h3 style="font-size:13px;margin:14px 0 8px;color:var(--dim)">${esc(g)}</h3>
+            <div class="grid g2">${fs.map(one).join('')}</div>`;
+  }).join('');
+  wireBriefDeps();
+}
+
+// `when` 依赖：字幕语言/烧录只在「需要字幕」勾上时才有意义。
+// 不隐藏的话，人会填了字幕语言却没勾字幕，然后奇怪为什么没生效。
+function wireBriefDeps() {
+  const shown = () => {
+    BRIEF.forEach(f => {
+      if (!f.when) return;
+      const on = $(`[data-bk="${f.when}"]`);
+      const me = $(`[data-bk="${f.key}"]`);
+      if (on && me && me.closest('div')) me.closest('div').style.display =
+        on.checked ? '' : 'none';
+    });
+  };
+  BRIEF.filter(f => f.type === 'bool').forEach(f => {
+    const el = $(`[data-bk="${f.key}"]`);
+    if (el) el.onchange = () => { el.nextElementSibling.textContent =
+      el.checked ? '是' : '否'; shown(); };
+  });
+  shown();
+}
+
+// ---- LLM 抽取：解析 → 预览 → 勾选 → 保存 ---------------------------
+// 四步一步都不能省。这些值会改变生产结果（画幅、时长、改编权限），
+// 模型读错一个字整部剧就按错的跑，而且要到成片才看得见。
+$('#briefParse').onclick = async () => {
+  const text = $('#briefRaw').value.trim();
+  if (!text) { $('#briefParseHint').textContent = '先把那段文字粘进来'; return; }
+  const btn = $('#briefParse');
+  btn.disabled = true; btn.textContent = '解析中…';
+  try {
+    // 不传 llm：后端用「设置 → 分析引擎」里配的那套，和别的环节一致
+    const r = await api.post('/api/project/settings/extract',
+                             {project_root: PROJ, text});
+    if (r.error) { $('#briefPreview').innerHTML =
+      `<div class="alert err">${esc(r.error)}</div>`; return; }
+    renderBriefPreview(r);
+  } finally { btn.disabled = false; btn.textContent = '解析'; }
+};
+
+function renderBriefPreview(r) {
+  const box = $('#briefPreview');
+  const parts = [];
+
+  // ★ 冲突排最前面。它比抽取值重要 —— 散文之间的矛盾没人能自动发现，
+  //   而它炸的时候不报错（字幕那次就是被静默抹掉的）。
+  if ((r.conflicts || []).length) parts.push(
+    `<div class="alert err" style="margin-top:10px">
+      <b>和现有规则冲突 ${r.conflicts.length} 处 —— 先解决这个</b>` +
+    r.conflicts.map(c => `<div style="margin-top:8px">
+      · <b>${esc(c.field || '')}</b>：设定说「${esc(c.setting_says || '')}」，
+        而现有规则说「${esc(c.rule_says || '')}」<br>
+      　后果：${esc(c.why_it_matters || '')}<br>
+      　建议：${esc(c.suggestion || '')}</div>`).join('') + '</div>');
+
+  if ((r.proposals || []).length) {
+    parts.push(`<table style="margin-top:10px"><tr>
+      <th style="width:34px"></th><th>字段</th><th>现在</th><th>建议改成</th></tr>` +
+      r.proposals.map((p, i) => {
+        // 镜像字段会改生产参数，单独标出来 —— 它们改错的代价最大
+        const warn = p.source === 'params'
+          ? ' <span class="pill" style="color:var(--warn);border-color:var(--warn)">改生产参数</span>' : '';
+        return `<tr>
+          <td><input type="checkbox" data-px="${i}" checked style="width:auto"></td>
+          <td>${esc(p.label)}${warn}</td>
+          <td class="muted">${esc(String(p.current ?? ''))}</td>
+          <td><b>${esc(String(p.proposed ?? ''))}</b></td></tr>`;
+      }).join('') + '</table>' +
+      `<div class="row" style="margin-top:8px">
+         <button class="btn" id="briefApply">应用勾选的 ${r.proposals.length} 项</button>
+       </div>`);
+  } else {
+    parts.push('<p class="muted" style="margin-top:10px">没抽出任何可填的字段。</p>');
+  }
+
+  // 判不了的和被丢掉的都要显示 —— 不显示的话人以为全抽到了
+  if ((r.unclear || []).length) parts.push(
+    `<div class="alert warn" style="margin-top:8px"><b>判不了的 ${r.unclear.length} 处</b>` +
+    r.unclear.map(u => `<div>· ${esc(u.field || '?')}：「${esc(u.text || '')}」
+      —— ${esc(u.why || '')}</div>`).join('') + '</div>');
+  if ((r.dropped || []).length) parts.push(
+    `<div class="alert warn" style="margin-top:8px"><b>模型给了但被挡下的 ${r.dropped.length} 处</b>
+     <div class="muted">取值不合法或想写只读字段，没有采纳：</div>` +
+    r.dropped.map(d => `<div>· ${esc(d)}</div>`).join('') + '</div>');
+
+  box.innerHTML = parts.join('');
+  const apply = $('#briefApply');
+  if (apply) apply.onclick = async () => {
+    const values = {};
+    $$('#briefPreview input[data-px]').forEach(cb => {
+      if (cb.checked) { const p = r.proposals[+cb.dataset.px];
+                        values[p.key] = p.proposed; }
+    });
+    if (!Object.keys(values).length) { alert('一项都没勾'); return; }
+    await api.post('/api/project/settings', {project_root: PROJ, values});
+    await renderBrief();
+    renderAuto();
+    box.innerHTML = `<div class="alert warn">已写入 ${Object.keys(values).length} 项
+      —— 下面的表单已经刷新，核对一下再跑。</div>`;
+  };
+}
+
+$('#saveBrief').onclick = async () => {
+  const values = {};
+  BRIEF.forEach(f => {
+    if (f.source === 'derived') return;      // 只读的不回传
+    const el = $(`[data-bk="${f.key}"]`);
+    if (!el) return;
+    values[f.key] = f.type === 'bool' ? el.checked
+                  : f.type === 'int' ? (el.value === '' ? '' : +el.value)
+                  : el.value;
+  });
+  await api.post('/api/project/settings', {project_root: PROJ, values});
+  await renderBrief();
+  renderAuto();                              // 画幅/尺寸是镜像的，跟着刷新
+  $('#briefHint').textContent = '已保存 —— 下一次跑环节就会带上';
+  setTimeout(() => { $('#briefHint').textContent = ''; }, 4000);
+};
+
 function renderParams() {
   const p = currentParams();
   $('#paramBox').innerHTML = PARAM_FIELDS.map(([k, label, t]) =>

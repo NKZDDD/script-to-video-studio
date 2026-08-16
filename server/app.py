@@ -170,7 +170,7 @@ SYSTEMS = ("v61", "v34")
 # skill_version 是**当前**基于的 skill 版本，升级时改这里一处；
 # 项目建立时会把它抄进 project.json，这样老项目也知道自己按哪版跑的。
 SYSTEM_LABELS = {
-    "v34": {"name": "电影级十七章", "skill_version": "V5.6",
+    "v34": {"name": "电影级十七章", "skill_version": "V6.1",
             "note": "17 章 / 15 次 LLM 调用，逐段落到场景状态图与故事板包"},
     "v61": {"name": "通用十二环节", "skill_version": "V6.1",
             "note": "12 环节 / 8 次 LLM 调用，逐集逐段直接编故事板"},
@@ -1046,6 +1046,90 @@ def api_post(path: str, body: dict) -> dict:
         pj.save_meta(meta)
         return {"ok": True, "meta": meta}
 
+    if path == "/api/project/settings":
+        """项目基础信息：读 schema + 当前值，或者保存。
+
+        schema 和值一起下发：页面不该自己维护一份字段表 ——
+        字段一改就得两边同步，漏一处就是「填了没生效」而且不报错。
+        """
+        from core import settings as ST
+        pj = proj_of(body)
+        if body.get("values") is not None:
+            ST.save(pj, body["values"])
+            # params 那几项写回它们原来的家，**不在 settings 里存第二份**
+            pmap = {f["key"]: f["maps_to"] for f in ST.FIELDS
+                    if f["source"] == "params" and f.get("maps_to")}
+            back = {pmap[k]: v for k, v in body["values"].items()
+                    if k in pmap and str(v).strip() != ""}
+            if back:
+                meta = pj.meta()
+                meta.setdefault("params", {}).update(back)
+                pj.save_meta(meta)
+        params = params_of(cfg, pj, with_script=False)
+        cap = (pj.meta() or {}).get("capability") or {}
+        derived = dict(ST.FIXED_DERIVED,
+                       reference_capacity_per_call=params.get("ref_limit", ""),
+                       target_video_model=cap.get("target_video_model", ""),
+                       native_multishot_support=cap.get(
+                           "native_multishot_support", ""),
+                       current_episode=(pj.meta() or {}).get("episode", ""),
+                       target_image_model=(resolve_chain(cfg, "asset") or [{}])[0]
+                       .get("model", ""))
+        used = ST.used_by()
+        return {
+            "fields": [dict(f, value=(
+                ST.load(pj).get(f["key"]) if f["source"] == "settings"
+                else params.get(f.get("maps_to") or f["key"], "")
+                if f["source"] == "params"
+                else derived.get(f["key"], "")),
+                # 「这个设定影响哪几个环节」是**扫模板得出的**，不是手写表
+                used_by=used.get(ST.placeholder_of(f["key"])) or [])
+                for f in ST.FIELDS],
+            "groups": list(dict.fromkeys(f["group"] for f in ST.FIELDS)),
+        }
+
+    if path == "/api/project/settings/extract":
+        """把粘进来的一段【项目基础信息】读成字段 —— **只出建议，不落盘**。
+
+        为什么不自动保存：这些值会改变生产结果（画幅、时长、改编权限），
+        模型读错一个字，整部剧就按错的跑，而且要到成片才看得见。
+        所以固定是「解析 → 预览 → 你挑 → 保存」四步，中间那两步不能省。
+
+        真正值钱的不是抽取，是 `conflicts` —— 散文之间的矛盾没人能自动发现。
+        实跑炸过一次：用户写「字幕烧录进画面」，和「画面内禁止出现任何文字」
+        并存，程序不报错，出来的图里字幕被抹掉了。
+        """
+        from core import settings as ST
+        pj = proj_of(body)
+        raw = (body.get("text") or "").strip()
+        if not raw:
+            raise ValueError("没有可解析的文本 —— 把那段【项目基础信息】粘进来再点。")
+        llm = build_llm(cfg, body.get("llm"))
+        # 拿**当前生效的**全局规则去比对，不是内置那份 ——
+        # 用户改过 _common 的话，冲突要按他改过的版本判。
+        rules = S.system_prompt(pj, params_of(cfg, pj, with_script=False))
+        user = S.render(S.load_prompt("_settings_extract", pj),
+                        ST.extract_vars(pj, raw, rules))
+        out = llm.json_call("你是项目参数抽取器。只输出一个 JSON。", user,
+                            required=["values"], log=lambda m: None)
+        values, dropped = ST.sanitize(out.get("values") or {})
+        cur = ST.load(pj)
+        params = params_of(cfg, pj, with_script=False)
+        return {
+            "ok": True,
+            # 逐条给「现在是什么 → 建议改成什么」，让人看得见改动幅度
+            "proposals": [
+                {"key": k, "label": ST.BY_KEY[k]["label"],
+                 "source": ST.BY_KEY[k]["source"],
+                 "current": (cur.get(k) if ST.BY_KEY[k]["source"] == "settings"
+                             else params.get(ST.BY_KEY[k].get("maps_to") or k, "")),
+                 "proposed": v}
+                for k, v in values.items()],
+            "conflicts": out.get("conflicts") or [],
+            "unclear": out.get("unclear") or [],
+            "dropped": dropped,
+        }
+
     if path == "/api/stage/run":
         pj = proj_of(body)
         stage_id = body["stage"]
@@ -1265,10 +1349,9 @@ def api_post(path: str, body: dict) -> dict:
         # 放行是会被忘掉的，忘了之后「为什么这一集允许瞬移」就没人答得上。
         out = []
         for gate, label in G.GATES.items():
-            problems = {"audit_block": G.audit_gate,
-                        "visual_coverage": G.coverage_gate,
-                        "object_count": G.object_count_gate,
-                        "position_state": G.position_gate}[gate](pj, only)
+            # 别在这里再写一份 gate→函数 的表 —— 那份表和 GATES 迟早对不上，
+            # 加一道闸门就 KeyError（这条踩过）。唯一来源在 gates_v34.CHECKS。
+            problems = G.problems_of(pj, gate, only)
             out.append({"gate": gate, "label": label,
                         "problems": problems,
                         "blocking": gate in blocked,

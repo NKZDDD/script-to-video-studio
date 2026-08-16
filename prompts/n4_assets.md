@@ -119,11 +119,33 @@ CT 的规矩：**当前状态优先于干净状态**。有伤就不许退回没�
 
 ## 七、出不出（`decision`）
 
-- `must` —— 核心人物、重要配角、高频场景、核心道具、不可逆状态
-- `conditional` —— 次要角色、少量使用的场景、辅助状态
-- `skip` —— 一次性路人、普通背景物、普通动态效果（尘土、烟雾、雨、火花）
+> V6.1 把这一档拆细了。原来只有三档，判不出「这东西要登记但不用出图」——
+> 结果每一件衣服、每一个中间状态都被当成要出图的视觉资产，
+> 条数翻倍，而资产提示词那一步一次写不完。
 
-判 `skip` 的要写进 `skipped` 并给理由。**动态元素满足任一条就升级成状态资产**：
+**先完整登记逻辑对象，再决定要不要出图。** 这两件事是分开的：
+
+| `decision` | 含义 | 出图 | 写生产提示词 |
+|---|---|---|---|
+| `must` | 核心人物、重要配角、高频场景、核心道具、不可逆状态 | 是 | 是 |
+| `conditional` | 次要角色、少量使用的场景、辅助状态 | 看门控 | 看门控 |
+| `logical_only` | 简单服装、纯文字契约就够的东西 | **否** | **否** |
+| `defer_to_video` | 中间动作、姿势、反应 —— 交给视频执行 | **否** | **否** |
+| `visual_anchor_required` | 必须冻结的稳定结果 | 是 | 是 |
+| `visual_qc_required` | 出了图还要人核一眼才算数 | 是 | 是 |
+| `existing_canonical` | 已有 Canon，沿用编号不重造 | 否 | 否 |
+| `skip` | 一次性路人、普通背景物、普通动态效果 | 否 | 否 |
+
+判 `skip` / `logical_only` / `defer_to_video` 的都要写进 `skipped` 并给理由。
+
+**「保险起见出一张」不是合法理由。** skill 原话：
+不得用「保险」替代真实物化触发器。要出图必须命中：
+新身份或新 LOOK 首次出现 / 首次显露此前未定义的区域 / 不可逆结果首次激活 /
+跨 SEG 边界需要精确继承 / Hero 道具需要近景辨认 / 新场景首次建立 /
+实测高风险的合成。
+
+服装按 `{{COSTUME_ASSET_MODE}}` 处理：简单服装走 `logical_only` 文字契约，
+只有关键、复杂或跨集复用的才建独立 COST 视觉资产。**动态元素满足任一条就升级成状态资产**：
 跨多个段落持续 / 后续剧情依赖 / 状态不可逆 / 容易被模型错误恢复 /
 需要固定精确位置 / 影响人物道具场景关系。
 
@@ -136,7 +158,7 @@ CT 的规矩：**当前状态优先于干净状态**。有伤就不许退回没�
     {"asset_id": "C001",
      "family": "CHAR|PH|COST|LOOK|CT|LOC|PROP_SPEC|PROP_INSTANCE|PROP_SET|VEH|CRE|GRP|VFX",
      "name": "",
-     "decision": "must|conditional|skip",
+     "decision": "must|conditional|logical_only|defer_to_video|visual_anchor_required|visual_qc_required|existing_canonical|skip",
      "decision_reason": "",
      "first_episode": "EP01",
      "first_seg": "EP01-SEG01",

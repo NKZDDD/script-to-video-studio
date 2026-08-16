@@ -25,7 +25,7 @@ from typing import Callable, Optional
 from . import diagnose, episodes as _eps, ledger, system_v34 as V
 from .executor import LLM_GATE
 from .llm import LLMCancelled
-from .stages import jd, load_prompt, prompt_files, render
+from .stages import jd, load_prompt, prompt_files, render, system_prompt
 from .store import Project, keep_partial, write_text
 
 
@@ -78,6 +78,19 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         "CAPABILITY": _capability_block(pj),
         "REF_LIMIT": _ref_limit_block(params),
     }
+    # 项目基础信息：50 多个字段，模板里写了 {{X}} 才收到。
+    # 放在产物之前合并，让产物占位符能覆盖同名的（实际上不重名，
+    # 但顺序写死比"应该不会撞"可靠）。
+    from . import settings as _st
+    m.update(_st.mapping(pj, params, {
+        "episode_duration": _ep_seconds(pj, episode, params),
+        "current_episode": episode,
+        "reference_capacity_per_call": params.get("ref_limit", ""),
+        "target_video_model": (capability_of(pj) or {}).get("target_video_model", ""),
+        "native_multishot_support": (capability_of(pj) or {}).get(
+            "native_multishot_support", ""),
+    }))
+
     if stage_id == "n4b":
         data = dict(data, n4_assets=_n4b_worklist(pj, data.get("n4_assets") or {}))
     for out_name, obj in data.items():
@@ -411,6 +424,19 @@ def _n4b_worklist(pj: Project, a4: dict) -> dict:
     return dict(a4, assets=full, assets_already_done=catalog)
 
 
+# 这些档位**不出图、也不写生产提示词**。
+#
+# V6.1 把 `decision` 从三档拆细：逻辑对象要完整登记，但登记 ≠ 出图。
+# 简单服装走文字契约（logical_only）、中间动作交给视频执行（defer_to_video）、
+# 已有 Canon 沿用编号（existing_canonical）—— 这三类都不需要生产提示词。
+#
+# 代码不认这些档位的后果很具体：模板判出来了，程序照样给它们写提示词，
+# 那一步本来就顶着输出上限，白写的部分直接把它推过线。
+NO_IMAGE_DECISIONS = frozenset({
+    "skip", "logical_only", "defer_to_video", "existing_canonical", "deferred",
+})
+
+
 def n4b_split(pj: Project, episode: str = "") -> tuple:
     """资产表分三份：已经写过的 / 这次要写的 / 根本不用写的。
 
@@ -439,10 +465,10 @@ def n4b_split(pj: Project, episode: str = "") -> tuple:
         if not aid:
             continue
         # skill 第五章：只为**当前范围实际需要**且视觉差异有生产价值的状态
-        # 建资产。decision=skip 的出图那一层本来就会丢掉（见 build_tasks），
+        # 建资产。这几档出图那一层本来就会丢掉（见 build_tasks），
         # 在这里写一遍纯属把 token 花在注定要扔的东西上 ——
         # 而这一步恰恰是最容易被截断的那一步。
-        if a.get("decision") == "skip":
+        if a.get("decision") in NO_IMAGE_DECISIONS:
             dropped += 1
         elif aid in written:
             done.append(aid)
@@ -495,7 +521,8 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     if stage_id == "n4b":
         done, todo, dropped = n4b_split(pj, episode)
         if dropped:
-            log(f"  {dropped} 个资产 decision=skip，不写提示词"
+            log(f"  {dropped} 个资产不需要出图（skip / 逻辑契约 / 交给视频 / "
+                f"已有 Canon），不写提示词"
                 f"（出图那一层本来也会丢掉，写了是白写）")
         if done:
             log(f"  {len(done)} 个资产已经写过提示词，这次不重写")
@@ -514,7 +541,7 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     if saved:
         log(f"  {saved}")
     with LLM_GATE.slot():
-        out = llm.json_call(load_prompt("_common", pj), user, required=required,
+        out = llm.json_call(system_prompt(pj, params), user, required=required,
                             log=log, cancel=cancel,
                             on_usage=_usage(pj, stage_id, episode),
                             on_partial=keep_partial(pj, stage_id, episode, llm=llm))
@@ -636,7 +663,7 @@ def run_segment_stage(pj: Project, stage_id: str, *, llm, params: dict,
             user = build_user(pj, stage_id, params, episode, sid)
             with LLM_GATE.slot():
                 out = llm.json_call(
-                    load_prompt("_common", pj), user, required=required,
+                    system_prompt(pj, params), user, required=required,
                     log=lambda m, _s=sid: log(f"    {_s}: {m}"), cancel=cancel,
                     on_usage=_usage(pj, stage_id, episode, sid),
                     on_partial=keep_partial(pj, stage_id, episode, sid, llm=llm))
@@ -817,7 +844,7 @@ def preview_prompt(pj: Project, stage_id: str, params: dict,
         segment = ""
 
     user = build_user(pj, stage_id, params, episode, segment)
-    out["system"] = load_prompt("_common", pj)
+    out["system"] = system_prompt(pj, params)
     out["user"] = user
     out["chars"] = len(user)
     out["tokens"] = rough_tokens(user)
@@ -897,7 +924,7 @@ def build_tasks(pj: Project, params: dict) -> dict:
 
     asset_tasks = []
     for aid, a in amap.items():
-        if a.get("decision") == "skip" or aid not in prompts:
+        if a.get("decision") in NO_IMAGE_DECISIONS or aid not in prompts:
             continue
         ap = prompts[aid]
         asset_tasks.append({
