@@ -74,9 +74,10 @@ OPTIONAL = {
     "PIL": "参考图压缩（不压直接转 base64，请求体会很大）",
     "pypdf": "读 PDF 剧本（docx / txt 不受影响）",
     "imageio_ffmpeg": "环节12 拼接成片（目标机装了系统 ffmpeg 也行）",
+    "psutil": "CPU / 内存占用统计和并发建议（缺了页面上显示「占用未知」）",
 }
 # 这些包 PyInstaller 有时扫不出来（运行时才 import 的），显式点名
-HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg"]
+HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg", "psutil"]
 
 
 def selfcheck(exe: str) -> bool:

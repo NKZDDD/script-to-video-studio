@@ -1098,6 +1098,41 @@ def api_post(path: str, body: dict) -> dict:
             "groups": list(dict.fromkeys(f["group"] for f in ST.FIELDS)),
         }
 
+    if path == "/api/resources":
+        """本机占用 + 并发能开到多少。
+
+        两类数据分开看：
+          本机余量   → 还能不能再开
+          服务商反应 → 再开有没有用
+
+        只看第一类会把并发调到一个本机撑得住、但服务商全在限流的数字上 ——
+        那时候任务不失败，只是变慢并反复重试，看起来在跑，实际在原地烧钱。
+        """
+        from core import resources
+        pj = None
+        try:
+            pj = proj_of(body)
+        except Exception:                                   # noqa: BLE001
+            pass                # 没开项目也要能看本机占用
+        gate = GATE.snapshot()
+        llm = LLM_GATE.snapshot()
+        inflight = (int(gate.get("global_inflight") or 0)
+                    + int(llm.get("llm_inflight") or 0))
+        resources.sample(inflight)
+        # 最近的限流次数：从这个项目的失败记录里数
+        n429 = calls = 0
+        if pj:
+            rows = diagnose.load(pj.root)
+            recent = rows[-200:]
+            calls = len(recent)
+            n429 = sum(1 for r in recent if r.get("code") == "RATE_LIMITED")
+        return {"ok": True,
+                "usage": resources.snapshot(),
+                "gates": dict(gate, **llm),
+                "inflight": inflight,
+                "advice": resources.advise(
+                    max(int(llm.get("llm_peak") or 0), inflight), n429, calls)}
+
     if path == "/api/project/settings/extract":
         """把粘进来的一段【项目基础信息】读成字段 —— **只出建议，不落盘**。
 
@@ -1502,7 +1537,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(exc)}, 500)
 
 
-def serve(host: str = "127.0.0.1", port: int = 8770):
-    srv = ThreadingHTTPServer((host, port), Handler)
-    srv.daemon_threads = True
-    return srv
+def serve(host: str = "127.0.0.1", port: int = 0, tries: int = 20):
+    """起服务。端口被占就顺延，不是直接崩。
+
+    两套体系是两个包、要同时开着，各自有默认端口；但用户也可能已经
+    开了别的东西占住那个口。崩掉的话人只看到一串 traceback，
+    还得自己想到「换个端口」——顺延一个继续跑，并把真实端口打出来就行。
+
+    返回 (srv, 实际端口)：调用方要用真实端口拼 URL，
+    否则浏览器会打开一个没人在听的地址。
+    """
+    port = port or build_info.default_port()
+    last = None
+    for i in range(max(1, tries)):
+        try:
+            srv = ThreadingHTTPServer((host, port + i), Handler)
+        except OSError as exc:
+            last = exc
+            continue
+        srv.daemon_threads = True
+        return srv, port + i
+    raise OSError(f"{port}–{port + tries - 1} 都被占了，用 --port 指一个空的") from last

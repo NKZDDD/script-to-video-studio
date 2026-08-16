@@ -32,21 +32,52 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
+# 锚点至少要这么长才允许做「包含匹配」。
+#
+# 实跑撞过：环节1 给的锚点是 `10`、`11`、`13`（把集号当成了正文第一行）。
+# 两个字符拿去做 `anchor in line`，剧本里上千行都能命中，匹配到哪一行纯属偶然 ——
+# 而一旦命中，游标就被带歪，后面每一集都跟着崩。
+# 短锚点只允许整行相等或行首匹配，绝不做包含。
+_LOOSE_MIN = 6
+
+
 def _find_line(lines: list, anchor: str, start_at: int = 0) -> int:
     """在 lines 里找 anchor 所在行号，从 start_at 往后找。找不到返回 -1。
 
-    三轮由严到宽：整行相等 → 行首匹配 → 包含。
+    由严到宽：整行相等 → 行首匹配 → 包含。
+    **包含只给够长的锚点用**（见 _LOOSE_MIN）——短锚点做包含是在上千行里碰运气。
     每一轮都从 start_at 起，保证切出来的集是顺序递增的。
     """
     a = _norm(anchor)
     if not a:
         return -1
     normed = [_norm(x) for x in lines]
-    for test in (lambda x: x == a, lambda x: x.startswith(a), lambda x: a in x):
+    tests = [lambda x: x == a, lambda x: x.startswith(a)]
+    # 包含匹配只给够长的锚点用。短锚点做包含 = 在上千行里碰运气。
+    if len(a) >= _LOOSE_MIN:
+        tests.append(lambda x: a in x)
+    for test in tests:
         for i in range(start_at, len(lines)):
             if normed[i] and test(normed[i]):
                 return i
     return -1
+
+
+def _why_bad_anchor(anchor: str) -> str:
+    """这个锚点根本不可能唯一 —— 返回原因；能用就返回空串。
+
+    在**搜索之前**判掉，比搜出一个错位置再事后发现有用得多：
+    错位置会把游标带到错的地方，从此每一集都错。
+    """
+    a = _norm(anchor)
+    if not a:
+        return "是空的"
+    if len(a) < 3:
+        return f"只有 {len(a)} 个字符（`{anchor}`），不可能在全剧里唯一"
+    if re.fullmatch(r"[\d\W_]+", a):
+        return (f"`{anchor}` 里没有文字，看着像集号或分隔符 —— "
+                f"要的是**该集正文第一行**，不是章节标记")
+    return ""
 
 
 def split(script: str, ranges: list) -> dict:
@@ -62,16 +93,28 @@ def split(script: str, ranges: list) -> dict:
     for idx, r in enumerate(ranges):
         ep = (r.get("episode") or f"EP{idx + 1:02d}").strip()
         anchor = (r.get("start_anchor") or "").strip()
-        if not anchor:
-            issues.append({"episode": ep, "reason": "环节1 没给出这一集的起始行（start_anchor 为空）"})
+        bad = _why_bad_anchor(anchor)
+        if bad:
+            issues.append({"episode": ep,
+                           "reason": f"环节1 给的起始行{bad}。"
+                                     f"这一集切不出来 —— 重跑环节1，"
+                                     f"或者去「产物」页把 episodes.json 里这一条的 "
+                                     f"start_anchor 改成该集正文真正的第一行"})
             continue
         at = _find_line(lines, anchor, cursor)
         if at < 0:
             # 从头再找一次：模型偶尔把集顺序写乱
             at = _find_line(lines, anchor, 0)
             if at >= 0 and found and at <= found[-1]["start_line"]:
-                issues.append({"episode": ep,
-                               "reason": f"起始行出现在上一集之前，集顺序可能乱了：{anchor[:40]}"})
+                prev = found[-1]
+                issues.append({
+                    "episode": ep,
+                    "reason": f"起始行在剧本里的位置**比上一集还靠前**（第 {at + 1} 行，"
+                              f"而 {prev['episode']} 从第 {prev['start_line'] + 1} 行开始）："
+                              f"「{anchor[:40]}」。"
+                              f"多半是环节1 给的锚点错位了 —— 比如把上一集的标记"
+                              f"当成了这一集的第一行。这一集切不出来，"
+                              f"下游全部环节都会在错的分集上工作"})
                 continue
         if at < 0:
             issues.append({"episode": ep, "reason": f"在剧本里找不到这一行：{anchor[:60]}"})

@@ -37,3 +37,14 @@ def flavor_name(labels: dict) -> str:
     if s and s in labels:
         return labels[s]["name"]
     return "全体系"
+
+
+# 每套体系一个默认端口 —— **两个包要能同时开着**。
+#
+# 共用一个端口的后果：先开的占住，后开的要么起不来、要么你以为打开了
+# 其实看的是另一套的页面。后一种更坏，因为它不报错。
+DEFAULT_PORTS = {"": 8770, "v34": 8770, "v61": 8771}
+
+
+def default_port() -> int:
+    return DEFAULT_PORTS.get(only(), 8770)

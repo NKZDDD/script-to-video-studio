@@ -141,6 +141,8 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
   <div class="gauge" id="gauge" title="此刻正在发给服务商的请求数 / 允许的上限。同时做几部剧也共用这一个上限。">
     <span class="dot" id="gDot"></span><span id="gText">并发 0/8 · 运行 0</span>
   </div>
+  <div class="gauge" id="resGauge" style="cursor:pointer"
+       title="本机占用。点开看并发还能开多少 —— 以及服务商那边接不接得住"></div>
   <nav>
     <button data-t="proj" class="on">项目</button>
     <button data-t="flow">流程</button>
@@ -1796,6 +1798,50 @@ async function loadDetail() {
 }
 
 setInterval(tick, 1500);
+
+// ---- 本机占用 + 并发建议 ------------------------------------------
+// 每 4 秒一次。比 tick 慢，因为读进程内存本身有开销，而且这个数
+// 秒级波动没有意义 —— 要看的是趋势。
+const GB = n => (n / 1073741824).toFixed(1);
+let RES = null;
+
+async function tickRes() {
+  try { RES = await api.post('/api/resources', PROJ ? {project_root: PROJ} : {}); }
+  catch { return; }
+  const u = RES.usage, box = $('#resGauge');
+  if (!u.has_psutil) {
+    box.innerHTML = '<span class="muted">占用未知（没装 psutil）</span>';
+    return;
+  }
+  // 内存吃紧时标黄 —— 这是唯一「本机真的成了瓶颈」的信号
+  const hot = u.mem_percent >= 85;
+  box.innerHTML = `CPU <b>${u.cpu_percent.toFixed(0)}%</b>`
+    + ` · 内存 <b style="${hot ? 'color:var(--warn)' : ''}">${GB(u.mem_used)}`
+    + `/${GB(u.mem_total)}G</b>`
+    + ` · 本程序 <b>${(u.proc_rss / 1048576).toFixed(0)}M</b>`
+    + (RES.advice.limit ? ` · 建议并发 <b>≤${RES.advice.limit}</b>` : '');
+}
+$('#resGauge').onclick = () => {
+  if (!RES) return;
+  const a = RES.advice, u = RES.usage;
+  const lines = [
+    u.has_psutil
+      ? `CPU ${u.cpu_percent.toFixed(0)}%（${u.cpu_count} 核）　内存 ${GB(u.mem_used)}/${GB(u.mem_total)} GB　`
+        + `本程序 ${(u.proc_rss / 1048576).toFixed(0)} MB / ${u.threads} 线程`
+      : '读不到本机占用',
+    `在途 ${RES.inflight}　出图出片闸门 ${RES.gates.global_inflight}/${RES.gates.global_limit}`
+      + `　分析闸门 ${RES.gates.llm_inflight}/${RES.gates.llm_limit}（峰值 ${RES.gates.llm_peak}）`,
+    '',
+    a.limit ? `建议并发上限：${a.limit}` : '现在还给不出建议：',
+    ...a.basis.map(b => '· ' + b),
+    '',
+    a.note,
+  ];
+  alert(lines.join('
+'));
+};
+setInterval(tickRes, 4000);
+tickRes();
 function log(sel, msg) { $(sel).textContent = msg; }
 
 // ---------- 看产物：资产库 / 按段看 / 原始文件

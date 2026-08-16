@@ -23,7 +23,9 @@ from core import paths  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description="剧本→AI视频 自动化生产台")
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8770)
+    # 默认端口按体系分开 —— 电影级 8770、通用 8771，**两个包要能同时开着**。
+    # 0 = 用这一版自己的默认值（见 build_info.DEFAULT_PORTS）。
+    ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--data", default="", metavar="目录",
                     help="数据目录（config.json 和默认 projects/ 放这儿）。"
@@ -50,8 +52,11 @@ def main() -> int:
         print("    在「设置 → 数据与路径」点一下「把配置搬出程序目录」，或者启动时加")
         print("    --data D:\\stv-data （原件会保留成 config.json.已搬走，不删）")
 
-    srv = serve(args.host, args.port)
-    url = f"http://{args.host}:{args.port}/"
+    srv, port = serve(args.host, args.port)
+    # 用**真实端口**拼 URL：端口被占时会顺延，拿参数拼会打开一个没人听的地址
+    url = f"http://{args.host}:{port}/"
+    if args.port and port != args.port:
+        print(f"\n  ⚠ {args.port} 被占了，改用 {port}")
     print(f"\n  生产台已启动 → {url}")
     print("  Ctrl+C 停止\n")
     if not args.no_browser:
