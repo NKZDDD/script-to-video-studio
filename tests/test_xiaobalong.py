@@ -76,13 +76,25 @@ class XiaobalongTests(unittest.TestCase):
         self.assertEqual(body["audios"], ["https://a/1.mp3"])
         self.assertNotIn("reference_videos", body)         # 和 videos 同发必须完全一致，索性不发
 
-    def test_duration_rules_per_model(self):
-        self.assertEqual(_fit_duration("quanneng2.0", 8), 10)      # 只有 5/10/15
-        self.assertEqual(_fit_duration("quanneng2.0", 4), 5)
-        self.assertEqual(_fit_duration("quanneng2.0-9tu", 4), 15)  # 只有 15
-        self.assertEqual(_fit_duration("bh2.0-720p", 30), 15)      # 通用 4–15
-        self.assertEqual(_fit_duration("bh2.0-720p", 1), 4)
-        self.assertIn("quanneng2.0", DURATION_RULES)
+    def test_duration_falls_back_to_generic_range(self):
+        """文档 r21 那两条白名单（quanneng2.0 / -9tu）的模型已下线，现在只剩通用 4–15。
+
+        新模型的档位官方没给，**故意不猜** —— 猜错会按错的长度出片并计费，
+        而越界只是 400（不结算）。所以这里断言 DURATION_RULES 是空的。
+        """
+        self.assertEqual(DURATION_RULES, {})
+        self.assertEqual(_fit_duration("sd2.5-720p-301010", 30), 15)
+        self.assertEqual(_fit_duration("sd2.5-720p-301010", 1), 4)
+        self.assertEqual(_fit_duration("sd2-720p-933", 8), 8)
+
+    def test_model_list_is_the_live_one_not_the_doc(self):
+        """文档 r21 的 20 个视频模型 2026-08-16 实拉只剩 2 个还在 —— 别再照文档抄。"""
+        from core.providers.xiaobalong import VIDEO_MODELS, VIDEO_PRICES
+        for dead in ("bh2.0-720p", "quanneng2.0", "fd-Seedance 2.0 933", "doubaofast"):
+            self.assertNotIn(dead, VIDEO_MODELS)
+        for alive in ("sd2.5-720p-301010", "sd2.5-480p-301010", "sd2-福利", "sd2-fast福利"):
+            self.assertIn(alive, VIDEO_MODELS)
+        self.assertEqual(set(VIDEO_PRICES), set(VIDEO_MODELS))   # 价格表别漏模型
 
     def test_image_body_uses_count_and_ratio(self):
         p = XiaobalongProvider(api_key="k")

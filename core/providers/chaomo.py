@@ -28,12 +28,14 @@ from typing import Callable, Optional
 
 import requests
 
-from ..apiutil import (ApiError, extract_image_items, extract_task_id,
-                       extract_video_url)
+from ..apiutil import (ApiError, _b64_bytes, extract_image_items,
+                       extract_task_id, extract_video_url)
 from .base import ImageTask, Provider, VideoTask
 
 VIDEO_MODELS = ["seedance2", "seedance2-fast", "seedance2-mini"]
 IMAGE_MODELS = [
+    # Native 三档：官方原生接口，2026-08 确认在售
+    "gpt-image2-1K-Native", "gpt-image2-2K-Native", "gpt-image2-4K-Native",
     "gpt-image2-1K", "gpt-image2-2K-low", "gpt-image2-4K-low",
     "gpt-image2-2K-Direct", "gpt-image2-4K-Direct", "gpt-image2-4K",
     "gpt-image-1k-th",
@@ -160,17 +162,81 @@ class ChaomoProvider(Provider):
             return (r.content, f"ref_{idx}.{ext}", ctype)
         return ()
 
-    def _pick_images(self, data, task_id_hint: str, *, log, poll_interval, poll_timeout) -> list:
+    @staticmethod
+    def meta_of(data) -> dict:
+        """取 include_metadata 回来的核验信息（实际宽高 / 格式 / 字节数 / 耗时）。"""
+        if not isinstance(data, dict):
+            return {}
+        for key in ("metadata", "meta", "info"):
+            v = data.get(key)
+            if isinstance(v, dict):
+                return v
+        arr = data.get("data")
+        if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+            v = arr[0].get("metadata")
+            if isinstance(v, dict):
+                return v
+        return {}
+
+    @staticmethod
+    def check_meta(meta: dict, items: list, *, log=print) -> None:
+        """拿网关自报的字节数核对手里的数据 —— 判断「有没有被截断」的硬证据。
+
+        文档说 include_metadata 给的是「**可核验的**实际图片宽高、格式和字节数」，
+        那就真拿来核验。对不上就当场报错：出来的图缺一块，比没有更糟 ——
+        任务会标 ok，没人知道那张资产是残的。
+        """
+        if not meta:
+            return
+        size = next((meta.get(k) for k in ("bytes", "size_bytes", "byte_size", "file_size")
+                     if isinstance(meta.get(k), (int, float))), None)
+        desc = "  ".join(f"{k}={meta[k]}" for k in
+                         ("width", "height", "format", "bytes", "size_bytes", "elapsed")
+                         if k in meta)
+        if desc:
+            log(f"超模 核验信息: {desc}")
+        if not size:
+            return
+        for item in items:
+            if not (isinstance(item, str) and item.startswith("data:")):
+                continue                       # URL 结果由 save_item 的大小检查兜底
+            try:
+                got = len(_b64_bytes(item.split(",", 1)[1], item))
+            except Exception:                                   # noqa: BLE001
+                continue
+            if got < int(size) * 0.98:         # 留 2% 容差（元数据可能不含容器开销）
+                raise ApiError(
+                    f"超模说这张图有 {int(size)} 字节，实际只收到 {got} 字节"
+                    f"（缺 {int(size) - got}）。数据在传输途中丢了，不出这张图 —— "
+                    f"残图比没有更糟，任务会标 ok 但资产是坏的。"
+                    f"本类已对图生图开启 async（异步固定返回 URL），"
+                    f"还出现说明这条线路本身不稳，把这类活排给别家。",
+                    status=0, kind="task_fatal")
+
+    def _pick_images(self, data, task_id_hint: str, *, log, poll_interval,
+                     poll_timeout) -> tuple:
+        """返回 (图片清单, 最终那份响应)。
+
+        **第二个返回值是必须的。** 我们开了 async，图在轮询结果里，
+        而核验用的 metadata（宽高/格式/字节数）也在那一份里 ——
+        拿提交时的响应去 check_meta，永远是空的，那道核对等于没接。
+        """
         items = extract_image_items(data)
         if items:
-            return items
+            return items, data
         tid = extract_task_id(data) or task_id_hint
         if not tid:
             raise ApiError(f"未取到图片也没有任务 ID: {str(data)[:300]}")
         log(f"超模 图片任务 {tid} 已提交，开始轮询")
-        got = self.session.poll("/v1/images/{id}", tid, picker=extract_image_items,
+        last = {}
+
+        def pick(payload):
+            last["data"] = payload          # 留住最终那份，metadata 在里面
+            return extract_image_items(payload)
+
+        got = self.session.poll("/v1/images/{id}", tid, picker=pick,
                                 interval=poll_interval, timeout=poll_timeout, log=log)
-        return got if isinstance(got, list) else [got]
+        return (got if isinstance(got, list) else [got]), last.get("data") or data
 
     # ---------------------------------------------------------------- image
     def generate_image(self, task: ImageTask, dest: str, *, log: Callable = print,
@@ -182,30 +248,55 @@ class ChaomoProvider(Provider):
 
         if refs:
             # 图生图：multipart，字段名是 image[]（复数带方括号，别写成 image / images）
+            #
+            # ⚠ async 必须发。文档原文：「response_format：url 或 b64_json；
+            # **异步任务固定返回 URL 结果**」。不发 async 就是同步，网关会把几 MB 的
+            # PNG 塞进 JSON 的 base64 字段回来 —— 那条路上任何一处丢字节，整张图报废。
+            # 实跑撞过：超模一批资产全是 0KB，报错只有一句 Incorrect padding。
+            # 走异步拿 URL 直接下载，整条 base64 传输链就不存在了。
             files = [("model", (None, model)), ("prompt", (None, task.prompt or "")),
                      ("ratio", (None, ratio)), ("n", (None, "1")),
-                     ("response_format", (None, "url"))]
+                     ("response_format", (None, "url")),
+                     ("async", (None, "true")),
+                     # quality：文档示例用 high。只有调用方明确指定才发，不猜。
+                     *([("quality", (None, str(task.extra["quality"])))]
+                       if task.extra.get("quality") else []),
+                     # 返回可核验的实际宽高/格式/**字节数**，用来核对有没有传丢
+                     ("include_metadata", (None, "true"))]
+            attached = 0
             for i, ref in enumerate(refs, start=1):
                 got = self._ref_bytes(ref, i)
                 if got:
                     files.append(("image[]", (got[1], got[0], got[2])))
-            if len(files) == 5:
+                    attached += 1
+            # **数 image[] 的条数，别数 files 的长度。**
+            # 原来写的是 `if len(files) == 5`（当时基数正好 5）。后来加了
+            # async / include_metadata / quality，基数变成 7 甚至 8 ——
+            # 这个判断就永远不成立了，于是「一张参考图都没转成文件」时
+            # 照样把请求发出去：出来的图不是同一个人，而任务标 ok。
+            # 拿魔法数字当哨兵，加一个字段就会把它悄悄废掉。
+            if not attached:
                 raise ApiError(f"超模图生图：{len(refs)} 张参考图一张都没转成文件，不出这张图 —— "
                                f"少了参考图出来的就不是同一个人。")
-            log(f"超模 图生图 {model}: ratio={ratio} 参考图{len(files) - 5}张（multipart image[]）")
+            log(f"超模 图生图 {model}: ratio={ratio} 参考图{attached}张（multipart image[]）")
             data = self.session.request("POST", "/v1/images/edits", files=files,
                                         retries=2, timeout=600)
         else:
             body = {"model": model, "prompt": task.prompt, "ratio": ratio,
-                    "n": 1, "response_format": "url", "async": True}
+                    "n": 1, "response_format": "url", "async": True,
+                    # 文档：返回可核验的实际图片宽高、格式和字节数
+                    "include_metadata": True}
+            if task.extra.get("quality"):
+                body["quality"] = str(task.extra["quality"])
             log(f"超模 文生图 {model}: ratio={ratio}")
             data = self.session.request("POST", "/v1/images/generations", json_body=body,
                                         retries=2, timeout=600)
 
-        items = self._pick_images(data, "", log=log,
-                                  poll_interval=poll_interval, poll_timeout=poll_timeout)
+        items, final = self._pick_images(
+            data, "", log=log, poll_interval=poll_interval, poll_timeout=poll_timeout)
         if not items:
             raise ApiError(f"出图没返回可用结果: {str(data)[:300]}")
+        self.check_meta(self.meta_of(final), items, log=log)
         self.session.save_item(items[0], dest)
         return {"task_id": extract_task_id(data), "source": items[0][:200],
                 "provider": self.id, "model": model}

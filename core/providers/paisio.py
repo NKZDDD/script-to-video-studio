@@ -26,7 +26,7 @@ from .base import ImageTask, Provider, VideoTask
 
 SEEDANCE25_MODELS = ("seedance-2.5-480p", "seedance-2.5-720p")
 SEEDANCE25_DURATIONS = list(range(4, 30))
-SEEDANCE25_RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9"]
+SEEDANCE25_RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "3:2", "2:3"]
 
 
 class PaisioProvider(Provider):
@@ -41,6 +41,25 @@ class PaisioProvider(Provider):
     # 新文档明确要求 image_url / extra_images 是公网 http(s) URL。
     # 没配对象存储时宁可在发送前报清楚，也不能把 data URI 发出去后让参考图静默失效。
     url_only_models = SEEDANCE25_MODELS
+
+    # -- 余额与实时价格（GET /v1/balance）--------------------------------
+    def balance(self) -> dict:
+        """余额 / VIP等级 / 今日次数 / **current_prices 实时价格表**。
+
+        `current_prices` 就是这个 Key 真正能用的模型清单 —— 比写死的列表可靠，
+        也不用去撞需要鉴权的 /v1/models。价格随 VIP 等级变，所以必须按 Key 查。
+        """
+        return self.session.request("GET", "/v1/balance", retries=1, timeout=60)
+
+    def live_models(self) -> list:
+        """从 /v1/balance 的价格表取模型名（按价格升序）。取不到就退回写死的清单。"""
+        try:
+            data = self.balance()
+        except Exception:                                   # noqa: BLE001
+            return []
+        prices = (data or {}).get("current_prices") or {}
+        return sorted(prices, key=lambda k: prices.get(k) or 0)
+
 
     def capabilities(self) -> dict:
         return {
@@ -88,6 +107,19 @@ class PaisioProvider(Provider):
                     "video431-fast-480p", "video431-fast-720p",
                     # grok
                     "grok-imagine-video-1.5-fast", "grok-imagine-video-1.5",
+                    "grok-imagine-video-1.5-preview", "grok-imagine-1.0-video",
+                    # 下面这批是对着 ComfyUI 那边的清单补齐的
+                    # （he_nodes.HE_VIDEO_MODELS / seedance_nodes.*）——
+                    # 那份是跟着服务商文档在维护的，两边对不上就等于
+                    # studio 这边少了一半可选项，而页面上完全看不出来。
+                    "paisiodance2.0", "paisiodance2.0-fast", "paisiodance2.0-mini",
+                    "paisiodance2.0-720p", "paisiodance933-720p",
+                    "seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
+                    "seedance2.0-fast",
+                    "sd2-720p-fast", "sd2-720p-mini",
+                    "sd2-1080p-fast", "sd2-1080p-mini",
+                    "video-2.0", "video-2.0-fast",
+                    "官方稳定seedance-2.0-720p-fast", "官方稳定seedance-2.0-720p-max",
                 ],
                 "default_model": "sd2-pro-720p",
                 "ratios": ["9:16", "16:9", "1:1"],
@@ -128,9 +160,23 @@ class PaisioProvider(Provider):
             "prompt": task.prompt,
             "size": task.size or "1024x1536",
             "n": int(task.n or 1),
+            # 文档 2026-08 新增：async=true 返回 task_id，再轮询任务。
+            # 4K 同步出图很容易把连接拖到超时，异步才是该走的路。
+            "async": True,
         }
-        if task.refs:
-            body["images"] = task.refs[:9]
+        refs = list(task.refs or [])
+        if len(refs) > 1:
+            # 文档的统一出图接口只列了**单个** `image` 字段，没有多图入口。
+            # 以前这里发的是 `images` 数组 —— 文档里没有这个字段，
+            # 多半被网关整个忽略：图照出，但一张参考图都没生效，而且不报错。
+            raise ApiError(
+                f"鹤的出图接口只收 1 张参考图（文档字段是单数 image），这一项要 {len(refs)} 张。"
+                f"少了参考图出来的就不是同一个人/同一个东西，所以不出这张图 —— "
+                f"把多图参考的活排给支持多图的服务商。",
+                status=0, kind="task_fatal")
+        if refs:
+            body["image"] = refs[0]
+
         data = self.session.request("POST", "/v1/images/generations", json_body=body,
                                     retries=2, timeout=600)
         items = extract_image_items(data)
@@ -138,9 +184,11 @@ class PaisioProvider(Provider):
         if not items:
             if not task_id:
                 raise ApiError("提交未返回 task_id 或图片")
-            items = self.session.poll("/v1/images/{id}", task_id, picker=extract_image_items,
+            # 文档的异步查询端点是 /v1/images/generations/{task_id}，
+            # **不是** /v1/images/{id}（那个路径查不到，只会白等到超时）。
+            items = self.session.poll("/v1/images/generations/{id}", task_id,
+                                      picker=extract_image_items,
                                       interval=poll_interval, timeout=poll_timeout,
-                                      content_path_tpl="/v1/images/{id}/content",
                                       log=log, cancel=cancel)
         self.session.save_item(items[0], dest)
         return {"task_id": task_id, "source": items[0][:200], "provider": self.id,
@@ -220,7 +268,13 @@ class PaisioProvider(Provider):
             "duration": duration,
             "aspect_ratio": ratio,
         }
-        if refs:
+        if task.extra.get("first_last") and len(refs) >= 2:
+            # 文档 2026-08 新增：start_image_url=首帧、end_image_url=末帧
+            # （「部分模型支持首尾帧控制」）。文档没说它俩能不能和 image_url 同发，
+            # 所以这条路径**不发 image_url / extra_images**，两组字段不混。
+            body["start_image_url"], body["end_image_url"] = refs[0], refs[1]
+        elif refs:
+            # prompt 里可用 @Image1 / @Image2 引用，顺序就是编号
             body["image_url"] = refs[0]
             if len(refs) > 1:
                 body["extra_images"] = refs[1:]

@@ -68,7 +68,9 @@ class SaveGuardTests(unittest.TestCase):
         self.assertIn("https://example.com/x.png", str(cm.exception))
 
     def test_a_real_file_passes(self):
-        self._save(b"\x89PNG\r\n\x1a\n" + b"\x00" * 2000)
+        # 带 IEND 结尾 —— 落盘那一步会查图片的收尾标记（防残图）
+        self._save(b"\x89PNG\r\n\x1a\n" + b"\x00" * 2000
+                   + b"IEND" + bytes([0xAE, 0x42, 0x60, 0x82]))
 
 
 class RetryTests(unittest.TestCase):
@@ -95,6 +97,11 @@ class RetryTests(unittest.TestCase):
             calls["n"] += 1
             with open(dest, "wb") as f:
                 f.write(b"\x00" * sizes[i])
+                if sizes[i]:
+                    # 落盘那一步会查图片的收尾标记（防残图）。这几条测的是
+                    # 「取空了要重取」，不是图片完整性 —— 补上标记，
+                    # 免得两件事混在一起。
+                    f.write(b"IEND" + bytes([0xAE, 0x42, 0x60, 0x82]))
             apiutil._check_saved(dest, item)
             return dest
 

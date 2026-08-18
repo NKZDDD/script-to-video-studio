@@ -87,6 +87,33 @@ class ChaomoTests(unittest.TestCase):
         self.assertTrue(body["async"])
         self.assertEqual(seen["path"], "/v1/images/generations")
 
+    def test_edits_must_go_async_to_avoid_base64_transport(self):
+        """图生图不发 async 就走同步 → 几 MB 的图塞进 JSON base64 → 传丢就整张报废。
+
+        文档原文：「异步任务固定返回 URL 结果」。实跑撞过：超模一批资产全是 0KB，
+        报错只有一句 Incorrect padding。所以 async 必须在，这条不能回退。
+        """
+        p = ChaomoProvider(api_key="k")
+        seen = _stub(p, {"data": [{"url": "https://x/i.png"}]})
+        p.generate_image(ImageTask(prompt="改背景", refs=["data:image/png;base64,iVBORw0KGgo="],
+                                   model="gpt-image2-1K"), "out.png")
+        fields = {name: payload[1] for name, payload in seen["files"] if payload[0] is None}
+        self.assertEqual(fields["async"], "true")
+        self.assertEqual(fields["include_metadata"], "true")
+
+    def test_metadata_byte_count_catches_truncation(self):
+        """网关自报 2MB、实际只收到几十字节 → 必须报错，不能把残图当成功。"""
+        meta = {"width": 941, "height": 1672, "format": "png", "bytes": 2_000_000}
+        short = "data:image/png;base64," + "iVBORw0KGgoAAAANSUhEUg=="
+        with self.assertRaises(ApiError) as raised:
+            ChaomoProvider.check_meta(meta, [short], log=lambda *a: None)
+        self.assertEqual(raised.exception.kind, TASK_FATAL)
+        self.assertIn("传输途中丢了", str(raised.exception))
+        # 尺寸对得上就放行
+        ChaomoProvider.check_meta({"bytes": 10}, [short], log=lambda *a: None)
+        # URL 结果不在这儿查（由 save_item 的大小检查兜底），别误伤
+        ChaomoProvider.check_meta(meta, ["https://x/i.png"], log=lambda *a: None)
+
     def test_image_with_refs_goes_multipart_image_bracket(self):
         """有参考图必须走 /v1/images/edits，字段名是 image[]（不是 image / images）。"""
         p = ChaomoProvider(api_key="k")

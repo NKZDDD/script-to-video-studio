@@ -8,6 +8,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import time
 from typing import Any, Optional
 
@@ -35,35 +36,141 @@ _BATCH_FATAL_KW = (
     "authentication", "token 不正确", "令牌", "余额", "额度", "欠费",
     "无可用渠道", "账户", "已封禁", "禁用", "过期",
 )
+# 「这段内容不让过」——**只认平台的判词，不认内容名词。**
+#
+# 这一条踩过两次，方向相反：
+#
+#   漏：表里只有「违规」没有「违反」，也没有「防护限制」，于是
+#       「该提示可能违反了关于暴力内容的防护限制」被判成「没见过的错误」，
+#       自动改写提示词那一层根本没被触发，只白重试了两次。
+#
+#   过：补完之后我一度把「暴力」「血腥」「色情」也当成触发词 ——
+#       **而这些正是短剧剧本的常用词**。不少服务商会把提示词原样回显在
+#       报错里，一旦回显，一个网络错误也会因为台词里有「他违反了约定」
+#       而被判成内容审核：不再重试（内容问题按不可重试处理），
+#       还白跑几轮改写。
+#
+# 分界线是：**平台说话的方式和剧本写人的方式不一样**。
+# 「防护限制」「内容政策」「审核未通过」「修改提示语」不会出现在台词里；
+# 「暴力」「违反了约定」天天出现。所以只收前者。
+CONTENT_REJECT_RE = re.compile(
+    # 英文：平台判词
+    r"content polic|content guideline|usage polic|safety (system|filter|polic)"
+    r"|content filter|moderation|policy violation|violat\w* (our|the|content|safety)"
+    r"|prohibited (content|by)|not allowed by|disallowed by|blocked by"
+    r"|flagged (as|by|for)|rejected by|restricted content|harmful content"
+    # 中文：平台判词。「违反」必须带上它违反的是什么，光一个「违反」不算 ——
+    # 台词里的「你违反了约定」会误伤
+    r"|违反了?[^。；\n]{0,14}(限制|政策|策略|规范|准则|条款|规定|协议)"
+    r"|防护限制|安全限制|内容政策|内容策略|安全策略|使用政策|社区(规范|准则)"
+    r"|审核(未|不)通过|未通过审核|内容审核"
+    # 「违规」也得带上判定的语气 —— 剧本里「他违规操作」不算平台判词
+    r"|(涉嫌|涉及|存在|判定为?|属于)违规|违规内容|内容违规|违规，"
+    r"|不当内容|不适当内容|敏感内容|命中敏感"
+    r"|(拒绝|不予|无法)生成|已被拦截|被(拦截|屏蔽)"
+    # 让你怎么办 —— 最强的信号，只有内容问题才会这么说
+    r"|修改提示(语|词)|调整提示(语|词)|更换描述", re.I)
+
 _TASK_FATAL_KW = (
-    "content policy", "safety", "violat", "prohibited", "sensitive",
-    "invalid prompt", "prompt too long", "unsupported", "违规", "敏感", "审核",
+    "invalid prompt", "prompt too long", "unsupported",
 )
 
 
-def classify(status: int, text: str = "") -> str:
-    """把 HTTP 状态 + 响应体分成三级。"""
+# 「这会儿排不上」和「账户没钱」是两件事，而两边都会出现 quota / 额度 这个词。
+#
+# 实跑撞到：`HTTP 429 No available image quota. Please try again later.`
+# ——「quota」命中了上面那张余额表，于是被判成 batch_fatal，**整批立刻熔断**，
+# 卡片写着「这家服务商的账户没钱了」。而账户是有钱的，那句话是「稍后再试」。
+# 后果：一次临时排队，整批图停掉，人跑去充值。
+#
+# 429 本来就是限流码。带着「稍后再试」的 429 一律当临时状况处理 ——
+# 真欠费的家不会让你 try again later。
+_TRANSIENT = re.compile(
+    r"try again later|retry later|稍后再?试|请稍[后候]|暂时(不可用|无法|没有)"
+    r"|temporarily (unavailable|busy)|rate limit", re.I)
+
+
+# 各家在 `error.code` / `error.type` 里给的机器可读错误码。
+#
+# **有码就认码，别去猜措辞。** 措辞随时会变、会翻译、会本地化，
+# 而码是给程序看的。只有拿不到码（或者码是 upstream_error 这种通用值）时
+# 才退回读 message —— 那是下策，不是首选。
+_CODE_CONTENT = frozenset({
+    "content_policy_violation", "content_policy", "content_filter",
+    "content_filtered", "sensitive_content", "moderation_blocked",
+    "safety_violation", "safety_error", "prohibited_content",
+    "image_generation_user_error", "invalid_prompt",
+})
+_CODE_QUOTA = frozenset({
+    "insufficient_quota", "insufficient_balance", "billing_hard_limit_reached",
+    "account_deactivated", "quota_exceeded",
+})
+_CODE_AUTH = frozenset({
+    "invalid_api_key", "invalid_authentication", "authentication_error",
+})
+_CODE_RETRY = frozenset({
+    "rate_limit_exceeded", "server_error", "service_unavailable",
+    "engine_overloaded", "timeout", "gateway_timeout",
+})
+
+
+def code_kind(err_code: str) -> str:
+    """服务商给的机器码 → 三级分类。不认识返回空字符串。"""
+    c = (err_code or "").strip().lower()
+    if c in _CODE_CONTENT:
+        return TASK_FATAL
+    if c in _CODE_QUOTA or c in _CODE_AUTH:
+        return BATCH_FATAL
+    if c in _CODE_RETRY:
+        return RETRYABLE
+    return ""
+
+
+def classify(status: int, text: str = "", err_code: str = "") -> str:
+    """把 HTTP 状态 + 服务商错误码 + 响应体分成三级。
+
+    优先级：**服务商给的机器码 > HTTP 状态 > 响应体措辞**。
+    只靠措辞是最脆的一层 —— 但也去不掉：有的家只给 `upstream_error`
+    这种通用码，真正的原因只写在 message 里（实跑撞到过）。
+    """
+    by_code = code_kind(err_code)
+    if by_code:
+        return by_code
     low = (text or "").lower()
     if status in (401, 402, 403):
         return BATCH_FATAL
+    if status == 429 and _TRANSIENT.search(text or ""):
+        return RETRYABLE
     if any(k in low for k in _BATCH_FATAL_KW):
         return BATCH_FATAL
+    # **内容问题要排在状态码前面。**
+    #
+    # 轮询式的服务商是「HTTP 200 + 任务状态 failed」，我们抛出来的 ApiError
+    # status 是 0 —— 而 0 在下面那行属于「可重试」，于是内容被拒也被原样重发。
+    # 实跑就是这样：章鱼哥回「该提示可能违反了关于暴力内容的防护限制」，
+    # 程序照样重试两次，每次都要重新出一张图，拿回同一句话。
+    #
+    # 内容问题跟它是从哪个状态码回来的没有关系，所以先判它。
+    if CONTENT_REJECT_RE.search(text or "") or any(k in low for k in _TASK_FATAL_KW):
+        return TASK_FATAL
     if status == 429:
         return RETRYABLE
     if status in (408, 409, 425, 500, 502, 503, 504, 0):
         return RETRYABLE
-    if status == 400 or status == 422:
-        return TASK_FATAL if any(k in low for k in _TASK_FATAL_KW) else TASK_FATAL
-    if any(k in low for k in _TASK_FATAL_KW):
+    if status in (400, 422):
         return TASK_FATAL
     return RETRYABLE
 
 
 class ApiError(RuntimeError):
-    def __init__(self, message: str, status: int = 0, kind: str = "", retry_after: float = 0):
+    def __init__(self, message: str, status: int = 0, kind: str = "",
+                 retry_after: float = 0, err_code: str = ""):
         super().__init__(message)
         self.status = status
-        self.kind = kind or classify(status, message)
+        # 服务商给的机器可读错误码。**要单独留着**，别只靠 message ——
+        # 拍进字符串里之后，判断就只剩「在一堆文字里搜关键词」这一条腿。
+        self.err_code = err_code
+        self.kind = kind or classify(status, message, err_code)
         self.retry_after = retry_after
         # 服务商可以往这里塞「该查什么」的清单：有些家的 400 只回一句笼统话，
         # 通用错误码给不出具体指引，只有各家自己知道该逐条比对哪些约束。
@@ -114,6 +221,51 @@ def _collect_urls(node: Any, found: list, key: str = "") -> None:
         found.append((key, node))
 
 
+def _dig(node: Any, keys: tuple, depth: int = 4) -> str:
+    """在响应里找某几个键的第一个非空字符串值。各家的嵌套层数不一样。"""
+    if depth < 0 or not isinstance(node, (dict, list, tuple)):
+        return ""
+    if isinstance(node, dict):
+        for k in keys:
+            v = node.get(k)
+            if isinstance(v, (str, int)) and str(v).strip():
+                return str(v).strip()
+        for v in node.values():
+            got = _dig(v, keys, depth - 1)
+            if got:
+                return got
+        return ""
+    for v in node:
+        got = _dig(v, keys, depth - 1)
+        if got:
+            return got
+    return ""
+
+
+def task_failed(data: Any) -> "ApiError":
+    """轮询到「任务失败」→ 一个**保留了结构**的异常。
+
+    以前是 `ApiError(f"任务失败: {json.dumps(data)[:500]}")` —— 整个响应
+    压成一句话。两个后果：
+
+      · `error.code` 变成字符串里的一段文本，判断就只剩「搜关键词」一条腿。
+        实跑因此漏掉了内容审核（章鱼哥回「违反了关于暴力内容的防护限制」，
+        表里只有「违规」没有「违反」），自动改写提示词那一层根本没被触发。
+      · 日志里是一整坨 JSON，真正那句话被埋在 `"created_at"` 之类中间。
+
+    现在把码单独取出来交给 classify，把服务商自己那句话放到最前面。
+    """
+    code = _dig(data, ("code", "error_code", "type"))
+    msg = _dig(data, ("message", "msg", "error_message", "reason", "detail"))
+    # 通用码（upstream_error / unknown 之类）当没有：它什么错都用，
+    # 认了反而会把内容问题判成上游故障。这时候只能退回读 message。
+    if code.lower() in ("upstream_error", "unknown", "error", "failed", "500"):
+        code = ""
+    head = msg or json.dumps(data, ensure_ascii=False)[:400]
+    tail = f"（服务商错误码：{code}）" if code else ""
+    return ApiError(f"任务失败：{head}{tail}", 0, err_code=code)
+
+
 def extract_video_url(data: Any) -> str:
     """媒体后缀优先，API /content 端点垫底。"""
     found: list = []
@@ -137,8 +289,58 @@ def extract_video_url(data: Any) -> str:
     return found[0][1]
 
 
+def data_array_images(data: Any) -> list:
+    """严格按 OpenAI 风格的 `data[]` 取图：**一个元素 = 一张图，链接优先**。
+
+    这一段是从 ComfyUI 那边搬过来的（utils.extract_data_array_images），
+    它把这个坑踩明白了：**网关会同时给 `url` 和 `b64_json`**（4K 模型常见）。
+
+    下面那个递归扫描器对这种响应有两个毛病：
+      · 同一张图数成两张（两个字符串不相等，去重去不掉）
+      · **优先挑了 b64_json —— 而那个是坏的**
+
+    实跑：超模一张 1254×1254 的图，`b64_json` 里只有 4096 个字符
+    （解出来 3055 字节），而同一个元素里的 `url` 是好的。
+    超模自己的文档也写着「异步任务固定返回 URL 结果」——
+    几 MB 的图塞进 JSON 的 base64 字段本来就会被中间层截断。
+
+    所以：响应是规范的 `{"data": [...]}` 就走这条，取不到再退回递归扫描。
+    """
+    if not isinstance(data, dict):
+        return []
+    arr = data.get("data")
+    if not isinstance(arr, list) or not arr:
+        return []
+    out: list = []
+    for item in arr:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+            continue
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") or item.get("image_url")
+        if isinstance(url, dict):
+            url = url.get("url")
+        if isinstance(url, str) and url.strip():
+            out.append(url.strip())          # 链接优先：不会被截断
+            continue
+        b64 = item.get("b64_json") or item.get("image_b64")
+        if isinstance(b64, str) and b64.strip():
+            out.append(b64 if b64.startswith("data:")
+                       else "data:image/png;base64," + b64)
+    return out
+
+
 def extract_image_items(data: Any) -> list:
-    """http URL / data URI / b64_json。"""
+    """http URL / data URI / b64_json。
+
+    先走 `data[]` 严格解析（一个元素一张、链接优先），拿不到才递归乱扫。
+    顺序反过来的话，同时给 url 和 b64 的响应会挑中那个会被截断的 b64 ——
+    实跑因此存下了一批残图，而报错出现在下一步拿它当参考图的时候。
+    """
+    strict = data_array_images(data)
+    if strict:
+        return strict
     items: list = []
 
     def walk(node: Any):
@@ -216,6 +418,95 @@ def resolve_ref(ref: str, project_root: str, max_side: int = 1024) -> str:
 MIN_BYTES = 512
 
 
+_B64_ALPHABET = re.compile(r"[^A-Za-z0-9+/]")
+
+
+def _b64_bytes(payload: str, whole: str) -> bytes:
+    """base64 文本 → 字节。宽容地解，解不动就说清楚收到的是什么。
+
+    `base64.b64decode` 只会抛一句 `Incorrect padding`，**不告诉你它在解什么**。
+    实跑撞到过：超模一批资产全挂在这一句上，每张还自动重试两次
+    （每次要重出一张图、两分半），八张图跑了半小时，
+    最后既没有图，也没有一条能拿去问服务商的信息。
+
+    宽容处理三种常见的不合规写法，都是真出现过的：
+      · 前后有空白 / 换行（有些家会把 b64 折行）
+      · URL-safe 字母表（`-_` 而不是 `+/`）
+      · 少了结尾的 `=` 填充（不少网关会把它剥掉）
+
+    嵌套的 `data:` 前缀单独说：有的家在 `b64_json` 里塞的是一整个 data URI，
+    我们又给它拼了一次前缀，结果是 `data:…,data:…,iVBOR…`。
+    """
+    s = "".join((payload or "").split())            # 去掉所有空白和换行
+    while s.startswith("data:"):                    # 嵌套前缀：再剥一层
+        s = s.split(",", 1)[1] if "," in s else ""
+    s = s.replace("-", "+").replace("_", "/")       # URL-safe → 标准字母表
+    # **先把字母表外的字符全去掉，再补填充。** 顺序反了没用：
+    # b64decode 自己会丢掉这些字符，于是我们按原长度补的 `=` 补错位置，
+    # 还是 `Incorrect padding`。
+    s = _B64_ALPHABET.sub("", s).rstrip("=")
+    s += "=" * (-len(s) % 4)
+    err = ""
+    raw = b""
+    try:
+        raw = base64.b64decode(s)
+    except Exception as exc:                        # noqa: BLE001
+        err = str(exc)
+    if err or not raw:
+        # 解出空字节和解不动是同一件事：那串东西压根不是图片数据。
+        # 不能让它落到后面的大小检查上 —— 那条会说「只有 0 字节」，
+        # 把人引去找服务商要文件，而真正的问题是这个字段的格式不对。
+        looks = ("像一个链接" if whole[:200].lstrip().startswith("http")
+                 else "像 JSON" if whole.lstrip()[:1] in "{[" else "不像链接也不像 JSON")
+        raise ApiError(
+            f"服务商说做好了，但返回的内容解不成图片（{err or '解出来是空的'}）。"
+            f"这不是网络问题，重试多少次都是同一个结果 —— "
+            f"是这一家返回的格式和我们认的对不上。\n"
+            f"收到 {len(whole)} 字符，{looks}。开头 120 字：{whole[:120]!r}\n"
+            f"把上面这两行发给服务商，问「你们这个字段返回的到底是什么格式」。",
+            status=0, kind=TASK_FATAL)
+    return raw
+
+
+# 图片格式的收尾标记。文件没有它 = 只下/解了一半。
+#
+# **大小检查拦不住这一类。** 一张 1254×1254 的 PNG 截掉后半段仍然有几百 KB，
+# 512 字节那道线轻松通过，于是被当成做好了、注册成 generated、
+# 后面的状态资产和故事板拿它当参考 —— 到那时候才炸：
+#
+#     UNKNOWN: Truncated File Read
+#
+# 而报错出现在**用它的那一步**，不是产生它的那一步。实跑里 19 个资产 +
+# 40 张故事板都挂在这句话上，真正坏掉的却是上一轮存下来的那几张图。
+_END_MARK = {".png": b"IEND" + bytes([0xAE, 0x42, 0x60, 0x82]),
+             ".jpg": bytes([0xFF, 0xD9]),
+             ".jpeg": bytes([0xFF, 0xD9])}
+
+
+def _incomplete_image(dest: str) -> str:
+    """这个图片文件是不是只有一半。是的话返回一句人话，否则空字符串。
+
+    只查收尾标记，不解码整张图 —— 一批几百张，每张都用 Pillow 打开太慢，
+    而截断的表现恰恰就是「结尾没了」，查标记足够准。
+    认不出的扩展名（视频、webp 等）一律放过：宁可漏，不可误杀。
+    """
+    mark = _END_MARK.get(os.path.splitext(dest)[1].lower())
+    if not mark:
+        return ""
+    try:
+        with open(dest, "rb") as f:
+            f.seek(max(0, os.path.getsize(dest) - 64))
+            tail = f.read()
+    except OSError:
+        return ""
+    if mark in tail:
+        return ""
+    return (f"这张图没有结尾标记，是个残图（只解出/下载了一半）。"
+            f"大小看着正常（{os.path.getsize(dest)} 字节），但打不开 —— "
+            f"留着的话，后面拿它当参考图的那几步会报 "
+            f"「Truncated File Read」，而那时候看不出是这一张的问题。")
+
+
 def _check_saved(dest: str, src: str) -> None:
     """落盘之后验一遍。**0 字节的文件是最坏的一种失败。**
 
@@ -231,7 +522,11 @@ def _check_saved(dest: str, src: str) -> None:
     except OSError as exc:
         raise ApiError(f"结果文件没能落盘：{dest}（{exc}）") from exc
     if n >= MIN_BYTES:
-        return
+        bad = _incomplete_image(dest)
+        if not bad:
+            return
+        os.remove(dest)     # 同样必须删：留着下次会被当成「已经做过了」跳过
+        raise ApiError(f"{bad}\n来源：{src}", 0, RETRYABLE)
     head = ""
     if n:
         try:
@@ -240,13 +535,18 @@ def _check_saved(dest: str, src: str) -> None:
         except OSError:
             pass
     os.remove(dest)         # **必须删掉**，留着下次会被当成「已经做过了」跳过
+    # 链接和内嵌数据要给不同的下一步：说「拿链接去问服务商」而实际上根本没有
+    # 链接（内容是响应里内嵌的），人会去翻一个不存在的东西。
+    tail = (f"这种情况要拿「来源」那个链接去问服务商：任务标成成功了，"
+            f"但下载地址返回的是空的。" if src.startswith("http") else
+            f"内容是响应里直接带的、不是下载来的 —— 把上面的「来源」发给服务商，"
+            f"问「这个字段返回的到底是什么」。")
     raise ApiError(
         f"服务商说做好了，但取回来的文件只有 {n} 字节（正常的图至少几十 KB）—— "
         f"这不是一张图，已经删掉，不会被当成做好了。\n"
         f"来源：{src}\n"
         + (f"文件内容：{head!r}\n" if head else "文件是空的。\n")
-        + f"这种情况要拿「来源」那个链接去问服务商：任务标成成功了，"
-          f"但下载地址返回的是空的。")
+        + tail)
 
 
 def _retry_after(resp) -> float:
@@ -358,7 +658,7 @@ class HttpSession:
                 log(f"状态: {status}")
                 last_status = status
             if status in FAIL_STATES:
-                raise ApiError(f"任务失败: {json.dumps(data, ensure_ascii=False)[:500]}")
+                raise task_failed(data)
             done = status in DONE_STATES
             if got and (not status or done):
                 return got
@@ -396,10 +696,17 @@ class HttpSession:
 
     def _save_once(self, item: str, dest: str) -> str:
         os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
-        src = "内嵌数据"
+        # 内嵌数据也要能追溯：只写「内嵌数据」的话，大小检查报出来的那条
+        # 完全看不出收到的是什么，跟服务商对不上话。
+        src = f"响应内嵌数据（{len(item)} 字符，开头 {item[:80]!r}）"
         if item.startswith("data:"):
+            # **先解码，解成功了再开文件。** 顺序反过来的话，`open(dest,"wb")`
+            # 已经把文件建成 0 字节，b64decode 再抛异常 —— 于是磁盘上留下一个
+            # 0KB 的「图」。实跑撞过：超模一批资产全是 0KB，报错只有
+            # 一句 `Incorrect padding`，看不出是我们自己留下的空壳。
+            raw = _b64_bytes(item.split(",", 1)[1], item)
             with open(dest, "wb") as f:
-                f.write(base64.b64decode(item.split(",", 1)[1]))
+                f.write(raw)
         elif item.startswith("http"):
             src = item
             headers = self._headers() if item.startswith(self.base_url) else None
@@ -409,11 +716,22 @@ class HttpSession:
                 r = requests.get(item, headers=self._headers(), timeout=self.timeout,
                                  proxies=self._proxies(), stream=True)
             r.raise_for_status()
-            with open(dest, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1 << 20):
-                    f.write(chunk)
+            # 先写 .part 再改名：下到一半断了（视频几十 MB，断过），
+            # 直接写 dest 会留下一个**够大但不完整**的文件 ——
+            # 大小检查放它过去，下次 isfile 为真于是永远跳过，
+            # 成片里那一段是坏的。改名是原子的，要么完整要么没有。
+            part = dest + ".part"
+            try:
+                with open(part, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+                os.replace(part, dest)
+            finally:
+                if os.path.exists(part):
+                    os.remove(part)
         else:
+            raw = _b64_bytes(item, item)
             with open(dest, "wb") as f:
-                f.write(base64.b64decode(item))
+                f.write(raw)
         _check_saved(dest, src)
         return dest

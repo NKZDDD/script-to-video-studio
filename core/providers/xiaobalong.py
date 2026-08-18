@@ -36,18 +36,35 @@ from .base import ImageTask, Provider, VideoTask
 
 IMAGE_MODELS = ["gemini-3-pro-image", "gemini-3.1-flash-image",
                 "image2", "image2-2k4k", "image2-4k", "image2-high"]
+# 2026-08-16 从 GET /api/pricing（公开可读）实拉，**不是文档 r21 里那批**。
+# r21（2026-07-30）列的 bh2.0-* / gz-sd480p / sdvip* / doubaofast / quanneng2.0 /
+# fd-Seedance 2.0 933 / video-standard-720p / B-quannengship2.0 现在全查不到，
+# 20 个只活下来 sd2-fast福利 和 sd2-福利。这家换模型很勤，文档自己也写了别硬编码 ——
+# list_models() 拿到的实时清单优先于这里。
 VIDEO_MODELS = [
-    "bh2.0-mini-480p", "bh2.0-mini-720p", "bh2.0-fast-480p", "bh2.0-fast-720p",
-    "bh2.0-480p", "bh2.0-720p", "bh2.0-1080p",
-    "gz-sd480p", "gz-sd720p", "sdvip720p", "sdvip1080p", "doubaofast",
-    "sd2-fast福利", "sd2-福利", "sd2-vip720p", "B-quannengship2.0",
-    "quanneng2.0", "quanneng2.0-9tu", "video-standard-720p", "fd-Seedance 2.0 933",
+    "sd2-mini-480p", "sd2-mini-720p", "sd2-720p-933", "sd2.5-480p-301010",
+    "sd2.0-720p-903", "sd2-720p-high", "sd2.5-720p-301010", "sd2-标准720p",
+    "sd2-900", "sd2-fast福利", "sd2-fast-933", "sd2-福利",
+    "sd2-720p-福利", "sd2-720p-quan", "gz-sd2-720p",
 ]
+# 2026-08-16 实时单价（USD），仅供排优先级链时估成本；结算以实时 /api/pricing 为准
+VIDEO_PRICES = {
+    "sd2-mini-480p": 0.028767123287, "sd2-mini-720p": 0.038356164383,
+    "sd2-720p-933": 0.04200913242, "sd2.5-480p-301010": 0.049315068493,
+    "sd2.0-720p-903": 0.050684931506, "sd2-720p-high": 0.053424657534,
+    "sd2.5-720p-301010": 0.061643835616, "sd2-标准720p": 0.095890410958,
+    "sd2-900": 0.246575342465, "sd2-fast福利": 0.390410958904,
+    "sd2-fast-933": 0.472602739726, "sd2-福利": 0.479452054794,
+    "sd2-720p-福利": 0.520547945205, "sd2-720p-quan": 0.753424657534,
+    "gz-sd2-720p": 0.890410958904,
+}
 RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9"]
 # 文档 12.1：只有这两个模型限制了 resolution 白名单
 IMAGE_RESOLUTIONS = {"image2-2k4k": ("2K", "4K"), "image2-4k": ("4K",)}
-# 文档 12.2：时长规则不是一刀切
-DURATION_RULES = {"quanneng2.0": (5, 10, 15), "quanneng2.0-9tu": (15,)}
+# 文档 12.2 的两条时长白名单（quanneng2.0 / -9tu）对应的模型已下线，先清空。
+# 现存这批的档位官方没给，**不猜** —— 猜错时长会按错的长度出片并计费，
+# 而参数越界只是 400（不结算），后者安全得多。
+DURATION_RULES: dict = {}
 DEFAULT_DURATIONS = tuple(range(4, 16))
 
 MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 9, 3, 3
@@ -102,7 +119,8 @@ class XiaobalongProvider(Provider):
             },
             "video": {
                 "models": VIDEO_MODELS,
-                "default_model": "bh2.0-720p",
+                "default_model": "sd2-720p-933",
+                "prices_usd": VIDEO_PRICES,
                 "ratios": RATIOS,
                 "durations": list(DEFAULT_DURATIONS),
                 "default_duration": 5,
@@ -111,8 +129,10 @@ class XiaobalongProvider(Provider):
                 "ref_mode": "url",
                 "notes": "统一用 **duration 整数**；素材是纯字符串数组 images≤9 / videos≤3 / audios≤3"
                          "（不能用对象数组），可填 HTTPS 直链或上传接口给的 asset://xiaobalong/... "
-                         "(24 小时有效)。quanneng2.0 只有 5/10/15 秒，quanneng2.0-9tu 只有 15 秒。"
-                         "带参考视频的按秒模型价格 ×1.8。",
+                         "(24 小时有效)。带参考视频的按秒模型价格 ×1.8。"
+                         "⚠ **模型清单换得很勤**：2026-08-16 实拉发现文档 r21 里 20 个视频模型只剩 2 个还在，"
+                         "现在是 sd2-* / sd2.5-* 一套。上线新模型时用 list_models() 或 /api/pricing 复核，"
+                         "别照旧文档抄。各模型的时长档位官方没给，越界会 400（不结算）。",
             },
             "notes": "⚠ 创建 POST 只能提交一次、**不得自动重试**（本类已设 retries=1）。"
                      "status=unknown 不是失败也不是可重投信号，只能继续查。"
