@@ -126,9 +126,11 @@ class CvsPositionTests(unittest.TestCase):
         self.assertIn("Portal", bad)
 
     def test_a_move_without_a_completion_condition_is_blocked(self):
+        # 用**真的换了位置**来触发（换 anchor）。以前这里用的是转个朝向，
+        # 而朝向不算移动 —— 模板把「表演、视线、手势」列为允许改变。
         self._save(
-            [cvs("A1", who("C001", posture="STANDING", support="", yaw=90)),
-             cvs("A2", who("C001", posture="STANDING", support="", yaw=270))],
+            [cvs("A1", who("C001", anchor="DESK_01", posture="STANDING", support="")),
+             cvs("A2", who("C001", anchor="DOOR_01", posture="STANDING", support=""))],
             [{"source_cvs": "A1", "target_cvs": "A2",
               "authorized_movers": ["C001"]}])
         bad = "　".join(G.position_gate(self.pj))

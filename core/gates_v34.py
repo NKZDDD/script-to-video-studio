@@ -24,6 +24,7 @@ V3.4 对这几条的措辞是硬的，没有「知道了继续跑」这种运行
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from . import episodes as _eps
@@ -155,24 +156,80 @@ def object_count_gate(pj: Project, only: Optional[list] = None) -> list:
         if total is None:
             continue            # 没写对账表不算错，写了就得对得上
         rec = str(lock.get("reconciliation") or "")
-        nums = [int(x) for x in _digits(rec)]
-        if not nums:
+        if not _digits(rec):
             bad.append(f"{iid}：写了存在总数 {total}，但没给对账明细")
-        elif sum(nums[:-1]) != nums[-1] or nums[-1] != int(total):
+            continue
+        got = _sum_equation(rec)
+        if got is None:
+            continue        # 算不出来就不拦，理由见 _sum_equation
+        left, right = got
+        if left != right or right != int(total):
             bad.append(f"{iid}：对账对不上 —— {rec}，但存在总数写的是 {total}")
     return bad
 
 
 def _digits(s: str) -> list:
-    import re
     return re.findall(r"\d+", s)
+
+
+def _sum_equation(rec: str):
+    """`a + b + c = 总数` → (左边之和, 右边)。算不出来返回 None。
+
+    **算不出来就不许拦。** 原来的写法是「把整段文字里所有数字抓出来，
+    假设最后一个是总数、前面的加起来等于它」—— 而 `reconciliation` 是
+    一段自由文本，模型会在等号后面继续解释。实跑被这么误判了 4 条，
+    每一条都把整批生产拦死，而模型写的其实是对的：
+
+        一把青菜1 + 野葱1 = 2；成交后摊位库存减少2，林南桥持有2，不得回到摊位
+        → 抓到 [1,1,2,2,2]，前四个加起来 6 ≠ 2 → 判「对不上」
+        → 而算式本身 1 + 1 = 2 完全正确
+
+        明确可见0至1 + 部分可见0至1 + 遮挡0 + 画外0至1 = 1
+        → 「0至1」是区间，一项出两个数，怎么加都不对
+
+    所以只认等号左边那个加法式，且每一项必须是**一个确定的数**；
+    出现区间、或者根本没有等号，一律返回 None ——
+    我们对格式的假设不该变成硬性拦截。这一条上一次就是这么栽的。
+    """
+    if "=" not in rec and "＝" not in rec:
+        return None
+    head = re.split(r"[=＝]", rec)[0]
+    tail = re.split(r"[=＝]", rec)[1]
+    right = _digits(tail)
+    if not right:
+        return None
+    terms = re.split(r"[+＋]", head)
+    if len(terms) < 2:
+        return None
+    left = 0
+    for t in terms:
+        n = _digits(t)
+        if len(n) != 1:         # 没有数、或者是区间（0至1 会出两个数）
+            return None
+        left += int(n[0])
+    return left, int(right[0])
 
 
 # ------------------------------------------------- B5 位置状态门控（V5.6 新增）
 
-# 位置状态里必须逐项继承的那几维。少写一维，那一维就成了自由变量。
-POSITION_DIMS = ("zone", "anchor_id", "support_binding_id", "posture_class",
-                 "orientation_yaw_deg")
+# 「没有移动事件时不许变」的是哪几维。
+#
+# **以模板写的为准，不要自己加。** n12 模板原文：
+#
+#   `authorized_movement_event_id = NONE` 时，这一格只能改变：
+#   机位投影、表演、视线、手势、动作阶段。
+#   **不能改变**：人物真实的 Zone、Anchor、支撑关系。
+#
+# 我一开始把 posture_class 和 orientation_yaw_deg 也算了进去，比规则更严 ——
+# 结果转个身、换个朝向就被判成「无事件瞬移」，把整批生产拦死。
+# 而模板恰恰把「表演、视线、手势」列为**允许改变**，转身就是这一类。
+#
+# 真的坐下/起身仍然拦得住：那会改 support_binding_id（从 NONE 变成 CHAIR_01），
+# 而它在下面这张表里。姿态本身不用单独查。
+POSITION_DIMS = ("zone", "anchor_id", "support_binding_id")
+
+# 这几维变了不算瞬移，但值得记一笔 —— 它们是「表演」，不是「站位」。
+POSE_DIMS = ("posture_class", "orientation_yaw_deg")
 
 # 坐、躺、乘车、跪靠都不是普通姿态 —— 它们绑着一个支撑实体。
 # 起身前必须先解除支撑，否则「人还坐着，同时又站在别处」。
@@ -218,14 +275,33 @@ def _pos_of(obj: dict) -> dict:
     return out
 
 
+# 「没有支撑」的几种写法，都是同一个意思。不归一的话，模型这一格写 ""、
+# 下一格写 "NONE"，会被当成解除了支撑 —— 一屏误报。
+_NO_VALUE = {"", "none", "null", "n/a", "无", "没有"}
+
+
+def _norm(v) -> str:
+    s = str(v).strip()
+    return "" if s.lower() in _NO_VALUE else s
+
+
 def _moved_dims(a: dict, b: dict) -> list:
-    """两个位置状态之间，哪几维变了。空值不算变 —— 没写不等于改了。"""
+    """两个位置状态之间，哪几维变了。
+
+    **按「键在不在」判，不按「值空不空」判。**
+    这两件事以前混成一条（空值一律跳过），后果是**起身漏判**：
+    坐着时 `support_binding_id = "CHAIR_03"`，站起来变成 `""` ——
+    而 `""` 被当成「没写」跳过了，于是「人还坐着又站在别处」这类
+    恰恰是这道闸门要拦的错，反而拦不住。
+
+    键没写才是真的没写（老产物、模型漏字段），那种不比。
+    """
     out = []
     for d in POSITION_DIMS:
-        x, y = a.get(d), b.get(d)
-        if x in (None, "") or y in (None, ""):
-            continue
-        if str(x) != str(y):
+        if d not in a or d not in b:
+            continue                      # 没写就是没写，不猜
+        x, y = _norm(a[d]), _norm(b[d])
+        if x != y:
             out.append(d)
     return out
 
@@ -463,3 +539,36 @@ def blocked_message(blocked: dict) -> str:
                  "点对应那一道的「显式放行」并写理由 —— "
                  "理由和时间会记进冻结记录，不是静默跳过。")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 拦还是记
+
+# **默认不拦，只记。**
+#
+# 这几道闸门查的都是连续性细节（道具数对不对、人有没有无故换位、
+# 某一格该不该补张覆盖图）。它们各自都是真问题，但**没有一条会让产物
+# 做不出来** —— 做出来的东西是完整的，只是某处对不上。
+#
+# 而拦住的代价是整条线停摆：一个道具的对账数字写错，连角色定妆图都出不来，
+# 而定妆图是后面所有环节的地基。实跑就是这样 —— 四步生产四行一模一样的
+# 「12 处」，其中一半还是我们自己判错的。
+#
+# 所以默认改成：**照常生产，问题记在失败清单里（提醒级）**。
+# 真想要硬拦的，把项目参数里的 gates_block 设成 true。
+def should_block(params: Optional[dict] = None) -> bool:
+    return bool((params or {}).get("gates_block"))
+
+
+def gate_notes(blocked: dict) -> list:
+    """闸门查出来的问题 → 一条条提醒（不是失败）。
+
+    每道闸门记一条，带上前几例和总数 —— 一处一条会把失败清单淹掉，
+    而淹掉之后人就不看了，等于没记。
+    """
+    out = []
+    for gate, problems in blocked.items():
+        head = "；".join(problems[:3])
+        more = f"（共 {len(problems)} 处，其余见「生产」页的闸门面板）" \
+            if len(problems) > 3 else ""
+        out.append((gate, f"{GATES[gate]}：{head}{more}"))
+    return out

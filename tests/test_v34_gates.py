@@ -13,7 +13,7 @@ import os
 import shutil
 import unittest
 
-from core import gates_v34 as G, pipeline_v34 as P, run_v34 as R
+from core import diagnose, gates_v34 as G, pipeline_v34 as P, run_v34 as R
 from core.executor import Job
 from test_v34_run import EP1, PARAMS, SEGS, FakeLLM, new_project
 from test_v34_pipeline import FakeProv
@@ -212,33 +212,51 @@ class PipelineBlockingTests(unittest.TestCase):
         _P.build_provider = self._orig
         shutil.rmtree(self.pj.root, ignore_errors=True)
 
-    def _run(self):
+    def _run(self, **over):
         job = Job("pipeline", 1, 1, project_root=self.pj.root)
         res = P.run(job, self.pj, llm_factory=lambda: self.llm,
                     provider_factory=lambda k: [{"provider": "fake", "api_key": "k",
                                                  "model": "m"}],
-                    params=PARAMS, concurrency=1, ep_concurrency=1,
+                    params=dict(PARAMS, **over), concurrency=1, ep_concurrency=1,
                     seg_concurrency=1)
         return res, job
 
-    def test_a_block_finding_stops_all_production(self):
-        """★ 拦住的是**出图出片**，不是文字环节 —— 文字已经跑完了，
-        拦它没意义；要拦的是接下来要花钱的那几步。"""
-        self.llm.fail_on = set()
-        # 让审计报一条 BLOCK
+    def _with_a_block_finding(self, fn):
         import test_v34_run as F
         F._FIXTURES["n14"] = {"findings": [
             {"severity": "BLOCK", "where": "n12", "what": "参考图编号错位",
              "how_to_fix": "按上传顺序改"}], "verdict": "FIX_FIRST"}
         try:
-            res, job = self._run()
-            self.assertEqual(res["status"], "error")
-            self.assertFalse(self.prov.made, "被拦下了却还是出了图")
-            msgs = [v.get("msg", "") for v in job.items.values()
-                    if v.get("state") == "failed"]
-            self.assertTrue(any("审计" in m or "编号错位" in m for m in msgs), msgs)
+            return fn()
         finally:
             F._FIXTURES["n14"] = {"findings": []}
+
+    def test_by_default_a_finding_does_not_stop_production(self):
+        """★ 默认记下来就继续跑。
+
+        这几道闸门查的是连续性细节，**没有一条会让产物做不出来** ——
+        做出来的东西是完整的，只是某几处对不上。而拦住的代价是整条线停摆：
+        实跑撞到过一次，一个道具的对账数字写错，四步生产全部标红，
+        连角色定妆图都出不来 —— 而定妆图是后面所有环节的地基。
+        """
+        self.llm.fail_on = set()
+        res, job = self._with_a_block_finding(lambda: self._run())
+        self.assertTrue(self.prov.made, "被记了一笔就不出图了？那还是拦")
+        rows = [d for d in diagnose.load(self.pj.root) if d["code"] == "GATE_FINDING"]
+        self.assertTrue(rows, "问题得记下来，不能悄悄放过")
+        self.assertEqual(rows[0]["level"], "warn", "这是提醒，不是失败")
+        self.assertIn("审计", rows[0]["raw"])
+
+    def test_turning_gates_block_on_brings_the_old_behaviour_back(self):
+        """★ 要硬拦的还能硬拦 —— 只是不再是默认。"""
+        self.llm.fail_on = set()
+        res, job = self._with_a_block_finding(
+            lambda: self._run(gates_block=True))
+        self.assertEqual(res["status"], "error")
+        self.assertFalse(self.prov.made, "被拦下了却还是出了图")
+        msgs = [v.get("msg", "") for v in job.items.values()
+                if v.get("state") == "failed"]
+        self.assertTrue(any("审计" in m or "编号错位" in m for m in msgs), msgs)
 
     def test_clean_run_is_not_blocked(self):
         res, job = self._run()
