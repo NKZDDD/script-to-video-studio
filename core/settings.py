@@ -120,6 +120,21 @@ FIELDS: list = [
      "group": "字幕", "local": True,
      "why": "勾上之后程序会自动改写「画面内禁止出现文字」那条规则，"
             "不用你手动去改提示词 —— 手改两处散文必然打架。"},
+    # 「画面里本来就该有的文字」——和字幕是两回事。
+    #
+    # 起因：一部剧的原文里有大量【弹幕】，而弹幕是**剧情的一部分**
+    # （主角看得见它们）。但「画面内禁止出现任何文字」那条规则会把它禁掉，
+    # 而禁掉是**静默**的 —— 图出来了、没有弹幕、没有报错。
+    # 这正是字幕烧录当年踩过的同一个坑（两段散文互相矛盾，一方悄悄消失）。
+    #
+    # 做成自由文本而不是枚举：画面里该有什么文字是**这部剧**的事 ——
+    # 弹幕、手机短信、店铺招牌、系统面板、报纸标题，穷举不了。
+    {"key": "on_screen_text", "label": "画面里本来就该有的文字",
+     "type": "text", "default": "", "source": "settings",
+     "group": "字幕", "local": True,
+     "why": "留空 = 画面内一律不许有文字（默认）。填了就只允许你写的这几类，"
+            "其余照旧禁止。例：「弹幕：飘过的半透明评论条，中文，字号不要太小」。"
+            "不填而在剧本里指望它出现的话，它会被那条禁令悄悄拦掉，不报错。"},
     # ---- 旁白 / 画外音：**skill 的参数表里也没有这一项**，本地扩展 ----
     #
     # 它和「音频模式」是两回事，混了会出错：
@@ -525,13 +540,26 @@ def subtitle_rule(pj: Project) -> str:
     散文之间的矛盾检测不了；变成一个字段两种取值就不会矛盾。
     """
     v = load(pj)
-    if not v.get("subtitle") or not v.get("subtitle_burn"):
+    parts = []
+    burn = v.get("subtitle") and v.get("subtitle_burn")
+    if burn:
+        lang = v.get("subtitle_lang") or "中文"
+        parts.append(f"**本项目字幕烧录进画面**：{lang}字幕，放在画面底部安全区内，"
+                     f"不遮挡人物面部。")
+    # 「画面里本来就该有的文字」（弹幕、短信、招牌…）——**它是剧情的一部分**，
+    # 不是字幕。不在这里放开的话，下面那条禁令会把它悄悄拦掉：
+    # 图出来了、该有的文字没有、也不报错。
+    want = (v.get("on_screen_text") or "").strip()
+    if want:
+        parts.append(f"**画面内允许出现这些文字元素**（它们属于剧情，该出现就要出现）："
+                     f"{want}")
+    if not parts:
         return ("画面内禁止出现任何文字、字幕、水印、UI 面板"
                 "（系统界面等文字元素走后期合成）。")
-    lang = v.get("subtitle_lang") or "中文"
-    return (f"**本项目字幕烧录进画面**：{lang}字幕，放在画面底部安全区内，"
-            f"不遮挡人物面部。\n"
-            f"除字幕外，画面内仍然禁止出现其他文字、水印、UI 面板。")
+    kept = "、".join(x for x in (("字幕" if burn else ""),
+                                ("上面列出的那几类" if want else "")) if x)
+    parts.append(f"除{kept}之外，画面内仍然禁止出现其他文字、水印、UI 面板。")
+    return "\n".join(parts)
 
 
 def narration_rule(pj: Project) -> str:

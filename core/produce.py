@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Callable
+from typing import Callable, Optional
 
-from . import diagnose, ledger, probe, uploader
-from .apiutil import resolve_ref
+from . import diagnose, ledger, probe, soften, uploader
+from .apiutil import TASK_FATAL, ApiError, resolve_ref
 from .providers import ImageTask, VideoTask, build as build_provider
 from .store import Project, read_text, write_text
 
@@ -173,16 +173,59 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
         src = (src or "").strip()
         if not src or src.startswith("http"):
             return src
-        if need_bytes:
-            # 本机绝对路径，provider 自己读字节塞 multipart
-            return src if os.path.isabs(src) else os.path.join(pj.root, src)
-        if not use_url:
-            return resolve_ref(src, pj.root, max_side=ref_side)
-        path = src if os.path.isabs(src) else os.path.join(pj.root, src)
-        return uploader.to_url(path, up, project_root=pj.root,
-                               max_side=ref_side, log=log)
+        # **先验这张图是不是真的图，再决定怎么送。**
+        # 三条分支（本机路径 / data URI / 传对象存储）以前各走各的，
+        # 而 0 字节的文件在每一条上都过得去：传上去是个空对象、
+        # 转 data URI 是段空数据 —— 服务商收到的是「有参考图」，
+        # 实际什么都没有。出来的脸不是本人，任务标 ok，只能靠肉眼在几百张里发现。
+        try:
+            path0 = src if os.path.isabs(src) else os.path.join(pj.root, src)
+            if not probe.have_output(path0):
+                # 在 try 里抛：下面那个 except 会去查这张图**为什么**不在
+                # （多半是它自己那一条失败了），把真正的原因接上来。
+                raise ApiError(
+                    f"参考图不存在或者是个空文件：{src}。"
+                    f"少一张参考图出来的就不是同一个人，所以这一条不出。")
+            if need_bytes:
+                # 本机绝对路径，provider 自己读字节塞 multipart
+                return src if os.path.isabs(src) else os.path.join(pj.root, src)
+            if not use_url:
+                return resolve_ref(src, pj.root, max_side=ref_side)
+            path = src if os.path.isabs(src) else os.path.join(pj.root, src)
+            return uploader.to_url(path, up, project_root=pj.root,
+                                   max_side=ref_side, log=log)
+        except ApiError as exc:
+            raise _why_ref_missing(pj, src, exc) from exc
 
     return resolve
+
+
+def _why_ref_missing(pj: Project, src: str, exc: ApiError) -> ApiError:
+    """参考图不见了 —— 多半是它**自己那张图没出成**，而不是文件被谁删了。
+
+    实跑：ST001 因为「图片额度用完」没出来，紧接着 ST002 报
+    「参考图文件不存在: …/ST001.png」。照着这句话去查，只会去翻硬盘 ——
+    而真正要处理的是额度，那条记录就在同一份失败清单里。
+
+    所以这里回头查一眼：这个文件名对应的资产，是不是刚刚失败过。
+    查得到就把**它的**失败原因接在后面。
+    """
+    aid = os.path.splitext(os.path.basename(src))[0]
+    if not aid:
+        return exc
+    for d in diagnose.load(pj.root):
+        if str(d.get("target")) != aid:
+            continue
+        better = ApiError(
+            f"{exc}\n"
+            f"—— 这张图之所以不在，是因为 {aid} 自己没出成："
+            f"{d.get('title') or d.get('code')}。\n"
+            f"要处理的是那一条，不是这一条：{(d.get('raw') or '')[:200]}",
+            getattr(exc, "status", 0) or 0, TASK_FATAL)
+        better.extra_fix = [f"先把 {aid} 出出来（它的失败原因见上），"
+                            f"这一条会跟着好 —— 单独重试这一条没用"]
+        return better
+    return exc
 
 
 # 提示词里 `Image 1 = C001 名称` 这种映射行。全角冒号/等号都认。
@@ -413,8 +456,48 @@ def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
         extra_fix=[f"这个文件在：{pj.rel(path)}"])
 
 
-def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
-    """kind: asset | storyboard。返回 worker(task, log, cancel)。"""
+def _lazy_llm(llm_factory: Optional[Callable]) -> Callable:
+    """分析引擎按需构造一次，之后共用。
+
+    不能在建 worker 的时候就造：整批图一次都没被拒的话（绝大多数时候），
+    造它纯属白连一次；而密钥没配的项目会因此在出图这一步报「缺 llm_api_key」——
+    出图跟分析引擎本来没关系，那个报错完全指错方向。
+    """
+    box: dict = {}
+
+    def get():
+        if not llm_factory:
+            return None
+        if "llm" not in box:
+            try:
+                box["llm"] = llm_factory()
+            except Exception:                               # noqa: BLE001
+                box["llm"] = None       # 造不出来就是没有，照常报原来的错
+        return box["llm"]
+
+    return get
+
+
+def _soften_rounds(provider_cfg: dict) -> int:
+    """改写几轮。0 = 关掉，上限 5。设置页的「被审核拒绝后改写重试」。
+
+    服务商配置里单独写了就按它的（某一家审得特别严时可以单独调），
+    否则用全局默认。
+    """
+    v = provider_cfg.get("soften_rounds")
+    if v in (None, ""):
+        v = (provider_cfg.get("defaults") or {}).get(
+            "soften_rounds", soften.DEFAULT_ROUNDS)
+    return soften.clamp_rounds(v)
+
+
+def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
+                      llm_factory: Optional[Callable] = None) -> Callable:
+    """kind: asset | storyboard。返回 worker(task, log, cancel)。
+
+    `llm_factory` 给了的话，被审核拒绝时会把提示词交给分析引擎改写再重发
+    （见 soften.py）。不给就是关掉这个功能，按原来的方式直接失败。
+    """
     prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
                           provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
     model = provider_cfg.get("model", "")
@@ -422,6 +505,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
     timeout = int(provider_cfg.get("poll_timeout", 900))
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="image")
+    _llm = _lazy_llm(llm_factory)
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -461,9 +545,13 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
                 log(f"⚠️ {map_warn}")
         refs = [to_ref(s, log) for _, s in srcs]
         log(f"参考图×{len(refs)}")
-        meta = prov.generate_image(
-            ImageTask(prompt=prompt, refs=refs, size=want, model=model),
-            out, log=log, cancel=cancel, poll_interval=interval, poll_timeout=timeout)
+        meta = soften.run_with_softening(
+            lambda p: prov.generate_image(
+                ImageTask(prompt=p, refs=refs, size=want, model=model),
+                out, log=log, cancel=cancel,
+                poll_interval=interval, poll_timeout=timeout),
+            prompt, pj=pj, llm=_llm(), kind=kind, key=task["key"],
+            rounds=_soften_rounds(provider_cfg), log=log)
         pj.upsert_registry(kind, {"id": task["key"], "file_ref": task["output"],
                                   "status": "generated", **meta})
         pj.log_event({"stage": kind, "id": task["key"], "result": "ok", **meta})
@@ -479,7 +567,8 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str) -> Callable:
     return worker
 
 
-def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
+def make_video_worker(pj: Project, provider_cfg: dict,
+                      llm_factory: Optional[Callable] = None) -> Callable:
     prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
                           provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
     model = provider_cfg.get("model", "")
@@ -487,6 +576,7 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
     timeout = int(provider_cfg.get("poll_timeout", 2400))
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video")
+    _llm = _lazy_llm(llm_factory)
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -498,18 +588,29 @@ def make_video_worker(pj: Project, provider_cfg: dict) -> Callable:
                     "warn": _ratio_warn(pj, out, want, "video", task["key"],
                                         provider_cfg, model, "video")}
         sb = task["storyboard_ref"]
-        if not (sb.startswith("http") or os.path.isfile(pj.p(*sb.split("/")))):
-            raise RuntimeError(f"固定故事板不存在，请先跑环节9: {sb}")
+        # **不能用 isfile。** 0 字节和下了一半的文件都是「文件存在」，
+        # 而出片是最贵的一步：拿一张空图当参考发出去，模型等于没有参考，
+        # 出来的人不是本人 —— 任务还标 ok。配了对象存储的话更彻底：
+        # 那个 0 字节文件会被原样传上去再给服务商，连解码失败都不会有。
+        if not (sb.startswith("http") or probe.have_output(pj.p(*sb.split("/")))):
+            raise RuntimeError(
+                f"固定故事板不存在或者是个空文件，出不了片：{sb}。"
+                f"先把环节9（故事板生产）这一段跑出来 —— "
+                f"没有故事板做参考，出来的画面和这一段没有关系。")
         prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
         refs = [to_ref(sb, log)]
         if task.get("aux_reference"):
             refs.append(to_ref(task["aux_reference"], log))
         log(f"model={model} {p.get('duration', 15)}s {want} 参考图×{len(refs)}")
-        meta = prov.generate_video(
-            VideoTask(prompt=prompt, refs=refs, duration=int(p.get("duration", 15)),
-                      ratio=want, model=model,
-                      resolution=provider_cfg.get("resolution", "")),
-            out, log=log, cancel=cancel, poll_interval=interval, poll_timeout=timeout)
+        meta = soften.run_with_softening(
+            lambda pr: prov.generate_video(
+                VideoTask(prompt=pr, refs=refs, duration=int(p.get("duration", 15)),
+                          ratio=want, model=model,
+                          resolution=provider_cfg.get("resolution", "")),
+                out, log=log, cancel=cancel,
+                poll_interval=interval, poll_timeout=timeout),
+            prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
+            rounds=_soften_rounds(provider_cfg), log=log)
         pj.upsert_registry("video", {"id": task["key"], "file_ref": task["output"],
                                      "storyboard_ref": sb, "status": "generated", **meta})
         pj.log_event({"stage": "video", "id": task["key"], "result": "ok", **meta})
