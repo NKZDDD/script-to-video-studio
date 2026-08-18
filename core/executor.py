@@ -400,6 +400,11 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                     kind = getattr(exc, "kind", RETRYABLE)
                     diag = diagnose.build(exc, stage=job.kind, target=key,
                                           provider=job.provider, model=job.model)
+                    # 程序自己的 bug 重试是纯浪费：同一段代码、同一个错。
+                    # 默认 kind 是 RETRYABLE，不拦的话每条任务白跑三遍 ——
+                    # 而且是在**每一条**任务上，一批几百条就是几百次无用调用。
+                    if diagnose.is_app_bug(exc):
+                        kind = TASK_FATAL
 
                     def fail():
                         job.set_item(key, state="failed", msg=diagnose.one_line(diag),

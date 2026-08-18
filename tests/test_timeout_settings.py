@@ -117,7 +117,7 @@ class ClampIsNotSilentTests(unittest.TestCase):
     """★ 夹住配置不能悄悄来。
 
     这个项目里最难查的错全是「悄悄少给了一点」，而我在 max_tokens 上
-    自己犯了一次：页面填 999999，日志显示 200000，人只会以为程序藏了个
+    自己犯了一次：页面填 999999，日志显示 128000，人只会以为程序藏了个
     限制，不知道是自己那个值被改掉了 —— 于是去纠结「为什么有限制」，
     而真正要修的（输出被中转站截断）完全在另一个方向。
     """
@@ -125,21 +125,23 @@ class ClampIsNotSilentTests(unittest.TestCase):
     def test_it_reports_when_it_clamps(self):
         from server.app import _max_tokens
         said = []
-        self.assertEqual(_max_tokens(999999, said.append), 200000)
+        self.assertEqual(_max_tokens(999999, said.append), 128000)
         self.assertTrue(said, "夹住了却一声不吭")
         self.assertIn("999,999", said[0])
-        self.assertIn("200,000", said[0])
+        self.assertIn("128,000", said[0])
 
     def test_it_says_the_clamp_does_not_shorten_the_output(self):
-        """★ 说了「被夹住」还不够，得说清这不是变短的原因。
+        """★ 说了「被夹住」还不够，得说清填更大会怎样。
 
-        不说的话人会以为「原来是它把我的输出截断了」，
-        然后一直在这个参数上打转。
+        这个上限不是我们抠门 —— **网关会校验这个字段并直接 400**，
+        整个请求被挡回来，几十万 token 的输入白发一遍、白等两分钟。
+        不写清楚的话，人会以为是我们把他的输出截短了，一直在这个参数上打转。
         """
         from server.app import _max_tokens
         said = []
         _max_tokens(999999, said.append)
-        self.assertIn("不会让输出变短", said[0])
+        self.assertIn("128,000", said[0])
+        self.assertIn("拒收", said[0], "要说清再高会发生什么")
 
     def test_it_stays_quiet_when_the_value_is_fine(self):
         from server.app import _max_tokens
@@ -148,7 +150,7 @@ class ClampIsNotSilentTests(unittest.TestCase):
         self.assertEqual(said, [], "没夹住却报了一句，会变成噪音")
 
     def test_the_note_reaches_the_run_log_not_just_the_settings_page(self):
-        """★ 看日志的时候才是他在纳闷「怎么是 200000」。
+        """★ 看日志的时候才是他在纳闷「怎么是 128000」。
 
         只在设置页提示的话，跑起来看日志的人看不到。
         """

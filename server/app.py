@@ -105,6 +105,13 @@ def load_config() -> dict:
     # 老配置没有该字段时也按非流式处理。这个开关适用于任意 LLM Base URL，
     # 不与具体服务商绑定。
     llm_cfg.setdefault("stream", False)
+    # **读进来就把非法的上限纠正掉。**
+    # 保存时会夹（_max_tokens），但那只管新存的 —— 早先存进去的
+    # 9,999,999 会一直躺在 config.json 里：页面上显示着它，每次调用都在
+    # 日志里刷一句「你填的是 9,999,999…」，而人不点保存就一直不会变。
+    # 这里纠正之后，下一次任何一处保存都会把正确的值落盘。
+    if "max_tokens" in llm_cfg:
+        llm_cfg["max_tokens"] = _max_tokens(llm_cfg["max_tokens"])
     # 出图出片的服务商优先级：一次配好，之后每次跑都按这个顺序，
     # 首选挂了自动换下一家。空的话「设置」页会提示去配。
     cfg.setdefault("chains", {"asset": [], "storyboard": [], "video": []})
@@ -356,6 +363,10 @@ def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
     # 参考图上传配置是全局共用的（一个对象存储服务所有服务商），
     # 但某家自己的上传端点能不能用是按家配的
     out["upload"] = dict(cfg.get("upload") or {})   # 上传配置全局共用一份
+    # 全局默认也带上：worker 只拿得到这一份配置，拿不到整个 config。
+    # 「被审核拒绝后改写重试」是全局设的，某一家想单独调就在这家里写
+    # 同名字段覆盖 —— 不带下来的话，设置页那个输入框就是个假旋钮。
+    out["defaults"] = dict(cfg.get("defaults") or {})
     return out
 
 
@@ -388,7 +399,18 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
 # 报错却指向「网络中断」，根本看不出是这个值的问题。
 # 页面上那个 input 标了 max="200000"，但 HTML 的 max 不会阻止提交，
 # 所以真正的关口必须在这里。
-MAX_TOKENS_CEILING = 200000
+# 12.8 万，不是 20 万。
+#
+# **网关会校验这个字段并直接 400。** 我原来按「远高于任何现役模型的实际
+# 输出能力，撞不到它」定了 20 万 —— 那句话是错的：撞不到的是**模型**，
+# 而**网关**会先把它挡回来：
+#
+#   HTTP 400: Field 'max_output_tokens' must be at most 128000
+#
+# 代价很实在：实跑里 n3/n4/n4b 各挂了一次，每次都是先把几十万 token 的输入
+# 发出去、等 127 秒、然后拿回这一句。而且我还加过「读配置时自动纠正」——
+# 于是那个被拒绝的 20 万被**写进了 config.json**，每次都稳定复现。
+MAX_TOKENS_CEILING = 128000
 
 
 def ref_limit_of(cfg: dict, kind: str = "video") -> int:
@@ -476,8 +498,9 @@ def _max_tokens(v, note=None) -> int:
     out = max(1024, min(n, MAX_TOKENS_CEILING))
     if note and out != n:
         note(f"「单次输出上限」你填的是 {n:,}，不在合法范围内，按 {out:,} 发出。"
-             f"这不会让输出变短 —— {MAX_TOKENS_CEILING:,} 已经远高于"
-             f"任何现役模型的实际输出能力，撞不到它。")
+             f"上限是 {MAX_TOKENS_CEILING:,} —— 再高网关会直接拒收整个请求"
+             f"（Field 'max_output_tokens' must be at most 128000），"
+             f"输入白发一遍、白等两分钟。")
     return out
 
 
@@ -736,12 +759,25 @@ def api_post(path: str, body: dict) -> dict:
         # 直接 update 会把已保存的密钥覆盖成空。
         SECRET = ("api_key", "llm_api_key", "image_api_key", "image_1k_api_key",
                   "image_4k_api_key", "video_api_key", "secret_key", "access_key")
+
+        def _is_mask(v) -> bool:
+            """这个值是我们自己打码出来的回显，不是真密钥。
+
+            回显用的是「前4位 + …」。前端**不该**把它塞回输入框，
+            但那一层已经错过一次：access_key 的掩码（5 个字符）被存了回去，
+            上传时报「Credential access key has length 5, should be 32」，
+            而用户完全看不出是自己点了一下保存造成的。
+
+            所以这里再拦一道 —— 前端哪天又漏一个字段，也不会把配置写坏。
+            """
+            return "…" in str(v) or "•" in str(v)
         for k, v in body.items():
             if k == "providers" and isinstance(v, dict):
                 cur.setdefault("providers", {})
                 for pid, pv in v.items():
                     pv = {kk: vv for kk, vv in pv.items()
-                          if not (kk in SECRET and not str(vv).strip())}
+                          if not (kk in SECRET
+                                  and (not str(vv).strip() or _is_mask(vv)))}
                     if "poll_timeout" in pv:
                         pv["poll_timeout"] = _poll(pv["poll_timeout"], 60, 7200, 900)
                     if "poll_interval" in pv:
@@ -749,7 +785,8 @@ def api_post(path: str, body: dict) -> dict:
                     cur["providers"].setdefault(pid, {}).update(pv)
             elif isinstance(v, dict):
                 v = {kk: vv for kk, vv in v.items()
-                     if not (kk in SECRET and not str(vv).strip())}
+                     if not (kk in SECRET
+                             and (not str(vv).strip() or _is_mask(vv)))}
                 # 这几个是只读回显字段，不该被存进 config
                 v.pop("access_key_set", None)
                 v.pop("secret_key_set", None)
@@ -833,10 +870,16 @@ def api_post(path: str, body: dict) -> dict:
             raise ValueError(f"这是个文件不是目录：{d}")
         try:
             os.makedirs(d, exist_ok=True)
-            probe = os.path.join(d, ".写入自检")
-            with open(probe, "w", encoding="utf-8") as f:
+            # **别叫 probe。** 模块级 `from core import ... probe ...` 是个模块，
+            # 在这儿赋一个同名局部变量，会让**整个 api_post**（741-1519 行）
+            # 里的 `probe` 都变成局部变量 —— 于是别的分支里那句
+            # `probe.have_output(...)` 读到一个还没赋值的名字，
+            # 报「cannot access free variable 'probe'」。
+            # 一个巨型函数里随手起的临时变量名，能把几百行外的另一个功能打死。
+            touch = os.path.join(d, ".写入自检")
+            with open(touch, "w", encoding="utf-8") as f:
                 f.write("ok")
-            os.remove(probe)
+            os.remove(touch)
         except OSError as exc:
             raise ValueError(f"这个目录建不了或者写不进去：{exc}") from exc
         cur = load_config()
@@ -932,7 +975,11 @@ def api_post(path: str, body: dict) -> dict:
                 ep_concurrency=int(body.get("llm_episodes")
                                    or (cfg.get("defaults") or {}).get("llm_episodes", 4)),
                 seg_concurrency=int(body.get("llm_segments")
-                                    or (cfg.get("defaults") or {}).get("llm_segments", 4)))
+                                    or (cfg.get("defaults") or {}).get("llm_segments", 4)),
+                # 这一项以前没往 v34 传 —— 页面上「分析·总上限」填了没人收，
+                # 电影级的分析并发一直卡在代码默认的 4
+                llm_concurrency=int(body.get("llm_concurrency")
+                                    or (cfg.get("defaults") or {}).get("llm_concurrency", 6)))
             return {"ok": True, "job_id": job.id, "system": "v34"}
         pipeline.start(
             job, pj,
@@ -1319,6 +1366,10 @@ def api_post(path: str, body: dict) -> dict:
 
         # 手动跑也走优先级链：首选挂了自动换下一家补剩下的
         chain = resolve_chain(cfg, kind, body.get("chain") or [pcfg])
+        # 被审核拒绝时用它改写提示词重发。延迟构造 —— 绝大多数批次一次都
+        # 不会用到，提前造只是白连一次，还会让没配 LLM 的项目在出图这一步
+        # 报「缺 llm_api_key」，方向完全错。
+        _soften_llm = lambda: build_llm(cfg)                    # noqa: E731
         parent = JOBS.create(kind, len(items), conc,
                              project_root=pj.root, project_name=os.path.basename(pj.root),
                              provider=chain[0]["provider"], model=chain[0].get("model", ""))
@@ -1342,8 +1393,13 @@ def api_post(path: str, body: dict) -> dict:
                         parent.log(kind, f"—— 第 {gi}/{len(layers)} 层，{len(grp)} 项")
                     one = run_chain(
                         grp, chain=chain,
-                        worker_of=lambda p: (S.make_video_worker(pj, p) if kind == "video"
-                                             else S.make_image_worker(pj, p, kind)),
+                        # 分析引擎要传下去：被审核拒绝时靠它改写提示词重发。
+                        # 「生产」页单独跑这一步走的是这条路径，漏传的话
+                        # 一键跑会自动改写、单独点这一步不会 —— 而两边都不报错。
+                        worker_of=lambda p: (
+                            S.make_video_worker(pj, p, _soften_llm)
+                            if kind == "video"
+                            else S.make_image_worker(pj, p, kind, _soften_llm)),
                         job_of=lambda p, n: JOBS.create(
                             kind, n, conc, project_root=pj.root,
                             project_name=os.path.basename(pj.root),

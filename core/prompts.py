@@ -94,10 +94,29 @@ def all_template_names() -> list:
             if tpl not in names:
                 names.append(tpl)
     # 下划线开头的是**跨体系的**，不属于任何环节，所以上面那圈扫不到。
-    # 不列进来的后果：文件在盘上、页面上改不了 —— 而这两份恰恰是最该能改的
-    # （全局规则、抽取提示词）。加新的 _xxx.md 记得往这里加一行。
-    names += ["_common", "_settings_extract"]
+    # 不列进来的后果：文件在盘上、页面上改不了 —— 而这几份恰恰是最该能改的
+    # （全局规则、抽取提示词、过审改写）。
+    #
+    # **从盘上扫，不手写清单。** 原来这里是一行写死的 `["_common", ...]`，
+    # 配着一句「加新的 _xxx.md 记得往这里加一行」—— 而"记得"是靠不住的：
+    # 加了 _soften.md 就漏了，表现是那份模板在页面上根本不存在，不报错。
+    names += sorted(n for n in _loose_templates() if n not in names)
     return names
+
+
+def _loose_templates() -> list:
+    """prompts/ 下不属于任何环节的模板（`_开头`）。
+
+    `*_adapter.md` 不算：它是拼在别的模板后面的传输层，不单独用。
+    """
+    import os
+    try:
+        files = os.listdir(S.PROMPT_DIR)
+    except OSError:
+        return []
+    return [f[:-3] for f in files
+            if f.startswith("_") and f.endswith(".md")
+            and not f.endswith("_adapter.md")]
 
 
 def _paths(name: str, pj=None) -> tuple:

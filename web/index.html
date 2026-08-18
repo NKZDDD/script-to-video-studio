@@ -25,6 +25,15 @@ header .sp{flex:1}
   color:var(--dim);font-size:13px;cursor:pointer;transition:.15s}
 .drop:hover,.drop.over{border-color:var(--accent);color:var(--accent);background:var(--panel2)}
 .jobcard{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;background:var(--panel2)}
+/* 任务按项目分组折叠。summary 用 flex 才能让右边那些 pill 排整齐 */
+.jobgrp{border:1px solid var(--line);border-radius:8px;margin-bottom:8px;background:var(--panel)}
+.jobgrp>summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 12px;cursor:pointer;font-size:13px;user-select:none}
+.jobgrp>summary:hover{background:var(--panel2)}
+.jobgrp[open]>summary{border-bottom:1px solid var(--line)}
+.jobgrp>.jobcard,.jobgrp>.jobpast{margin:8px 10px}
+.jobpast>summary{cursor:pointer;font-size:12px;padding:4px 2px;user-select:none}
+.jobpast>.jobcard{margin-top:6px}
 .jobcard .top{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
 .jobcard .top b{font-size:13px}
 .alert{margin-top:8px;padding:8px 10px;border-radius:6px;font-size:12.5px;line-height:1.7}
@@ -668,6 +677,9 @@ const api = {
                                 body: JSON.stringify(b)}, p),
 };
 let BOOT = null, PROJ = null, DETAIL = null;   // DETAIL = 正在看明细的 job id
+// 任务分组的展开状态。任务卡每 1.5 秒重绘一次，不记住的话人刚点开就被弹回去。
+// 只记**动过的**：没动过的按「有没有在跑」决定默认展开。
+const GRP_OPEN = {};
 
 function providerReady(id, capability, model='') {
   const status = (BOOT.provider_keys_configured || {})[id];
@@ -690,7 +702,11 @@ const PARAM_FIELDS = [
 // 填了、存了、显示着，就是没人读。
 const RUN_FIELDS = [
   ['concurrency','默认并发','number'], ['max_retry','技术重试上限','number'],
+  ['soften_rounds','被审核拒绝后改写重试（0=关）','number'],
 ];
+// 这几项**没填过时也要显示出默认值**。留空的后果很实在：保存时
+// `+""` 是 0，于是用户只是点了一下「保存」，改写重试就被悄悄关掉了。
+const RUN_DEFAULTS = {concurrency: 3, max_retry: 2, soften_rounds: 5};
 
 // 尺寸/比例/时长的候选：取「这条链上每一家都支持」的交集 ——
 // 只有交集里的值才保证自动换家时不会因为参数不支持而挂掉。
@@ -1826,9 +1842,49 @@ async function tick() {
     + ` · 运行 ${d.active||0}`;
   $('#gDot').classList.toggle('busy', (g.global_inflight||0) + (g.llm_inflight||0) > 0);
 
-  // 任务卡列表
+  // 任务卡列表：**按项目分组，组内把已结束的折起来**。
+  //
+  // 平铺的时候一屏能有十几张卡（同一个项目跑过几轮 + 每轮派生的出图任务），
+  // 正在跑的那一张被埋在中间，等于看不见。
+  //
+  // 重绘每 1.5 秒一次，所以**重绘前必须先把展开状态记下来** ——
+  // 不记的话你刚点开一个分组，下一次刷新就弹回去，那个折叠等于不能用。
+  $$('#jobCards details[data-key]').forEach(el => { GRP_OPEN[el.dataset.key] = el.open; });
+
   const jobs = d.jobs || [];
-  $('#jobCards').innerHTML = jobs.length ? jobs.map(j => {
+  const ACTIVE = j => !['done','error','cancelled','aborted'].includes(j.status);
+  const groups = [];
+  const byName = {};
+  for (const j of jobs) {
+    const key = j.project_name || '—';
+    if (!byName[key]) { byName[key] = {key, live: [], past: []}; groups.push(byName[key]); }
+    (ACTIVE(j) ? byName[key].live : byName[key].past).push(j);
+  }
+  // 有正在跑的排前面 —— 那是人打开这一页要看的东西
+  groups.sort((a, b) => (b.live.length > 0) - (a.live.length > 0));
+
+  $('#jobCards').innerHTML = groups.length ? groups.map(g => {
+    const failed = g.past.reduce((n, j) => n + ((j.counts||{}).failed || 0), 0);
+    const mine = (g.live[0] || g.past[0] || {}).project_root === PROJ;
+    // 没手动动过就按「有没有在跑」决定默认展开 —— 动过就听人的
+    const open = (g.key in GRP_OPEN) ? GRP_OPEN[g.key] : g.live.length > 0;
+    return `<details class="jobgrp" data-key="${esc(g.key)}"${open ? ' open' : ''}>
+      <summary>
+        <b>${esc(g.key)}</b>
+        ${mine ? '<span class="pill s-run">当前项目</span>' : ''}
+        ${g.live.length ? `<span class="pill s-run">运行中 ${g.live.length}</span>` : ''}
+        ${failed ? `<span class="pill s-fail">失败 ${failed}</span>` : ''}
+        <span class="muted">共 ${g.live.length + g.past.length} 条</span>
+      </summary>
+      ${g.live.map(card).join('')}
+      ${g.past.length ? `<details class="jobpast" data-key="${esc(g.key)}::past">
+          <summary class="muted">已结束 ${g.past.length} 条${failed ? `（其中 ${failed} 个任务失败）` : ''}</summary>
+          ${g.past.map(card).join('')}
+        </details>` : ''}
+    </details>`;
+  }).join('') : '<p class="muted">空闲</p>';
+
+  function card(j) {
     const pct = j.total ? Math.round(j.finished / j.total * 100) : 0;
     const cnt = Object.entries(j.counts||{}).map(([k,v]) =>
       `<span class="pill s-${PILL(k)}">${k} ${v}</span>`).join(' ');
@@ -1865,9 +1921,14 @@ async function tick() {
       <div class="bar"><i style="width:${pct}%"></i></div>
       ${banner}
     </div>`;
-  }).join('') : '<p class="muted">空闲</p>';
+  }
 
-  $$('#jobCards [data-detail]').forEach(b => b.onclick = () => { DETAIL = b.dataset.detail; loadDetail(); });
+  // 点「明细」要跳到下面的明细面板。**只有点击这一次跳** ——
+  // 跳的动作不能放进 loadDetail：那个函数每 1.5 秒被轮询调一次，
+  // 放进去等于每 1.5 秒把页面拽一下，正在看别处的人根本没法用。
+  $$('#jobCards [data-detail]').forEach(b => b.onclick = () => {
+    DETAIL = b.dataset.detail; loadDetail(true);
+  });
   $$('#jobCards [data-cancel]').forEach(b => b.onclick = () => api.post('/api/job/cancel', {id: b.dataset.cancel}));
 
   if (DETAIL) loadDetail();
@@ -1877,7 +1938,9 @@ async function tick() {
   lastActive = d.active || 0;
 }
 
-async function loadDetail() {
+// jump=true 表示这是「刚点开」这一次：把页面滚到明细面板，日志也拉到最新一行。
+// 轮询刷新时不传，页面和滚动条都不动。
+async function loadDetail(jump) {
   const j = await api.get('/api/job', {id: DETAIL});
   if (j.status === 'none') { DETAIL = null; return; }
   $('#detailTag').textContent = `${j.project_name||''} · ${j.kind} · ${j.status} · ${j.finished}/${j.total}`;
@@ -1885,9 +1948,13 @@ async function loadDetail() {
     `<tr><td>${k}</td><td><span class="pill s-${PILL(v.state)}">${v.state}</span></td>
      <td class="muted">${(v.msg||'').slice(0,90)}</td></tr>`).join('');
   const el = $('#jobLog');
+  // 人手动往回翻了日志就别动它 —— 正看着上面几行时被拽到底最烦
   const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   el.textContent = (j.logs || []).join('\n') || '—';
-  if (atBottom) el.scrollTop = 1e6;
+  if (jump || atBottom) el.scrollTop = 1e6;
+  // 滚到日志框、让它的底边贴着视口底部：这样上面的任务表也看得见一截，
+  // 而不是只剩一个黑框。block:'start' 在任务多的时候会把日志顶出屏幕外。
+  if (jump) el.scrollIntoView({behavior: 'smooth', block: 'end'});
 }
 
 setInterval(tick, 1500);
@@ -2312,7 +2379,7 @@ $('#saveChains').onclick = async () => {
 function renderDefaults() {
   const d = BOOT.config.defaults || {};
   $('#defBox').innerHTML = PARAM_FIELDS.concat(RUN_FIELDS).map(([k, label, t]) =>
-    paramField(k, label, t, d[k], 'data-dk')).join('');
+    paramField(k, label, t, d[k] ?? RUN_DEFAULTS[k], 'data-dk')).join('');
 }
 $('#saveDefs').onclick = async () => {
   const defaults = {};
@@ -2846,8 +2913,14 @@ const UP_FIELDS = {upEndpoint:'endpoint', upRegion:'region', upBucket:'bucket',
 function renderUpload() {
   const u = BOOT.config.upload || {};
   for (const [el, key] of Object.entries(UP_FIELDS)) {
-    // 密钥回传的是掩码，别塞回输入框——留空表示不改
-    $('#' + el).value = (key === 'secret_key') ? '' : (u[key] ?? '');
+    // **两个密钥回传的都是掩码，都别塞回输入框** —— 留空表示不改。
+    //
+    // 原来只清了 secret_key。access_key 的掩码是「前4位 + …」= 5 个字符，
+    // 被塞回框里，一点保存就当成真 key 存了回去，然后上传报
+    // 「Credential access key has length 5, should be 32」——
+    // 用户完全看不出是自己点了一下保存造成的。
+    const masked = (key === 'secret_key' || key === 'access_key');
+    $('#' + el).value = masked ? '' : (u[key] ?? '');
   }
   $('#upMode').value = u.mode || 'always';
   const ready = u.bucket && u.access_key_set && u.secret_key_set;
