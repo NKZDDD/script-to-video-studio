@@ -176,6 +176,28 @@ def list_projects(base: str) -> list:
 
 
 # ------------------------------------------------ 失败原文（两套体系共用）
+def _stop_line(llm) -> str:
+    """「上一次是怎么结束的」——判断截断属于哪一类，唯一有用的就是这一行。
+
+    这份文件多半会被单独发出去（排错包里只有它，没有运行日志）。
+    少了这一行，收到的人分不出下面三种，而它们的修法完全相反：
+
+        结束原因=length  真撞上限了 → 调大上限，或者把活拆小
+        结束原因=stop    模型「以为」自己写完了 → **调上限没有任何用**
+        结束原因=（服务商没给）  多半是中转站切的 → 查线路，别动模型参数
+
+    实跑在这上面耗过一整轮：三次全是断流，一直往「调上限」的方向排。
+    """
+    last = getattr(getattr(llm, "_last", None), "stop", None)
+    if not last:
+        return ""
+    from .llm import stop_note
+    u = last.get("usage") or {}
+    got = (f"，服务商记账输出 {u['completion_tokens']} token"
+           if u.get("completion_tokens") else "")
+    return f"结束原因：{stop_note(last.get('reason', '')).strip()}{got}\n"
+
+
 def keep_partial(pj: Project, stage_id: str, episode: str = "",
                  segment: str = "", llm=None) -> Callable:
     """返回一个「把即将丢弃的模型输出存下来」的回调。
@@ -206,7 +228,8 @@ def keep_partial(pj: Project, stage_id: str, episode: str = "",
                 f"　线路：{_host(getattr(llm, 'base_url', '')) or '（没记到）'}"
                 f"　流式：{'开' if getattr(llm, 'stream', None) else '关'}"
                 f"　输出上限：{getattr(llm, 'max_tokens', '') or '（没设）'}\n"
-                f"原因：{why}\n"
+                + _stop_line(llm)
+                + f"原因：{why}\n"
                 f"收到 {len(text)} 字\n"
                 + "-" * 60 + "\n")
         write_text(path, head + text)

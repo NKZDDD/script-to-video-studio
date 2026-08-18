@@ -94,12 +94,48 @@ class MaxTokensTests(unittest.TestCase):
         for junk in (None, "abc", "", {}):
             self.assertEqual(_max_tokens(junk), 16000, repr(junk))
 
+    def test_an_old_config_is_healed_on_load(self):
+        """★ 存盘时夹住只管新存的。
+
+        早先存进去的 9,999,999 会一直躺在 config.json 里：页面上显示着它，
+        每次调用都在日志里刷一句「你填的是 9,999,999…」，而人不点保存
+        就永远不会变。实跑里它一直跟到了提示词改写那一层的日志里。
+        """
+        import json
+        import shutil
+        import tempfile
+
+        from core import paths
+        from server.app import load_config
+        prev, d = paths._forced["data"], tempfile.mkdtemp()
+        paths.set_data_dir(d)
+        try:
+            with open(paths.config_path(), "w", encoding="utf-8") as f:
+                json.dump({"llm": {"max_tokens": 9999999}}, f)
+            self.assertLessEqual(load_config()["llm"]["max_tokens"], 200000)
+        finally:
+            paths.set_data_dir(prev)
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_clamped_on_save_not_only_on_use(self):
-        """存的时候不夹住的话，config.json 里一直躺着 999999，页面回显也是它。"""
-        src = open(os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "server", "app.py"), encoding="utf-8").read()
-        i = src.index('if path == "/api/config"')
-        self.assertIn("_max_tokens", src[i:i + 1500])
+        """存的时候不夹住的话，config.json 里一直躺着 999999，页面回显也是它。
+
+        直接调接口验行为，不去数源码的字符 —— 原来是截 1500 字看
+        `_max_tokens` 在不在，那个处理函数一长就假失败（真出现过）。
+        """
+        import shutil
+        import tempfile
+
+        from core import paths
+        from server.app import api_post, load_config
+        prev, d = paths._forced["data"], tempfile.mkdtemp()
+        paths.set_data_dir(d)
+        try:
+            api_post("/api/config", {"llm": {"max_tokens": 999999}})
+            self.assertLessEqual(load_config()["llm"]["max_tokens"], 200000)
+        finally:
+            paths.set_data_dir(prev)
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class KeepPartialTests(unittest.TestCase):
