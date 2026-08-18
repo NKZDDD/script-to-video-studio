@@ -18,14 +18,63 @@ from __future__ import annotations
 import os
 import re
 import time
+import traceback
 from typing import Any, Optional
 
+from .apiutil import CONTENT_REJECT_RE as _CONTENT_RE
 from .store import LOCK, read_json, write_json
 
 # ---------------------------------------------------------------- 错误目录
 # title 出了什么事  why 为什么会这样  where 去哪改  fix 怎么改  resume 改完怎么接着跑
 # level: error=没做出来  warn=东西做出来了但可能不对，不挡后面的流程
 CATALOG = {
+    "GATE_FINDING": {
+        "title": "连续性检查有对不上的地方（东西已经照常做出来了）",
+        "why": "出图出片前会过几道连续性检查：道具存在总数对不对得上账、"
+               "人物有没有无事件换位、某一格该不该补一张覆盖图、"
+               "故事板一张几格。这些查的是「做出来看着正常但是错的」那一类。\n"
+               "**它们不挡生产。** 没有一条会让产物做不出来 —— 做出来的东西是"
+               "完整的，只是某几处对不上。而挡住的代价是整条线停摆："
+               "一个道具的对账数字写错，连角色定妆图都出不来，"
+               "而定妆图是后面所有环节的地基。",
+        "where": "「生产」页下面那块「出图出片前的闸门」，逐条列着",
+        "fix": ["**不用马上处理。** 成片能拼出来，先看效果",
+                "在意的话按闸门面板上那几条去改对应环节的产物，再重跑那一步",
+                "想让它像以前一样挡住生产：项目参数里把 `gates_block` 设成 true"],
+        "resume": "不用做什么，生产照常在跑。",
+        "resumable": True, "scope": "stage", "level": "warn",
+    },
+    "PROMPT_SOFTENED": {
+        "title": "这一条的提示词被自动改写过（已经出图了）",
+        "why": "服务商以「血腥/暴力」之类的理由拒了原提示词。程序把它交给分析引擎"
+               "改写了一版 —— **只换呈现方式，不动剧情** —— 然后重发，这次过了。\n"
+               "这不是失败，东西已经做出来了。列在这里是因为**发出去的东西和"
+               "环节里编译的那份不一样了**，而这种差异在成片里看不出来："
+               "画面是完整的，只是那一场戏可能被拍软了。",
+        "where": "03_提示词/自动改写/ 下有这一条的改写前后全文",
+        "fix": ["打开那个文件，对着「原文」看一遍改写后的版本：**该有的动作、"
+                "人物、结果还在不在** —— 程序已经挡掉了明显删戏的改写"
+                "（短太多、身份映射被动过），但语气被拍软这种只有人能判断",
+                "不满意的话，直接改环节里的提示词原文再重跑这一条",
+                "完全不想要自动改写：在服务商配置里把 `soften_rounds` 设成 0"],
+        "resume": "不用做什么，这一条已经完成了。",
+        "resumable": True, "scope": "task", "level": "warn",
+    },
+    "QUOTA_BUSY": {
+        "title": "这家这会儿排不上（不是你欠费）",
+        "why": "服务商回的是「额度暂时不可用，稍后再试」——「额度」这个词容易被"
+               "当成欠费，但它说的是**这一刻**的共享池排不上，不是你的账户没钱。"
+               "真欠费的家不会让你 try again later。\n"
+               "以前这条被归到「账户没钱了」，后果是整批图立刻熔断、"
+               "卡片让人去充值，而账上是有钱的。",
+        "where": "不用改任何设置",
+        "fix": ["等几分钟再点一次 —— 这类多半自己就好了（程序也会自动重试）",
+                "赶时间的话，去「设置 → 优先级链」把这类活排给另一家",
+                "**如果反复出现**，再去服务商网站确认一次余额和套餐；"
+                "真欠费时报的会是另一条（「账户没钱了」）"],
+        "resume": "回「生产」页点「开始」，做好的自动跳过。",
+        "resumable": True, "scope": "task", "level": "warn",
+    },
     "QUOTA_EXHAUSTED": {
         "title": "这家服务商的账户没钱了",
         "why": "服务商说你的余额或套餐额度不够了。程序已经自己停下来，"
@@ -313,7 +362,12 @@ CATALOG = {
                "所以撞上它的**恰恰是纯文字里最重的那一步**（整本剧本进去、几万字出来）：非流式下要等模型全写完才开始往回发，静默期最长。出图出片反而不会撞 —— 那边是「提交任务拿个号、之后轮询」，每个请求都几秒就返回。"
                "认它很容易：524 不是标准 HTTP 状态码，520-527 这一段是 Cloudflare 自己定义的，别人不会发这个码。",
         "where": "设置 → 分析引擎 → 「流式输出」",
-        "fix": ["**把「流式输出」打开** —— 这是这一条最主要的解法。流式下数据一直在流，Cloudflare 看得见就不会超时；实测同一步非流式 100 秒内 524，流式跑 406 秒照样出结果",
+        "fix": ["**先看报错里那个「等了 N 秒」** —— 它分开了两种完全不同的情况：\n"
+                "　　· 等了 100 秒以上：是下面说的入口超时，按下面几条办\n"
+                "　　· 只等了几十秒就回来了：那不是超时，是这一家**当下自己出了问题**"
+                "（源站过载、在维护、边缘连不上源站）。这种跟你的输入大小、流式开没开都无关，"
+                "隔几分钟再点一次，或者换一条线路 —— 去调流式和输入是白调",
+                "**把「流式输出」打开** —— 等了 100 秒以上那种的主要解法。流式下数据一直在流，Cloudflare 看得见就不会超时；实测同一步非流式 100 秒内 524，流式跑 406 秒照样出结果",
                 "**不要**去调「超时（秒）」或轮询超时 —— 那是我们这边等多久，和中转站入口的限制没关系，调到一小时也一样 524",
                 "**开了流式还是断，而且一个字都没收到**：那是模型的思考期太长。"
                 "它在吐第一个 token 之前是沉默的，流式也救不了 —— 静默一超过那道线（各家不同，"
@@ -503,6 +557,26 @@ CATALOG = {
         "resume": "第九环节重跑对了之后点「开始」，第十环节往后会跟着重做。",
         "resumable": True, "scope": "stage", "level": "error",
     },
+    "STRUCT_ASSUMPTION": {
+        "title": "输出和我们对剧本结构的假设对不上（东西已经存下来了）",
+        "why": "程序里有一批「剧本一般长这样」的规则 —— 比如「一个人在一段里"
+               "只该有一条空间记录」。这次的输出不满足其中几条。\n"
+               "**这不一定是错。** 剧本结构没法穷举：穿越回忆、梦境、平行时空、"
+               "双主角双线，都会让某条规则不成立。实跑撞过一次：一部穿越剧，"
+               "同一段里主角现实在医院、回忆在操场，模型写了两条空间记录 —— "
+               "模型是对的，是规则没考虑到闪回。\n"
+               "所以现在**只提醒，不拦**：产物已经存下来了，后面照常跑。"
+               "真正「下游读不了」的问题另有几道在管（参考图解析、身份映射、"
+               "出图前的四道闸门）。",
+        "where": "「产物」页看这一步的结果，对着下面列的几条自己判断",
+        "fix": ["**先看一眼列出来的是什么** —— 是剧情本来就这样（闪回、双线），"
+                "还是模型真写重了",
+                "剧情本来就这样：不用管，继续跑",
+                "模型真写错了：重跑这一个环节，或者在「产物」页直接改那几条",
+                "同一类提醒反复出现、而每次都是误报：那是规则该改，告诉开发者"],
+        "resume": "不用做什么 —— 这一步已经成了，点「开始」会继续往下跑。",
+        "resumable": True, "scope": "stage", "level": "warn",
+    },
     "NOTHING_TO_ASSEMBLE": {
         "title": "没有分段视频可拼，交付这一步跟着停了",
         "why": "拼接只是把已经做好的分段视频按段号接起来。一段视频都没有，"
@@ -518,6 +592,19 @@ CATALOG = {
                 "「产物」页逐段看"],
         "resume": "上游补齐之后点「开始」，这一步会自己重跑 —— 不用单独做什么。",
         "resumable": True, "scope": "stage", "level": "warn",
+    },
+    "APP_BUG": {
+        "title": "程序自己的 bug（重试没用）",
+        "why": "这不是模型、网络或配置的问题，是程序代码里的缺陷 —— "
+               "比如某个变量没传进来、调用签名对不上。"
+               "同一个活儿重试多少次都是同一个错，换服务商、换模型、改设置也一样。",
+        "where": "看下面的「原始报错」第一行；每一段/每一集都报同一句话就是这类",
+        "fix": ["**别重试** —— 这个错和你的剧本、模型、网络都无关，重试只会重复同一句话",
+                "点「导出排错资料」发出来，这类必须改程序才能好",
+                "在修好之前：这一步的产物是缺的，后面依赖它的环节会跟着停 —— "
+                "那些「前置还没跑」是连带的，不用单独查"],
+        "resume": "换了修好的版本之后点「开始」，已完成的部分不会重做。",
+        "resumable": False, "scope": "task", "level": "error",
     },
     "UNKNOWN": {
         "title": "没见过的错误",
@@ -535,12 +622,22 @@ CATALOG = {
 # 原始报错 → 错误码（按顺序匹配，先命中先用）
 _PATTERNS = [
     ("ASSET_DEP_CYCLE", r"资产循环依赖|资产依赖无法继续分层"),
+    # 这条必须排在 QUOTA_EXHAUSTED 前面：两边都带 quota / 额度 这个词，
+    # 但一边是「这会儿排不上，稍后再试」，另一边是「账上没钱了」。
+    # 归错的代价很实在 —— 实跑把一次临时排队报成了欠费，整批图熔断，
+    # 而人跑去充值。
+    ("QUOTA_BUSY", r"(quota|额度|配额)[^。\n]{0,80}(try again later|retry later|稍后|暂时)"
+                   r"|(try again later|retry later|稍后再?试|请稍[后候])[^。\n]{0,80}(quota|额度|配额)"),
     ("QUOTA_EXHAUSTED", r"insufficient|quota|余额|额度|欠费|balance|billing|payment|credit|arrears"),
     ("AUTH_INVALID", r"invalid[_ ]api[_ ]key|incorrect api key|unauthorized|authentication|令牌|token 不正确|无效的?密钥"),
     ("ACCOUNT_BANNED", r"banned|封禁|禁用|账户异常|无可用渠道|no available channel|suspend"),
     ("MODEL_NOT_FOUND", r"model.*not (found|exist)|不存在的?模型|unsupported model|无此模型"),
     ("RATE_LIMITED", r"429|rate limit|too many request|限流|请求过于频繁"),
-    ("CONTENT_REJECTED", r"content policy|safety|violat|prohibited|sensitive|审核|违规|敏感"),
+    # 规则本体在 apiutil.CONTENT_REJECT_RE —— **一份，两处用**。
+    # 那边定「要不要重试」，这边定「跟人怎么说」，各写一张表迟早对不上，
+    # 而对不上的表现是「有时候会自动改写、有时候不会」，比不做还难查。
+    # 为什么只认平台判词、不认「暴力/血腥」这类内容名词，见那边的注释。
+    ("CONTENT_REJECTED", _CONTENT_RE.pattern),
     ("PROMPT_INVALID", r"prompt too long|too long|invalid (prompt|param|size|request)|参数错误|不支持的?(尺寸|时长|比例)"),
     # 这两条要排在 REF_MISSING 前面：都跟参考图有关，但原因和改法完全不同
     ("REF_URL_ONLY", r"只收公网|只收 ?HTTPS|must be a (public )?url|不接受本地图片"
@@ -600,7 +697,37 @@ _PATTERNS = [
 ]
 
 
-def code_of(message: str, status: int = 0) -> str:
+# 服务商给的机器码 → 我们的错误码。**有码就认码，别去猜措辞。**
+# 措辞会变、会翻译、会本地化；码是给程序看的。
+# 只有拿不到码，或者拿到的是 upstream_error 这种通用值时才退回读文案。
+_BY_CODE = {
+    "content_policy_violation": "CONTENT_REJECTED",
+    "content_policy": "CONTENT_REJECTED",
+    "content_filter": "CONTENT_REJECTED",
+    "content_filtered": "CONTENT_REJECTED",
+    "sensitive_content": "CONTENT_REJECTED",
+    "moderation_blocked": "CONTENT_REJECTED",
+    "safety_violation": "CONTENT_REJECTED",
+    "safety_error": "CONTENT_REJECTED",
+    "prohibited_content": "CONTENT_REJECTED",
+    "insufficient_quota": "QUOTA_EXHAUSTED",
+    "insufficient_balance": "QUOTA_EXHAUSTED",
+    "billing_hard_limit_reached": "QUOTA_EXHAUSTED",
+    "quota_exceeded": "QUOTA_EXHAUSTED",
+    "invalid_api_key": "AUTH_INVALID",
+    "invalid_authentication": "AUTH_INVALID",
+    "authentication_error": "AUTH_INVALID",
+    "account_deactivated": "ACCOUNT_BANNED",
+    "rate_limit_exceeded": "RATE_LIMITED",
+    "model_not_found": "MODEL_NOT_FOUND",
+    "invalid_prompt": "PROMPT_INVALID",
+}
+
+
+def code_of(message: str, status: int = 0, err_code: str = "") -> str:
+    by_code = _BY_CODE.get((err_code or "").strip().lower())
+    if by_code:
+        return by_code
     low = (message or "").lower()
     if status in (401,):
         return "AUTH_INVALID"
@@ -641,6 +768,28 @@ def _entry(code: str, *, stage: str, target: str, provider: str, model: str,
     }
 
 
+# 这几种异常类型基本只可能是我们自己写错了，跟模型和网络无关。
+# **按类型认，不按文案认** —— 文案是 Python 生成的，没有稳定关键词可匹配。
+_BUG_TYPES = (NameError, UnboundLocalError, AttributeError, ImportError)
+
+# TypeError 两头都沾：模型给回怪数据也能触发。只认签名对不上的那几种措辞。
+_BUG_TYPE_MSG = re.compile(
+    r"unexpected keyword argument|missing \d+ required|positional argument", re.I)
+
+
+def is_app_bug(exc: Any) -> bool:
+    """这个异常是程序缺陷，还是外部原因？
+
+    分开的理由很实在：实跑撞到过 `name 'params' is not defined` ——
+    环节7 八段全挂，每段都报「没见过的错误」，卡片写着「查清楚之后点开始重试」。
+    于是重试了一轮，八段又是同一句话。**这类错重试一次都是浪费**，
+    而卡片当时给的正是重试。
+    """
+    if isinstance(exc, _BUG_TYPES):
+        return True
+    return isinstance(exc, TypeError) and bool(_BUG_TYPE_MSG.search(str(exc)))
+
+
 def build(exc: Any, *, stage: str = "", target: str = "", provider: str = "",
           model: str = "", extra_fix: Optional[list] = None) -> dict:
     """异常 → 结构化诊断。这是给人看的那一份。
@@ -652,7 +801,16 @@ def build(exc: Any, *, stage: str = "", target: str = "", provider: str = "",
     msg = str(exc)
     status = getattr(exc, "status", 0) or 0
     extra = list(extra_fix or []) + list(getattr(exc, "extra_fix", None) or [])
-    return _entry(code_of(msg, status), stage=stage, target=target, provider=provider,
+    # 服务商给的机器码优先于文案匹配 —— 见 code_of
+    code = ("APP_BUG" if is_app_bug(exc)
+            else code_of(msg, status, getattr(exc, "err_code", "")))
+    if code == "APP_BUG":
+        # Python 的报错只有一句话，看不出在哪一行。程序自己的 bug 必须带栈，
+        # 否则「导出排错资料」发过来还是得靠猜。
+        tb = "".join(traceback.format_exception(
+            type(exc), exc, exc.__traceback__)).strip()
+        msg = f"{type(exc).__name__}: {msg}\n\n{tb}"
+    return _entry(code, stage=stage, target=target, provider=provider,
                   model=model, status=status, raw=msg, extra_fix=extra)
 
 
@@ -666,12 +824,18 @@ def warn(code: str, raw: str, *, stage: str = "", target: str = "", provider: st
 # 换一家服务商能解决的问题 —— 都是「这家不行」而不是「这个活有问题」
 FAILOVER_CODES = {
     "QUOTA_EXHAUSTED",     # 这家没钱了，别家有
+    "QUOTA_BUSY",           # 这家这会儿排不上，别家的池子是另一个
     "AUTH_INVALID",         # 这家 key 不对
     "ACCOUNT_BANNED",       # 这家账号/线路不可用
     "MODEL_NOT_FOUND",      # 这家没这个模型
     "RATE_LIMITED",         # 这家在限流，换一家能继续
     "NETWORK",              # 这家连不上
     "TIMEOUT",              # 这家太慢
+    # 52x 是**这一家的入口**在抽风（源站过载、连不上、在维护）。
+    # 别家的入口是另一套配置，换过去多半就通了。
+    # 以前它既不在这儿也不在下面那张表里 —— 于是一次 524 直接判死整个环节，
+    # 一次都不重、也不换家。实跑一晚上被它咬了三次。
+    "GATEWAY_TIMEOUT",
     "REF_URL_ONLY",         # 这家只收链接而我们没配存储 → 换能吃本地图的
 }
 
@@ -687,6 +851,8 @@ NO_FAILOVER_CODES = {
     # 这几条都是「活儿本身缺东西」，换一家服务商也一样缺，别浪费一轮重试
     "GHOST_REF", "ASSET_NO_PROMPT", "NO_REF", "SEG_NOT_COMPILED", "ASSET_SCOPE",
     "PROMPT_REF_MISSING", "ASSET_DEP_CYCLE",
+    # 程序自己的 bug：换家、换模型、重试全都是同一个错，一次都不该自动重
+    "APP_BUG",
     # 提示词里没说清哪张图是谁。换一家服务商收到的还是同一段提示词，
     # 只会把同一个错误重复一遍，还多花一次钱。
     "REF_MAP_INCOMPLETE",
