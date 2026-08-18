@@ -95,12 +95,47 @@ class AssetReferenceTests(unittest.TestCase):
             stages.validate_s4_output(out, "EP01"),
         )
 
-    def test_json_call_feeds_custom_validator_failure_back_for_retry(self):
+    def test_business_rules_do_not_trigger_a_retry(self):
+        """★ 业务规则不满足**不重试、不失败**，只记一笔。
+
+        以前是重试 2 次然后整步失败。改掉的原因是实跑撞到的：
+        一部穿越剧，同一段里主角现实在医院、回忆在操场，模型规规矩矩写了
+        两条空间记录，被判成「人物空间记录重复」—— **模型是对的，
+        是规则没考虑到闪回**。而规则错的时候重试必然三次都失败：
+        同一份 2.8 万字的输出白跑三遍，最后整步卡死。
+
+        剧本结构没法穷举（穿越、梦境、平行时空、双主角双线），
+        所以这一层只能是提醒。真正「下游读不了」的由上面两道管：
+        JSON 解析不了 = 截断；缺必需字段 = 数组是空的。
+        """
+        class FakeLLM(LLM):
+            def __init__(self):
+                self.calls = 0
+
+            def chat(self, *args, **kwargs):
+                self.calls += 1
+                return json.dumps({"assets": [{"asset_id": "C001"}]})
+
+        llm = FakeLLM()
+        seen = []
+        out = llm.json_call("", "prompt", required=["assets[]", "assets[].asset_id"],
+                            validator=lambda x: ["人物空间记录重复:C001/EP01-SEG04"],
+                            on_soft=seen.append, log=lambda _m: None)
+        self.assertEqual(llm.calls, 1, "业务规则不该触发重试")
+        self.assertEqual(out["assets"][0]["asset_id"], "C001", "产物要照常返回")
+        self.assertEqual(seen, [["人物空间记录重复:C001/EP01-SEG04"]],
+                         "但必须记下来，不能悄悄咽掉")
+
+    def test_missing_required_fields_still_retry(self):
+        """★ 放开业务规则不等于放开一切。
+
+        缺必需字段是「下游一定读不了」，模型改一次多半就对了 —— 照旧重试。
+        """
         class FakeLLM(LLM):
             def __init__(self):
                 self.responses = iter([
+                    json.dumps({"assets": []}),
                     json.dumps({"assets": [{"asset_id": "C001"}]}),
-                    json.dumps({"assets": [{"asset_id": "C001"}], "complete": True}),
                 ])
                 self.calls = 0
 
@@ -110,10 +145,9 @@ class AssetReferenceTests(unittest.TestCase):
 
         llm = FakeLLM()
         out = llm.json_call("", "prompt", required=["assets[]", "assets[].asset_id"],
-                            validator=lambda x: [] if x.get("complete") else ["语义映射不完整"],
                             log=lambda _m: None)
-        self.assertTrue(out["complete"])
         self.assertEqual(llm.calls, 2)
+        self.assertTrue(out["assets"])
 
     def test_state_keeps_parent_first_and_all_dependencies(self):
         out = {"assets": [{

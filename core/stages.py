@@ -102,6 +102,11 @@ def system_prompt(pj: Optional[Project] = None, params: Optional[dict] = None,
     if pj is not None:
         m = dict(_st.mapping(pj, params, derived))
         m["SUBTITLE_RULE"] = _st.subtitle_rule(pj)
+        # **旁白规则以前没接进来**，代价很实在：解说剧只要画外音、不要对口型，
+        # 而这条规则只有电影级的 n13 收到 —— 通用级 12 环节一个字都没看见。
+        # 于是「念旁白时人物不动嘴」在通用级是个假旋钮：勾了也不生效，
+        # 视频模型照样生成张嘴说话的画面，而声音是画外音，看起来就是坏的。
+        m["NARRATION_RULE"] = _st.narration_rule(pj)
         m["PROJECT_BRIEF"] = _st.brief_block(pj, params, derived)
         text = render(text, m)
     return re.sub(r"<!--.*?-->\s*", "", text, flags=re.S)
@@ -595,10 +600,25 @@ def validate_s4_output(out: Any, episode: str = "", known_asset_ids=None,
             problems.append(f"{label}.inherit_to_seg不能指向自身")
         if inherit_to and not str(binding.get("inheritance_rule") or "").strip():
             problems.append(f"{label}.inheritance_rule在跨SEG继承时不能为空")
-        binding_key = (character_id, seg_id)
+        # 唯一性按「角色 + 段 + **时间线**」算，不是「角色 + 段」。
+        #
+        # 只按角色+段判会把闪回误判成重复。实跑撞过：一部穿越剧，
+        # 同一个 SEG 里主角**现实中在医院、回忆里在操场**，模型规规矩矩
+        # 写了两条，被我们拦下并报「人物空间记录重复」——
+        # 模型是对的，判错的是这条校验。而且页面还建议「换个更强的模型」，
+        # 那个方向完全是白费。
+        #
+        # 老产物没有 timeline 字段 —— 回落到「现实」，行为和以前一致：
+        # 同一段里两条无时间线记录照旧算重复。
+        timeline = str(binding.get("timeline") or "现实").strip() or "现实"
+        binding_key = (character_id, seg_id, timeline)
         if character_id and seg_id:
             if binding_key in binding_keys:
-                problems.append(f"人物空间记录重复:{character_id}/{seg_id}")
+                problems.append(
+                    f"人物空间记录重复:{character_id}/{seg_id}"
+                    f"（时间线「{timeline}」）—— 同一条时间线上一个人不可能"
+                    f"同时在两个地方。如果这两条本来是现实和回忆，"
+                    f"把它们的 timeline 分别填成「现实」和回忆的名字")
             binding_keys.add(binding_key)
 
         for j, relation in enumerate(binding.get("fixed_object_relations") or []):
@@ -795,8 +815,24 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
             value, episode, known_ids, known_space_ids)
     try:
         with LLM_GATE.slot():
+            # 业务规则**只记不拦**（见 llm.json_call 里那段注释）：
+            # 剧本结构没法穷举，规则错的时候重试必然三次都失败，
+            # 而下游还有参考图解析、身份映射、四道闸门在管真问题。
+            def _soft(problems, _pj=pj, _sid=stage_id, _ep=episode):
+                shown = list(problems)[:24]
+                tail = (f"；另有{len(problems) - len(shown)}处"
+                        if len(problems) > len(shown) else "")
+                d = diagnose.warn("STRUCT_ASSUMPTION", "；".join(shown) + tail,
+                                  stage=f"stage:{_sid}", target=_ep or "全剧")
+                diagnose.record(_pj.root, d)
+                if log:
+                    log(f"⚠️ 有 {len(problems)} 处和「剧本一般长这样」的假设对不上，"
+                        f"**已经存下来了、不挡后面**：{'；'.join(shown[:3])}"
+                        f"{'…' if len(shown) > 3 else ''}")
+
             out = llm.json_call(system, user, required=required, log=log,
-                                validator=validator, cancel=cancel, on_usage=_usage,
+                                validator=validator, on_soft=_soft,
+                                cancel=cancel, on_usage=_usage,
                                 # 收到什么必须留档。不留的话「JSON 解析不了」
                                 # 就只剩一句话，看不出模型是写了散文、拒答了、
                                 # 还是写到一半断了 —— 那三种改法完全不同。
@@ -1119,7 +1155,7 @@ def _usage_of(pj: Project, stage: str, episode: str, target: str = "") -> Callab
 
 def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
                   segs: list, done_ids: set, llm: LLM, build_user: Callable,
-                  required: list, log: Callable, episode: str,
+                  params: dict, required: list, log: Callable, episode: str,
                   cancel: Optional[Callable], seg_concurrency: int,
                   on_item: Optional[Callable] = None) -> tuple:
     """按段跑一个环节：一段一次调用、每段存盘、失败只影响那一段、天然可续跑。
@@ -1132,6 +1168,10 @@ def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
     时间省了钱翻几倍。环节7/8 的输入本来就是按段组织的，裁完基本不多花。
 
     返回 (结果, 失败的段, 被取消的段)。异常不往外抛，由调用方决定怎么报。
+
+    `params` 是必传的（没有默认值）：system prompt 里的项目设定要靠它渲染。
+    给个 `None` 默认值的话，漏传就是**静默少一段设定** —— 字幕规则、旁白、
+    对白语言全部按缺省走，而每一段都跑通、什么都不报。宁可 TypeError。
     """
     prev = pj.stage_data(out_name, episode) or {key: []}
     by_id = {c["id"]: c for c in prev.get(key, []) if c.get("id")}
@@ -1282,6 +1322,7 @@ def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     result, failed, cancelled = run_segmented(
         pj, stage_id="s7", out_name="s7_shots", key="shots", segs=segs,
         done_ids=s7_done_segments(pj, episode), llm=llm, build_user=build_user,
+        params=params,
         required=["shots[]", "shots[].character_space_note",
                   "shots[].shot_list[].positions"],
         log=log, episode=episode, cancel=cancel,
@@ -1340,6 +1381,7 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     result, failed, cancelled = run_segmented(
         pj, stage_id="s8", out_name="s8_compile", key="compiled", segs=segs,
         done_ids=s8_done_segments(pj, episode), llm=llm, build_user=build_user,
+        params=params,
         required=["compiled[]", "compiled[].storyboard_prompt", "compiled[].video_prompt"],
         log=log, episode=episode, cancel=cancel, seg_concurrency=seg_concurrency,
         on_item=on_item)

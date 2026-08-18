@@ -106,7 +106,7 @@ LLM_SPEC = {
     "n1": ("n1_truth", [], [
         "entities[]", "entities[].entity_id", "entities[].aliases",
         "events[]", "events[].event_id", "events[].story_time",
-        "story_truth", "reality_threads[]", "episode_ranges[]",
+        "story_truth", "reality_threads[]?", "episode_ranges[]",
     ]),
     "n2": ("n2_rules", ["n1_truth"], [
         "characters[]", "characters[].character_id", "characters[].long_term_motive",
@@ -135,7 +135,7 @@ LLM_SPEC = {
         "assets[].parent_asset_id", "assets[].reference_assets",
         "assets[].identity_anchors", "assets[].appearance",
         "assets[].output_spec", "assets[].dependency_order",
-        "costume_contracts[]", "prop_specs[]", "prop_instances[]",
+        "costume_contracts[]?", "prop_specs[]?", "prop_instances[]?",
         # 是数组。不标 [] 只要求「键存在」，模型给个空数组也算过 ——
         # 而空的生产顺序等于没有依赖分层，出图会乱序。
         "production_order[]",
@@ -152,7 +152,7 @@ LLM_SPEC = {
         "spatial_masters[].unit", "spatial_masters[].zones",
         "spatial_masters[].anchors", "spatial_masters[].routes",
         "spatial_masters[].landmarks", "spatial_masters[].fixed_structures",
-        "loc_views[]",
+        "loc_views[]?",
     ]),
     "n6": ("n6_ledger", ["n3_narrative", "n4_assets", "n5_spatial"], [
         "ledger[]", "ledger[].event_id", "ledger[].affected_entity",
@@ -171,14 +171,14 @@ LLM_SPEC = {
         "cvs[]", "cvs[].cvs_id", "cvs[].story_time", "cvs[].location_id",
         "cvs[].characters", "cvs[].props", "cvs[].relational_blocking",
         "cvs[].forbidden_state",
-        "vt[]", "vt[].vt_id", "vt[].source_cvs", "vt[].target_cvs",
+        "vt[]?", "vt[].vt_id", "vt[].source_cvs", "vt[].target_cvs",
         "vt[].trigger_event", "vt[].irreversible_result",
     ]),
     "n9": ("n9_shots", ["n7_directing", "n8_cvs"], [
         "shots[]", "shots[].shot_id", "shots[].source_cvs", "shots[].shot_size",
         "shots[].camera_position_xyz", "shots[].screen_direction",
         "shots[].estimated_duration", "shots[].dramatic_function",
-        "transitions[]", "transitions[].transition_id", "transitions[].from_shot",
+        "transitions[]?", "transitions[].transition_id", "transitions[].from_shot",
         "transitions[].to_shot", "transitions[].mechanism",
         "transitions[].cinematic_grammar", "transitions[].execution_mode",
         "timing_plan[]",
@@ -201,7 +201,7 @@ LLM_SPEC = {
         "video_plan[].reference_order", "video_plan[].video_prompt",
     ]),
     "n14": ("n14_audit", ["n8_cvs", "n10_segs", "n12_storyboard", "n13_video"], [
-        "findings[]",
+        "findings[]?",
     ]),
 }
 
@@ -240,6 +240,10 @@ COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
                        "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT",
                        "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY",
                        "NARRATION_RULE",
+                       # 分批跑的两个：这一批做什么范围、前面几批做过什么。
+                       # 没分批时也有值（「一次处理全剧」/「这是第一次排」），
+                       # 所以任何模板用它们都不会渲染成空。
+                       "BATCH_SCOPE", "DONE_SCENES",
                        ) + _setting_placeholders()
 
 

@@ -186,9 +186,16 @@ class TemplateRegistryTests(unittest.TestCase):
         self.assertEqual(len(by_sys.get("v34", [])), 15)
         self.assertEqual(len(by_sys.get("v61", [])), 8)
         # 下划线开头的是跨体系的，不属于任何一套：
-        # _common 是每次调用都发的全局规则，_settings_extract 是基础信息抽取器
+        #   _common            每次调用都发的全局规则
+        #   _settings_extract  基础信息抽取器
+        #   _soften            被审核拒绝时的提示词改写器
+        # 这一组是**从盘上扫**出来的，不是手写清单 —— 所以这里也照着盘上比，
+        # 写死名字的话，以后加一份 _xxx.md 就得来改测试，而漏改的表现是
+        # 「那份模板在页面上不存在」，不报错。
         self.assertEqual(sorted(by_sys.get("", [])),
-                         ["_common", "_settings_extract"])
+                         sorted(P._loose_templates()))
+        self.assertTrue({"_common", "_settings_extract", "_soften"}
+                        <= set(by_sys.get("", [])))
         # 上面那条已经查过跨体系的这一组了，这里不再重复断言一遍
         self.assertIn("_common", by_sys.get("", []), "_common 是两套共用的")
 

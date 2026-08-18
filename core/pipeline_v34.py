@@ -24,7 +24,7 @@ from . import (diagnose, episodes as _eps, gates_v34 as G, probe,
                run_v34 as R, system_v34 as V)
 from .apiutil import BATCH_FATAL
 from .llm import LLMCancelled
-from .executor import Job, run_chain
+from .executor import LLM_GATE, Job, run_chain
 
 
 def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
@@ -143,7 +143,14 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         params: dict, jobs=None, concurrency: int = 3, max_retry: int = 2,
         include_produce: bool = True, include_deliver: bool = True,
         only_episodes: Optional[list] = None,
-        ep_concurrency: int = 4, seg_concurrency: int = 4) -> None:
+        ep_concurrency: int = 4, seg_concurrency: int = 4,
+        llm_concurrency: int = 0) -> None:
+    # **必须配。** 这一行以前只有 pipeline.py（通用级）有，这边一直没接 ——
+    # 于是电影级的分析并发永远是 LlmGate 的构造默认值 4，
+    # 页面上「分析·总上限」填 200 也没用，状态栏一直显示「分析 3/4」。
+    # 这种漏接不会报错，只会让一个旋钮**看起来在那儿、其实没接线**。
+    LLM_GATE.configure(llm_concurrency or max(1, ep_concurrency, seg_concurrency))
+    LLM_GATE.reset_peak()
     steps = plan(pj, include_produce=include_produce,
                  include_deliver=include_deliver, only_episodes=only_episodes)
     job.total = len(steps)
@@ -204,8 +211,12 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             else:
                 R.run_stage(pj, sid, llm=llm, params=params,
                             episode=ep, log=log, cancel=lambda: job.cancelled)
-            if ep:
-                R.write_prompt_files(pj, ep)
+            # **不能写成 `if ep:`。** 资产提示词是 n4b 出的，而 n4b 是全剧级，
+            # 这里的 ep 是空字符串 —— 加了这个条件，那 80 多份提示词就永远
+            # 落不成 txt，出图那一层按路径读文件，全部报「文件不存在」。
+            # 实跑撞到：n4b 八批都跑完了、产物里有 prompt，磁盘上一个文件都没有。
+            # 传空 episode 是安全的：逐集那几个循环读不到东西，自然什么都不写。
+            R.write_prompt_files(pj, ep)
             job.set_item(key, state="ok")
             return "ok"
         except LLMCancelled:
@@ -248,8 +259,11 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                      msg=f"{len(todo)} 项待做 · 首选 {chain[0]['provider']}")
 
         from .produce import asset_layers, make_image_worker, make_video_worker
-        mk = (lambda p: make_video_worker(pj, p)) if s["produce"] == "video" \
-            else (lambda p, k=s["produce"]: make_image_worker(pj, p, k))
+        # llm_factory 要传下去：被审核拒绝时靠它改写提示词重发。
+        # 漏传不会报错，只是那个功能悄悄没了。
+        mk = (lambda p: make_video_worker(pj, p, llm_factory)) \
+            if s["produce"] == "video" \
+            else (lambda p, k=s["produce"]: make_image_worker(pj, p, k, llm_factory))
         mk_job = (lambda p, n: jobs.create(s["produce"], n, concurrency,
                                            project_root=pj.root,
                                            provider=p["provider"],
@@ -407,14 +421,27 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         # 在花钱之前停，比出完几百张再人工发现便宜得多。
         blocked = G.check_all(pj, only_episodes)
         if blocked:
-            msg = G.blocked_message(blocked)
-            for s in tail:
-                if s["kind"] == "produce":
-                    job.set_item(s["label"], state="failed", msg=msg.splitlines()[0])
-                    with st_lock:
-                        failed.append(s["label"])
-            job.log(steps[0]["label"], msg)
-            tail = [s for s in tail if s["kind"] != "produce"]
+            job.log(steps[0]["label"], G.blocked_message(blocked))
+            # **默认记下来就继续跑，不拦。**
+            # 这几道查的是连续性细节，没有一条会让产物做不出来 ——
+            # 而拦住的代价是整条线停摆：一个道具的对账数字写错，
+            # 连角色定妆图都出不来，那是后面所有环节的地基。
+            # 要硬拦的把项目参数里的 gates_block 设成 true。
+            for gate, note in G.gate_notes(blocked):
+                diagnose.record(pj.root, diagnose.warn(
+                    "GATE_FINDING", note, stage="gate", target=gate,
+                    extra_fix=["这一条不挡生产 —— 东西照常做出来了，"
+                               "但那几处对不上的地方值得回头看一眼",
+                               "要让它挡住生产：项目参数里把 gates_block 设成 true"]))
+            if G.should_block(params):
+                msg = G.blocked_message(blocked)
+                for s in tail:
+                    if s["kind"] == "produce":
+                        job.set_item(s["label"], state="failed",
+                                     msg=msg.splitlines()[0])
+                        with st_lock:
+                            failed.append(s["label"])
+                tail = [s for s in tail if s["kind"] != "produce"]
     for i, s in enumerate(tail):
         if job.aborted or job.cancelled:
             _mark_stopped(job, tail[i:])

@@ -369,12 +369,16 @@ class RunTests(unittest.TestCase):
         from core import ledger
         self._run_series_and_episode(EP1)
         rows = [r for r in ledger.load(self.pj.root) if r.get("kind") == "llm"]
-        self.assertEqual(
-            len(rows), 11,
-            "11 次调用应该有 11 条账 —— 全剧层 7 次 + 逐集层 4 次")
-        self.assertEqual({r["stage"] for r in rows},
-                         {"n1", "n2", "n3", "n4", "n4b", "n5", "n6",
-                          "n7", "n8", "n9", "n10"})
+        per = {}
+        for r in rows:
+            per[r["stage"]] = per.get(r["stage"], 0) + 1
+        # n3 是**按集分批**的：两集 = 两次调用 = 两条账。
+        # 这里不写死总数 —— 写死的话，以后夹具多加一集就得来改这个数字，
+        # 而真正要守的是「每一次调用都记了账」，不是「一共 11 次」。
+        want = {sid: 1 for sid in ("n1", "n2", "n4", "n4b", "n5", "n6",
+                                   "n7", "n8", "n9", "n10")}
+        want["n3"] = len(_FIXTURES["n1"]["episode_ranges"])
+        self.assertEqual(per, want, "有调用没记账，或者分批次数不对")
 
 
 

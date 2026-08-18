@@ -48,8 +48,13 @@ def deps_data(pj: Project, stage_id: str, episode: str = "") -> dict:
 
 
 def mapping(pj: Project, stage_id: str, params: dict, data: dict,
-            episode: str = "", segment: str = "") -> dict:
-    """模板里 {{X}} 各填什么。真跑和预览共用这一个，分开写迟早飘。"""
+            episode: str = "", segment: str = "",
+            extra: Optional[dict] = None) -> dict:
+    """模板里 {{X}} 各填什么。真跑和预览共用这一个，分开写迟早飘。
+
+    `extra` 里下划线开头的是**给这个函数看的开关**（比如这一批要写哪几个
+    资产），不是占位符；其余的最后覆盖上去，是分批跑要换掉的那几个值。
+    """
     m = {
         # 项目参数只发白名单里的几项。以前是「除了剧本全发」，结果配置里
         # 删掉的旧旋钮还留在 config.json 里照样发过去，模型当成指令执行。
@@ -77,6 +82,11 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         # 随便挑」写，而模型做不出来 —— 转场糊掉或者变成一个长镜头，不报错。
         "CAPABILITY": _capability_block(pj),
         "REF_LIMIT": _ref_limit_block(params),
+        # 分批用的两个，**必须有默认值**：没分批时（老项目没切集、预览）
+        # 留空的话模板里会原样出现 `{{BATCH_SCOPE}}`，模型会把它当成
+        # 一个要填的空位或者一句奇怪的指令。
+        "BATCH_SCOPE": "**一次处理全剧。** 所有集都在这一次里排完。",
+        "DONE_SCENES": "（这是第一次排，前面没有已排好的集）",
     }
     # 项目基础信息：50 多个字段，模板里写了 {{X}} 才收到。
     # 放在产物之前合并，让产物占位符能覆盖同名的（实际上不重名，
@@ -95,8 +105,14 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
             "native_multishot_support", ""),
     }))
 
+    extra = dict(extra or {})
     if stage_id == "n4b":
-        data = dict(data, n4_assets=_n4b_worklist(pj, data.get("n4_assets") or {}))
+        data = dict(data, n4_assets=_n4b_worklist(
+            pj, data.get("n4_assets") or {}, extra.pop("_n4b_batch", None)))
+    # 逐段环节：整集级的镜头表/状态表/空间主表按 ID 链裁到这一段。
+    # 算一次给所有产物用 —— 每份各算一次会把 n8/n9/n10 各读三遍。
+    ctx = _seg_context(pj, episode, segment,
+                       extra.pop("_log", None)) if segment else None
     for out_name, obj in data.items():
         # 三层裁剪，各管一件事：
         #   按集   全剧级产物 → 只剩本集（叙事结构、总账）
@@ -106,10 +122,16 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
             obj = _narrow_episode(out_name, obj, episode)
         if segment:
             obj = _narrow(out_name, obj, segment)
+            # 按段号直接裁不到的那几份（整集的镜头表、状态表、空间主表），
+            # 走 ID 链再裁一道 —— 这是逐段环节输入的大头
+            obj = _narrow_join(out_name, obj, ctx)
         # 逐段裁剪之后再按环节投影：两件事都是「只发这一步真正要的」，
         # 但一个按段切、一个按用途切，顺序无所谓，都做才完整。
         obj = project_product(stage_id, out_name, obj)
         m[V.placeholder_of(out_name)] = jd(obj)
+    # 分批的那几个值最后覆盖 —— 上面那些是「这个环节一般发什么」，
+    # 这一批要发什么以调用方给的为准（比如 n3 只发本集剧本）。
+    m.update({k: v for k, v in extra.items() if not k.startswith("_")})
     return m
 
 
@@ -192,6 +214,97 @@ _SEG_INDEXED = {
     "n12_storyboard": ("sbpkg", "seg_id"),
     "n13_video": ("video_plan", "seg_id"),
 }
+
+
+# 逐段环节收到的**整集级**产物，靠一条 ID 链裁到这一段。
+#
+# 起因很具体：实跑里 n11 是逐段环节，单段输入却有 **101,342 token** ——
+# 一集 17 段就把同一份东西发了 17 遍。而输入越大，模型吐第一个字之前
+# 想得越久，中转站看不到数据就在 125 秒切断（那一晚三条 524 都是这个）。
+#
+# 链是这样接的，四层都有 ID 可以对：
+#
+#     n10_segs.included_shots  →  n9_shots.shot_id
+#     n9_shots.source_cvs      →  n8_cvs.cvs_id
+#     n8_cvs.spatial_id        →  n5_spatial.spatial_masters.spatial_id
+#
+# **接不上就整份发。** 任何一环取空（模型没填 included_shots、ID 对不上、
+# 老项目的产物没有这些字段）都退回原来的行为并说一声 —— 裁错的后果是
+# 模型看不到本段真正要用的镜头/状态，然后自己编一个，而这不报错。
+def _seg_context(pj: Project, episode: str, segment: str,
+                 log: Optional[Callable] = None) -> Optional[dict]:
+    """这一段真正牵涉到哪些 shot / cvs / spatial。接不上返回 None（= 不裁）。"""
+    def _why(msg: str):
+        if log:
+            log(f"  ⚠️ 按段裁剪没接上（{msg}），这一步按整集发 —— "
+                f"输入会大很多，但不会少给上下文")
+        return None
+
+    me = next((s for s in (pj.stage_data("n10_segs", episode) or {}).get("segs") or []
+               if isinstance(s, dict) and s.get("seg_id") == segment), None)
+    if not me:
+        return _why(f"环节10 的装箱表里没有 {segment}")
+    want_shots = {x for x in (me.get("included_shots") or []) if x}
+    if not want_shots:
+        return _why(f"{segment} 没写 included_shots")
+    shots = [s for s in (pj.stage_data("n9_shots", episode) or {}).get("shots") or []
+             if isinstance(s, dict) and s.get("shot_id") in want_shots]
+    if not shots:
+        return _why("环节9 的镜头表里一个都对不上这些 shot_id")
+    cvs_ids = {s.get("source_cvs") for s in shots if s.get("source_cvs")}
+    cvs_ids |= {x for x in (me.get("entry_cvs"), me.get("exit_cvs")) if x}
+    rows = [c for c in (pj.stage_data("n8_cvs", episode) or {}).get("cvs") or []
+            if isinstance(c, dict) and c.get("cvs_id") in cvs_ids]
+    if not rows:
+        return _why("环节8 的状态表里一个都对不上这些 cvs_id")
+    return {"shots": {s.get("shot_id") for s in shots},
+            "cvs": {c.get("cvs_id") for c in rows},
+            "spatial": {c.get("spatial_id") for c in rows if c.get("spatial_id")}}
+
+
+def _keep(rows, pred) -> list:
+    """按条件留一部分。**一条都没留下就整份保留** —— 空数组比多发更糟：
+    下游看到「这一段没有任何镜头/状态」，然后自己编。"""
+    if not isinstance(rows, list):
+        return rows
+    mine = [r for r in rows if isinstance(r, dict) and pred(r)]
+    return mine or rows
+
+
+def _narrow_join(out_name: str, obj: dict, ctx: Optional[dict]) -> dict:
+    """按上面那条 ID 链把整集级产物裁到这一段。"""
+    if not ctx or not isinstance(obj, dict):
+        return obj
+    if out_name == "n9_shots":
+        keep = ctx["shots"]
+        out = dict(obj, shots=_keep(obj.get("shots"),
+                                    lambda r: r.get("shot_id") in keep))
+        got = {r.get("shot_id") for r in out["shots"]}
+        # 转场要两端都在本段才留：跨段的那条属于相邻段，发过来只会让模型
+        # 以为本段要接一个它看不到的镜头
+        out["transitions"] = _keep(
+            obj.get("transitions"),
+            lambda r: r.get("from_shot") in got and r.get("to_shot") in got)
+        out["timing_plan"] = _keep(
+            obj.get("timing_plan"),
+            lambda r: not r.get("shot_id") or r.get("shot_id") in got)
+        return out
+    if out_name == "n8_cvs":
+        keep = ctx["cvs"]
+        out = dict(obj, cvs=_keep(obj.get("cvs"),
+                                  lambda r: r.get("cvs_id") in keep))
+        out["vt"] = _keep(obj.get("vt"),
+                          lambda r: r.get("source_cvs") in keep
+                          or r.get("target_cvs") in keep)
+        return out
+    if out_name == "n5_spatial" and ctx["spatial"]:
+        keep = ctx["spatial"]
+        return dict(obj,
+                    spatial_masters=_keep(obj.get("spatial_masters"),
+                                          lambda r: r.get("spatial_id") in keep),
+                    loc_views=_keep(obj.get("loc_views"),
+                                    lambda r: r.get("spatial_id") in keep))
+    return obj
 
 
 def _narrow(out_name: str, obj: dict, segment: str) -> dict:
@@ -392,40 +505,64 @@ def missing_deps(pj: Project, stage_id: str, episode: str = "") -> list:
 # ---------------------------------------------------------------- 跑一个环节
 
 def build_user(pj: Project, stage_id: str, params: dict,
-               episode: str = "", segment: str = "") -> str:
-    """这个环节这一次实际会发出去的正文。"""
+               episode: str = "", segment: str = "",
+               extra: Optional[dict] = None) -> str:
+    """这个环节这一次实际会发出去的正文。
+
+    `extra` 是分批跑用的：覆盖某几个占位符（这一批做哪几集/哪几个资产）。
+    """
     tpl_name, _, _ = V.LLM_SPEC[stage_id]
     data = deps_data(pj, stage_id, episode)
     text = render(load_prompt(tpl_name, pj),
-                  mapping(pj, stage_id, params, data, episode, segment))
+                  mapping(pj, stage_id, params, data, episode, segment, extra))
     if segment:
         text += (f"\n\n【只做这一段】{segment}，"
                  f"输出数组里只放这一段，不要带上别的段。")
     return text
 
 
-def _n4b_worklist(pj: Project, a4: dict) -> dict:
-    """n4b 的输入：**要写的留全量，其余压成一行目录。**
+def _n4b_worklist(pj: Project, a4: dict, batch: Optional[set] = None) -> dict:
+    """n4b 的输入：**这一批要写的留全量，其余压成一行目录。**
 
     不能直接把已写过的删掉 —— 模型引用别的资产要靠 ID（LOOK 引 PH、
     CT 引 LOOK）。看不到就会重新发明一个 ID，出图那层再报「查不到这个资产」。
     所以留着，但只留 id/family/name 三个字段，一条几十字节而不是八百字符。
 
+    `batch` 给了就只写这一批（分批跑用）；不给就是这一轮所有没写过的。
+
+    **被这一批引用到的资产要留全量。** 写 LOOK 得看得见它引的那个 PH
+    长什么样，只给个 ID 是写不出提示词的 —— 模型会自己编一个外观，
+    于是同一个角色在不同批次里长得不一样，而这**不会报错**。
+
     这一步只改**发过去的内容**，不改环节顺序、不改产物结构。
     """
     if not isinstance(a4, dict):
         return a4
-    _, todo, _ = n4b_split(pj)
-    keep = set(todo)
-    full, catalog = [], []
-    for a in a4.get("assets") or []:
+    if batch is None:
+        batch = set(n4b_split(pj)[1])
+    rows = [a for a in a4.get("assets") or [] if isinstance(a, dict)]
+    keep = set(batch)
+    for a in rows:                      # 这一批引到的，连同它们的父资产一起留全
+        if a.get("asset_id") in batch:
+            keep.update(x for x in (a.get("reference_assets") or []) if x)
+            if a.get("parent_asset_id"):
+                keep.add(a["parent_asset_id"])
+    # 只有两栏 —— 模板就是按两栏解释的，多一栏模型不知道该拿它怎么办。
+    #   assets[]              这一批要写的，全量
+    #   assets_already_done[] 其余的；被这一批引用到的留全量，其它只留一行
+    write, other = [], []
+    for a in rows:
         aid = a.get("asset_id")
-        if aid in keep:
-            full.append(a)
-        elif aid:
-            catalog.append({k: a.get(k) for k in ("asset_id", "family", "name")
-                            if a.get(k)})
-    return dict(a4, assets=full, assets_already_done=catalog)
+        if not aid:
+            continue
+        if aid in batch:
+            write.append(a)
+        elif aid in keep:
+            other.append(a)
+        else:
+            other.append({k: a.get(k) for k in ("asset_id", "family", "name")
+                          if a.get(k)})
+    return dict(a4, assets=write, assets_already_done=other)
 
 
 # 这些档位**不出图、也不写生产提示词**。
@@ -510,6 +647,222 @@ def merge_asset_prompts(previous: dict, fresh: dict) -> dict:
     return merged
 
 
+# ====================================================================== 分批
+#
+# n3 和 n4b 都是「全剧一次」，而全剧一次的输出量随剧的长度线性涨 ——
+# 涨过这条线路能一次吐完的量，就再也跑不过去了：重试写的是同一批东西，
+# 每次断在差不多的地方，钱花掉、进度是零。实跑连撞三次。
+#
+# 分批**不改环节图**：n3 还是 n3、还在原位、产物文件名不变、下游读法不变。
+# 变的只有一件事 —— 这一个环节内部分几次调用，每次存盘。
+# 于是断在第三批，前两批是留下的，再点一次从第三批接着跑。
+#
+# 两者的分批单位不一样，不能套同一套：
+#   n3   按集。场次天生带 episode 字段，下游本来就按集裁。
+#   n4b  按资产。资产之间没有顺序依赖（提示词只是互相引 ID），随便切。
+_N3_BATCH_NOTE = "按集分批"
+_N4B_BATCH = 12          # 一批写几个资产的提示词
+#
+# 12 是这么来的：实测 V6.1 逐集 17 条资产 ≈ 8,320 token 输出（约 490/条），
+# 而本机见过的最大一次输出是 19,612 token。12 条 ≈ 5,900，留了足够余量 ——
+# 顶到天花板才是最贵的失败（整批白跑）。宁可多调几次。
+
+
+def n3_split(pj: Project) -> tuple:
+    """n3 分批：哪几集已经排过场次了，哪几集还没。
+
+    依据是**已存产物里的 scenes**，不是磁盘上的别的东西 ——
+    scene 自带 episode 字段，这是唯一可靠的「这一集做过没有」。
+    """
+    eps = _eps.ids(pj)
+    have = {s.get("episode") for s in
+            (pj.stage_data("n3_narrative", "") or {}).get("scenes") or []
+            if isinstance(s, dict) and s.get("episode")}
+    done = [e for e in eps if e in have]
+    todo = [e for e in eps if e not in have]
+    return done, todo
+
+
+def merge_narrative(previous: dict, fresh: dict) -> dict:
+    """n3 分批产物合并。**必须合并，不能覆盖。**
+
+    和 merge_asset_prompts 是同一个道理：这一批只做了一集，
+    直接存盘会把前面几集排好的场次全冲掉 —— 而且不报错，
+    只是「场次越跑越少」，要到第七环节才发现某一集根本没有戏。
+    """
+    merged = dict(previous or {})
+    for key, id_field in (("scenes", "scene_id"), ("beats", "beat_id"),
+                          ("episode_arcs", "episode")):
+        rows = [r for r in (merged.get(key) or []) if isinstance(r, dict)]
+        pos = {r.get(id_field): i for i, r in enumerate(rows) if r.get(id_field)}
+        for r in (fresh or {}).get(key) or []:
+            if not isinstance(r, dict) or not r.get(id_field):
+                continue
+            rid = r[id_field]
+            if rid in pos:
+                rows[pos[rid]] = r          # 重跑同一集时覆盖那一集的旧条目
+            else:
+                pos[rid] = len(rows)
+                rows.append(r)
+        merged[key] = rows
+    merged["scope"] = "full_series"
+    # boundary_note 是一段话不是数组，按行累加。**不能覆盖**：
+    # 它记的是「哪几处场次边界是判断题」，每一批各有各的判断，
+    # 后一批盖掉前一批等于把前面几集的判断依据丢了。
+    old = str((previous or {}).get("boundary_note") or "").strip()
+    new = str((fresh or {}).get("boundary_note") or "").strip()
+    lines = [x for x in old.split("\n") if x.strip()]
+    if new and new not in lines:
+        lines.append(new)
+    merged["boundary_note"] = "\n".join(lines)
+    return merged
+
+
+def _n3_done_block(pj: Project, done: list) -> str:
+    """已经排过的那几集，压成一行一场的目录发回去。
+
+    为什么要发：模板原本一次看全剧，靠的就是「第 5 集能看到第 1 集埋的伏笔」。
+    分集之后这个视野没了 —— 不补回来，后面几集会重新编号、
+    `entry_state` 接不上上一集的 `exit_state`、前面留的
+    `unresolved_tension` 再也没人收。**这三样都不报错。**
+
+    只发摘要不发全文：全文发回去等于把省下的输入又加回来。
+    """
+    scenes = [s for s in (pj.stage_data("n3_narrative", "") or {}).get("scenes") or []
+              if isinstance(s, dict) and s.get("episode") in set(done)]
+    if not scenes:
+        return "（这是第一批，前面没有已排好的集）"
+    lines = []
+    for s in scenes:
+        lines.append(
+            f"{s.get('scene_id', '?')}　{s.get('episode', '?')}　"
+            f"目标：{s.get('objective', '')}　结果：{s.get('outcome', '')}　"
+            f"收场状态：{s.get('exit_state', '')}　"
+            f"未了结：{s.get('unresolved_tension', '') or '无'}")
+    return ("已经排好的场次（**不要重排、不要重复编号**，"
+            "新场次的编号接着往下走；这一集的第一场 `entry_state` "
+            "要接得住上面最后一场的 `exit_state`；上面的「未了结」"
+            "该在本集回收的要回收）：\n" + "\n".join(lines))
+
+
+def _one_call(pj: Project, stage_id: str, *, llm, params: dict, episode: str = "",
+              extra: Optional[dict] = None, label: str = "",
+              log: Callable = print, cancel: Optional[Callable] = None) -> dict:
+    """发一次请求。分批跑就是把这个函数调多次，每次换 extra。"""
+    _, _, required = V.LLM_SPEC[stage_id]
+    user = build_user(pj, stage_id, params, episode, extra=extra)
+    tag = label or (f"{episode} " if episode else "全剧 ")
+    log(f"{tag}{stage_id} 提示词 {len(user)} 字，调 {llm.model}")
+    saved = trim_saving(pj, stage_id, episode)
+    if saved:
+        log(f"  {saved}")
+    with LLM_GATE.slot():
+        return llm.json_call(system_prompt(pj, params), user, required=required,
+                             log=log, cancel=cancel,
+                             on_usage=_usage(pj, stage_id, episode),
+                             on_partial=keep_partial(pj, stage_id, episode,
+                                                     label.strip(), llm=llm))
+
+
+def run_n3_batched(pj: Project, *, llm, params: dict, log: Callable = print,
+                   cancel: Optional[Callable] = None) -> dict:
+    """第三环节按集分批，**顺序**跑，每集存盘。
+
+    为什么不并发：这一步的产物是有前后依赖的 —— 每一集的第一场
+    `entry_state` 要接住上一集最后一场的 `exit_state`，场次编号也要接着走。
+    并发的话每一批看到的「前面」都是空的，接不上而且不报错。
+
+    每集跑完就存：断在第三集，前两集是留下的，再点一次从第三集接着跑。
+    """
+    eps = _eps.ids(pj)
+    if not eps:
+        # 还没切集（老项目、或者第一环节没给出 episode_ranges）。
+        # 退回原来的一次全剧 —— 分批是为了跑得过去，不是为了强制换做法。
+        log("  没有分集信息，按原来的一次全剧跑")
+        return _one_call(pj, "n3", llm=llm, params=params, log=log, cancel=cancel)
+
+    done, todo = n3_split(pj)
+    if done:
+        log(f"  {len(done)} 集已经排过场次，这次不重排：{'、'.join(done)}")
+    if not todo:
+        log("  所有集都排过了，直接跳过（不调模型、不花钱）")
+        prev = pj.stage_data("n3_narrative", "") or {"scenes": [], "beats": []}
+        diagnose.clear(pj.root, "stage:n3", "全剧")
+        return prev
+    log(f"  按集分批：这次要排 {len(todo)} 集（{'、'.join(todo)}），一集一次调用")
+
+    out = pj.stage_data("n3_narrative", "") or {}
+    for i, ep in enumerate(todo, 1):
+        if cancel and cancel():
+            raise LLMCancelled(
+                f"第三环节已按取消停下，排好的 {len(done)} 集都存了盘；"
+                f"再点一次「开始」只补没排的那几集。")
+        fresh = _one_call(
+            pj, "n3", llm=llm, params=params, episode=ep,
+            label=f"[{i}/{len(todo)}] {ep} ",
+            extra={"SCRIPT": _eps.script_of(pj, ep),
+                   "BATCH_SCOPE": _n3_batch_scope(ep, done + todo),
+                   "DONE_SCENES": _n3_done_block(pj, done)},
+            log=log, cancel=cancel)
+        out = merge_narrative(out, fresh)
+        pj.save_stage("n3_narrative", out, "")     # 每集落盘 —— 断了不白跑
+        done = done + [ep]
+        log(f"  {ep} 排好 "
+            f"{len([s for s in out.get('scenes') or [] if s.get('episode') == ep])} 场")
+    diagnose.clear(pj.root, "stage:n3", "全剧")
+    return out
+
+
+def _n3_batch_scope(ep: str, all_eps: list) -> str:
+    return (f"**这一次只做 {ep} 这一集。** 全剧共 {len(all_eps)} 集"
+            f"（{'、'.join(all_eps)}），其余各集另有批次，不要替它们排场次 ——"
+            f"输出的 `scenes` 和 `beats` 里只能有 {ep} 的内容，"
+            f"每一条的 `episode` 都必须是 {ep}。`episode_arcs` 同理，只写这一集。")
+
+
+def run_n4b_batched(pj: Project, *, llm, params: dict, log: Callable = print,
+                    cancel: Optional[Callable] = None) -> dict:
+    """第四环节（下）按资产分批，每批存盘。
+
+    资产之间没有生产顺序依赖（提示词只是互相引 ID，引到的那几条会带全量
+    发过去），所以切在哪儿都行 —— 按 n4 给的顺序切成固定大小就够了。
+    """
+    done, todo, dropped = n4b_split(pj)
+    if dropped:
+        log(f"  {dropped} 个资产不需要出图（skip / 逻辑契约 / 交给视频 / "
+            f"已有 Canon），不写提示词"
+            f"（出图那一层本来也会丢掉，写了是白写）")
+    if done:
+        log(f"  {len(done)} 个资产已经写过提示词，这次不重写")
+    if not todo:
+        log("  没有新资产要写提示词，直接跳过（不调模型、不花钱）")
+        prev = pj.stage_data("n4b_asset_prompts", "") or {"asset_prompts": []}
+        diagnose.clear(pj.root, "stage:n4b", "全剧")
+        return prev
+
+    batches = [todo[i:i + _N4B_BATCH] for i in range(0, len(todo), _N4B_BATCH)]
+    log(f"  这次要写 {len(todo)} 个，分 {len(batches)} 批"
+        f"（每批最多 {_N4B_BATCH} 个）")
+
+    out = pj.stage_data("n4b_asset_prompts", "") or {}
+    for i, ids in enumerate(batches, 1):
+        if cancel and cancel():
+            raise LLMCancelled(
+                f"第四环节（下）已按取消停下，写好的都存了盘；"
+                f"再点一次「开始」只补没写的那些资产。")
+        log(f"  第 {i}/{len(batches)} 批：{'、'.join(ids)}")
+        fresh = _one_call(
+            pj, "n4b", llm=llm, params=params,
+            label=f"[{i}/{len(batches)}] ", extra={"_n4b_batch": set(ids)},
+            log=log, cancel=cancel)
+        # **必须合并，不能覆盖。** 模型回来的只有这一批，
+        # 直接存盘会把前几批写好的全冲掉 —— 而且不报错，只是越跑越少。
+        out = merge_asset_prompts(out, fresh)
+        pj.save_stage("n4b_asset_prompts", out, "")
+    diagnose.clear(pj.root, "stage:n4b", "全剧")
+    return out
+
+
 def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
               episode: str = "", log: Callable = print,
               cancel: Optional[Callable] = None) -> dict:
@@ -522,39 +875,16 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
         raise RuntimeError(f"{stage_id} 的前置还没跑：{'、'.join(miss)}")
     check_inputs(pj, stage_id, params, episode)
 
+    # 这两个环节的输出量随剧的长度线性涨，全剧一次跑不过去 —— 分批跑。
+    # 它们自己负责存盘和合并，不走下面的单次路径。
+    if stage_id == "n3":
+        return run_n3_batched(pj, llm=llm, params=params, log=log, cancel=cancel)
     if stage_id == "n4b":
-        done, todo, dropped = n4b_split(pj, episode)
-        if dropped:
-            log(f"  {dropped} 个资产不需要出图（skip / 逻辑契约 / 交给视频 / "
-                f"已有 Canon），不写提示词"
-                f"（出图那一层本来也会丢掉，写了是白写）")
-        if done:
-            log(f"  {len(done)} 个资产已经写过提示词，这次不重写")
-        if not todo:
-            log("  没有新资产要写提示词，直接跳过（不调模型、不花钱）")
-            prev = pj.stage_data("n4b_asset_prompts", "") or {"asset_prompts": []}
-            diagnose.clear(pj.root, "stage:n4b", "全剧")
-            return prev
-        log(f"  这次要写 {len(todo)} 个：{'、'.join(todo[:8])}"
-            f"{'…' if len(todo) > 8 else ''}")
+        return run_n4b_batched(pj, llm=llm, params=params, log=log, cancel=cancel)
 
-    user = build_user(pj, stage_id, params, episode)
-    tag = f"{episode} " if episode else "全剧 "
-    log(f"{tag}{stage_id} 提示词 {len(user)} 字，调 {llm.model}")
-    saved = trim_saving(pj, stage_id, episode)
-    if saved:
-        log(f"  {saved}")
-    with LLM_GATE.slot():
-        out = llm.json_call(system_prompt(pj, params), user, required=required,
-                            log=log, cancel=cancel,
-                            on_usage=_usage(pj, stage_id, episode),
-                            on_partial=keep_partial(pj, stage_id, episode, llm=llm))
+    out = _one_call(pj, stage_id, llm=llm, params=params, episode=episode,
+                    log=log, cancel=cancel)
     check_runtime(pj, stage_id, out, params, episode, log)
-    if stage_id == "n4b":
-        # **必须合并，不能覆盖。** 这一步现在是增量的：输入只给还没写过的，
-        # 所以模型回来的也只有那几条。直接存盘会把前几轮写好的全冲掉 ——
-        # 而且不报错，只是资产提示词越跑越少。
-        out = merge_asset_prompts(pj.stage_data("n4b_asset_prompts", "") or {}, out)
     pj.save_stage(tpl_name, out, "" if V.scope_of(stage_id) == "series" else episode)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode or "全剧")
     if stage_id == "n1":
@@ -664,7 +994,10 @@ def run_segment_stage(pj: Project, stage_id: str, *, llm, params: dict,
         sid = seg["seg_id"]
         log(f"[{i}/{n}] {sid}")
         try:
-            user = build_user(pj, stage_id, params, episode, sid)
+            # 把 log 递进去：按段裁剪接不上时要说一声，不然那一段悄悄
+            # 按整集发（输入翻几倍、更容易撞 524），日志上看不出发生过什么
+            user = build_user(pj, stage_id, params, episode, sid,
+                              extra={"_log": lambda m, _s=sid: log(f"  {_s}{m}")})
             with LLM_GATE.slot():
                 out = llm.json_call(
                     system_prompt(pj, params), user, required=required,

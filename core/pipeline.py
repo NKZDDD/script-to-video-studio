@@ -251,8 +251,11 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                                  + (f"（备选 {len(chain)-1} 家）" if len(chain) > 1 else ""))
 
                 def mk_worker(pcfg, kind=s["produce"]):
-                    return (S.make_video_worker(pj, pcfg) if kind == "video"
-                            else S.make_image_worker(pj, pcfg, kind))
+                    # llm_factory 要传下去：被审核拒绝时靠它改写提示词重发。
+                    # 漏传不会报错，只是那个功能悄悄没了。
+                    return (S.make_video_worker(pj, pcfg, llm_factory)
+                            if kind == "video"
+                            else S.make_image_worker(pj, pcfg, kind, llm_factory))
 
                 def mk_job(pcfg, n, kind=s["produce"]):
                     return (jobs.create(kind, n, concurrency, project_root=pj.root,
@@ -278,7 +281,9 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                         log(f"—— 第 {gi}/{len(layers)} 层，{len(grp)} 项")
                     one = run_chain(grp, chain=chain, worker_of=mk_worker, job_of=mk_job,
                                     key_of=lambda t: t["key"],
-                                    done_of=lambda t: os.path.isfile(
+                                    # 不能用 isfile：0 字节的残骸也是「文件存在」，
+                                    # 换家重试时会被当成上一家已经做好了，直接跳过。
+                                    done_of=lambda t: probe.have_output(
                                         pj.p(*t["output"].split("/"))),
                                     max_retry=max_retry, log=log)
                     r["attempts"] += one["attempts"]
