@@ -261,10 +261,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
   <!-- 闸门面板。以前拦截文案写着「去项目设置里显式授权」，而那个地方
        根本不存在 —— 任何一道闸门判定有问题，页面上就走不下去了。 -->
   <div class="card" id="gatesCard" style="display:none">
-    <h2>出图出片前的闸门 <span class="tag">拦下来的都是「看着正常但是错的」</span></h2>
+    <h2>连续性检查 <span class="tag">查的是「看着正常但是错的」</span></h2>
     <div class="muted" style="margin-bottom:10px">
-      这几道在花钱之前拦一次。要带着问题往下跑就显式放行 ——
-      放行会连理由和时间一起记进冻结记录，不是静默跳过。
+      道具存在总数对不对得上账、人物有没有无事件换位、某一格该不该补一张覆盖图、
+      故事板一张几格。<b>这几道不挡生产</b> —— 东西照常做出来，
+      这里只是把对不上的地方列出来，什么时候想收拾都行。<br>
+      想让它像以前一样挡住生产：项目参数里把 <code>gates_block</code> 设成 true。
     </div>
     <div id="gatesBody">加载中…</div>
   </div>
@@ -701,12 +703,24 @@ const PARAM_FIELDS = [
 // 面板送的值，或者这里的默认值，**从不读项目参数**。放进项目参数就是个假旋钮：
 // 填了、存了、显示着，就是没人读。
 const RUN_FIELDS = [
-  ['concurrency','默认并发','number'], ['max_retry','技术重试上限','number'],
+  ['concurrency','默认并发（出图出片）','number'],
+  ['llm_episodes','分析·集并发','number'],
+  ['llm_segments','分析·段并发','number'],
+  ['llm_concurrency','分析·总上限','number'],
+  ['max_retry','技术重试上限','number'],
   ['soften_rounds','被审核拒绝后改写重试（0=关）','number'],
 ];
 // 这几项**没填过时也要显示出默认值**。留空的后果很实在：保存时
 // `+""` 是 0，于是用户只是点了一下「保存」，改写重试就被悄悄关掉了。
-const RUN_DEFAULTS = {concurrency: 3, max_retry: 2, soften_rounds: 5};
+const RUN_DEFAULTS = {concurrency: 3, llm_episodes: 4, llm_segments: 4,
+                      llm_concurrency: 6, max_retry: 2, soften_rounds: 5};
+// 「一键跑到底」面板上会写回默认值的那几项：面板 id → defaults 里的键。
+// 只写回**跑法**（并发、尺寸、比例、秒数）。**范围和两个勾选框不写回** ——
+// 记住「分析这几集=EP01」或者「包含出图出片=关」的话，下次点「开始/继续」
+// 你以为在跑全剧/在出图，实际只跑了一集/只跑了文字，而这不报错。
+const AUTO_REMEMBER = {autoConc: 'concurrency', autoEpConc: 'llm_episodes',
+                       autoSegConc: 'llm_segments', autoLlmConc: 'llm_concurrency',
+                       autoSize: 'image_size', autoRatio: 'ratio', autoDur: 'duration'};
 
 // 尺寸/比例/时长的候选：取「这条链上每一家都支持」的交集 ——
 // 只有交集里的值才保证自动换家时不会因为参数不支持而挂掉。
@@ -998,10 +1012,10 @@ function renderAuto() {
   $('#autoChains').innerHTML = rows
     + `<div style="margin-top:4px">按上面的顺序用，前一家挂了自动换下一家补剩下的。</div>`;
   const d = BOOT.config.defaults || {};
-  $('#autoConc').value = d.concurrency || 3;
-  $('#autoEpConc').value  = d.llm_episodes    || 4;
-  $('#autoSegConc').value = d.llm_segments    || 4;
-  $('#autoLlmConc').value = d.llm_concurrency || 6;
+  $('#autoConc').value    = d.concurrency     || RUN_DEFAULTS.concurrency;
+  $('#autoEpConc').value  = d.llm_episodes    || RUN_DEFAULTS.llm_episodes;
+  $('#autoSegConc').value = d.llm_segments    || RUN_DEFAULTS.llm_segments;
+  $('#autoLlmConc').value = d.llm_concurrency || RUN_DEFAULTS.llm_concurrency;
   // 候选取「资产图链的首选那家」和「视频链的首选那家」各自声明支持的值
   const capOf = (kind, block) => {
     const first = (ch[kind] || [])[0];
@@ -1096,6 +1110,28 @@ function autoRangeHint() {
 });
 autoRangeHint();          // 还没打开项目时也要看得见写法示例
 
+// 面板上改过的跑法**立刻写回默认值**。以前是单向的（只从 defaults 读、从不写回），
+// 于是改完刷新就弹回去 —— 而人以为它记住了，下次按着记忆点「开始」，
+// 实际跑的是旧并发。这类「看着记住了其实没记」不报错，只能靠自己发现。
+const AUTO_NUM = new Set(['concurrency', 'llm_episodes', 'llm_segments',
+                          'llm_concurrency', 'duration']);
+async function rememberAuto() {
+  const defaults = {};
+  for (const [id, key] of Object.entries(AUTO_REMEMBER)) {
+    const el = $('#' + id);
+    // 空着的不写回：`+''` 是 0，一个 0 并发存进去就等于把这条路堵死。
+    if (!el || String(el.value) === '') continue;
+    defaults[key] = AUTO_NUM.has(key) ? +el.value : el.value;
+  }
+  await api.post('/api/config', {defaults});
+  BOOT.config.defaults = Object.assign(BOOT.config.defaults || {}, defaults);
+}
+Object.keys(AUTO_REMEMBER).forEach(id => {
+  const el = $('#' + id);
+  // change 而不是 input：数字框每敲一下都发一次请求纯属浪费。
+  if (el) el.addEventListener('change', () => rememberAuto().catch(() => {}));
+});
+
 function autoBody() {
   // 不传 provider_sel，让后端直接用 config 里存的链（单一真相源）
   const only = parseEps($('#autoOnly').value).list;
@@ -1161,9 +1197,12 @@ async function renderGates() {
                                           only_episodes: parseEps($('#autoOnly').value).list});
   const rows = (d.gates || []).map(g => {
     const a = g.authorized;
+    // 闸门早就不挡生产了，标签也别再写「拦住了」—— 那是在说一件不成立的事，
+    // 人看到会以为生产停在这儿，跑去找根本不存在的拦截。
     const head = g.blocking
-      ? '<span class="tag" style="background:#7f1d1d;color:#fecaca">拦住了</span>'
-      : (a ? '<span class="tag" style="background:#78350f;color:#fde68a">已放行</span>'
+      ? '<span class="tag" style="background:#78350f;color:#fde68a">有 '
+        + (g.problems || []).length + ' 处对不上</span>'
+      : (a ? '<span class="tag" style="background:#374151;color:#d1d5db">已放行</span>'
            : '<span class="tag" style="background:#14532d;color:#bbf7d0">通过</span>');
     const list = (g.problems || []).length
       ? '<ul style="margin:6px 0 0 18px;line-height:1.75">'
@@ -1180,7 +1219,7 @@ async function renderGates() {
     const btn = a
       ? '<button class="btn ghost sm" data-revoke="' + g.gate + '">撤销放行</button>'
       : ((g.problems || []).length
-          ? '<button class="btn ghost sm" data-auth="' + g.gate + '">显式放行…</button>'
+          ? '<button class="btn ghost sm" data-auth="' + g.gate + '">知道了，不用再提…</button>'
           : '');
     return '<div style="padding:10px 0;border-top:1px solid #1f2937">'
       + '<div class="row" style="justify-content:space-between;align-items:center">'
@@ -1192,8 +1231,8 @@ async function renderGates() {
   $('#gatesBody').innerHTML = rows || '<div class="muted">没有闸门</div>';
   $('#gatesBody').querySelectorAll('[data-auth]').forEach(b => {
     b.onclick = async () => {
-      const why = prompt('为什么带着这个问题往下跑？\n'
-        + '（会连时间一起记进冻结记录，几个月后回头看要知道当初为什么放）');
+      const why = prompt('为什么这几处可以不管？\n'
+        + '（会连时间一起记进冻结记录，几个月后回头看要知道当初为什么放过）');
       if (!why || !why.trim()) return;
       const r = await api.post('/api/gates/authorize',
         {project_root: PROJ, gate: b.dataset.auth, why: why.trim()});
@@ -1730,9 +1769,13 @@ async function watchStage(id) {
 
 // ---------- 生产
 const GEN_KINDS = [['asset','资产图','image'], ['storyboard','故事板','image'], ['video','分段视频','video']];
-function providerOptions(kind) {
+// cur = 要预选的那家。**不给的话浏览器选列表第一个** —— 那就是「每次都默认」
+// 的来处：设置里把资产图的首选排成超模，生产页照样显示列表里排第一的那家，
+// 点「开始」就用错了服务商，而且不报错（那家也能出图，只是不是你排的那家）。
+function providerOptions(kind, cur) {
   return BOOT.capabilities.filter(c => c.supports.includes(kind))
-    .map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    .map(c => `<option value="${c.id}"${c.id === cur ? ' selected' : ''}>${c.name}</option>`)
+    .join('');
 }
 function renderGen(summary) {
   const multi = (EPS.episodes || []).length > 1;
@@ -1749,11 +1792,17 @@ function renderGen(summary) {
                  video: '环节8 还没编出视频提示词'}[k] || '前置环节还没产出';
     const empty = !s.total;
     const dis = empty ? ` disabled title="${esc(why)}，所以没有任务可跑"` : '';
-    return `<tr data-k="${k}"${empty ? ' style="opacity:.62"' : ''}>
+    // **按「设置 → 出图出片优先级」的首选预选。** 一键跑到底一直是按那条链跑的，
+    // 生产页却不看它 —— 同一个项目两条入口用不同的服务商，而两边都不报错。
+    const pick = ((BOOT.config.chains || {})[k] || [])[0] || {};
+    return `<tr data-k="${k}" data-chain-prov="${esc(pick.provider || '')}"
+                data-chain-model="${esc(pick.model || '')}"${
+                empty ? ' style="opacity:.62"' : ''}>
       <td>${label} ${scope}</td>
       <td>${empty ? `<span class="muted" title="${esc(why)}">0　没有任务</span>`
                   : `${s.done}/${s.total}`}</td>
-      <td><select class="p-sel" data-cap="${cap}" style="min-width:150px">${providerOptions(cap)}</select></td>
+      <td><select class="p-sel" data-cap="${cap}" style="min-width:150px">${
+            providerOptions(cap, pick.provider)}</select></td>
       <td><select class="m-sel" style="min-width:150px"></select></td>
       <td class="pbox"></td>
       <td><input class="c-in" type="number" value="${(BOOT.config.defaults||{}).concurrency||3}" min="1" max="16"></td>
@@ -1787,8 +1836,13 @@ function renderGen(summary) {
     const fill = () => {
       const cap = BOOT.capabilities.find(c => c.id === sel.value) || {};
       const block = cap[sel.dataset.cap] || {};
+      // 模型同理：这一家还是链上那一家时，用链上排的那个模型，
+      // 而不是这家自己的 default_model。换成别家了链上那个型号就不适用了，
+      // 退回这家的默认 —— 硬套会选到一个这家不认的型号然后吃 400。
+      const want = sel.value === tr.dataset.chainProv ? tr.dataset.chainModel : '';
+      const cur = (block.models || []).includes(want) ? want : block.default_model;
       msel.innerHTML = (block.models || []).map(m =>
-        `<option${m === block.default_model ? ' selected' : ''}>${esc(m)}</option>`).join('');
+        `<option${m === cur ? ' selected' : ''}>${esc(m)}</option>`).join('');
       msel.onchange = () => fillParams(block);
       fillParams(block);
     };
@@ -1849,6 +1903,10 @@ async function tick() {
   //
   // 重绘每 1.5 秒一次，所以**重绘前必须先把展开状态记下来** ——
   // 不记的话你刚点开一个分组，下一次刷新就弹回去，那个折叠等于不能用。
+  //
+  // **两层都要记、两层都要还。** 这里一直是两层都记了，但下面只还了外层
+  // 那一个 —— 内层「已结束 N 条」每次重绘都是关着的，于是点开一下就自己
+  // 收回去，看着像点不开。存了不用比不存更难查：状态明明在 GRP_OPEN 里。
   $$('#jobCards details[data-key]').forEach(el => { GRP_OPEN[el.dataset.key] = el.open; });
 
   const jobs = d.jobs || [];
@@ -1877,7 +1935,8 @@ async function tick() {
         <span class="muted">共 ${g.live.length + g.past.length} 条</span>
       </summary>
       ${g.live.map(card).join('')}
-      ${g.past.length ? `<details class="jobpast" data-key="${esc(g.key)}::past">
+      ${g.past.length ? `<details class="jobpast" data-key="${esc(g.key)}::past"${
+            GRP_OPEN[g.key + '::past'] ? ' open' : ''}>
           <summary class="muted">已结束 ${g.past.length} 条${failed ? `（其中 ${failed} 个任务失败）` : ''}</summary>
           ${g.past.map(card).join('')}
         </details>` : ''}
