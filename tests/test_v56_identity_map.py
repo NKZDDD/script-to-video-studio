@@ -62,13 +62,33 @@ Image 2 = ST008 病房
         self.assertIn("这张图是谁", bad)
         self.assertEqual(warn, "", "这条必须硬停，不能只提醒")
 
-    def test_identity_and_authority_are_hard_stops(self):
-        """★ 按危害分级：说不清身份、多图没划权威 → 硬停。"""
-        for label in ("是谁/是什么 + 画面可见内容", "有权控制", "无权控制"):
+    def test_only_a_nameless_image_is_a_hard_stop(self):
+        """★ 硬停只有一条：说不清这张图是谁。
+
+        skill 的硬拦条件就一句「无法消歧时阻断」。
+        """
+        label = "是谁/是什么 + 画面可见内容"
+        hacked = "\n".join(l for l in FULL.splitlines()
+                           if not l.strip().startswith(label))
+        bad, _ = PR.check_identity_map(hacked, REFS)
+        self.assertIn("没说清它是谁", bad)
+
+    def test_a_missing_authority_split_is_only_a_warning(self):
+        """★ 「≥2 张却没划分权威」原来是硬停 —— 那条是自己加的，已降级。
+
+        实跑代价：一条 6 张参考图的场景状态提示词把整批生产拦住，
+        而它并没有说不清谁是谁（报错自己都写着「只说了是谁、
+        没说各自管什么」）。那是把自己的偏好当成规范去拦人。
+
+        多图不划权威确实会让模型平均融合，所以照旧报出来 ——
+        但那是「做出来可能不对」，不是「做不出来」。
+        """
+        for label in ("有权控制", "无权控制"):
             hacked = "\n".join(l for l in FULL.splitlines()
                                if not l.strip().startswith(label))
-            bad, _ = PR.check_identity_map(hacked, REFS)
-            self.assertTrue(bad, f"删掉「{label}」竟然通过了")
+            bad, warn = PR.check_identity_map(hacked, REFS)
+            self.assertEqual(bad, "", f"删掉「{label}」不该硬停")
+            self.assertIn("没说各自管什么", warn, label)
 
     def test_time_and_scope_are_only_warnings(self):
         """★ 时间和范围缺了只提醒，不拦生产。
@@ -100,7 +120,7 @@ Image 2 = ST008 病房
             inline, [{"image_n": 1, "asset_id": "PH001"},
                      {"image_n": 2, "asset_id": "COST001"}])
         self.assertNotIn("没说清它是谁", bad, "行内写法被误判成没说清身份")
-        self.assertIn("没有逐张划分权威", bad)
+        self.assertEqual(bad, "", "身份说清了就不该硬停（缺权威划分只是提醒）")
 
     def test_a_single_reference_in_the_inline_form_passes(self):
         """★ 单张 + 行内说清了是谁 → 放过。
@@ -136,9 +156,12 @@ Image 2 = ST008 病房
   适用范围：本次
 Image 2 = ST008 病房
 """
-        bad, _ = PR.check_identity_map(first_only, REFS)
-        self.assertTrue(bad)
-        self.assertIn("Image 2", bad)
+        # 两张的身份都点名了，所以不硬停；缺权威划分的**只有 Image 2**，
+        # 提醒里必须点到它 —— 这才是「逐张」的意思。
+        bad, warn = PR.check_identity_map(first_only, REFS)
+        self.assertEqual(bad, "")
+        self.assertIn("Image 2", warn)
+        self.assertNotIn("Image 1", warn)
         self.assertNotIn("Image 1（", bad, "第一张是全的，不该被报进来")
 
     def test_legacy_authority_labels_still_count(self):
@@ -185,8 +208,10 @@ class WiringTests(unittest.TestCase):
     def test_both_checks_run_before_generating(self):
         src = io.open(os.path.join(ROOT, "core", "produce.py"),
                       encoding="utf-8").read()
-        i = src.index("check_image_map(prompt, want_refs, who, ref)")
-        j = src.index("check_identity_map(prompt, want_refs, who, ref)")
+        # 只钉顺序，不钉参数表 —— 后面给编号校验加过参数（no_image_refs），
+        # 写死整行会因为这种无关改动而红。
+        i = src.index("check_image_map(prompt, want_refs, who, ref")
+        j = src.index("check_identity_map(prompt, want_refs, who, ref")
         self.assertLess(i, j, "编号校验要排在六字段校验前面，否则会盖住真问题")
 
     def test_the_error_says_whose_prompt_is_at_fault(self):

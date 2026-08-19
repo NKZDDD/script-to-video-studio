@@ -136,35 +136,70 @@ State Result      = 结果锚点，仅在不可逆结果必须冻结时
 **同一时间窗口只能有一个 Temporal Primary。** 两张图都想管"这一刻是什么样"，
 模型会取平均 —— 出来的既不是 A 也不是 B。
 
-**故事板在 V6.1 下可能根本没有图。** 物化门控把大部分 KF 判成
-`TEXT_CANON_ONLY` 时，SBPKG 是一份**文字合同**。这种情况下：
+> **V6.1 这里原来允许「故事板根本没有图」** —— 物化门控把大部分 KF 判成
+> `TEXT_CANON_ONLY` 时，SBPKG 是一份纯文字合同，视频只拿文字当组合权威。
+>
+> **V6.2 第 19 章把这条禁掉了**：每个正式生产 SEG 必须有覆盖完整关键
+> 时间推进的**视觉**载体。所有 KF 照旧保留文字 Canon，但入口、转折、
+> 接触/激活、不可逆结果、出口、高风险走位这几类必须有图。
+> 只有文字 → `VIDEO_STORYBOARD_SPINE_MISSING`。
 
-- 组合权威**仍然是故事板**，只是以文字形式存在，写进提示词正文
-- 六维里的 Position/Blocking 由 CVS/SCSTATE 的**逻辑合同**提供，不需要图
-- 但 Identity 和 LOOK/CT **必须有图** —— 那两维靠文字撑不住，
-  模型会照着描述重新长一张脸
+Identity 和 LOOK/CT 照旧**必须有图** —— 那两维靠文字撑不住，
+模型会照着描述重新长一张脸。
 
 **删掉 SCSTATE 的图，不等于删掉它的 Source CVS、Zone、Anchor、
 Support、Route、Orientation。** 那些是位置合同，没有被批准的移动事件就不可变，
 和出不出图无关。
 
-### 5.2 按可靠度选执行集，**但下限是六维都有来源**
+### 5.2 参考图分两层：骨架必给，补图才是挑的（V6.2 第 19 章）
 
-`{{VIDEO_EXECUTION_RELIABILITY}}` 决定用哪条路径：
+`{{VIDEO_REFERENCE_POLICY}}`
 
-| 可靠度 | 执行集 | 说明 |
-|---|---|---|
-| `high` | `START_ONLY` 或 `CANONICAL_CUT_PAIR` | **仍然不得低于六维底座**；缺哪一维就补哪一维 |
-| `medium` | `TEMPORAL_ANCHOR_SEQUENCE`（2–4 张时间锚点） | 按缺口补当前 LOOK/CT 或相关 LOC_VIEW |
-| `low` | `FULL_STORYBOARD_SEQUENCE` | 超出参考图容量就**拆 SEG**，不是硬塞 |
-| `unknown` | **按 `medium` 处理** | 不许冒充 `high` |
+**第一层 —— 强制故事板时间骨架，不可省。**
+把本段第十二环节的**全部有序 Sheet**（或同一 SBPKG 的有序独立 KF 锚点）
+按 `order` 上传。它覆盖的是：先发生什么后发生什么、每个 Beat 谁施动谁受动、
+关键动作阶段与稳定结果、镜头顺序与切换动机。
 
-`unknown` 按 `medium` 走这条是硬的。冒充 `high` 的代价是参考图给少了，
-视频自己编 —— 而且看起来是好的，要到整集连起来看才发现人不对、地方不对。
+> **V6.1 这里原来是按可靠度分路的**：`high` 走 `START_ONLY`（只给一张起始图）、
+> `medium` 走 2–4 张时间锚点、`low` 才给完整故事板。
+>
+> **V6.2 把这条改掉了。** 原话：可靠度只决定故事板**承载颗粒度**、
+> 补图数量与提示词冗余度，**不决定是否提供故事板**。
+> 所以 `{{VIDEO_EXECUTION_RELIABILITY}}` 再高也不能退化成只有一张起始图 ——
+> 那种情况输出 `VIDEO_STORYBOARD_SPINE_MISSING`。
 
-删图的唯一合法理由是**这一维已经由别的来源覆盖**，
-不是"看起来够了"。同一稳定状态不要重复上传 SCSTATE、故事板、
-Anchor、LOOK 和场景 PR —— 但删之前回到 5.0 那张表逐维核一遍。
+**每张骨架图进视频前逐项准入**（`storyboard_reference_admission_gate`）：
+叙事准确、身份、当前 LOOK/CT、几何、World Position/Zone/Anchor/朝向、
+支撑/通路/屏障/门户、时间状态与未来状态禁运、道具实例/数量/持有人、
+动作阶段、镜头观察、可读性（脸、手、关键细节）。
+
+任一关键项错 → `STORYBOARD_REFERENCE_ADMISSION_FAILED`。
+修的顺序是：先判上游文字 Canon 对不对，上游对就建新的故事板版本，
+上游错就先修有权威的那一层。
+**禁止用正确的 LOOK、LOC_VIEW 或文字提示词去「压过」一张错的故事板。**
+
+**第二层 —— 补图必须证明有独有作用**（`effective_reference_selection_gate`）。
+每张候选同时满足五条，否则删掉并输出 `VIDEO_REFERENCE_UNIQUE_UTILITY_UNPROVEN`：
+
+```
+CORRECT        通过准入与 Canonical 解析
+UNIQUE         解决骨架**没覆盖**的独有 Authority 缺口
+NONCONFLICTING 不控制镜头、走位、时间或动作阶段
+WINDOWED       有明确的适用视频时间窗
+LEGIBLE        对模型可见，且足以解决那个缺口
+```
+
+合法的补图触发器：主角身份在骨架里不够清晰或跨镜头易漂；当前完整 LOOK/CT 的
+身体/背面/下装/鞋履/伤势区域将**首次显露**；镜头显露进入骨架没充分说明
+但空间已批准的新 Zone；Hero 道具的文字/结构/尺寸/状态结果在骨架里不可辨；
+不可逆状态结果需要独立清晰权威。
+
+**禁止的补图动机**：为了填满上限；「可能有用」「多一张更保险」；
+和骨架表达完全相同的状态；错的故事板还没修；让 LOOK 重新控制姿态或走位；
+让 LOC_VIEW 重新控制当前构图；让道具 SPEC 重新决定持有人、数量或动作阶段。
+
+**SCSTATE 默认不上传视频。** 同一稳定状态不许用 SCSTATE、故事板、LOOK
+和场景 PR 重复投票。
 
 **参考图上限是容量上限，不是要装满的目标，也不是可以减到零的许可。**
 
@@ -212,6 +247,116 @@ Image 1 = SB_{{EPISODE}}_{{SEGMENT}} 本段故事板执行图
 补充图必须显式写「无权控制：机位、走位、动作阶段、时间」。
 补充图一旦被要求控制姿态、机位、走位或动作时间，
 输出 `REFERENCE_AUTHORITY_CONFLICT` 并停下，不要释放视频提示词。
+
+## 六（前）｜导演级执行密度（V6.2 第 19 章）
+
+`{{VIDEO_PROMPT_DETAIL_MODE}}`
+
+**提示词不许只有字段标题、镜头标签或一句动作摘要。** 把这一段按因果、表演、
+镜头和状态变化**动态**划分时间窗：普通 Beat 可以 2–5 秒，高风险接触、交接、
+跌倒或状态激活细分到 0.5–1.5 秒。**不要机械地固定窗口数量。**
+
+不够可执行 → `VIDEO_PROMPT_EXECUTION_DETAIL_INSUFFICIENT`。
+
+### 时间窗执行卡：每个窗口至少写这些
+
+```
+TIME WINDOW                     这一窗的起止秒
+STORY / BEAT PURPOSE            这一窗要完成什么剧情任务
+ACTIVE CHARACTER / LOOK / CT    谁在场、当前造型与状态
+WORLD POSITION / ZONE / ANCHOR / SUPPORT / ORIENTATION
+PROP INSTANCE / COUNT / HOLDER
+PRIMARY NARRATIVE SUBJECT       这一窗镜头和观众注意力归谁
+TRIGGER                         什么触发了这一窗
+ACTION CAUSALITY                谁因为什么做了什么
+ACTION PHASE                    准备/启动/路径/接触/跟随/反应/恢复/稳定结果
+PHYSICAL PATH / COMPLETION CONDITION
+MICRO-PERFORMANCE
+EYE-LINE / ATTENTION
+CAMERA / COMPOSITION / FOCUS
+CUT OR TRANSITION MOTIVATION    为什么在这里切
+DIALOGUE / VOCAL DELIVERY / LIP SYNC
+SFX / AMBIENCE / MUSIC
+STATE DELTA                     这一窗结束时变了什么
+NEXT TRIGGER
+FORBIDDEN FUTURE STATE
+```
+
+**逐窗重复当前持续状态和关键位置，不许写「同上」「保持一致」。**
+
+### 微表演：写可拍的行为，不是情绪词
+
+`{{MICRO_PERFORMANCE_CONTRACT}}`
+
+「细腻」来自角色目标、压抑与泄露，不来自堆砌随机动作。关键 Beat 至少挑几项
+和剧情相关的：内心目标、潜台词、注意力对象、眼动先于头动、呼吸变化、
+面部肌肉张力、眨眼/吞咽/迟疑、手与手指行为、身体张力与重心转移、
+反应延迟、克制/泄露/释放、说话前的准备与说完后的收尾。
+
+写成这样：「先保持面对记者，眼睛先右移，停顿半秒后才转头」。
+**不要只写「紧张」「悲伤」「电影感表演」** → `VIDEO_PERFORMANCE_CONTRACT_INSUFFICIENT`。
+
+背景人物只给符合空间与事件的低优先级自然反应，不许抢主叙事对象。
+
+### 动作阶段与物理反应
+
+`{{ACTION_PHASE_PHYSICAL_RESPONSE_CONTRACT}}`
+
+攻击、跌倒、搀扶、交接、拥抱、起身、转身、开门、上下车这类高风险动作按需展开：
+
+```
+准备 → 启动 → 路径 → 接触 → 跟随 → 反应延迟 → 恢复/失衡 → 稳定结果
+```
+
+逐阶段写施动者、受动者、身体或道具路径、接触位置、重量与惯性、完成条件、
+声音和状态变化。硬规则：
+
+- **受动者不得在接触前完整反应**
+- **道具不得在手闭合前换持有人**
+- **跌倒必须有失衡、支撑失败与落地过程**
+- 完成之后不许重演；状态只在激活动作完成后生效
+- 中间姿势不建立新的稳定 Canon，除非剧情需要
+
+缺了 → `VIDEO_ACTION_PHASE_INCOMPLETE`。
+
+### 镜头语法
+
+`{{CINEMATIC_CAMERA_GRAMMAR_CONTRACT}}`
+
+每个镜头或切换必须说明：叙事功能、来源 KF/时间窗、景别/角度/镜头意图、
+机位与看向、构图与景深层次与主体优先级、运动起点/路径/速度变化/停点、
+视线与轴线与画面方向、焦点与拉焦、显露包络、切换动机与剪辑关系、
+转场机制与遮挡与切点、新镜头透露了什么信息。
+
+**镜头只投影 Canonical World** —— 不移动人物、门窗、家具、Zone 或道具。
+不许为了「更有张力」加没有功能的推拉摇移；镜头复杂度必须服务 Beat、
+表演或信息 → 否则 `VIDEO_CAMERA_GRAMMAR_INSUFFICIENT`。
+
+### 细化 ≠ 堆形容词
+
+只有长篇形容词、重复禁令，或者每个窗口的描述完全一样 —— **不算高密度**。
+
+模型负载过高时，优先减掉装饰性背景动作、复杂景深、无必要拉焦、
+无功能运镜、重复反应镜头。**不许删**关键因果、故事板骨架、身份、
+LOOK/CT、World Position、动作完成、必需音频或 Canonical 结果。
+
+### 冲突时的保护顺序
+
+```
+1. 故事真相 / 故事板时间骨架
+2. 边界 / 入口 / 出口
+3. 人物身份 + 当前 LOOK / CT
+4. World Position / 空间 / 几何
+5. 状态 / 道具实例 / 数量 / 持有人
+6. 必需对白 / 音频
+7. 动作完成 / 物理因果
+8. 表演意图 / 反应优先级
+9. 镜头复杂度 / 焦点效果
+10. 装饰细节 / 背景微动作
+```
+
+允许把复杂运镜降成稳定机位、把多次拉焦降成单一焦点、把装饰动作交给自然生成；
+**禁止用「简化镜头」当作人物瞬移、动作缺失或状态重置的理由。**
 
 ## 六、提示词必须包含的执行块
 
@@ -344,7 +489,23 @@ V6.1 要求提示词按这个顺序写，**技术合同放最后**：
         "transition_id": "TR_{{EPISODE}}_001",
         "transition_role": "NONE|EXIT|WINDOW|ENTRY",
         "sound_cue": "",
-        "exit_state": ""}
+        "exit_state": "",
+        "_V6.2 导演级 —— 下面几项每个窗口都要填，不许写「同上」": "",
+        "beat_purpose": "这一窗要完成什么剧情任务",
+        "primary_narrative_subject": "这一窗镜头和观众注意力归谁",
+        "trigger": "什么触发了这一窗",
+        "action_phase": "准备|启动|路径|接触|跟随|反应延迟|恢复或失衡|稳定结果",
+        "physical_path": "身体或道具的路径、接触位置、重量与惯性",
+        "completion_condition": "这个动作算完成的判据",
+        "micro_performance": "可拍的行为：眼动/呼吸/手指/重心/迟疑/克制或泄露",
+        "eye_line_attention": "看谁、注意力在哪；眼动先于头动写清楚",
+        "camera_grammar": "叙事功能、景别角度、机位与看向、构图层次、运动起止、轴线与画面方向、焦点与拉焦、显露包络",
+        "cut_motivation": "为什么在这里切；不切就写 NONE",
+        "dialogue_delivery": "台词原文、说话人、语速停顿情绪；口型只绑当前说话人",
+        "sfx_ambience_music": "动作声与物理事件同步；Room Tone 随场景延续",
+        "state_delta": "这一窗结束时变了什么",
+        "next_trigger": "下一窗靠什么起来",
+        "position_state_restated": "当前 Zone/Anchor/支撑/朝向，逐窗重写一遍"}
      ],
      "transition_windows": [
        {"transition_id": "TR_{{EPISODE}}_001",
@@ -361,15 +522,34 @@ V6.1 要求提示词按这个顺序写，**技术合同放最后**：
         "completion_condition": "什么算做成了",
         "failure_signature": "做失败会长什么样（给人工验收看）"}
      ],
+     "storyboard_spine": {
+       "sbpkg_id": "SBPKG_{{SEGMENT}}",
+       "carrier_mode": "ORDERED_CONTINUATION_SHEETS|ORDERED_KF_ANCHORS",
+       "temporal_coverage": "COMPLETE",
+       "images": [
+         {"order": 1, "sheet_id": "SHEET_A", "kf_range": "KF01-KF03",
+          "time_range": "本段 0-12 秒",
+          "spine_role": "ENTRY|TURN|CONTACT_OR_ACTIVATION|RESULT|EXIT|HIGH_RISK_BLOCKING",
+          "admission_status": "ADMITTED 或 FAILED + 哪一项不过"}
+       ],
+       "coverage_note": "这几张按顺序覆盖了本段哪些关键时刻；有没有哪个关键时间窗没覆盖"
+     },
      "reference_order": [
-       {"image_n": 1, "asset_id": "SBPKG_{{SEGMENT}}", "asset_name": "本段故事板",
+       {"image_n": 1, "asset_id": "SBPKG_{{SEGMENT}}_SHEET_A",
+        "asset_name": "本段故事板第 1 张",
+        "reference_role": "STORYBOARD_SPINE|IDENTITY|GEOMETRY|PROP|STATE_RESULT|BOUNDARY_ANCHOR",
         "who_what_visible": "这张图是谁/是什么 + 画面里能看见什么（必填）",
         "story_time_state": "故事时间与当前状态（必填）",
-        "unique_missing_authority": "只在超过 5 张时必填：这一张补的是哪一项故事板给不了的权威",
+        "unique_authority_contribution": "**补图必填**：这一张解决的是哪一项骨架给不了的权威缺口",
+        "admission_status": "ADMITTED 或 FAILED + 哪一项不过",
         "must_preserve": "", "must_transform": "",
         "must_not_copy": "", "does_not_control": "",
-        "applicable_time_window": "全段"}
+        "applicable_time_window": "全段 或 0-12 秒"}
      ],
+     "rejected_references": [
+       {"asset_id": "", "why": "为什么删掉：和骨架表达同一状态 / 证明不出独有作用 / 准入没过"}
+     ],
+     "quality_priority_note": "如果过载，先简化什么、绝不删什么",
      "capability_note": "按目标模型的多镜头能力档位，这一段是否需要降级；降到哪一档",
      "video_prompt": "完整提示词正文，含上面全部执行块，可直接复制投喂视频模型"}
   ],

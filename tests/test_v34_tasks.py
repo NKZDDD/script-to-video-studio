@@ -54,17 +54,54 @@ class TaskBuildTests(unittest.TestCase):
             for f in ("key", "prompt_ref", "storyboard_ref", "params", "output"):
                 self.assertIn(f, task)
 
-    def test_one_task_per_segment(self):
-        t = R.build_tasks(self.pj, PARAMS)
-        self.assertEqual({x["key"] for x in t["storyboard_tasks"]}, set(SEGS))
-        self.assertEqual({x["key"] for x in t["video_tasks"]}, set(SEGS))
+    def test_one_video_task_per_segment(self):
+        self.assertEqual({x["key"] for x in R.build_tasks(
+            self.pj, PARAMS)["video_tasks"]}, set(SEGS))
 
-    def test_video_points_at_its_own_storyboard(self):
-        """★ 视频拿故事板当参考。指错段的话，画面和台词对不上但不报错。"""
+    def test_a_segment_gets_one_storyboard_task_per_sheet(self):
+        """★ V6.2：一个段落是 1..N 张**有序** Sheet，不再是一张。
+
+        V6.1 时代这里断言的是「一段一张」。那条不变量正是坑的来源：
+        模板要求「每张最多 3 格、更多用有序续页」，而装配层只给一个输出位置，
+        模型只能把 6 格挤进一张 —— 实遇 EP01-SEG06 就是这样。
+        """
         t = R.build_tasks(self.pj, PARAMS)
-        sb = {x["key"]: x["output"] for x in t["storyboard_tasks"]}
+        per_seg: dict = {}
+        for x in t["storyboard_tasks"]:
+            per_seg.setdefault(x["segment"], []).append(x)
+        self.assertEqual(set(per_seg), set(SEGS))
+        for seg, rows in per_seg.items():
+            self.assertEqual(len(rows), 2, f"{seg} 的两张 Sheet 没都建出任务")
+            self.assertEqual([r["sheet_id"] for r in rows],
+                             ["SHEET_A", "SHEET_B"])
+            self.assertEqual(len({r["key"] for r in rows}), 2,
+                             "两张的 key 撞了 —— 会互相覆盖同一个文件")
+            self.assertEqual(len({r["output"] for r in rows}), 2,
+                             "两张的输出路径撞了 —— 后一张覆盖前一张，不报错")
+
+    def test_video_carries_the_whole_ordered_spine(self):
+        """★ V6.2 的核心：视频要拿**整条**有序骨架，不是一张。
+
+        只给第一张的话，模型不知道这一段先发生什么后发生什么 ——
+        而画面照样出得来，看着正常。
+        """
+        t = R.build_tasks(self.pj, PARAMS)
+        by_seg: dict = {}
+        for x in t["storyboard_tasks"]:
+            by_seg.setdefault(x["segment"], []).append(x["output"])
         for v in t["video_tasks"]:
-            self.assertEqual(v["storyboard_ref"], sb[v["key"]])
+            got = [s["file_ref"] for s in v["storyboard_refs"]]
+            self.assertEqual(got, by_seg[v["key"]],
+                             "视频拿到的骨架和这一段的故事板对不上")
+            self.assertEqual([s["order"] for s in v["storyboard_refs"]], [1, 2],
+                             "顺序丢了 —— 模型会把后段当前段")
+
+    def test_the_old_single_ref_field_still_points_somewhere(self):
+        """老页面和老台账还在读 storyboard_ref，别让它变成空。"""
+        t = R.build_tasks(self.pj, PARAMS)
+        for v in t["video_tasks"]:
+            self.assertTrue(v["storyboard_ref"])
+            self.assertEqual(v["storyboard_ref"], v["storyboard_refs"][0]["file_ref"])
 
     def test_storyboard_refs_resolve_to_scstate_files(self):
         """★ 故事板的参考图应该指到场景状态图，不是指到空。"""

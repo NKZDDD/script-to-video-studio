@@ -100,11 +100,20 @@ class CompressionCheckTests(unittest.TestCase):
             for i, e in enumerate(ends)]}, {"duration": 15}, "EP01",
             lambda *a, **k: None)
 
-    def test_the_real_failure_is_caught(self):
-        """★ 用户那一轮的真实数字：该 90 秒，排成了 15 秒。"""
-        with self.assertRaises(RuntimeError) as cm:
-            self._check(0.9, 8.1, 15.0)
-        msg = str(cm.exception)
+    def test_the_real_failure_is_recorded_but_does_not_block(self):
+        """★ 用户那一轮的真实数字：该 90 秒，排成了 15 秒。
+
+        **以前这里硬停，现在只记。** 这条检查（压缩超过 25%）是本地经验
+        规则，skill 里没有对应条文；而 duration 的语义本来就容易配错
+        （实跑：项目参数 15 秒、装箱 12 段共 180 秒），
+        硬停整个环节太重。审计（n14）本来就会报同一件事。
+        """
+        self._check(0.9, 8.1, 15.0)          # 不抛
+        rows = [d for d in diagnose.load(self.pj.root)
+                if d["code"] == "RUNTIME_SQUEEZED"]
+        self.assertEqual(len(rows), 1, "不拦也得记下来")
+        self.assertEqual(rows[0]["level"], "warn")
+        msg = rows[0]["raw"]
         self.assertIn("15", msg)
         self.assertIn("90", msg)
         # 光说「时长不对」没用 —— 得说清这两个数字分别是什么，
@@ -137,14 +146,18 @@ class CompressionCheckTests(unittest.TestCase):
             R.check_runtime(self.pj, sid, {"timing_plan": [{"end": 15.0}]},
                             {"duration": 15}, "EP01", lambda *a, **k: None)
 
-    def test_it_gets_its_own_diagnosis_code(self):
-        """★ 报成「没见过的错误」等于没查出来。"""
-        try:
-            self._check(15.0)
-        except RuntimeError as exc:
-            self.assertEqual(diagnose.code_of(str(exc)), "EPISODE_COMPRESSED")
-        else:
-            self.fail("该抛没抛")
+    def test_a_clean_episode_records_nothing(self):
+        """★ 别拦过头 —— 时长对得上就不该留记录。"""
+        self._check(90.0)
+        self.assertEqual([d for d in diagnose.load(self.pj.root)
+                          if d["code"] == "RUNTIME_SQUEEZED"], [])
+
+    def test_it_no_longer_raises(self):
+        """★ 这一条单独钉：本地经验规则不许挡住整个环节。"""
+        import inspect
+        src = inspect.getsource(R.check_runtime)
+        self.assertNotIn("raise RuntimeError", src)
+        self.assertIn("RUNTIME_SQUEEZED", src)
 
 
 class TemplateTests(unittest.TestCase):

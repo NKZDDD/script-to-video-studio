@@ -54,11 +54,25 @@ class BoundaryTests(unittest.TestCase):
 
 class DimensionFloorTests(unittest.TestCase):
 
-    def test_the_policy_name_says_authority_complete(self):
-        """★ 「最小充分」和「权威完整」是相反的判据，不是同义词。"""
+    def test_the_policy_name_is_not_minimum_sufficient(self):
+        """★ 这条测试钉的是**方向**，被改过两次名字，方向一直没变。
+
+        V6.0  `minimum_sufficient`                 能删就删
+        V6.1  `adaptive_authority_complete…`       六维都有来源才允许删
+        V6.2  `mandatory_storyboard_plus_selective_effective_supplemental`
+                                                  故事板必给，只有补图是挑的
+
+        「最小充分」和后两者是**相反**的判据。名字可以再改，
+        但不许改回「能删就删」——那个方向一打开就是回到 bug 里。
+        """
         v = ST.FIXED_DERIVED["video_reference_policy"]
-        self.assertIn("authority_complete", v)
         self.assertNotIn("minimum_sufficient", v)
+        self.assertIn("mandatory_storyboard", v)
+
+    def test_the_storyboard_spine_is_mandatory(self):
+        """★ V6.2 的主题：视频不许退化成只有一张起始图。"""
+        self.assertEqual(ST.FIXED_DERIVED["storyboard_video_reference_policy"],
+                         "mandatory_temporal_spine")
 
     def test_the_gate_is_required(self):
         self.assertEqual(ST.FIXED_DERIVED["reference_dimension_coverage_gate"],
@@ -98,8 +112,25 @@ class StoryboardSheetTests(unittest.TestCase):
             self.assertIn(tier, t, tier)
         self.assertIn("默认是 `TEXT_CANON_ONLY`", t)
 
-    def test_it_forbids_asking_the_image_model_for_three_panels(self):
-        self.assertIn("不许默认让图片模型一次生成三格", _tpl("n12_storyboard"))
+    def test_the_two_carriers_are_equal_under_v62(self):
+        """★ V6.1 这条是「**不许默认**让图片模型一次生成三格」——
+
+        逐张独立锚点是正路，三格排版是例外。V6.2 第 19 章把两者拉平了：
+        有序多张 Sheet 和有序独立 KF 锚点是**等价载体**，按模型实测挑，
+        而必须满足的是「覆盖完整关键时间推进」。
+
+        所以那句禁令没了，换成这条 —— 钉住的是「两种都合法、都必须有序」。
+        """
+        t = _tpl("n12_storyboard")
+        self.assertIn("ORDERED_CONTINUATION_SHEETS", t)
+        self.assertIn("ORDERED_KF_ANCHORS", t)
+        self.assertIn("等价载体", t)
+        self.assertNotIn("不许默认让图片模型一次生成三格", t,
+                         "V6.2 已经把两种载体拉平，这句禁令留着会和上面那张表打架")
+
+    def test_the_three_panel_cap_itself_is_still_there(self):
+        """★ 别把上限一起丢了：每张最多 3 格是 V6.0 定的，V6.2 没动。"""
+        self.assertIn("每张 Sheet 最多", _tpl("n12_storyboard"))
 
 
 class ScstateLogicalFirstTests(unittest.TestCase):

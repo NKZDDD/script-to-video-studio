@@ -58,13 +58,56 @@ SBPKG_{{SEGMENT}}
 新的动作阶段、新的信息、新的反应、新的空间关系、新的状态价值 ——
 **没有新增价值的格子一律删掉**，重复的情绪格只会稀释信息。
 
-### 只有 1–2 个锚点时，Sheet 可以完全不出图
+## 二（补一）｜强制故事板时间骨架（V6.2 第 19 章）
 
-物化门控（下一章）判下来只剩 1–2 个视觉锚点时，
-SBSHEET 保持 **LOGICAL Package** —— 一份文字合同，不生成排版图。
+**这一章改了这个环节的性质。** V6.0/6.1 允许「只剩 1–2 个锚点时整个 Sheet
+保持文字合同、不出图」—— V6.2 把它禁掉了：
 
-**不许默认让图片模型一次生成三格。** 通过门控的 KF 是**逐张**
-生成独立锚点的；三格排版只在已有批准锚点、需要确定性版式时才做。
+> 每个正式生产 SEG 必须拥有覆盖**本段完整关键时间进程**的视觉载体。
+> 不得以「视频模型很强」为由取消 Storyboard。
+
+时间骨架必须回答：先发生什么、后发生什么；每个关键 Beat 谁施动谁受动；
+人物从哪个 World Position 起、经什么 Route 到哪个 Anchor；每个关键动作阶段、
+接触、反应与稳定结果；镜头顺序、观察方向、切换动机；哪个事件激活 CT / 道具 /
+场景状态；出口的人物、空间、数量、持有人与时间真相。
+
+**人物 LOOK、LOC_VIEW、道具 SPEC、SCSTATE 或文字提示词都不能替代它。**
+
+### 完整覆盖 ≠ 每个动作都出图
+
+所有 KF 照旧保留文字 Canon。视觉骨架只物化足以锁定完整关键推进的
+**入口、转折、接触/激活、不可逆结果、出口、高风险走位锚点**；
+自然中间运动交给视频提示词展开。
+
+但不许出现某个关键时间窗**既没有 Sheet / KF 锚点覆盖，也没有合法理由**
+标记为两个锚点之间的视频重建。
+
+### 两种等价载体，选一种
+
+当前策略：`{{STORYBOARD_MATERIALIZATION_POLICY}}`
+
+| `carrier_mode` | 怎么承载 | 什么时候用 |
+|---|---|---|
+| `ORDERED_CONTINUATION_SHEETS` | 有序多张 Sheet，每张最多 {{STORYBOARD_MAX_KF_PER_SHEET}} 格 | 模型对多格排版理解稳定 |
+| `ORDERED_KF_ANCHORS` | 有序独立关键帧锚点，一张一格 | 多格理解不稳、容易糊格或泄露未来状态 |
+
+**独立锚点仍然是 Canonical Storyboard 的视觉载体**，不是绕过故事板的另一套
+参考系统。策略写的是 `mandatory_temporal_spine` 时由你按实测挑一种并在
+`carrier_mode` 里说明理由。
+
+两种载体都**必须有序**，都属于同一个 SBPKG，都不许重新编号或改顺序。
+一个 SEG 永远只有一个 SBPKG。
+
+### 容量不够时的顺序
+
+1. 删重复的情绪 KF，**不删关键因果**
+2. 把已批准锚点确定性排成每张最多 3 格
+3. 模型更适合独立图片时，改用同一 SBPKG 的有序独立锚点
+4. 仍然超容量就**拆 SEG** 并重建稳定边界
+5. **禁止静默丢弃中段转折、动作完成或出口结果**
+
+无法在容量内提供完整骨架时输出 `STORYBOARD_REFERENCE_CAPACITY_BLOCKED`
+并说明卡在哪一步。
 
 ## 二（补）｜每个 KF 的物化档位
 
@@ -231,7 +274,30 @@ Image 1 = SCST_{{EPISODE}}_SC01_01 本段场景状态图
   "segment": "{{SEGMENT}}",
   "sbpkg": [
     {"sbpkg_id": "SBPKG_{{SEGMENT}}",
-     "sheets": [{"sheet_id": "SHEET_A", "kf_range": "KF01-KF06", "layout": "2行3列"}],
+     "carrier_mode": "ORDERED_CONTINUATION_SHEETS|ORDERED_KF_ANCHORS",
+     "carrier_reason": "为什么选这种载体（策略是 mandatory_temporal_spine 时必填）",
+     "temporal_coverage": "COMPLETE",
+     "spine_note": "这几张按顺序覆盖了本段哪些关键时刻：入口→转折→接触→结果→出口",
+     "sheets": [
+       {"sheet_id": "SHEET_A",
+        "order": 1,
+        "kf_range": "KF01-KF03",
+        "layout": "1行3列；ORDERED_KF_ANCHORS 时写「单格」",
+        "time_range": "本段 0-12 秒",
+        "spine_role": "ENTRY|TURN|CONTACT_OR_ACTIVATION|RESULT|EXIT|HIGH_RISK_BLOCKING",
+        "size": "{{IMAGE_SIZE}}",
+        "filename": "SBPKG_{{SEGMENT}}_SHEET_A.png",
+        "reference_order": [
+          {"image_n": 1, "asset_id": "SCST_{{EPISODE}}_SC01_01",
+           "asset_name": "本段场景状态图",
+           "who_what_visible": "这张图是谁/是什么 + 画面里能看见什么（必填；多人必须逐个点名并说清各自位置）",
+           "story_time_state": "故事时间与当前状态（必填）",
+           "must_preserve": "", "must_transform": "",
+           "must_not_copy": "", "does_not_control": "",
+           "applicable_kf": "这张 Sheet 里的哪几格"}
+        ],
+        "storyboard_prompt": "**这一张**的完整提示词正文，按上面十部分的顺序写，可直接投喂图片模型"}
+     ],
      "kf_count": 6,
      "kf": [
        {"kf_id": "KF01",
@@ -274,15 +340,6 @@ Image 1 = SCST_{{EPISODE}}_SC01_01 本段场景状态图
         "transition_role": "EXIT|TRIGGER|SHIELD_OR_PEAK|ENTRY|NONE",
         "world_truth_authority": "NONE 或写明例外"}
      ],
-     "reference_order": [
-       {"image_n": 1, "asset_id": "SCST_{{EPISODE}}_SC01_01",
-        "asset_name": "本段场景状态图",
-        "who_what_visible": "这张图是谁/是什么 + 画面里能看见什么（必填；多人必须逐个点名并说清各自位置）",
-        "story_time_state": "故事时间与当前状态（必填）",
-        "must_preserve": "", "must_transform": "",
-        "must_not_copy": "", "does_not_control": "",
-        "applicable_kf": "全部 或 KF01-KF03"}
-     ],
      "transition_contracts": [
        {"transition_id": "TR_{{EPISODE}}_001",
         "mechanism": "NATIVE_CUT", "execution_mode": "MODEL_NATIVE_ONLY",
@@ -292,12 +349,18 @@ Image 1 = SCST_{{EPISODE}}_SC01_01 本段场景状态图
         "do_not_interpolate_camera": true,
         "forbidden_state_mixing": []}
      ],
-     "size": "{{IMAGE_SIZE}}",
-     "filename": "SBPKG_{{SEGMENT}}_SHEET_A.png",
-     "storyboard_prompt": "完整提示词正文，按上面十部分的顺序写，可直接复制投喂图片模型"}
+     "reference_capacity_rationale": "每张各引了几张参考图、为什么装得下"}
   ],
   "kf_rationale": "为什么是这个格数（每格新增了什么价值）"
 }
+```
+
+**`sheets[]` 里每一项都会变成一张真实的出图任务**，所以三样一个都不能少：
+`order`（决定上传给视频模型的顺序）、`filename`（落盘路径）、
+`storyboard_prompt`（这一张自己的提示词正文，不是整包共用一份）。
+
+漏了 `storyboard_prompt` 的那张不会有出图任务 —— 于是时间骨架缺一段，
+而这件事**不报错，只是少一张**。
 ```
 
 ## 输入

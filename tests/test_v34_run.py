@@ -151,8 +151,20 @@ _FIXTURES = {
                       "boundary_rationale": "b"} for s in SEGS]},
     "n11": {"scstates": [{"scstate_id": "SCST1", "source_cvs": "CVS1",
                           "reference_assets": ["C001"], "prompt": "p"}]},
-    "n12": {"sbpkg": [{"sbpkg_id": "PKG", "kf": [], "reference_order": [],
-                       "storyboard_prompt": "p"}]},
+    # V6.2：提示词和参考图顺序在 **sheet 一级**，一个 SEG 是 1..N 张有序 Sheet。
+    # 包一级那份老形状仍然能跑（见 test_v34_tasks 里那几条），但新产出必须是这个。
+    "n12": {"sbpkg": [{"sbpkg_id": "PKG", "kf": [],
+                       "carrier_mode": "ORDERED_CONTINUATION_SHEETS",
+                       "temporal_coverage": "COMPLETE",
+                       "sheets": [
+                           {"sheet_id": "SHEET_A", "order": 1,
+                            "kf_range": "KF01-KF03", "spine_role": "ENTRY",
+                            "reference_order": [],
+                            "storyboard_prompt": "p"},
+                           {"sheet_id": "SHEET_B", "order": 2,
+                            "kf_range": "KF04-KF06", "spine_role": "EXIT",
+                            "reference_order": [],
+                            "storyboard_prompt": "p2"}]}]},
     "n13": {"video_plan": [{"seg_id": SEGS[0], "windows": [],
                             "reference_order": [], "video_prompt": "p"}]},
     "n14": {"findings": []},

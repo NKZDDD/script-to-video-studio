@@ -66,7 +66,8 @@ FIELDS: list = [
             "定紧了节奏可能拖沓，定松了模型会改人物关系和结局。"},
     {"key": "visual_medium", "label": "拍成什么形式", "type": "enum",
      "options": ["live_action", "3d", "2d", "mixed"],
-     "zh": {"live_action": "真人写实", "3d": "3D", "2d": "2D", "mixed": "混合"},
+     "zh": {"live_action": "真人短剧", "3d": "3D漫剧", "2d": "二维动画",
+            "mixed": "混合形式"},
      "default": "live_action", "source": "settings", "group": "项目"},
     {"key": "visual_style", "label": "视觉风格", "type": "text",
      "hint": "电影写实 / 都市情感 / 末日废土 / 古装写实…",
@@ -213,14 +214,22 @@ FIELDS: list = [
      "default": "risk_based", "source": "settings", "group": "图像减压",
      "why": "V6.0 第 9 章：SCSTATE 默认是 CVS 派生的**逻辑合同**，"
             "不要求每个 CVS 出图。中间动作、姿势、反应优先标 DEFER_TO_VIDEO。"},
-    {"key": "storyboard_materialization_policy", "label": "故事板出多少张",
-     "type": "enum", "options": ["anchor_only", "selected_kf", "full_storyboard"],
-     "zh": {"anchor_only": "只出入口/结果/高风险锚点",
-            "selected_kf": "出挑选过的关键帧",
-            "full_storyboard": "整套故事板都出"},
-     "default": "anchor_only", "source": "settings", "group": "图像减压",
-     "why": "V6.0 第 15 章：**禁止默认让图片模型一次生成三格**。"
-            "每个 KF 都有文字 Canon，只有通过门控的才逐张生成独立 Anchor。"},
+    {"key": "storyboard_materialization_policy", "label": "故事板怎么承载",
+     "type": "enum", "options": ["mandatory_temporal_spine",
+                                 "ordered_continuation_sheets",
+                                 "ordered_kf_anchors"],
+     "zh": {"mandatory_temporal_spine": "由模型按实测选承载（推荐）",
+            "ordered_continuation_sheets": "有序多张连续 Sheet（每张≤3格）",
+            "ordered_kf_anchors": "有序独立关键帧锚点（一张一格）"},
+     "default": "mandatory_temporal_spine", "source": "settings",
+     "group": "图像减压",
+     "why": "**V6.2 第 19 章改了这一条的性质。** V6.0/6.1 是「出多少张」"
+            "（anchor_only / selected_kf / full_storyboard），可以退化到只出一张；"
+            "V6.2 定死每个 SEG 必须有覆盖**完整关键时间推进**的故事板骨架，"
+            "所以这里选的不再是「出几张」而是「用哪种载体承载」——"
+            "有序多张 Sheet，还是有序独立关键帧锚点。两种等价，"
+            "按你的模型实测挑：多格 Sheet 理解不稳、容易糊格或泄露未来状态的，"
+            "用独立锚点。选「由模型按实测选」就让第十二环节自己判。"},
     {"key": "storyboard_max_kf_per_sheet", "label": "每张故事板最多几格",
      "type": "int", "default": 3, "source": "settings", "group": "图像减压",
      "why": "**V6.0 定的 3，V6.1 保留。** 我们模板里原来写的「3×3=9」是自编的，V5.6 没给过数字上限。实跑撞过 16 格 —— 模型记不住那么多"
@@ -351,8 +360,69 @@ FIELDS: list = [
             "**隐藏 ID 之后仍必须能理解原文确切时刻与因果。**"},
     {"key": "video_reference_policy", "label": "视频参考图怎么挑",
      "type": "text", "source": "derived", "group": "已冻结",
-     "why": "参考数量**不以模型上限为目标**；同一时间窗口只能有一个 "
-            "Temporal Primary。"},
+     "why": "**V6.2 改成两层。** 第一层是必须给的故事板时间骨架，"
+            "第二层才是「证明得出独有作用」的补图。参考数量**不以模型上限为目标**；"
+            "补图不许和故事板争夺时间、动作阶段、走位或镜头顺序。"},
+    # ---- V6.2 新增的六条固定策略（第 19 章） ----
+    {"key": "storyboard_video_reference_policy",
+     "label": "视频必须带故事板吗", "type": "text",
+     "source": "derived", "group": "已冻结",
+     "why": "**V6.2 定死为 mandatory_temporal_spine。** 每个 SEG 的视频必须携带"
+            "覆盖**完整关键时间推进**的故事板视觉载体 —— 不许退化成只有一张起始图、"
+            "只有 SCSTATE、只有 LOOK 或只有文字提示词。"
+            "缺了返回 VIDEO_STORYBOARD_SPINE_MISSING。"
+            "**这一条取代了 V6.1 按可靠度分路的做法**：可靠度只决定承载颗粒度、"
+            "补图数量和提示词冗余度，不决定给不给故事板。"},
+    {"key": "storyboard_reference_admission_gate",
+     "label": "故事板进视频前要逐项审核吗", "type": "text",
+     "source": "derived", "group": "已冻结",
+     "why": "故事板在 Canon 里存在**不等于**它的图片自动有资格当视频参考。"
+            "进视频前逐项审：叙事准确、身份、当前 LOOK/CT、几何、World Position、"
+            "支撑/通路/屏障、时间状态与未来状态禁运、道具实例/数量/持有人、"
+            "动作阶段、机位观察、可读性。任一关键项错就返回 "
+            "STORYBOARD_REFERENCE_ADMISSION_FAILED —— "
+            "**禁止用正确的 LOOK / LOC_VIEW 或文字去压过一张错的故事板。**"},
+    {"key": "effective_reference_selection_gate",
+     "label": "补图要证明有独有作用吗", "type": "text",
+     "source": "derived", "group": "已冻结",
+     "why": "故事板骨架之外的每张补图必须同时满足五条：通过准入、"
+            "解决故事板没覆盖的**独有** Authority 缺口、不控制镜头/走位/时间/动作阶段、"
+            "有明确适用时间窗、对模型可读。任一不满足返回 "
+            "VIDEO_REFERENCE_UNIQUE_UTILITY_UNPROVEN。"
+            "「为了填满上限」「多一张更保险」都是明确禁止的动机。"},
+    {"key": "video_prompt_detail_mode",
+     "label": "视频提示词写到什么密度", "type": "text",
+     "source": "derived", "group": "已冻结",
+     "why": "**V6.2 定死为 director_level_expanded。** 视频提示词不许只有字段标题、"
+            "镜头标签或一句动作摘要 —— 要把整段拆成逐时间窗执行卡，"
+            "每窗写动作阶段、微表演、眼神呼吸、身体重心、接触与延迟反应、"
+            "镜头景别运动焦点、切换动机、声音同步和窗口出口。"
+            "**但细化不等于堆形容词**：只有长篇形容词、重复禁令或每窗都一样的描述，"
+            "不算高密度，返回 VIDEO_PROMPT_EXECUTION_DETAIL_INSUFFICIENT。"},
+    {"key": "micro_performance_contract",
+     "label": "微表演要写成可拍的行为吗", "type": "text",
+     "source": "derived", "group": "已冻结",
+     "why": "「细腻」来自角色目标、压抑与泄露，不来自堆砌随机动作。"
+            "要写可拍的行为（「先保持面对记者，眼睛先右移，停顿半秒后才转头」），"
+            "不是只写「紧张」「悲伤」「电影感表演」。"
+            "只有情绪词时返回 VIDEO_PERFORMANCE_CONTRACT_INSUFFICIENT。"},
+    {"key": "action_phase_physical_response_contract",
+     "label": "高风险动作要逐阶段展开吗", "type": "text",
+     "source": "derived", "group": "已冻结",
+     "why": "攻击、跌倒、搀扶、交接、拥抱、起身、开门、上下车这类动作按需要展开"
+            "准备→启动→路径→接触→跟随→反应延迟→恢复/失衡→稳定结果。"
+            "硬规则：受动者不得在接触前完整反应；道具不得在手闭合前换持有人；"
+            "跌倒必须有失衡与落地过程；完成后不得重演。"
+            "缺了返回 VIDEO_ACTION_PHASE_INCOMPLETE。"},
+    {"key": "cinematic_camera_grammar_contract",
+     "label": "镜头要写清叙事功能吗", "type": "text",
+     "source": "derived", "group": "已冻结",
+     "why": "每个镜头或切换要说明叙事功能、来源 KF、景别角度、机位、构图层次、"
+            "运动起止、轴线与画面方向、焦点、显露范围、切换动机与机制、"
+            "新镜头透露了什么信息。**镜头只投影 Canonical World**，"
+            "不移动人物、门窗、家具、Zone 或道具；"
+            "不许为了「更有张力」加没有功能的推拉摇移。"
+            "只有景别和运动时返回 VIDEO_CAMERA_GRAMMAR_INSUFFICIENT。"},
     {"key": "scstate_spatial_slice_policy", "label": "一个场景太大时怎么拆",
      "type": "text", "source": "derived", "group": "已冻结",
      "why": "同一 CVS 横跨远距离、不同高度、Barrier 或不相容动作轴时，"
@@ -400,7 +470,18 @@ FIXED_DERIVED = {
     "story_first_prompt_order": "required",
     # V6.1 从「最小充分」改成「权威完整」—— 一个词的改动，方向是反的：
     # 不是「能删就删」，是「六维都有来源的前提下才允许删」。
-    "video_reference_policy": "adaptive_authority_complete_nonconflicting_set",
+    # V6.2 又改一次，方向同样是反的：从「自适应地挑一套不冲突的」
+    # 改成「**故事板骨架是必给的**，补图才是挑的」。
+    "video_reference_policy":
+        "mandatory_storyboard_plus_selective_effective_supplemental",
+    # ---- V6.2 第 19 章新增 ----
+    "storyboard_video_reference_policy": "mandatory_temporal_spine",
+    "storyboard_reference_admission_gate": "required",
+    "effective_reference_selection_gate": "required",
+    "video_prompt_detail_mode": "director_level_expanded",
+    "micro_performance_contract": "required",
+    "action_phase_physical_response_contract": "risk_driven_required",
+    "cinematic_camera_grammar_contract": "required",
     "generated_video_frame_reference_policy": "forbidden",
     "reference_dimension_coverage_gate": "required",
     "position_contract_policy": "immutable_without_authorized_movement",
@@ -451,6 +532,21 @@ PLACEHOLDERS = tuple(placeholder_of(f["key"]) for f in FIELDS)
 
 # ---------------------------------------------------------------- 读写
 
+# 取值改过名的字段：老项目里存的旧值 → 现在的值。
+#
+# V6.2 把「故事板出多少张」改成了「故事板怎么承载」——三个旧取值都表达
+# 「可以少出几张」，而 V6.2 定死必须覆盖完整时间推进，只是载体可以选。
+# 所以旧的两个「出得少」的档位一律翻成有序独立锚点（一张一格，最省容量
+# 又能覆盖完整推进），「整套都出」翻成有序多张 Sheet。
+_RENAMED_VALUES = {
+    "storyboard_materialization_policy": {
+        "anchor_only": "ordered_kf_anchors",
+        "selected_kf": "ordered_kf_anchors",
+        "full_storyboard": "ordered_continuation_sheets",
+    },
+}
+
+
 def load(pj: Project) -> dict:
     """这个项目已经填的设定。没填过的字段用默认值。
 
@@ -464,6 +560,12 @@ def load(pj: Project) -> dict:
             continue
         v = saved.get(f["key"])
         out[f["key"]] = f.get("default", "") if v is None else v
+        # 取值改过名的，把老项目里存的那个翻译过来。**不翻译的后果很静默**：
+        # 模板里会渲染出 `当前策略：anchor_only` —— V6.2 不认这个词，
+        # 模型只能猜，而页面上那个下拉显示的是空（选项里没有这一项）。
+        ren = _RENAMED_VALUES.get(f["key"], {})
+        if out[f["key"]] in ren:
+            out[f["key"]] = ren[out[f["key"]]]
     return out
 
 
@@ -694,9 +796,16 @@ def brief_block(pj: Project, params: Optional[dict] = None,
     tail = ("\n\n画面比例、单段时长、出图尺寸、参考图上限一律以"
             "【项目参数】为准，这里不重复声明。")
     if ndef:
+        # **这里不许再举「媒介」当例子。** 原话是「比如这是一部动画而媒介
+        # 写着真人写实」—— 那字面就是一句「看到不像真人的剧本就改成动画」的
+        # 指令，而实跑照做了：项目选真人写实，出来的提示词是 3D 漫剧建模。
+        # 举例只举**剧本里真的有答案**的那类。
         tail += (f"\n带「默认，未指定」的 {ndef} 项是系统默认值，**不是用户的决定** —— "
-                 f"如果剧本内容明显和它冲突（比如这是一部动画而媒介写着真人写实），"
-                 f"以剧本为准并在输出里说明。")
+                 f"如果剧本内容明显和它冲突（比如剧本本身就是外语对白，"
+                 f"而对白语言写着中文），以剧本为准并在输出里说明。\n"
+                 f"**没标「默认」的那几项一律照做，不许按剧本推翻** —— "
+                 f"拍成什么形式、视觉风格、字幕、旁白、声音怎么来这些是"
+                 f"**制作决策**，剧本里没有答案。")
     return ("以下是**本项目**的设定，优先级高于上面的通用默认：\n\n"
             + "\n".join(rows) + tail)
 

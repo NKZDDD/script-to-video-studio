@@ -71,22 +71,42 @@ class V34Tests(unittest.TestCase):
                     f"必需字段写成 {spec}")
 
     def test_nested_field_names_exist_in_the_schema(self):
-        """★ `blocking[].zone` vs 模板里的 `zone_id` —— 名字差一点就永远缺。"""
+        """★ `blocking[].zone` vs 模板里的 `zone_id` —— 名字差一点就永远缺。
+
+        **要走任意深度。** 原来只拆一层（`parent.child`），于是三层的
+        `sbpkg[].sheets[].storyboard_prompt` 被当成「child 叫
+        `sheets[].storyboard_prompt`」去找 —— 找不到，报一个假的缺失。
+        V6.2 把故事板提示词下移到 sheet 一级之后就有三层了。
+        """
         bad = []
         for sid, (tpl, _deps, req) in V.LLM_SPEC.items():
             d = schema_of(tpl)
             for spec in req:
                 if "." not in spec:
                     continue
-                parent, child = spec.split(".", 1)
-                rows = d.get(parent.rstrip("[]"))
-                if not isinstance(rows, list) or not rows:
-                    continue
-                if not isinstance(rows[0], dict):
-                    continue
-                if child.rstrip("[]") not in rows[0]:
-                    bad.append(f"{sid}: {spec} —— 示例里的键是 "
-                               f"{sorted(rows[0])[:6]}")
+                parts = spec.split(".")
+                node, missing_at = d, ""
+                for i, part in enumerate(parts):
+                    key = part.rstrip("?").rstrip("[]")
+                    if not isinstance(node, dict):
+                        break               # 走不下去了，交给上面那条整体验
+                    if key not in node:
+                        missing_at = key
+                        break
+                    node = node[key]
+                    # **只在还要往下走的时候才进数组。** 叶子本来就可以是
+                    # 字符串数组（`reference_assets: ["C001"]`）——
+                    # 一律要求 list[dict] 会把这些全部误报成缺失。
+                    if i + 1 < len(parts):
+                        if not isinstance(node, list):
+                            break
+                        if not node or not isinstance(node[0], dict):
+                            break
+                        node = node[0]
+                if missing_at:
+                    where = node if isinstance(node, dict) else {}
+                    bad.append(f"{sid}: {spec} —— 到 `{missing_at}` 找不着，"
+                               f"这一层的键是 {sorted(where)[:6]}")
         self.assertEqual(bad, [], "必需字段名和 schema 对不上：\n" + "\n".join(bad))
 
 

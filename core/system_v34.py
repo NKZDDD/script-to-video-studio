@@ -192,9 +192,14 @@ LLM_SPEC = {
         "scstates[]", "scstates[].scstate_id", "scstates[].source_cvs",
         "scstates[].reference_assets", "scstates[].prompt",
     ]),
+    # V6.2：提示词和参考图顺序从**包一级下移到 sheet 一级** ——
+    # 一个 SEG 要 1..N 张有序 Sheet（或有序独立 KF 锚点）才能覆盖完整时间推进。
+    # 只校验包一级的话，模型写了 sheets[] 但每张都没有 storyboard_prompt 也算过 ——
+    # 那时装配层一张出图任务都建不出来，而这**不报错，只是没有故事板**。
     "n12": ("n12_storyboard", ["n9_shots", "n10_segs", "n11_scstate"], [
         "sbpkg[]", "sbpkg[].sbpkg_id", "sbpkg[].kf",
-        "sbpkg[].reference_order", "sbpkg[].storyboard_prompt",
+        "sbpkg[].sheets[]", "sbpkg[].sheets[].sheet_id",
+        "sbpkg[].sheets[].reference_order", "sbpkg[].sheets[].storyboard_prompt",
     ]),
     "n13": ("n13_video", ["n9_shots", "n10_segs", "n12_storyboard"], [
         "video_plan[]", "video_plan[].seg_id", "video_plan[].windows",
@@ -239,7 +244,7 @@ def _setting_placeholders() -> tuple:
 COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
                        "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT",
                        "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY",
-                       "NARRATION_RULE",
+                       "NARRATION_RULE", "MEDIUM_RULE",
                        # 分批跑的两个：这一批做什么范围、前面几批做过什么。
                        # 没分批时也有值（「一次处理全剧」/「这是第一次排」），
                        # 所以任何模板用它们都不会渲染成空。
