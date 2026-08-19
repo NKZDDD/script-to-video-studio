@@ -18,7 +18,7 @@ import os
 import re
 from typing import Callable, Optional
 
-from . import diagnose, ledger, probe, soften, uploader
+from . import accounts, diagnose, ledger, probe, soften, uploader
 from .apiutil import TASK_FATAL, ApiError, resolve_ref
 from .providers import ImageTask, VideoTask, build as build_provider
 from .store import Project, read_text, write_text
@@ -244,11 +244,17 @@ def _why_ref_missing(pj: Project, src: str, exc: ApiError) -> ApiError:
     所以这里回头查一眼：这个文件名对应的资产，是不是刚刚失败过。
     查得到就把**它的**失败原因接在后面。
     """
-    aid = os.path.splitext(os.path.basename(src))[0]
-    if not aid:
+    stem = os.path.splitext(os.path.basename(src))[0]
+    if not stem:
         return exc
+    # 文件名常带后缀：PH006_R01.png / C001_V02.png —— 而失败记录的 target
+    # 是资产号 PH006。只做全等匹配会**永远对不上**，于是这条线索白搭。
+    # 实跑撞到：LK006 报「参考图 PH006_R01.png 不存在」，而 PH006 自己
+    # 就在同一份清单里失败着，程序却没把两条连起来。
+    cands = {stem, re.sub(r"_(R|V)\d+$", "", stem)}
     for d in diagnose.load(pj.root):
-        if str(d.get("target")) != aid:
+        aid = str(d.get("target"))
+        if aid not in cands:
             continue
         better = ApiError(
             f"{exc}\n"
@@ -391,16 +397,17 @@ def check_identity_map(prompt: str, want_refs: list, who: str = "",
                   "不够，它不知道这张图是哪个人，多人场景必然张冠李戴（实跑撞过）。"
                   "每个 Image 编号后面要紧跟这张图是谁/是什么，"
                   "比如 `Image 1 = C002 甲，成年男性正面半身`。"), ""
+    notes = []
     if thin:
-        return ("REFERENCE_MAPPING_BLOCKED　多张参考图没有逐张划分权威。"
-                + _whose(who, ref)
-                + "这几张只说了是谁、没说各自管什么：" + "；".join(thin)
-                + f"。这一条要传 {len(want)} 张，全局写一句「禁止改变…」管不住 —— "
-                  "模型不知道该从哪张拿脸、从哪张拿衣服、哪张的构图不许照搬，"
-                  "结果是几张平均融合。逐张写清有权控制和无权控制。"), ""
-    return "", ("；".join(soft) + "。这几项不影响这一次出图，但缺了容易让未来状态"
-                "提前用上（伤口在受伤前出现），或者一张图的权威被无限扩张。"
-                if soft else "")
+        notes.append(
+            f"这 {len(thin)} 张只说了是谁、没说各自管什么："
+            + "；".join(thin)
+            + "。多图不划分权威时模型容易几张平均融合 —— "
+              "逐张写清有权控制和无权控制会稳得多。")
+    if soft:
+        notes.append("；".join(soft) + "。这几项缺了容易让未来状态提前用上"
+                                      "（伤口在受伤前出现），或者一张图的权威被无限扩张。")
+    return "", "　".join(notes)
 
 def _whose(who: str, ref: str) -> str:
     """出问题的是哪一条任务、该去改哪个文件。
@@ -460,8 +467,8 @@ def check_image_map(prompt: str, want_refs: list, who: str = "",
             return (head + "两张以上参考图却不说哪张是谁，模型只能猜，"
                     "必然把其中一张的身份用到别处 —— 所以这里停下。"
                     "去「任务明细」改这一条的提示词，逐张写 `Image 1 = 资产ID 名称`，"
-                    "顺序和上面括号里一致；或者重跑对应的文字环节。"), ""
-        return "", head + "只有一张、顺序上没有歧义，先照常出图，但建议补上。"
+                    "顺序和上面括号里一致；或者重跑对应的文字环节。"), note
+        return "", head + "只有一张、顺序上没有歧义，先照常出图，但建议补上。" + note
 
     seen = {}
     for n, aid in got:
@@ -484,8 +491,8 @@ def check_image_map(prompt: str, want_refs: list, who: str = "",
                 + f"。实际上传顺序是 {'、'.join(f'Image {n}={a}' for n, a in want)}。"
                   "编号错位等于每张参考图都被错误归属（拿场景图去沿用人脸），"
                   "出来的东西看着正常但全是错的，所以这里停下。"
-                  "去「任务明细」按实际顺序改这一条的映射。"), ""
-    return "", ""
+                  "去「任务明细」按实际顺序改这一条的映射。"), note
+    return "", note
 
 
 def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
