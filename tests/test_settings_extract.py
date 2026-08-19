@@ -25,7 +25,9 @@ class SchemaBlockTests(unittest.TestCase):
     def test_it_lists_the_enum_values(self):
         s = ST.schema_block()
         self.assertIn("`preserve`=严格保持原文", s)
-        self.assertIn("`live_action`=真人写实", s)
+        # 用户要的是「真人短剧 / 3D漫剧 / 二维动画 / 混合形式」这套说法，
+        # 页面和提示词共用同一份词（见 settings.MEDIUM_ZH）
+        self.assertIn("`live_action`=真人短剧", s)
 
     def test_readonly_fields_are_not_offered(self):
         """★ 抽出来也没处放 —— 列出来只会让模型去填它。"""

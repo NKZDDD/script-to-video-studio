@@ -104,7 +104,10 @@ class SubtitleRuleTests(unittest.TestCase):
         ST.save(self.pj, {"subtitle": True, "subtitle_burn": True,
                           "subtitle_lang": "中英双语"})
         sp = S.system_prompt(self.pj, {})
-        self.assertIn("字幕烧录进画面", sp)
+        # 措辞收敛成原样陈述了（不再替用户写「放在底部安全区、
+        # 不遮挡人物面部」那种提示词工程），所以按事实断言。
+        self.assertIn("画面内允许出现", sp)
+        self.assertIn("烧录进画面", sp)
         self.assertIn("中英双语", sp)
         # 原来那句无条件禁令必须消失，否则两句并存又是矛盾
         self.assertNotIn("画面内禁止出现任何文字、字幕、水印、UI 面板", sp)
@@ -113,7 +116,7 @@ class SubtitleRuleTests(unittest.TestCase):
         """★ 放开字幕不等于放开水印和 UI —— 只松该松的那一项。"""
         ST.save(self.pj, {"subtitle": True, "subtitle_burn": True})
         sp = S.system_prompt(self.pj, {})
-        self.assertIn("仍然禁止", sp)
+        self.assertIn("除此之外禁止出现", sp)
         self.assertIn("水印", sp)
 
     def test_subtitles_not_burned_in_keep_the_original_rule(self):

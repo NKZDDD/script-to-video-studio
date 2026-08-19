@@ -166,6 +166,24 @@ FIELDS: list = [
      "source": "settings", "group": "旁白", "local": True,
      "why": "**这一条是旁白最容易出错的地方。** 默认不动嘴 —— "
             "内心独白配上对口型，看起来就是角色在自言自语。"},
+    # ---- 对白怎么呈现：解说剧要的那一条，**skill 的参数表里也没有** ----
+    #
+    # 和上面那一项差一层，混了就漏：
+    #   narration_on_screen = **旁白**念的时候人物动不动嘴
+    #   dialogue_mode       = **对白**（剧本里带引号那些）是谁在说
+    #
+    # 解说剧是「全片一个解说在讲」，连角色的对白也由画外音念出来，
+    # 画面里没有人开口。而剧本里照旧写着带引号的对白 ——
+    # 实测「烟火尽头」896 段里有 121 段带引号的对白、136 段第一人称独白。
+    # 只勾「旁白不动嘴」的话，那 121 段照旧会被当成台词对口型，
+    # 于是全片一半画外音一半对口型，看着就是坏的，而且不报错。
+    {"key": "dialogue_mode", "label": "对白怎么呈现", "type": "enum",
+     "options": ["in_scene", "voice_over_only"],
+     "zh": {"in_scene": "角色开口说（对口型）",
+            "voice_over_only": "全部画外音，人物不开口"},
+     "default": "in_scene", "source": "settings", "group": "旁白", "local": True,
+     "why": "解说剧选「全部画外音」—— 连剧本里带引号的对白也由解说念，"
+            "画面里没有人开口。和上面那一项不是一回事：那个管旁白，这个管对白。"},
 
     {"key": "special_notes", "label": "特殊要求", "type": "text",
      "source": "settings", "group": "授权", "local": True,
@@ -539,53 +557,101 @@ def subtitle_rule(pj: Project) -> str:
     之后，两段话直接矛盾，**结果字幕消失了而且没有任何报错**。
     散文之间的矛盾检测不了；变成一个字段两种取值就不会矛盾。
     """
+    # 只做两件事：把默认那句禁令按取值改写，把用户填的原文照抄进来。
+    # 我原来在这儿加过「放在画面底部安全区内，不遮挡人物面部」
+    # 「它们属于剧情，该出现就要出现」—— 那是替用户做提示词工程。
     v = load(pj)
-    parts = []
-    burn = v.get("subtitle") and v.get("subtitle_burn")
-    if burn:
-        lang = v.get("subtitle_lang") or "中文"
-        parts.append(f"**本项目字幕烧录进画面**：{lang}字幕，放在画面底部安全区内，"
-                     f"不遮挡人物面部。")
-    # 「画面里本来就该有的文字」（弹幕、短信、招牌…）——**它是剧情的一部分**，
-    # 不是字幕。不在这里放开的话，下面那条禁令会把它悄悄拦掉：
-    # 图出来了、该有的文字没有、也不报错。
+    allow = []
+    if v.get("subtitle") and v.get("subtitle_burn"):
+        allow.append(f"{v.get('subtitle_lang') or '中文'}字幕（烧录进画面）")
     want = (v.get("on_screen_text") or "").strip()
     if want:
-        parts.append(f"**画面内允许出现这些文字元素**（它们属于剧情，该出现就要出现）："
-                     f"{want}")
-    if not parts:
+        allow.append(want)
+    if not allow:
         return ("画面内禁止出现任何文字、字幕、水印、UI 面板"
                 "（系统界面等文字元素走后期合成）。")
-    kept = "、".join(x for x in (("字幕" if burn else ""),
-                                ("上面列出的那几类" if want else "")) if x)
-    parts.append(f"除{kept}之外，画面内仍然禁止出现其他文字、水印、UI 面板。")
-    return "\n".join(parts)
+    return ("画面内允许出现：" + "；".join(allow)
+            + "。除此之外禁止出现其他文字、水印、UI 面板。")
+
+
+# 这几项是**制作决策**，剧本里没有答案 —— 一部玄幻剧可以拍真人也可以拍 3D，
+# 一部小说可以配旁白也可以全对白。所以即使它们还是默认值，
+# **也不许模型「按剧本推翻」**。
+#
+# 起因是一句我自己写的话。brief 的结尾原来是：
+#
+#   带「默认，未指定」的 N 项是系统默认值，不是用户的决定 ——
+#   如果剧本内容明显和它冲突（**比如这是一部动画而媒介写着真人写实**），
+#   以剧本为准并在输出里说明。
+#
+# 那个例子字面就是「看到不像真人的剧本就把真人改成动画」。实跑照做了：
+# 项目选的是 live_action，出来的资产提示词写着「高质量3D漫剧风格、
+# 精致影视级角色建模」—— 而且不报错，因为程序没有任何一处检查媒介。
+NOT_FROM_SCRIPT = (
+    "visual_medium", "visual_style",
+    "subtitle", "subtitle_lang", "subtitle_burn", "on_screen_text",
+    "narration", "narration_style", "narration_voice", "narration_on_screen",
+    # **这一项尤其不能让剧本推翻。** 解说剧的剧本里照旧写满带引号的对白
+    # （「烟火尽头」121 段），模型看了只会得出「这部剧有对白」——
+    # 而「让谁来念」是制作决策，剧本里没有答案。
+    "dialogue_mode",
+    "video_audio_mode",
+)
+
+
+# 「视频类型」怎么写 —— 用户自己的说法，页面和提示词共用这一套词。
+MEDIUM_ZH = {"live_action": "真人短剧", "3d": "3D漫剧",
+             "2d": "二维动画", "mixed": "混合形式"}
+
+
+def medium_rule(pj: Project) -> str:
+    """一句「视频类型：xxx」。**原样给出去，不替用户丰富提示词。**
+
+    以前 `visual_medium` 只作为【项目基础信息】里的一行值出现，没有任何模板
+    把它当约束 —— 实跑选了真人写实，出来的资产提示词写着「高质量3D漫剧风格、
+    精致影视级角色建模」，而且不报错。所以它得像字幕、旁白那样每次调用都发。
+
+    但**只发事实，不写禁令**。我一度在这里生成一大段
+    「禁止出现 3D 渲染、CG 建模、动画、插画、卡通、Unreal/Blender…」——
+    那是替用户做提示词工程，而他要的是把「视频类型：真人短剧」原原本本递过去。
+    多写的每一句都是我们在猜他想要什么，猜错了他还得回来改我们的措辞。
+    """
+    v = load(pj)
+    return f"视频类型：{MEDIUM_ZH.get(v.get('visual_medium') or 'live_action', '真人短剧')}"
 
 
 def narration_rule(pj: Project) -> str:
-    """旁白那一段的正文 —— 和字幕规则一样，**按取值生成**。
+    """旁白那几行 —— **原样给出去，不替用户丰富提示词。**
 
-    不生成而是丢几个占位符进模板的话，没旁白的项目会看到
-    「本项目：否　声音属于：　画面处理：」这种半截句子 ——
-    模型读到空标签会自己去填，那比不给更糟。
+    按取值生成（而不是丢几个占位符进模板）只为一件事：没旁白的项目不该
+    看到「本项目：否　声音属于：　画面处理：」这种半截句子 ——
+    模型读到空标签会自己去填。除此之外一个字都不多写。
+
+    我原来在这儿写的是散文：「声线要和这个角色本人一致，不要换人」
+    「那是画外音，不是他在说话」—— 那是替用户做提示词工程。
+    他要的是把「旁白：有（第一人称内心独白）」原原本本递过去。
     """
     v = load(pj)
     if not v.get("narration"):
-        return ("**本项目没有旁白。** 一句画外音都不要加 —— "
-                "剧本里的第一人称叙述按台词或表演处理，不要凭空造一个旁白声线。")
-    style = {"first_person_inner": "第一人称内心独白",
-             "third_person": "第三人称旁白",
-             "mixed": "内心独白与第三人称混合"}.get(
-                 v.get("narration_style"), "第一人称内心独白")
-    who = (v.get("narration_voice") or "").strip()
-    lip = v.get("narration_on_screen") == "lip_sync"
-    return (f"**本项目有旁白**：{style}。\n"
-            + (f"旁白是 **{who}** 的声音 —— 声线要和这个角色本人一致，"
-               f"不要换人。\n" if who else
-               "（没指定是谁的声音 —— 同一部剧里保持同一个声线，别在段落之间飘。）\n")
-            + (f"旁白时画面里的人**要对口型**（按台词处理）。"
-               if lip else
-               f"旁白时画面里的人**不动嘴** —— 那是画外音，不是他在说话。"))
+        rows = ["旁白 / 画外音：无"]
+    else:
+        rows = [f"旁白 / 画外音：有（{_zh_of('narration_style', v)}）"]
+        who = (v.get("narration_voice") or "").strip()
+        if who:
+            rows.append(f"旁白声音：{who}")
+        rows.append(f"念旁白时人物：{_zh_of('narration_on_screen', v)}")
+    # 对白那一条**和旁白开关无关**，所以放在 if 外面。解说剧可能整部剧
+    # 一句「旁白」都不标，全靠解说把对白念出来 —— 那时旁白开关是关的，
+    # 而「人物不开口」照样必须说。放进 if 里就是漏掉这种最常见的解说剧。
+    rows.append(f"对白呈现：{_zh_of('dialogue_mode', v)}")
+    return "；".join(rows)
+
+
+def _zh_of(key: str, vals: dict) -> str:
+    """枚举值的中文说法。取字段表里的 zh，没有就用原值。"""
+    f = next((x for x in FIELDS if x["key"] == key), None)
+    raw = vals.get(key) or (f or {}).get("default") or ""
+    return ((f or {}).get("zh") or {}).get(raw, str(raw))
 
 
 def brief_block(pj: Project, params: Optional[dict] = None,
@@ -617,8 +683,10 @@ def brief_block(pj: Project, params: Optional[dict] = None,
             continue                    # 没填的布尔项：默认规则本来就是否
         if not str("" if v is None else v).strip() and not isinstance(v, bool):
             continue                    # 没默认值又没填的自由文本，不占篇幅
-        mark = "" if k in said else "　←（默认，未指定）"
-        if k not in said:
+        # 制作决策不标「默认」—— 标了就等于告诉模型「这一项可以按剧本推翻」，
+        # 而这类东西剧本里根本没有答案（见 NOT_FROM_SCRIPT）。
+        mark = "" if (k in said or k in NOT_FROM_SCRIPT) else "　←（默认，未指定）"
+        if k not in said and k not in NOT_FROM_SCRIPT:
             ndef += 1
         rows.append(f"- {f['label']}：{show(f, v)}{mark}")
     if not rows:
