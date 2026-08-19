@@ -865,8 +865,13 @@ def run_n4b_batched(pj: Project, *, llm, params: dict, log: Callable = print,
 
 def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
               episode: str = "", log: Callable = print,
-              cancel: Optional[Callable] = None) -> dict:
-    """跑一个全剧级或逐集级的 LLM 环节。逐段的走 run_segment_stage。"""
+              cancel: Optional[Callable] = None,
+              concurrency: int = 1) -> dict:
+    """跑一个全剧级或逐集级的 LLM 环节。逐段的走 run_segment_stage。
+
+    `concurrency` 目前只有 n3 用得上（它按集分批，各集互不依赖）。
+    真正的总闸门在 LLM_GATE 上 —— 这里给的是这一个环节自己开几路。
+    """
     if V.scope_of(stage_id) == "segment":
         raise ValueError(f"{stage_id} 是逐段环节，该走 run_segment_stage")
     tpl_name, _, required = V.LLM_SPEC[stage_id]
@@ -878,7 +883,8 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     # 这两个环节的输出量随剧的长度线性涨，全剧一次跑不过去 —— 分批跑。
     # 它们自己负责存盘和合并，不走下面的单次路径。
     if stage_id == "n3":
-        return run_n3_batched(pj, llm=llm, params=params, log=log, cancel=cancel)
+        return run_n3_batched(pj, llm=llm, params=params, log=log, cancel=cancel,
+                              concurrency=concurrency)
     if stage_id == "n4b":
         return run_n4b_batched(pj, llm=llm, params=params, log=log, cancel=cancel)
 
@@ -925,16 +931,21 @@ def check_runtime(pj: Project, stage_id: str, out: dict, params: dict,
     if got >= want * _TIME_TOL:
         return
     clip = int(params.get("duration") or 15) or 15
-    raise RuntimeError(
-        f"{episode} 第九环节把整集排成了 {got:g} 秒，"
-        f"但这一集该有 {want} 秒（第一环节按剧情定的）—— 压掉了 "
-        f"{100 - got * 100 / want:.0f}%。\n"
-        f"最常见的原因是把 SEG 容器的 {clip} 秒当成了整集预算。"
-        f"这两个数字不一样：{clip} 秒是视频模型一次最多生成多久，"
-        f"{want} 秒是这一集多长。\n"
-        f"压缩之后往下全线出错而且不报错 —— 第十环节只装得出 1 个 SEG，"
-        f"故事板一张纸要画十几格，模型记不住那么多场次的世界状态，"
-        f"就会把所有格子的场景状态全填成第一个。所以在这里停。")
+    # **只记不拦。** 这条检查（压缩超过 25% 就停）是本地经验规则，
+    # skill 里没有任何对应条文 —— 而 duration 的语义本来就容易配错
+    # （实跑：项目参数 15 秒、装箱 12 段共 180 秒），硬停整个环节太重。
+    # 审计（n14）本来就会报同一件事，那条现在是提醒。
+    diagnose.record(pj.root, diagnose.warn(
+        "RUNTIME_SQUEEZED",
+        f"{episode} 第九环节排成 {got:g} 秒，而这一集按剧情该有 {want} 秒 —— "
+        f"压掉了 {100 - got * 100 / want:.0f}%。"
+        f"最常见的原因是把 SEG 容器的 {clip} 秒当成了整集预算："
+        f"{clip} 秒是视频模型一次最多生成多久，{want} 秒是这一集多长。",
+        stage=f"stage:{stage_id}", target=episode or "全剧"))
+    if log:
+        log(f"⚠️ 这一集排成 {got:g} 秒，按剧情该有 {want} 秒（压掉 "
+            f"{100 - got * 100 / want:.0f}%）—— 已记下，不挡后面")
+    return
 
 
 def _plan_seconds(out: dict) -> float:

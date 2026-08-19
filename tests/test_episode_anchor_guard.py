@@ -42,14 +42,24 @@ class BadAnchorTests(unittest.TestCase):
 
 class SplitTests(unittest.TestCase):
 
-    def test_a_bad_anchor_says_how_to_fix_it(self):
-        """★ 只说「切不出来」没用 —— 要说清去哪儿改。"""
+    def test_an_anchor_that_is_not_there_says_how_to_fix_it(self):
+        """★ 只说「切不出来」没用 —— 要说清去哪儿改。
+
+        **「锚点合不合格」那一关已经去掉了**（skill 只要求给出每集正文的
+        第一行原文，没有对它的长度或字符做任何规定）—— 现在只剩事实：
+        这一行在剧本里找不到。「我觉得这个锚点不够好」是本地判断，不该拦人。
+        """
         r = split(_script("第一句正文", "第二句"), [{"episode": "EP01",
-                                                "start_anchor": "10"}])
+                                                "start_anchor": "剧本里没有这一行"}])
         self.assertEqual(r["episodes"], [])
         why = r["issues"][0]["reason"]
-        self.assertIn("重跑环节1", why)
-        self.assertIn("episodes.json", why)
+        self.assertIn("找不到这一行", why)
+
+    def test_the_quality_gate_is_gone(self):
+        """★ 单独钉住：不再因为「锚点太短 / 全是数字」而拒绝切集。"""
+        from core import episodes as E
+        import inspect
+        self.assertNotIn("_why_bad_anchor(anchor)", inspect.getsource(E.split))
 
     def test_a_short_anchor_no_longer_matches_by_containment(self):
         """★ 这就是那个 bug：`10` 以前会命中任何含「10」的行。

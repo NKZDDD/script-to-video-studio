@@ -389,11 +389,13 @@ class AuthorizeEndpointTests(unittest.TestCase):
     def test_the_block_message_points_at_somewhere_that_exists(self):
         """★ 文案指向的地方必须真的有。指向不存在的地方比不指更糟。"""
         msg = G.blocked_message({"position_state": ["随便一条"]})
-        self.assertIn("闸门", msg)
+        self.assertIn("连续性检查", msg)   # 面板改名了，文案要跟着页面走
         self.assertNotIn("项目设置里显式授权", msg)
         html = io.open(os.path.join(ROOT, "web", "index.html"),
                        encoding="utf-8").read()
-        self.assertIn("出图出片前的闸门", html)
+        # 面板改名过（闸门不再挡生产，标题从「出图出片前的闸门」变成「连续性检查」）。
+        # 这一条守的是「文案指向的地方真的存在」，所以名字要跟着页面走。
+        self.assertIn("连续性检查", html)
         self.assertIn("/api/gates/authorize", html)
 
 if __name__ == "__main__":

@@ -93,14 +93,10 @@ def split(script: str, ranges: list) -> dict:
     for idx, r in enumerate(ranges):
         ep = (r.get("episode") or f"EP{idx + 1:02d}").strip()
         anchor = (r.get("start_anchor") or "").strip()
-        bad = _why_bad_anchor(anchor)
-        if bad:
-            issues.append({"episode": ep,
-                           "reason": f"环节1 给的起始行{bad}。"
-                                     f"这一集切不出来 —— 重跑环节1，"
-                                     f"或者去「产物」页把 episodes.json 里这一条的 "
-                                     f"start_anchor 改成该集正文真正的第一行"})
-            continue
+        # 锚点「合不合格」那一关**已经去掉**（skill 只要求给出每集正文的
+        # 第一行原文，没有对它的长度或字符做任何规定）。找不到的时候
+        # 下面那条「找不到这一行」自然会报出来 —— 那是事实，
+        # 而「我觉得这个锚点不够好」是我的判断。
         at = _find_line(lines, anchor, cursor)
         if at < 0:
             # 从头再找一次：模型偶尔把集顺序写乱
