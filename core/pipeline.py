@@ -265,33 +265,24 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                                              provider=pcfg["provider"],
                                              model=pcfg.get("model", "")))
 
-                # 资产图按参考图依赖分层：状态资产依赖父资产及其他来源图，
-                # 不分层的话父子会并发，状态任务读不到来源 png 直接失败。
-                layers = (S.asset_layers(todo) if s["task_key"] == "asset_tasks"
-                          else [todo])
-                if len(layers) > 1:
-                    log(f"按参考图依赖分 {len(layers)} 层："
-                        + "、".join(f"第{i}层 {len(g)} 项" for i, g in enumerate(layers, 1))
-                        + "。上一层出完才跑下一层，否则状态资产读不到父资产或依赖图")
-                r = {"attempts": [], "left": 0, "switched": 0}
-                for gi, grp in enumerate(layers, 1):
-                    if stop_now():
-                        break
-                    if len(layers) > 1:
-                        log(f"—— 第 {gi}/{len(layers)} 层，{len(grp)} 项")
-                    one = run_chain(grp, chain=chain, worker_of=mk_worker, job_of=mk_job,
-                                    key_of=lambda t: t["key"],
-                                    # 不能用 isfile：0 字节的残骸也是「文件存在」，
-                                    # 换家重试时会被当成上一家已经做好了，直接跳过。
-                                    done_of=lambda t: probe.have_output(
-                                        pj.p(*t["output"].split("/"))),
-                                    max_retry=max_retry, log=log)
-                    r["attempts"] += one["attempts"]
-                    r["left"] += one["left"]
-                    r["switched"] = max(r["switched"], one["switched"])
-                    if one["left"] and gi < len(layers):
-                        log(f"第 {gi} 层还有 {one['left']} 项没成 —— 下一层依赖它们的"
-                            f"那些会因为缺参考图失败，先把这一层修好再点一次")
+                # 资产图之间有依赖：状态资产依赖父资产及其他来源图，不管依赖地
+                # 并发的话父子同时跑，状态任务读不到来源 png 直接失败。
+                #
+                # 以前是分层（层内并发、层间串行），现在改成**就绪即派** ——
+                # 一条的参考图全好了它立刻开跑，不用等同层里那条慢的。
+                deps = (S.asset_deps(todo) if s["task_key"] == "asset_tasks" else {})
+                waiting = sum(1 for v in deps.values() if v)
+                if waiting:
+                    log(f"{len(todo)} 项里有 {waiting} 项要等上游资产 —— "
+                        f"参考图一齐就开跑，不等整层出完")
+                r = run_chain(todo, chain=chain, worker_of=mk_worker, job_of=mk_job,
+                              key_of=lambda t: t["key"],
+                              # 不能用 isfile：0 字节的残骸也是「文件存在」，
+                              # 换家重试时会被当成上一家已经做好了，直接跳过。
+                              done_of=lambda t: probe.have_output(
+                                  pj.p(*t["output"].split("/"))),
+                              max_retry=max_retry, log=log,
+                              deps_of=deps.get if deps else None)
                 used = " → ".join(f"{a['provider']}/{a['model']}" for a in r["attempts"])
                 if r["left"] == 0:
                     job.set_item(key, state="ok",

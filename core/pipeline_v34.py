@@ -258,7 +258,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         job.set_item(key, state="running",
                      msg=f"{len(todo)} 项待做 · 首选 {chain[0]['provider']}")
 
-        from .produce import asset_layers, make_image_worker, make_video_worker
+        from .produce import asset_deps, make_image_worker, make_video_worker
         # llm_factory 要传下去：被审核拒绝时靠它改写提示词重发。
         # 漏传不会报错，只是那个功能悄悄没了。
         mk = (lambda p: make_video_worker(pj, p, llm_factory)) \
@@ -271,25 +271,24 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             (lambda p, n: Job(s["produce"], n, concurrency, project_root=pj.root,
                               provider=p["provider"], model=p.get("model", "")))
 
-        # 资产图按参考图依赖分层：状态资产的参考是它的父资产，不分层的话
-        # 父子并发，子任务读不到父资产的 png 直接失败。
-        layers = asset_layers(todo) if s["task_key"] == "asset_tasks" else [todo]
-        if len(layers) > 1:
-            job.log(key, f"按参考图依赖分 {len(layers)} 层，上一层出完才跑下一层")
-        left = 0
-        for gi, grp in enumerate(layers, 1):
-            if job.cancelled or job.aborted:
-                break
-            one = run_chain(grp, chain=chain, worker_of=mk, job_of=mk_job,
-                            key_of=lambda t: t["key"],
-                            done_of=lambda t: os.path.isfile(
-                                pj.p(*t["output"].split("/"))),
-                            max_retry=max_retry,
-                            log=lambda m, _k=key: job.log(_k, m))
-            left += one["left"]
-            if one["left"] and gi < len(layers):
-                job.log(key, f"第 {gi} 层还有 {one['left']} 项没成 —— "
-                             f"下一层依赖它们的会因为缺参考图停下")
+        # 资产图之间有依赖：状态资产的参考是它的父资产，并发不管依赖的话
+        # 父子同时跑，子任务读不到父资产的 png 直接失败。
+        #
+        # 以前是分层（层内并发、层间串行），现在改成**就绪即派** ——
+        # 一条的参考图全好了它立刻开跑，不用等同层里那条慢的。
+        deps = asset_deps(todo) if s["task_key"] == "asset_tasks" else {}
+        waiting = sum(1 for v in deps.values() if v)
+        if waiting:
+            job.log(key, f"{len(todo)} 项里有 {waiting} 项要等上游资产 —— "
+                         f"参考图一齐就开跑，不等整层")
+        one = run_chain(todo, chain=chain, worker_of=mk, job_of=mk_job,
+                        key_of=lambda t: t["key"],
+                        done_of=lambda t: os.path.isfile(
+                            pj.p(*t["output"].split("/"))),
+                        max_retry=max_retry,
+                        log=lambda m, _k=key: job.log(_k, m),
+                        deps_of=deps.get if deps else None)
+        left = one["left"]
         if s["task_key"] == "asset_tasks":
             # 出完就登记指纹。登记是为了后面能查出「文件被人换过」——
             # 换过之后下游还照着旧的引用跑，出来的东西看着正常但用的是另一张图。

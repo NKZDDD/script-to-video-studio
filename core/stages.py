@@ -30,7 +30,8 @@ from .store import Project, keep_partial, read_text, write_text
 # 但定义只在 produce.py 一处 —— 换体系的分支不碰它，引擎修复才好同步。
 from .produce import (  # noqa: F401
     AssetDependencyCycleError, _ordered_asset_refs, asset_dependency_cycles,
-    asset_layers, make_image_worker, make_ref_resolver, make_video_worker,
+    asset_deps, asset_layers, make_image_worker, make_ref_resolver,
+    make_video_worker,
     write_prompt_txt)
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -1391,23 +1391,18 @@ def api_post(path: str, body: dict) -> dict:
 
         def go():
             try:
-                # 已完成资产本身可以解除依赖环，所以只对尚未出图的任务分层。
-                # 真正的循环会在这里立即报出成员，不再把循环组塞进同层假装可执行。
+                # 已经出好的资产本身就解除了依赖，所以只对尚未出图的算依赖。
+                # 真正的循环会在这里立即报出成员，不会留成「谁都不就绪」的死等。
                 pending = [t for t in items if not os.path.isfile(
                     pj.p(*t["output"].split("/")))]
-                layers = S.asset_layers(pending) if kind == "asset" else [pending]
-                if len(layers) > 1:
-                    parent.log(kind, f"按参考图依赖分 {len(layers)} 层："
-                               + "、".join(f"第{i}层 {len(g)} 项"
-                                          for i, g in enumerate(layers, 1)))
-                r = {"attempts": [], "left": 0}
-                for gi, grp in enumerate(layers, 1):
-                    if parent.cancelled:
-                        break
-                    if len(layers) > 1:
-                        parent.log(kind, f"—— 第 {gi}/{len(layers)} 层，{len(grp)} 项")
-                    one = run_chain(
-                        grp, chain=chain,
+                # 就绪即派：一条的参考图全好了它立刻开跑，不等同层里那条慢的。
+                deps = S.asset_deps(pending) if kind == "asset" else {}
+                waiting = sum(1 for v in deps.values() if v)
+                if waiting:
+                    parent.log(kind, f"{len(pending)} 项里有 {waiting} 项要等上游资产 —— "
+                                     f"参考图一齐就开跑，不等整层出完")
+                r = run_chain(
+                        pending, chain=chain, deps_of=deps.get if deps else None,
                         # 分析引擎要传下去：被审核拒绝时靠它改写提示词重发。
                         # 「生产」页单独跑这一步走的是这条路径，漏传的话
                         # 一键跑会自动改写、单独点这一步不会 —— 而两边都不报错。
@@ -1422,8 +1417,6 @@ def api_post(path: str, body: dict) -> dict:
                         key_of=lambda t: t["key"],
                         done_of=lambda t: probe.have_output(pj.p(*t["output"].split("/"))),
                         max_retry=retry, log=lambda m: parent.log(kind, m))
-                    r["attempts"] += one["attempts"]
-                    r["left"] += one["left"]
                 for a in r["attempts"]:
                     parent.set_item(f"{a['provider']}/{a['model']}", state=
                                    "failed" if a["counts"].get("failed") else "ok",

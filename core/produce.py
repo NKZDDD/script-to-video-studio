@@ -114,6 +114,40 @@ def asset_dependency_cycles(items: list) -> list:
     return sorted(cycles, key=lambda c: min(order[x] for x in c))
 
 
+def asset_deps(tasks: list) -> dict:
+    """每条资产任务在**这一批里**要等的那几条 → `{key: [key, ...]}`。
+
+    这是分层的替代品。分层是「层内并发、层间串行」——正确但是慢：一层里有一条
+    慢的（4K 出图、被审核挡了要改写重试几轮），**整层都在等它**，
+    后面那些参考图早就齐了的也干等着。
+
+    改成按条记依赖之后，执行器就绪即派：一条的参考图全好了它立刻开跑，
+    等的只是自己真正依赖的那几条。产出和分层完全一样，只是不白等。
+
+    成环照旧在派任务前就报出来 —— 换了调度方式不代表环能跑了。
+    环的表现会变成「谁都不就绪」，那种「卡住」比报错难查得多。
+
+    批外的不算依赖：已经出好的（不在 tasks 里）本来就不用等；
+    判定不出图的在装配那一层已经挑掉了（见 run_v34.split_refs）。
+    """
+    cycles = asset_dependency_cycles(tasks)
+    if cycles:
+        detail = "；".join(" ↔ ".join(group) for group in cycles)
+        raise AssetDependencyCycleError(
+            f"资产循环依赖：{detail}。这些资产互相把对方当参考图，没有任何一个能先生产。"
+            "请回到环节4调整 dependency_order/reference_assets：同级资产不得互相引用，"
+            "每条引用只能指向更早完成的基础资产或状态资产。")
+    keys = {t["key"] for t in tasks}
+    out = {}
+    for t in tasks:
+        out[t["key"]] = sorted({
+            str(r.get("asset_id") or "")
+            for r in (t.get("reference_images") or [])
+            if str(r.get("asset_id") or "") in keys
+            and r.get("asset_id") != t["key"]})
+    return out
+
+
 def asset_layers(tasks: list) -> list:
     """把资产任务按参考图依赖分层：第 0 层没有参考图，第 N 层的参考图都在前面几层。
 

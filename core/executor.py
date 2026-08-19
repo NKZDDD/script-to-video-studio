@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from typing import Callable, Optional
 
@@ -294,7 +294,7 @@ class JobManager:
 
 def run_chain(tasks: list, *, chain: list, worker_of: Callable, job_of: Callable,
               key_of: Callable, done_of: Callable, max_retry: int = 2,
-              log: Callable = print) -> dict:
+              log: Callable = print, deps_of: Optional[Callable] = None) -> dict:
     """按优先级依次尝试各家服务商：上一家因为「这家不行」挂了就换下一家补剩下的。
 
     chain 是有序的 [{provider, model, ...}, ...]，第一个是首选。
@@ -316,7 +316,7 @@ def run_chain(tasks: list, *, chain: list, worker_of: Callable, job_of: Callable
             log(f"改用第 {idx + 1} 家「{who}」补剩下的 {len(todo)} 项")
         sub = job_of(pcfg, len(todo))
         run_batch(sub, todo, worker_of(pcfg), key_of=key_of, max_retry=max_retry,
-                  provider=pcfg.get("provider", ""))
+                  provider=pcfg.get("provider", ""), deps_of=deps_of)
         c = sub.counts()
         attempts.append({"provider": pcfg.get("provider", ""), "model": pcfg.get("model", ""),
                          "job_id": sub.id, "counts": c, "aborted": sub.aborted,
@@ -347,11 +347,28 @@ def run_chain(tasks: list, *, chain: list, worker_of: Callable, job_of: Callable
             "switched": max(0, len(attempts) - 1)}
 
 
+_DONE_STATES = ("ok", "skipped")
+_DEAD_STATES = ("failed", "aborted", "cancelled")
+
+
 def run_batch(job: Job, tasks: list, worker: Callable, *,
-              key_of: Callable, max_retry: int = 2, provider: str = "") -> None:
+              key_of: Callable, max_retry: int = 2, provider: str = "",
+              deps_of: Optional[Callable] = None) -> None:
     """并发跑 tasks。worker(task, log_fn, cancel_fn) 成功返回 dict，失败抛异常。
 
     每个任务在真正发请求前经过 GATE（服务商配额 + 全局总闸）。
+
+    `deps_of(key) -> [key, ...]` 给的是「这一条要等这一批里的哪几条」。
+    给了就**就绪即派**：一条的参考图全好了它立刻开跑，不用等同层的其他条。
+
+    以前是分层跑：层内并发、层间串行。正确但是慢 ——
+    一层里有一条慢的（4K 出图、被审核挡了要改写重试几轮），
+    **整层都在等它**，后面那些参考图早就齐了的也干等着。
+    改成就绪即派之后，等的只是自己真正依赖的那几条。
+
+    上游没做成时下游**当场标失败并说清是等谁**，不再派出去。以前会派 ——
+    然后那一条花一次调用去读一个不存在的参考图，报「参考图指不到文件」，
+    人还得自己回头找是哪个上游没成。既费钱又难查。
     """
     provider = provider or job.provider
     for t in tasks:
@@ -426,8 +443,61 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                     if attempt >= max_retry:
                         fail()
 
+    if deps_of is None:
+        with ThreadPoolExecutor(max_workers=max(1, job.concurrency)) as pool:
+            list(pool.map(one, tasks))
+        return
+
+    def _state(key: str) -> str:
+        return str((job.items.get(key) or {}).get("state") or "")
+
+    # **只等这一批里的。** 换家补跑时 tasks 只剩没做成的那些，上一家已经出好的
+    # 不在这一批里 —— 不过滤的话它们的状态查出来是空，依赖它们的会被判成
+    # 「既没做成也没在跑」，于是整批误报成环。已经在磁盘上的本来就不用等。
+    mine = {key_of(t) for t in tasks}
+
+    def _deps(key: str) -> list:
+        return [d for d in (deps_of(key) or ()) if d in mine and d != key]
+
+    left = list(tasks)
     with ThreadPoolExecutor(max_workers=max(1, job.concurrency)) as pool:
-        list(pool.map(one, tasks))
+        running: dict = {}
+        while left or running:
+            if job.cancelled:
+                # 取消了就把剩下的全交给 one —— 它自己会标成已取消/已中止。
+                # 不派的话它们一直挂在 pending 上，面板上看着像还在跑。
+                for t in left:
+                    running[pool.submit(one, t)] = t
+                left = []
+            fire, hold = [], []
+            for t in left:
+                deps = _deps(key_of(t))
+                dead = [d for d in deps if _state(d) in _DEAD_STATES]
+                if dead:
+                    # 上游没做成 —— 这一条不可能成，别花钱去撞那个不存在的文件。
+                    job.set_item(key_of(t), state="failed", kind=TASK_FATAL,
+                                 msg="它要的参考图没做成："
+                                     + "、".join(dead[:4])
+                                     + ("…" if len(dead) > 4 else "")
+                                     + "。先把那几条弄成，这条会自动跟着能跑。")
+                    continue
+                (fire if all(_state(d) in _DONE_STATES for d in deps)
+                 else hold).append(t)
+            left = hold
+            for t in fire:
+                running[pool.submit(one, t)] = t
+            if not running:
+                # 没有在跑的、也没有能跑的。派任务前的成环检查该拦住这种情况，
+                # 拦漏了也**绝不静默挂着** —— 那是最难查的一种「卡住」。
+                for t in left:
+                    job.set_item(key_of(t), state="failed", kind=TASK_FATAL,
+                                 msg="它等的参考图既没做成也没在跑（多半是互相引用成了环）："
+                                     + "、".join(_deps(key_of(t))[:4]))
+                break
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for f in done:
+                running.pop(f, None)
+                f.result()          # one 内部已消化业务异常；这里让程序 bug 冒出来
 
     job.finished_at = time.time()
     if job.aborted:
