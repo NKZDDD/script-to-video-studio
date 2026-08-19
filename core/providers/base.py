@@ -54,6 +54,16 @@ class Provider:
     #   bytes    —— 走 multipart，只收真的文件字节，**给链接会被丢掉**
     ref_mode: str = "data_uri"
     url_only_models: tuple = ()
+    # 这一家是不是**按账号计费、而且一个账号同时只能生成一条**。
+    #
+    # 声明成 True 之后，出片那一层会按账号排队（见 core/accounts.py）：
+    # api_key 里粘几个账号就有几路并发，每个账号内部严格串行。
+    # 不声明的家照旧按服务商并发，一个 Key 打到底。
+    #
+    # 为什么做成服务商自己声明：这是这一家的**计费和限流形状**，
+    # 只有它自己知道。写在调度那一层就得维护一张「哪几家要这样」的名单，
+    # 而漏了一家的后果是那家被并发打爆 —— 而且报错只会说「生成失败」。
+    per_account_serial: bool = False
 
     def needs_url(self, model: str = "", media: str = "image") -> bool:
         """这家**只**收公网链接，给 data URI 会被丢掉。

@@ -2229,9 +2229,20 @@ function renderProviders() {
     const ready = fields.filter(x => status[x[2]]).length;
     const has = ready > 0;
     const state = split ? (ready ? `已配置 ${ready}/4` : '未配置') : (has ? '已配置' : '未配置');
-    const keyBoxes = fields.map(([field, label, cap]) =>
-      `<div><label>${label}</label><input data-pv="${c.id}" data-f="${field}" type="password"
-        placeholder="${status[cap] ? '已保存，留空不改' : '粘贴 key'}"></div>`).join('');
+    // 按账号计费、一个账号只能同时跑一条的家（HVTALD）：多账号粘贴框。
+    // 密码框只能放一行，粘不进第二个账号 —— 而这一家**并发上限就是账号数**，
+    // 只能配一个账号的话它永远是串行的，而且看不出为什么慢。
+    const keyBoxes = c.per_account_serial
+      ? `<div style="grid-column:1/-1"><label>账号（一行一个，或用空行分段）
+           <span class="muted">这一家按账号计费，**一个账号同时只能生成一条** ——
+             想并发就多粘几个账号，并发上限 = 账号数</span></label>
+         <textarea data-pv="${c.id}" data-f="api_key" rows="4"
+           style="width:100%;font-family:ui-monospace,monospace;font-size:12px"
+           placeholder="${status.video ? '已保存，留空不改' : 'deviceId=…;token=…;webdav=…;user=…;password=…\n第二个账号写下一行'}"></textarea>
+         <div class="muted" id="acctBox_${c.id}" style="margin-top:6px">加载中…</div></div>`
+      : fields.map(([field, label, cap]) =>
+        `<div><label>${label}</label><input data-pv="${c.id}" data-f="${field}" type="password"
+          placeholder="${status[cap] ? '已保存，留空不改' : '粘贴 key'}"></div>`).join('');
     // 保存过的值要回显。以前这里写死 c.default_base_url，
     // 改过自定义端点的人再点一次保存就被默认值盖掉了，而且一声不吭。
     const saved = (BOOT.providers_public || {})[c.id] || {};
@@ -2270,6 +2281,33 @@ function renderProviders() {
     await api.post('/api/config', {providers: {[id]: obj}});
     BOOT = await api.get('/api/bootstrap'); renderProviders();
   });
+  BOOT.capabilities.filter(c => c.per_account_serial).forEach(c => loadAccounts(c.id));
+}
+
+// 每个账号今天做了多少条。用户要看的就是「这一家一天能做多少」。
+async function loadAccounts(pid) {
+  const box = $('#acctBox_' + pid);
+  if (!box) return;
+  const r = await api.post('/api/accounts', {provider: pid, days: 7});
+  if (r.error) return box.textContent = r.error;
+  const rep = r.report || {};
+  if (!(rep.rows || []).length)
+    return box.textContent = '还没有账号。粘一个进去保存，这里会显示每个账号每天做了多少条。';
+  const head = `配了 <b>${rep.accounts}</b> 个账号`
+    + (rep.busy ? `，其中 ${rep.busy} 个正在生成` : '')
+    + `　·　今天一共 <b>${rep.today_total}</b> 条`
+    + `　·　所以并发上限是 <b>${rep.accounts}</b>（一个账号同时只能跑一条）`;
+  const rows = rep.rows.map(x =>
+    `<tr><td>${esc(x.label)}${x.configured ? '' : '<span class="muted">（已移除）</span>'}</td>
+     <td style="text-align:right"><b>${x.today}</b></td>
+     <td style="text-align:right">${x.total}</td>
+     <td class="muted" style="font-size:11px">${
+       (rep.days || []).map(d => x.by_day[d] || 0).reverse().join(' → ')}</td></tr>`).join('');
+  box.innerHTML = head
+    + `<table style="margin-top:6px;font-size:12px"><thead><tr>
+         <th>账号</th><th style="text-align:right">今天</th>
+         <th style="text-align:right">7 天</th><th>逐日（旧→新）</th>
+       </tr></thead><tbody>${rows}</tbody></table>`;
 }
 $('#saveLlm').onclick = async () => {
   const mode = $('#llmProxyMode').value;

@@ -1315,6 +1315,21 @@ def api_post(path: str, body: dict) -> dict:
         threading.Thread(target=go, daemon=True).start()
         return {"ok": True, "job_id": job.id}
 
+    if path == "/api/accounts":
+        """按账号计费那几家：每个账号每天做了多少条。
+
+        **不返回任何凭据** —— 只有 label（deviceId 前 8 位）和计数。
+        """
+        from core import accounts as _acct
+        pid = resolve_provider_id(str(body.get("provider") or "hvtald"))
+        pc = (cfg.get("providers") or {}).get(pid) or {}
+        # 先按当前配置刷一遍账号池，页面上「配了几个」才是实时的。
+        # 账号没变时 configure 不重建 —— 重建会把在途任务占的槽位变回空闲。
+        n = _acct.configure(pid, str(pc.get("api_key") or ""))
+        rep = _acct.report(pid, days=int(body.get("days") or 7))
+        rep["accounts"] = n
+        return {"ok": True, "provider": pid, "report": rep}
+
     if path == "/api/tasks/rebuild":
         pj = proj_of(body)
         meta = pj.meta()

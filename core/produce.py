@@ -586,6 +586,12 @@ def make_video_worker(pj: Project, provider_cfg: dict,
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video")
     _llm = _lazy_llm(llm_factory)
+    # 按账号计费、一个账号只能同时跑一条的家（HVTALD）：按账号排队。
+    # 声明在服务商自己身上，这里只问一句。别家 pool 是 None，走老路。
+    pid = provider_cfg["provider"]
+    n_acct = (accounts.configure(pid, provider_cfg["api_key"])
+              if getattr(prov, "per_account_serial", False) else 0)
+    pool = accounts.pool(pid) if n_acct else None
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -596,38 +602,83 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             return {"skipped": True, "msg": "已经有了，跳过",
                     "warn": _ratio_warn(pj, out, want, "video", task["key"],
                                         provider_cfg, model, "video")}
-        sb = task["storyboard_ref"]
+        # V6.2 第 19 章：视频必须带覆盖**完整关键时间推进**的有序故事板骨架。
+        # 所以这里传的是整条，不是一张。老产物只有一张，那就是一条长度 1 的骨架。
+        spine = [str(s.get("file_ref") or "")
+                 for s in sorted(task.get("storyboard_refs") or [],
+                                 key=lambda s: s.get("order") or 0)
+                 if s.get("file_ref")] or [task.get("storyboard_ref") or ""]
         # **不能用 isfile。** 0 字节和下了一半的文件都是「文件存在」，
         # 而出片是最贵的一步：拿一张空图当参考发出去，模型等于没有参考，
         # 出来的人不是本人 —— 任务还标 ok。配了对象存储的话更彻底：
         # 那个 0 字节文件会被原样传上去再给服务商，连解码失败都不会有。
-        if not (sb.startswith("http") or probe.have_output(pj.p(*sb.split("/")))):
+        bad = [s for s in spine
+               if not (s.startswith("http")
+                       or probe.have_output(pj.p(*s.split("/"))))]
+        if bad or not spine[0]:
             raise RuntimeError(
-                f"固定故事板不存在或者是个空文件，出不了片：{sb}。"
-                f"先把环节9（故事板生产）这一段跑出来 —— "
-                f"没有故事板做参考，出来的画面和这一段没有关系。")
+                f"固定故事板不存在或者是个空文件，出不了片："
+                f"{'、'.join(bad) or '这一段一张故事板都没有'}。"
+                f"这一段的骨架应该有 {len(spine)} 张，缺 {len(bad) or len(spine)} 张 —— "
+                f"先把环节9（故事板生产）这一段跑出来。"
+                f"V6.2 要求整条时间骨架都在：缺中间那几张的话，"
+                f"模型不知道这一段先发生什么后发生什么，出来的画面和剧情没有关系。")
         prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
-        refs = [to_ref(sb, log)]
+        refs = [to_ref(s, log) for s in spine]
         if task.get("aux_reference"):
             refs.append(to_ref(task["aux_reference"], log))
-        log(f"model={model} {p.get('duration', 15)}s {want} 参考图×{len(refs)}")
-        meta = soften.run_with_softening(
-            lambda pr: prov.generate_video(
+        log(f"model={model} {p.get('duration', 15)}s {want} "
+            f"故事板骨架×{len(spine)} 参考图×{len(refs)}")
+
+        def _go(use, pr):
+            return use.generate_video(
                 VideoTask(prompt=pr, refs=refs, duration=int(p.get("duration", 15)),
                           ratio=want, model=model,
                           resolution=provider_cfg.get("resolution", "")),
                 out, log=log, cancel=cancel,
-                poll_interval=interval, poll_timeout=timeout),
-            prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
-            rounds=_soften_rounds(provider_cfg), log=log)
+                poll_interval=interval, poll_timeout=timeout)
+
+        acct_label = ""
+        if pool is None:
+            meta = soften.run_with_softening(
+                lambda pr: _go(prov, pr),
+                prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
+                rounds=_soften_rounds(provider_cfg), log=log)
+        else:
+            # 占一个空账号，占着期间这个账号不会被别的任务用。
+            # **每个账号一个独立的 provider 实例** —— 改共享那个的凭据
+            # 是竞态：两条并发任务会互相把对方的账号改掉，
+            # 于是两条都打到同一个账号上，而这正是要防的事。
+            with pool.slot(log=log, cancel=cancel) as acct:
+                acct_label = acct.label
+                mine = build_provider(pid, acct.api_key,
+                                      provider_cfg.get("base_url", ""),
+                                      provider_cfg.get("proxy", ""))
+                meta = soften.run_with_softening(
+                    lambda pr: _go(mine, pr),
+                    prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
+                    rounds=_soften_rounds(provider_cfg), log=log)
+                # 做成了才记 —— 计数是「这个账号今天做出了多少条」，
+                # 不是「试了多少次」。失败的那次没扣次数也不该占计数。
+                accounts.bump(pid, acct.label)
+        if acct_label:
+            meta = dict(meta or {})
+            meta["account"] = acct_label
         pj.upsert_registry("video", {"id": task["key"], "file_ref": task["output"],
-                                     "storyboard_ref": sb, "status": "generated", **meta})
+                                     # 整条骨架都入台账 —— 事后要能查出这一段
+                                     # 是拿哪几张、按什么顺序做出来的。
+                                     "storyboard_ref": spine[0],
+                                     "storyboard_spine": list(spine),
+                                     "status": "generated", **meta})
         pj.log_event({"stage": "video", "id": task["key"], "result": "ok", **meta})
         # 出片是最贵的一步，必须入账。带上时长——按秒计价的家要用
         ledger.record(pj.root, kind="video", stage="video", target=task["key"],
                       episode=task.get("episode", ""),
                       provider=meta.get("provider", provider_cfg.get("provider", "")),
                       model=meta.get("model", model), count=1,
+                      # 按账号计费的家：这一条是哪个账号出的钱，账本里要有。
+                      # 没有的话「这个月哪个账号花了多少」只能靠猜。
+                      account=acct_label,
                       duration=int(p.get("duration", 15)), ratio=want)
         return {"output": task["output"],
                 "warn": _ratio_warn(pj, out, want, "video", task["key"],

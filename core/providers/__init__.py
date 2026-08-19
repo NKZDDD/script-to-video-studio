@@ -39,7 +39,7 @@ from .base import ImageTask, Provider, VideoTask   # noqa: F401  对外导出
 # 这里漏过 ake 和 yishou，一直没被发现，是因为 exe 里目录恰好扫得到；
 # 哪天扫不到就会一次性少四家。加一家就往这里加一行。
 _BUILTIN_ORDER = ["paisio", "lingganya", "zeroapi", "m86", "aicopy", "kunji",
-                  "octopus", "ake", "yishou", "chaomo", "xiaobalong"]
+                  "octopus", "ake", "yishou", "chaomo", "xiaobalong", "hvtald"]
 
 REGISTRY: dict = {}          # id → 类
 ALIASES: dict = {}           # 别名 → id
@@ -218,7 +218,13 @@ def list_capabilities() -> list:
     out = []
     for pid, cls in REGISTRY.items():
         try:
-            out.append(cls().capabilities())
+            cap = cls().capabilities()
+            # 从类属性补上来，**不指望每家的 capabilities() 自己写一遍** ——
+            # 漏写一家的后果是页面上那家还按单账号渲染（一个密码框），
+            # 用户没地方粘第二个账号，而且看不出为什么并发上不去。
+            cap.setdefault("per_account_serial",
+                           bool(getattr(cls, "per_account_serial", False)))
+            out.append(cap)
         except Exception as exc:                     # noqa: BLE001
             out.append({"id": pid, "name": getattr(cls, "name", pid),
                         "supports": [], "broken": str(exc)})
