@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from typing import Callable, Optional
 
 import requests
@@ -80,6 +81,42 @@ def _to_size(resolution: str, default: str = "720p") -> str:
         if short >= edge:
             return name
     return "480p"
+
+
+# 文件头魔数：写成字节数组，避免任何转义在多层工具间被吃掉
+PNG_MAGIC = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+JPEG_MAGIC = bytes([0xFF, 0xD8])
+
+
+def _header_size(path: str) -> tuple:
+    """只读文件头拿宽高，不用 Pillow（一批几百张，逐张解码太慢）。
+
+    返回 (宽, 高)，认不出返回 (0, 0)。够用了：缩略图和原图差的是数量级，
+    不需要精确到像素级的校验。
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32)
+            if head.startswith(PNG_MAGIC):
+                # IHDR 紧跟在 8 字节签名 + 4 字节长度 + 4 字节类型之后
+                return (int.from_bytes(head[16:20], "big"),
+                        int.from_bytes(head[20:24], "big"))
+            if head.startswith(JPEG_MAGIC):
+                f.seek(2)
+                while True:
+                    b = f.read(2)
+                    if len(b) < 2 or b[0] != 0xFF:
+                        return (0, 0)
+                    if 0xC0 <= b[1] <= 0xCF and b[1] not in (0xC4, 0xC8, 0xCC):
+                        f.read(3)                       # 段长(2) + 精度(1)
+                        h = int.from_bytes(f.read(2), "big")
+                        w = int.from_bytes(f.read(2), "big")
+                        return (w, h)
+                    seg = int.from_bytes(f.read(2), "big")
+                    f.seek(seg - 2, 1)
+    except Exception:                                   # noqa: BLE001
+        pass
+    return (0, 0)
 
 
 def _block(kind: str, url: str) -> dict:
@@ -179,7 +216,7 @@ class ChaomoProvider(Provider):
         return {}
 
     @staticmethod
-    def check_meta(meta: dict, items: list, *, log=print) -> None:
+    def check_meta(meta: dict, items: list, *, dest: str = "", log=print) -> None:
         """拿网关自报的字节数核对手里的数据 —— 判断「有没有被截断」的硬证据。
 
         文档说 include_metadata 给的是「**可核验的**实际图片宽高、格式和字节数」，
@@ -197,9 +234,33 @@ class ChaomoProvider(Provider):
             log(f"超模 核验信息: {desc}")
         if not size:
             return
+        # 落盘文件核验：**这条专治「拿回来的是网页缩略图」**。
+        # 缩略图是一张完整合法的小图 —— 有正确的结尾标记、体积也远超 MIN_BYTES，
+        # save_item 那两道检查全都放行，于是任务标 ok、资产却是模糊的。
+        # include_metadata 给的宽高和字节数是网关自报的原图规格，拿来一比就露馅。
+        if dest and os.path.isfile(dest):
+            got = os.path.getsize(dest)
+            w, h = _header_size(dest)
+            want_w = meta.get("width") if isinstance(meta.get("width"), int) else 0
+            want_h = meta.get("height") if isinstance(meta.get("height"), int) else 0
+            if want_w and want_h and w and h and (w < want_w * 0.9 or h < want_h * 0.9):
+                os.remove(dest)                # 留着下次 isfile 为真会被当成"已做过"跳过
+                raise ApiError(
+                    f"超模说这张图是 {want_w}x{want_h}，实际存下来只有 {w}x{h} —— "
+                    f"**拿到的是缩略图，不是原图**。缩略图是完整合法的小图，"
+                    f"体积和结尾标记都正常，光靠大小检查发现不了。"
+                    f"多半是结果里同时给了预览图和原图、挑错了链接。不收这张。",
+                    status=0, kind="task_fatal")
+            if size and got < int(size) * 0.6:
+                os.remove(dest)
+                raise ApiError(
+                    f"超模说这张图有 {int(size)} 字节，落盘只有 {got} 字节"
+                    f"（{got * 100 // int(size)}%）—— 多半是缩略图或半截图，不收。",
+                    status=0, kind="task_fatal")
+
         for item in items:
             if not (isinstance(item, str) and item.startswith("data:")):
-                continue                       # URL 结果由 save_item 的大小检查兜底
+                continue                       # URL 结果已在上面按落盘文件核验过
             try:
                 got = len(_b64_bytes(item.split(",", 1)[1], item))
             except Exception:                                   # noqa: BLE001
@@ -296,8 +357,9 @@ class ChaomoProvider(Provider):
             data, "", log=log, poll_interval=poll_interval, poll_timeout=poll_timeout)
         if not items:
             raise ApiError(f"出图没返回可用结果: {str(data)[:300]}")
-        self.check_meta(self.meta_of(final), items, log=log)
         self.session.save_item(items[0], dest)
+        # 核验放在落盘之后：URL 结果只有存下来才量得到真实宽高
+        self.check_meta(self.meta_of(final), items, dest=dest, log=log)
         return {"task_id": extract_task_id(data), "source": items[0][:200],
                 "provider": self.id, "model": model}
 

@@ -129,5 +129,64 @@ class ChaomoTests(unittest.TestCase):
         self.assertNotIn("images", names)
 
 
+    # -- 缩略图核验 ----------------------------------------------------
+    def _png(self, w, h, pad=0):
+        """造一个头部合法、宽高可控的 PNG（只需要文件头能被读出来）。"""
+        import struct
+        sig = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        ihdr = struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h)
+        return sig + ihdr + b"\x08\x02\x00\x00\x00" + b"\x00" * pad
+
+    def test_header_size_reads_png_dimensions(self):
+        import os
+        import tempfile
+
+        from core.providers.chaomo import _header_size
+        p = os.path.join(tempfile.mkdtemp(), "a.png")
+        with open(p, "wb") as f:
+            f.write(self._png(3840, 2160))
+        self.assertEqual(_header_size(p), (3840, 2160))
+        self.assertEqual(_header_size(p + ".missing"), (0, 0))
+
+    def test_thumbnail_is_rejected(self):
+        """**缩略图是一张完整合法的小图** —— 结尾标记、体积都正常，
+        save_item 那两道检查全放行。只有拿 include_metadata 的宽高一比才露馅。
+        """
+        import os
+        import tempfile
+
+        p = os.path.join(tempfile.mkdtemp(), "thumb.png")
+        with open(p, "wb") as f:
+            f.write(self._png(320, 180, pad=2000))          # 网关说 3840x2160，实际只有 320x180
+        meta = {"width": 3840, "height": 2160, "format": "png", "bytes": 5_000_000}
+        with self.assertRaises(ApiError) as raised:
+            ChaomoProvider.check_meta(meta, [], dest=p, log=lambda *a: None)
+        self.assertEqual(raised.exception.kind, TASK_FATAL)
+        self.assertIn("缩略图", str(raised.exception))
+        self.assertFalse(os.path.exists(p))                 # 必须删掉，否则下次被当成"已做过"跳过
+
+    def test_full_size_passes(self):
+        import os
+        import tempfile
+
+        p = os.path.join(tempfile.mkdtemp(), "full.png")
+        with open(p, "wb") as f:
+            f.write(self._png(3840, 2160, pad=5_000_000))
+        meta = {"width": 3840, "height": 2160, "bytes": 5_000_000}
+        ChaomoProvider.check_meta(meta, [], dest=p, log=lambda *a: None)   # 不该抛
+        self.assertTrue(os.path.exists(p))
+
+    def test_size_far_below_reported_is_rejected(self):
+        """宽高读不出来（比如 webp）时，还有字节数这道防线。"""
+        import os
+        import tempfile
+
+        p = os.path.join(tempfile.mkdtemp(), "x.webp")
+        with open(p, "wb") as f:
+            f.write(b"RIFF" + b"\x00" * 3000)
+        with self.assertRaises(ApiError):
+            ChaomoProvider.check_meta({"bytes": 5_000_000}, [], dest=p, log=lambda *a: None)
+
+
 if __name__ == "__main__":
     unittest.main()
