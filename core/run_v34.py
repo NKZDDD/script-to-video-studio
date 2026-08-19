@@ -687,6 +687,49 @@ def n3_split(pj: Project) -> tuple:
     return done, todo
 
 
+def stamp_episode(ep: str, fresh: dict) -> dict:
+    """把这一批的 `scene_id` / `beat_id` 打上集号前缀。
+
+    **这是并发的前提。** 顺序跑时靠「编号接着往下走」那句话让模型自己续号；
+    并发之后每一批都看不到前面，21 集各自从 SC01 编起 ——
+    而 `merge_narrative` 是按 `scene_id` 合并的，同号就覆盖：
+    **21 集并发跑完可能只剩一集的场次，而且不报错。**
+
+    所以不能靠模型自觉。模板里也要求了带前缀，这里再兜一道：
+    已经带了的不动，没带的补上，`beats` 里指向旧号的一起改。
+    """
+    scenes = [s for s in (fresh or {}).get("scenes") or [] if isinstance(s, dict)]
+    if not ep or not scenes:
+        return fresh
+    pre = f"{ep}-"
+    rename = {}
+    for s in scenes:
+        old = str(s.get("scene_id") or "").strip()
+        if not old or old.startswith(pre):
+            continue
+        rename[old] = pre + old
+        s["scene_id"] = pre + old
+    if not rename:
+        return fresh
+    for b in (fresh or {}).get("beats") or []:
+        if not isinstance(b, dict):
+            continue
+        sid = str(b.get("scene_id") or "").strip()
+        if sid in rename:
+            b["scene_id"] = rename[sid]
+        bid = str(b.get("beat_id") or "").strip()
+        # `SC01-B1` → `EP01-SC01-B1`：只在它确实以旧场次号开头时替换，
+        # 免得把别的编号规则改花
+        for old, new in rename.items():
+            if bid.startswith(old):
+                b["beat_id"] = new + bid[len(old):]
+                break
+        else:
+            if bid and not bid.startswith(pre):
+                b["beat_id"] = pre + bid
+    return fresh
+
+
 def merge_narrative(previous: dict, fresh: dict) -> dict:
     """n3 分批产物合并。**必须合并，不能覆盖。**
 
@@ -769,14 +812,21 @@ def _one_call(pj: Project, stage_id: str, *, llm, params: dict, episode: str = "
 
 
 def run_n3_batched(pj: Project, *, llm, params: dict, log: Callable = print,
-                   cancel: Optional[Callable] = None) -> dict:
-    """第三环节按集分批，**顺序**跑，每集存盘。
+                   cancel: Optional[Callable] = None,
+                   concurrency: int = 1) -> dict:
+    """第三环节按集分批，每集存盘。`concurrency > 1` 时按集并发。
 
-    为什么不并发：这一步的产物是有前后依赖的 —— 每一集的第一场
-    `entry_state` 要接住上一集最后一场的 `exit_state`，场次编号也要接着走。
-    并发的话每一批看到的「前面」都是空的，接不上而且不报错。
+    **并发的前提是编号不撞。** 顺序跑时靠「编号接着往下走」让模型自己续号；
+    并发之后每一批看不到前面，各集都从 SC01 编起，而合并是按 `scene_id`
+    做的 —— 同号就覆盖，21 集跑完可能只剩一集，且不报错。
+    所以 `stamp_episode` 会把每一批的编号打上集号前缀，程序保证不撞。
 
-    每集跑完就存：断在第三集，前两集是留下的，再点一次从第三集接着跑。
+    并发丢掉的是**集与集接缝处那一下状态交接**（上一集 `exit_state` →
+    这一集 `entry_state`），以及「前面留的伏笔」那份提示。
+    没丢的是跨集因果本身 —— 每一批都收到完整的【故事真相】，
+    「第 1 集埋的东西在第 5 集哪一场收」写在那份事件表里。
+
+    每集跑完就存：断在第三集，前两集是留下的，再点一次只补没排的。
     """
     eps = _eps.ids(pj)
     if not eps:
@@ -793,26 +843,74 @@ def run_n3_batched(pj: Project, *, llm, params: dict, log: Callable = print,
         prev = pj.stage_data("n3_narrative", "") or {"scenes": [], "beats": []}
         diagnose.clear(pj.root, "stage:n3", "全剧")
         return prev
-    log(f"  按集分批：这次要排 {len(todo)} 集（{'、'.join(todo)}），一集一次调用")
+    workers = max(1, min(int(concurrency or 1), len(todo)))
+    log(f"  按集分批：这次要排 {len(todo)} 集（{'、'.join(todo)}），"
+        + (f"一集一次调用，{workers} 集并发" if workers > 1 else "一集一次调用"))
 
-    out = pj.stage_data("n3_narrative", "") or {}
-    for i, ep in enumerate(todo, 1):
+    # 已经排好的那几集（上一轮跑完的）——并发时这一份是**开跑前的快照**，
+    # 本轮各批互相看不见。顺序跑时它会随着每一批更新。
+    done_block = _n3_done_block(pj, done)
+    all_eps = done + todo          # 「全剧共几集」——固定住，别被下面的累加改花
+    box = {"out": pj.stage_data("n3_narrative", "") or {}}
+    lock = threading.Lock()
+    failed: list = []
+
+    def one(i: int, ep: str) -> None:
         if cancel and cancel():
-            raise LLMCancelled(
-                f"第三环节已按取消停下，排好的 {len(done)} 集都存了盘；"
-                f"再点一次「开始」只补没排的那几集。")
-        fresh = _one_call(
-            pj, "n3", llm=llm, params=params, episode=ep,
-            label=f"[{i}/{len(todo)}] {ep} ",
-            extra={"SCRIPT": _eps.script_of(pj, ep),
-                   "BATCH_SCOPE": _n3_batch_scope(ep, done + todo),
-                   "DONE_SCENES": _n3_done_block(pj, done)},
-            log=log, cancel=cancel)
-        out = merge_narrative(out, fresh)
-        pj.save_stage("n3_narrative", out, "")     # 每集落盘 —— 断了不白跑
-        done = done + [ep]
-        log(f"  {ep} 排好 "
-            f"{len([s for s in out.get('scenes') or [] if s.get('episode') == ep])} 场")
+            return
+        try:
+            fresh = _one_call(
+                pj, "n3", llm=llm, params=params, episode=ep,
+                label=f"[{i}/{len(todo)}] {ep} ",
+                extra={"SCRIPT": _eps.script_of(pj, ep),
+                       "BATCH_SCOPE": _n3_batch_scope(ep, all_eps),
+                       # 顺序跑时每批都拿最新的；并发时只有开跑前那份
+                       "DONE_SCENES": (_n3_done_block(pj, done) if workers == 1
+                                       else done_block)},
+                log=log, cancel=cancel)
+        except LLMCancelled:
+            raise
+        except Exception as exc:                            # noqa: BLE001
+            # 一集失败不拖累别的集 —— 记下来，最后一起报
+            d = diagnose.build(exc, stage="stage:n3", target=ep, model=llm.model)
+            diagnose.record(pj.root, d)
+            with lock:
+                failed.append(ep)
+            log(f"  {ep} 没排成：{diagnose.one_line(d)}")
+            return
+        # 打集号前缀 → 合并 → 落盘。**这三步必须在同一把锁里**：
+        # 合并是读-改-写，两集同时保存会把先写的那一集挤掉。
+        with lock:
+            box["out"] = merge_narrative(box["out"], stamp_episode(ep, fresh))
+            pj.save_stage("n3_narrative", box["out"], "")
+            n = len([s for s in box["out"].get("scenes") or []
+                     if s.get("episode") == ep])
+            # 顺序跑时把这一集加进「已排好的」——下一批的【已排好的场次】
+            # 要看得到它（编号接着走、entry_state 接上）。
+            # 并发时这一份用的是开跑前的快照，各批互相看不见。
+            if workers == 1:
+                done.append(ep)
+        log(f"  {ep} 排好 {n} 场")
+
+    jobs = list(enumerate(todo, 1))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda a: one(*a), jobs))
+    else:
+        for a in jobs:
+            one(*a)
+
+    out = box["out"]
+    if cancel and cancel():
+        raise LLMCancelled(
+            f"第三环节已按取消停下，排好的都存了盘；"
+            f"再点一次「开始」只补没排的那几集。")
+    if failed:
+        raise RuntimeError(
+            f"有 {len(failed)} 集没排成：{'、'.join(failed[:8])}"
+            f"{'…' if len(failed) > 8 else ''}。"
+            f"排好的 {len(todo) - len(failed)} 集已经存盘，"
+            f"再点一次「开始」只补没排的这几集。")
     diagnose.clear(pj.root, "stage:n3", "全剧")
     return out
 

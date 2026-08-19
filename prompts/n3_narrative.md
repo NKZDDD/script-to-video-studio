@@ -94,13 +94,20 @@ Project → Episode → Scene → Beat → Shot 表达需求
 也可以和相邻节拍共用一个镜头 —— 镜头数由信息量、动作复杂度、表演节奏、
 空间关系和导演意图决定，那是后面才定的事。
 
+## 编号
+
+`scene_id` 要带上集号：`EP01-SC01`、`EP01-SC02`…`beat_id` 跟着它走：
+`EP01-SC01-B1`。**不同集之间不许出现同一个 `scene_id`** ——
+各集独立从 SC01 编起的话，几集的场次表合到一起时会互相顶掉。
+（程序会兜一道：漏了前缀的会被自动补上，但按上面这样写更省事。）
+
 ## 输出 schema
 
 ```json
 {
   "scope": "full_series",
   "scenes": [
-    {"scene_id": "SC01",
+    {"scene_id": "EP01-SC01",
      "episode": "EP01",
      "story_time": "", "reality_thread": "RT_MAIN",
      "location_hint": "还没有正式 Location 资产，这里写人看得懂的地点",
@@ -113,7 +120,7 @@ Project → Episode → Scene → Beat → Shot 表达需求
      "source_event_ids": ["EV001"]}
   ],
   "beats": [
-    {"beat_id": "SC01-B1", "scene_id": "SC01",
+    {"beat_id": "EP01-SC01-B1", "scene_id": "EP01-SC01",
      "trigger": "什么刺激了这次变化",
      "character_intent": "", "tactic_or_action": "", "counterforce": "",
      "meaningful_change": "认知|目标|情绪|关系|权力|局势 —— 具体改变了什么",

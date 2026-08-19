@@ -210,7 +210,10 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                     return "failed"     # soft：不拉黑整集
             else:
                 R.run_stage(pj, sid, llm=llm, params=params,
-                            episode=ep, log=log, cancel=lambda: job.cancelled)
+                            episode=ep, log=log, cancel=lambda: job.cancelled,
+                            # n3 按集分批，各集互不依赖 —— 用逐集那档并发数。
+                            # 别的全剧级环节收到这个参数也不看它。
+                            concurrency=ep_concurrency)
             # **不能写成 `if ep:`。** 资产提示词是 n4b 出的，而 n4b 是全剧级，
             # 这里的 ep 是空字符串 —— 加了这个条件，那 80 多份提示词就永远
             # 落不成 txt，出图那一层按路径读文件，全部报「文件不存在」。
