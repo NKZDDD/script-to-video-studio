@@ -108,6 +108,19 @@ def token_cap(text: str) -> int:
 RETRY_STATUS = frozenset({429, 502, 503, 504,
                           520, 521, 522, 523, 524, 525, 526, 527, 529})
 
+# 已经开始吐字之后，多久没有新字就认定「卡住了」。
+#
+# 这一条防的是一种**不会死的死法**：服务商发心跳（`: ping` 或非 JSON 的
+# data 行）但不再发正文。心跳是字节，所以读超时永远不触发；而正文不增长，
+# 日志每 15 秒打一行「已等 N 秒，收到 M 字」，M 一直不变 —— 一直挂着，
+# 直到人点取消。
+#
+# 120 秒的取法：明显小于读超时（默认配 900），又比正常块间隔大一个量级。
+#
+# **只在已经收到过字之后才算。** 一个字都没收到时字数也是「不变」的，
+# 但那是思考期 —— 正常可以几分钟，掐掉比现在更糟。
+STALL_SECONDS = 120
+
 
 def stop_note(reason: str, usage: Optional[dict] = None) -> str:
     """模型为什么停下来，以及有多少输出 token 花在了思考上。
@@ -638,7 +651,18 @@ class LLM:
             try:
                 yield from response.iter_lines(decode_unicode=False)
             except requests.Timeout:
-                raise
+                n = sum(len(p) for p in parts)
+                if not n:
+                    raise           # 一个字都没收到：思考期太长，见下面那条 Fatal
+                # **已经吐过字然后彻底断供** —— 这是传输卡住，不是这次请求太重。
+                # 原来它和思考期超时走同一条路（Fatal、不重试、原文也不留），
+                # 而这两件事的修法完全不同：那个要减小输入，这个重发一次就好。
+                keep(f"流式传输卡住：收到 {n} 字之后再没有新内容")
+                raise _Retryable(
+                    f"流式传输卡住：收到 {n} 字之后 {tmo[1]} 秒没有任何新内容"
+                    f"（一共等了 {int(time.time()-started)} 秒）。"
+                    f"模型已经开始吐字了，所以不是它在想 —— 是这一条传输断供，"
+                    f"会自动重试。") from None
             except requests.RequestException as exc:
                 n = sum(len(p) for p in parts)
                 keep(f"流式连接中断：{exc}")
@@ -689,6 +713,10 @@ class LLM:
         reason, skipped = "", []
         closed = False
         usage = None
+        # 停滞看门狗：记下「上一次字数增长」是什么时候。
+        # 判定放在循环里而不是另起一个线程 —— 心跳行本身就是一次迭代，
+        # 所以「有心跳但不吐正文」这种卡住一定会被这里看到。
+        grew_at, grew_n = started, 0
         with sess.post(url, headers=headers, json=body, timeout=tmo,
                            proxies=proxies, stream=True) as r:
             self._check_status(r, started)
@@ -708,6 +736,17 @@ class LLM:
                     raise LLMCancelled(
                         f"已按取消停止接收（收到 {n} 字就断开了，"
                         f"用了 {int(time.time()-started)} 秒）")
+                now = time.time()
+                if grew_n and now - grew_at > STALL_SECONDS:
+                    # 已经吐过字、又整整 STALL_SECONDS 没有新字 —— 卡住了。
+                    # 不拦的话这里会一直挂着（心跳让读超时永远不触发）。
+                    keep(f"流式传输卡住：收到 {grew_n} 字之后 "
+                         f"{int(now - grew_at)} 秒没有新内容")
+                    raise _Retryable(
+                        f"流式传输卡住：收到 {grew_n} 字之后 "
+                        f"{int(now - grew_at)} 秒没有任何新正文"
+                        f"（线上还有心跳，所以读超时不会触发）。"
+                        f"模型已经开始吐字了，不是它在想 —— 会自动重试。")
                 if not raw:
                     continue
                 line = raw.decode("utf-8", "replace").strip()
@@ -732,6 +771,10 @@ class LLM:
                          or (ch.get("message") or {}).get("content") or "")
                 if piece:
                     parts.append(piece)
+                    # **增长要在这儿记，不能在循环开头算。** 开头算的是
+                    # 追加之前的字数，于是「刚长了」会晚一轮才被看见 ——
+                    # 那一轮的等待时间被算进了下一段静默里。
+                    grew_at, grew_n = time.time(), grew_n + len(piece)
                 if ch.get("finish_reason"):
                     reason = ch["finish_reason"]
                     closed = True
