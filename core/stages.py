@@ -107,6 +107,9 @@ def system_prompt(pj: Optional[Project] = None, params: Optional[dict] = None,
         # 于是「念旁白时人物不动嘴」在通用级是个假旋钮：勾了也不生效，
         # 视频模型照样生成张嘴说话的画面，而声音是画外音，看起来就是坏的。
         m["NARRATION_RULE"] = _st.narration_rule(pj)
+        # 「拍成真人还是 3D」同理：以前只在基础信息里当一行值，
+        # 没有任何模板把它当约束 —— 实跑选了真人写实，出来的是 3D 建模。
+        m["MEDIUM_RULE"] = _st.medium_rule(pj)
         m["PROJECT_BRIEF"] = _st.brief_block(pj, params, derived)
         text = render(text, m)
     return re.sub(r"<!--.*?-->\s*", "", text, flags=re.S)
@@ -1469,6 +1472,59 @@ def build_tasks(pj: Project, params: dict) -> dict:
         return _build_tasks(pj, params)
 
 
+def _no_image_reason(a, aid: str, aprompts: dict) -> dict:
+    """这个资产会不会有图。空字典 = 会有（或者这里判断不了，交给别处报）。
+
+    用户实遇：`EP01-SEG06` 的故事板等一张 `S003.png`，而 S003 从来没被派过任务。
+    参考图那栏显示「参4/5」，第 4 张标着「缺」—— 它在等一个永远不会出现的文件。
+
+    **两种成因，性质完全不同，所以话要分开说：**
+
+      · 环节4 判了不生产  —— 设计如此（一次性路人 / 普通背景物 / 普通动态效果）
+      · 环节5 没写提示词  —— 这是个窟窿。判它要出、写提示词那一步漏了，
+                              于是它不会进出图任务，等于永远没有图
+
+    第二种以前只有一条 `ASSET_NO_PROMPT` 提醒，原话就写着「引用到它们的故事板
+    会因为缺参考图停下」—— 说对了，然后就真的停在那儿，那一段永远出不来。
+    """
+    if a is None:
+        return {}       # 资产表里都没有 → 那是 GHOST_REF 管的，别在这儿混着报
+    if str(a.get("decision") or "") == "skip":
+        return {"decision": "环节4 判定不生产",
+                "reason": str(a.get("decision_reason") or "")}
+    if aid not in aprompts:
+        return {"decision": "缺生产提示词",
+                "reason": "环节4 判它要出、环节5 没给它写提示词，"
+                          "所以它不会进出图任务 —— 这不是设计如此，"
+                          "是个窟窿，重跑这一集的环节5 把它补上"}
+    return {}
+
+
+def _split_refs(rows, amap: dict, aprompts: dict) -> tuple:
+    """把参考图拆成「能上传的」和「永远不会有图的」。和电影级同一个规矩。
+
+    **编号不重排。** 提示词正文里那份 `Image N = 资产ID` 是模型写的，
+    挑掉一张就把后面的号往前挪，会和正文对不上 —— 那是把一个报错换成
+    另一个报错（「提示词里多写了 Image 4」）。留着原号，正文说的还是实话。
+    """
+    keep, no_image = [], []
+    for i, row in enumerate(rows or []):
+        # 资产那边是一串 id，故事板那边是带 image_n 的字典 —— 两种都收。
+        if isinstance(row, dict):
+            aid, n = str(row.get("asset_id") or "").strip(), row.get("image_n") or i + 1
+        else:
+            aid, n = str(row or "").strip(), i + 1
+        if not aid:
+            continue
+        why = _no_image_reason(amap.get(aid), aid, aprompts)
+        if why:
+            no_image.append({"image_n": n, "asset_id": aid, **why})
+            continue
+        keep.append({"image_n": n, "asset_id": aid,
+                     "file_ref": asset_output_rel(amap[aid]) if aid in amap else ""})
+    return keep, no_image
+
+
 def _build_tasks(pj: Project, params: dict) -> dict:
     from . import episodes as _eps
     code = params.get("project_code", "PROJ-001")
@@ -1512,6 +1568,7 @@ def _build_tasks(pj: Project, params: dict) -> dict:
         bad = [str(r) for r in refs if r not in amap]
         if bad:
             ghost[a["asset_id"]] = bad
+        a_refs, a_no_img = _split_refs(refs, amap, aprompts)
         asset_tasks.append({
             "key": a["asset_id"],
             # 哪几集用到它 —— 「只出第一集的资产图」靠这个字段过滤
@@ -1520,12 +1577,10 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                                 if str(s).startswith("EP")}),
             "prompt_ref": f"03_提示词/资产生产提示词/{ap.get('filename') or a['asset_id'] + '_PROMPT.txt'}",
             # 认不出的引用**留在列表里、file_ref 留空**，跟故事板那边一个规矩：
-            # 悄悄删掉的话数量看着是对的，反而看不出少了一张参考图
-            "reference_images": [
-                {"image_n": i + 1, "asset_id": rid,
-                 "file_ref": asset_output_rel(amap[rid]) if rid in amap else ""}
-                for i, rid in enumerate(refs)
-            ],
+            # 悄悄删掉的话数量看着是对的，反而看不出少了一张参考图。
+            # 「永远不会有图的」是另一回事 —— 那个挑出去并说明原因。
+            "reference_images": a_refs,
+            "no_image_refs": a_no_img,
             "params": {"size": ap.get("size") or params.get("image_size", "1024x1536")},
             "output": asset_output_rel(a),
         })
@@ -1563,14 +1618,14 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                 # 这个「0 声明 0 解析」躲得过出图时的缺图检查，只能在这里逮。
                 noref.append(sid)
             sb_out = f"04_故事板/{code}_{ep}_{seg}_STORYBOARD_V01_FIXED.png"
+            # **这一处就是用户实遇的那条**：EP01-SEG06 等一张 S003.png，
+            # 而 S003 从来不会有图。挑出去并说明原因，别让整段停在这儿。
+            sb_refs, sb_no_img = _split_refs(refs, amap, aprompts)
             sb_tasks.append({
                 "key": sid, "episode": ep,
                 "prompt_ref": f"03_提示词/故事板提示词/{sid}_STORYBOARD_PROMPT.txt",
-                "reference_images": [
-                    {"image_n": r.get("image_n", i + 1), "asset_id": r.get("asset_id", ""),
-                     "file_ref": asset_output_rel(amap[r["asset_id"]]) if r.get("asset_id") in amap else ""}
-                    for i, r in enumerate(refs)
-                ],
+                "reference_images": sb_refs,
+                "no_image_refs": sb_no_img,
                 # 不再往任务里塞 frames：格数写在提示词正文里（环节8 按分镜采样定的
                 # 4-6 格），出图接口本来也没有「格数」这个参数
                 "params": {"size": params.get("image_size", "1024x1536")},

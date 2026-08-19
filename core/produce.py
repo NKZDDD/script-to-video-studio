@@ -383,7 +383,7 @@ def _whose(who: str, ref: str) -> str:
 
 
 def check_image_map(prompt: str, want_refs: list, who: str = "",
-                    ref: str = "") -> tuple:
+                    ref: str = "", no_image: list = None) -> tuple:
     """核对提示词里的 Image 编号和程序实际上传顺序是否一致。
 
     出图模型收到的是 N 张**没有标签**的图，它只知道第 1 张、第 2 张。
@@ -397,11 +397,26 @@ def check_image_map(prompt: str, want_refs: list, who: str = "",
       · 写了映射但对不上 → 硬停。已经确定是错的，出图只会浪费钱。
       · 两张以上却没写映射 → 硬停。模型不可能知道哪张是哪张。
       · 只有一张且没写映射 → 只提醒。顺序上不存在歧义，但仍该补。
+
+    `no_image` 是装配那一层按 skill 挑出去的那几张（见 `run_v34.split_refs`）：
+    正文里有它的编号、附件里没有它的图，**这是对的**，所以那几个号不算
+    「多写了」。但要说出来 —— 不然就成了「声明 3 张只传 2 张」那类静默降级。
     """
     want = [(r.get("image_n") or i + 1, str(r.get("asset_id") or ""))
             for i, r in enumerate(want_refs)]
+    skipped = {int(r.get("image_n") or 0): r for r in (no_image or [])
+               if isinstance(r, dict) and str(r.get("asset_id") or "")}
+    note = ""
+    if skipped:
+        note = (_whose(who, ref) + "、".join(
+            f"Image {n} = {r['asset_id']}"
+            f"（{r.get('decision') or '不出图'}"
+            + (f"：{r['reason']}" if r.get("reason") else "") + "）"
+            for n, r in sorted(skipped.items()))
+            + " 按 skill 第七章不出图（只有文字契约），所以没有作为参考图上传；"
+              "正文里对它的文字描述照旧生效。")
     if not want:
-        return "", ""
+        return "", note
     got = _IMAGE_MAP.findall(prompt or "")
     if not got:
         head = (_whose(who, ref)
@@ -424,7 +439,7 @@ def check_image_map(prompt: str, want_refs: list, who: str = "",
             problems.append(f"Image {n} 应该是 {aid}，提示词里没提这个编号")
         elif claim != aid:
             problems.append(f"Image {n} 实际传的是 {aid}，提示词里却写成 {claim}")
-    extra = sorted(set(seen) - {n for n, _ in want})
+    extra = sorted(set(seen) - {n for n, _ in want} - set(skipped))
     if extra:
         problems.append("提示词里多写了 Image "
                         + "、".join(str(n) for n in extra)
@@ -546,7 +561,8 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
         # 两道校验顺序不能反：编号对不上时六字段校验会因为找不到槽位而漏报，
         # 报「身份映射不全」也会盖住真正的问题（编号错位）。
         who, ref = task["key"], task.get("prompt_ref") or ""
-        for bad_map, map_warn in (check_image_map(prompt, want_refs, who, ref),
+        for bad_map, map_warn in (check_image_map(prompt, want_refs, who, ref,
+                                                  task.get("no_image_refs")),
                                   check_identity_map(prompt, want_refs, who, ref)):
             if bad_map:
                 raise RuntimeError(bad_map)

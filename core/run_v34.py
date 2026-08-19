@@ -96,6 +96,10 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
     # 丢占位符进去的话，没旁白的项目会看到「本项目：否　声音属于：」这种
     # 半截句子，模型读到空标签会自己去填。
     m["NARRATION_RULE"] = _st.narration_rule(pj)
+    # 「拍成真人还是 3D」也要按取值生成整句规则。两套体系共用 _common，
+    # 只接一边的话，另一边渲染出来是原样的 {{MEDIUM_RULE}} ——
+    # 模型会把它当成一个要填的空位。
+    m["MEDIUM_RULE"] = _st.medium_rule(pj)
     m.update(_st.mapping(pj, params, {
         "episode_duration": _ep_seconds(pj, episode, params),
         "current_episode": episode,
@@ -1077,7 +1081,14 @@ CAPABILITY = ("RELIABLE", "LIMITED", "UNSUPPORTED", "UNKNOWN")
 # 已知支持一次生成多镜头的模型。认不出的一律 UNKNOWN，按 LIMITED 策略走 ——
 # 不假设模型有多镜头能力，是这一层的默认立场。
 _MULTISHOT = {
-    "seedance-2.5": "RELIABLE",     # 鹤 Seedance 2.5：29 秒 / 30 图，实测能多镜头
+    # 片段匹配，所以写不带档位号的前缀就能覆盖 seedance2.5-4-1-720p /
+    # -00-720p / -26-480p 等一整族。
+    # ⚠ 2026-08-19 修正：以前写的是 "seedance-2.5"（带连字符），
+    # 而真实模型名是 "seedance2.5-…" —— 一个都匹配不上，
+    # 于是这档能力一直是 UNKNOWN，多镜头按 LIMITED 走了，**且不报错**。
+    "seedance2.5": "RELIABLE",      # 鹤 Seedance 2.5：4-30 秒，实测能多镜头
+    "sd2.5-ultra": "RELIABLE",
+    "paisiodance-2.5": "RELIABLE",
 }
 
 
@@ -1238,6 +1249,172 @@ def asset_out(pj: Project, a: dict) -> str:
     return _asset_out(a, REG.current_revision(pj, str(a.get("asset_id") or "")))
 
 
+# n11 那个物化判定**只写在提示词正文里** —— 输出 schema 里原来没有这一栏，
+# 所以程序读不到，照样给它派了出图任务。用户实遇 SCST_EP01_SC01_01：
+# 正文第一行写着「当前判定：LOGICAL_ONLY … 候选图片角色：无；本条不生成图片」，
+# 而任务声明了 8 张参考图，出图前那道校验报「提示词里没有 Image N 的映射」——
+# 报错指向映射，真正的毛病是**这条压根不该是出图任务**（它是一份文字合同）。
+#
+# 结构化字段已经补进模板（`decision`），但**已经跑完的项目里没有那一栏**，
+# 所以这里同时认正文里的原话。正则只咬模板自己规定的那两种写法，
+# 不去扫别的词 —— 免得把提到 LOGICAL_ONLY 的说明文字也误判成判定。
+_SCST_NO_IMAGE_RE = re.compile(
+    r"(?:决定|当前判定)\s*[:：]\s*(?:LOGICAL_ONLY|DEFER_TO_VIDEO)"
+    r"|本条不生成图片")
+
+
+def scstate_no_image(sc: dict) -> str:
+    """这条场景状态**要不要出图**。返回不出图的理由；出图就返回空串。
+
+    先看结构化字段，没有再看正文 —— 字段是权威，正文是给老项目兜底的。
+    """
+    d = str(sc.get("decision") or sc.get("materialization") or "").strip().lower()
+    if d:
+        return d if d in NO_IMAGE_DECISIONS else ""
+    m = _SCST_NO_IMAGE_RE.search(str(sc.get("prompt") or ""))
+    return "正文里写着不生成图片" if m else ""
+
+
+def sb_sheets(pkg: dict, seg: str) -> list:
+    """一个 SBPKG 的**有序** Sheet 清单。V6.2 的核心结构改动。
+
+    V6.1 的产物把 `storyboard_prompt` / `filename` / `reference_order` 挂在
+    **包一级** —— 于是一个 SEG 只出一张图。而模板早就写着「更多关键时刻用
+    有序续页 SHEET_A/B/C」，两边对不上：模型只有一个输出位置，只能把 6 格
+    挤进一张（实遇 EP01-SEG06 的提示词就是「一张六格」），
+    而那和「每张最多 3 格」的上限直接冲突。
+
+    V6.2 第 19 章把这件事定死：每个 SEG 必须有覆盖**完整关键时间推进**的
+    骨架，载体可以是有序多张 Sheet，也可以是有序独立 KF 锚点。
+    所以那三样下移到 sheet 一级，这里把两种形状都归一成同一个清单。
+
+    **老项目照旧能跑**：sheets 里没有提示词时退回包一级那份，当成单张 ——
+    产出和以前完全一样，不会因为升级把已经出好的图判成缺失。
+    """
+    rows = [s for s in (pkg.get("sheets") or []) if isinstance(s, dict)]
+    fresh = [s for s in rows if (s.get("storyboard_prompt") or "").strip()]
+    if not fresh:
+        # 老形状：整包一份提示词 → 一张图。sheet_id 取第一张声明的，没有就 SHEET_A。
+        if not (pkg.get("storyboard_prompt") or "").strip():
+            return []
+        sid = str((rows[0].get("sheet_id") if rows else "") or "SHEET_A")
+        return [{"sheet_id": sid, "order": 1,
+                 "prompt": pkg["storyboard_prompt"],
+                 "reference_order": pkg.get("reference_order") or [],
+                 "size": pkg.get("size") or "",
+                 "kf_range": (rows[0].get("kf_range") if rows else "") or "",
+                 "spine_role": "", "legacy": True}]
+    out = []
+    for i, s in enumerate(fresh, 1):
+        out.append({
+            "sheet_id": str(s.get("sheet_id") or f"SHEET_{i}"),
+            # order 决定**上传给视频模型的顺序**。缺了就按出现顺序 ——
+            # 顺序错了模型会把后段当前段，而画面看着都对。
+            "order": int(s.get("order") or i),
+            "prompt": s["storyboard_prompt"],
+            "reference_order": s.get("reference_order") or [],
+            "size": s.get("size") or "",
+            "kf_range": str(s.get("kf_range") or ""),
+            "spine_role": str(s.get("spine_role") or ""),
+            "legacy": False,
+        })
+    out.sort(key=lambda x: x["order"])
+    return out
+
+
+def sb_prompt_name(seg: str, sheet: dict) -> str:
+    """这一张故事板的提示词 txt 叫什么。单张（老项目）保持原名。"""
+    if sheet.get("legacy"):
+        return f"{seg}_STORYBOARD_PROMPT.txt"
+    return f"{seg}_{sheet['sheet_id']}_PROMPT.txt"
+
+
+def sb_file(code: str, seg: str, sheet: dict) -> str:
+    """这一张故事板落在哪。
+
+    单张（老项目）保持原来的路径，**一个字都不能改** ——
+    改了等于把已经出好的几百张判成没出，重跑一遍全部重新花钱。
+    """
+    if sheet.get("legacy"):
+        return f"04_故事板/{code}_{seg}_STORYBOARD.png"
+    return f"04_故事板/{code}_{seg}_{sheet['sheet_id']}.png"
+
+
+def _no_image_reason(a, aid: str, prompts) -> dict:
+    """这个资产会不会有图。空字典 = 会有（或者判断不了，交给别处报）。
+
+    **两种成因，性质完全不同，所以话要分开说：**
+
+      · 档位判了不出图  —— 设计如此（skill 第七章那张表），照常跑
+      · 缺生产提示词    —— 这是个窟窿。环节判它要出，写提示词那一步
+                            漏了，于是它不会进出图任务，等于永远没有图
+
+    第二种以前只有一条 `ASSET_NO_PROMPT` 提醒（原话就写着「引用到它们的
+    故事板会因为缺参考图停下」）—— 说对了，然后就真的停在那儿。
+    """
+    if a is None:
+        return {}       # 资产表里都没有 → 认不出，留着让出图那层报「指不到文件」
+    d = str(a.get("decision") or "")
+    if d in NO_IMAGE_DECISIONS:
+        return {"decision": d, "reason": str(a.get("decision_reason") or "")}
+    if prompts is not None and aid not in prompts:
+        return {"decision": "缺生产提示词",
+                "reason": "环节4 判它要出、环节4b 没给它写提示词，"
+                          "所以它不会进出图任务 —— 这不是设计如此，"
+                          "是个窟窿，重跑 n4b 把它补上"}
+    return {}
+
+
+def split_refs(pj: Project, amap: dict, ids, *, prompts=None,
+               resolve=None) -> tuple:
+    """把一条 `reference_assets` 拆成「能上传的图」和「按 skill 不出图的」。
+
+    实遇：`CST002` 被 n4 判成 `logical_only`（「普通成年日常服装，未命中关键
+    服装物化触发器，**使用文字合同即可**」），所以它从来没有、也不该有图；
+    可 n4b 把它写进了 `LK002` 的 `reference_assets`。装配这一层照单全收，
+    给 LK002 派了一张 `CST002_R01.png` 的参考图 —— 那个文件永远不会出现，
+    LK002 于是永久卡在「参考图不存在或者是个空文件」。
+
+    排查时最费劲的一点是：CST002 **不是失败，是压根没被派过任务**，
+    所以失败记录里一个字都没有，看不出它为什么缺。
+
+    skill 第七章那张表把这件事写得很清楚 —— `logical_only` /
+    `defer_to_video` / `existing_canonical` / `skip` 这几档「出图：否」。
+    不出图的东西不能当参考图，它的约束本来就写在文字里
+    （服装是 `costume_contracts`）。所以这里把它挑出去。
+
+    **编号不重排。** 提示词正文里那份 `Image N = 资产ID` 是模型写的，
+    挑掉一张就把后面的号往前挪，会和正文对不上 —— 那是把一个报错换成
+    另一个报错。留着原来的号，正文说的还是实话，只是少了一张附件；
+    少的那一张由 `no_image_refs` 记着，出图前会照名字和档位报出来。
+    """
+    keep, no_image = [], []
+    for i, row in enumerate(ids or []):
+        # 两种写法都收：资产那边是一串 id，故事板 / 视频那边是带 image_n 的字典。
+        if isinstance(row, dict):
+            rid = str(row.get("asset_id") or "").strip()
+            n = row.get("image_n") or i + 1
+        else:
+            rid, n = str(row or "").strip(), i + 1
+        if not rid:
+            continue
+        # 场景状态图那类不在资产表里，但确实会出 —— 先给它机会认领，
+        # 否则会被下面当成「资产表里没有」而误判。
+        pre = resolve(rid) if resolve else ""
+        if pre:
+            keep.append({"image_n": n, "asset_id": rid, "file_ref": pre})
+            continue
+        why = _no_image_reason(amap.get(rid), rid, prompts)
+        if why:
+            no_image.append({"image_n": n, "asset_id": rid, **why})
+            continue
+        # 认不出的 ID **留在列表里、file_ref 留空** —— 见 build_tasks 的说明。
+        a = amap.get(rid)
+        keep.append({"image_n": n, "asset_id": rid,
+                     "file_ref": asset_out(pj, a) if a else ""})
+    return keep, no_image
+
+
 def build_tasks(pj: Project, params: dict) -> dict:
     """把各环节的产物装配成 tasks.json —— 出图出片那一层唯一读的东西。
 
@@ -1275,23 +1452,24 @@ def build_tasks(pj: Project, params: dict) -> dict:
         if a.get("decision") in NO_IMAGE_DECISIONS or aid not in prompts:
             continue
         ap = prompts[aid]
+        refs, no_img = split_refs(pj, amap, ap.get("reference_assets"),
+                                  prompts=prompts)
         asset_tasks.append({
             "key": aid,
             "episodes": sorted({str(s).split("-")[0]
                                 for s in (a.get("used_by_segs") or [])
                                 if str(s).startswith("EP")}),
             "prompt_ref": _rel("asset", ap.get("filename") or f"{aid}_PROMPT.txt"),
-            "reference_images": [
-                {"image_n": i + 1, "asset_id": rid,
-                 "file_ref": asset_out(pj, amap[rid]) if rid in amap else ""}
-                for i, rid in enumerate(ap.get("reference_assets") or [])
-            ],
+            "reference_images": refs,
+            "no_image_refs": no_img,
             "params": {"size": ap.get("size") or size},
             "output": asset_out(pj, a),
         })
 
     # ---- 场景状态图 / 故事板 / 视频：逐集逐段 ----
     scstate_tasks, sb_tasks, vd_tasks = [], [], []
+    scst_skipped: list = []       # 判成不出图的场景状态 —— 记一笔，别默默少几张
+    sb_noprompt: list = []        # 环节12 一张提示词都没写的段 —— 那一段没有骨架
     for ep in eps:
         for sc in (pj.stage_data("n11_scstate", ep) or {}).get("scstates", []):
             sid = sc.get("scstate_id")
@@ -1301,14 +1479,20 @@ def build_tasks(pj: Project, params: dict) -> dict:
             # 后一条覆盖前一条 —— 不报错，只是白花钱。
             if not sid or any(x["key"] == sid for x in scstate_tasks):
                 continue
+            # **判成不出图的不派出图任务。** 它的产物是那份文字合同（照旧落盘），
+            # 不是 png。派了的话出图前那道校验会报「没有 Image N 的映射」——
+            # 而一份文字合同本来就不该有参考图映射，报错指错了地方。
+            why = scstate_no_image(sc)
+            if why:
+                scst_skipped.append(f"{sid}（{why}）")
+                continue
+            refs, no_img = split_refs(pj, amap, sc.get("reference_assets"),
+                                      prompts=prompts)
             scstate_tasks.append({
                 "key": sid, "episode": ep, "segment": sc.get("seg_id", ""),
                 "prompt_ref": _rel("scstate", f"{sid}_PROMPT.txt"),
-                "reference_images": [
-                    {"image_n": i + 1, "asset_id": rid,
-                     "file_ref": asset_out(pj, amap[rid]) if rid in amap else ""}
-                    for i, rid in enumerate(sc.get("reference_assets") or [])
-                ],
+                "reference_images": refs,
+                "no_image_refs": no_img,
                 "params": {"size": size},
                 "output": f"03b_场景状态图/{code}_{sid}.png",
             })
@@ -1318,50 +1502,142 @@ def build_tasks(pj: Project, params: dict) -> dict:
             seg = pkg.get("seg_id")
             if not seg:
                 continue
-            sb_out = f"04_故事板/{code}_{seg}_STORYBOARD.png"
-            sb_tasks.append({
-                "key": seg, "episode": ep, "segment": seg,
-                "prompt_ref": _rel("storyboard", f"{seg}_STORYBOARD_PROMPT.txt"),
-                "reference_images": [
-                    {"image_n": r.get("image_n", i + 1),
-                     "asset_id": r.get("asset_id", ""),
-                     "file_ref": scst_out.get(r.get("asset_id"))
-                     or (asset_out(pj, amap[r["asset_id"]])
-                         if r.get("asset_id") in amap else "")}
-                    for i, r in enumerate(pkg.get("reference_order") or [])
-                ],
-                "params": {"size": size},
-                "output": sb_out,
-            })
+            # V6.2：一个 SEG 是 1..N 张**有序** Sheet（或有序独立 KF 锚点），
+            # 不再是一张。老项目退回单张，路径一个字不变。
+            sheets = sb_sheets(pkg, seg)
+            if not sheets:
+                sb_noprompt.append(seg)
+                continue
+            for sh in sheets:
+                # 故事板的参考图里也会出现「永远不会有图」的资产 —— 用户实遇
+                # EP01-SEG06 等一张 S003.png。所以和资产那边走同一个筛子。
+                refs, no_img = split_refs(pj, amap, sh["reference_order"],
+                                          prompts=prompts, resolve=scst_out.get)
+                sb_tasks.append({
+                    "key": (seg if sh.get("legacy")
+                            else f"{seg}_{sh['sheet_id']}"),
+                    "episode": ep, "segment": seg,
+                    # 骨架里的第几张 —— 视频那边按这个顺序上传。
+                    "sheet_id": sh["sheet_id"], "order": sh["order"],
+                    "spine_role": sh["spine_role"], "kf_range": sh["kf_range"],
+                    "prompt_ref": _rel("storyboard", sb_prompt_name(seg, sh)),
+                    "reference_images": refs,
+                    "no_image_refs": no_img,
+                    "params": {"size": sh["size"] or size},
+                    "output": sb_file(code, seg, sh),
+                })
 
-        sb_by_seg = {t["key"]: t["output"] for t in sb_tasks}
+        # 一个段落的**有序**骨架清单。视频那一步要整条，不是一张。
+        sb_by_seg: dict = {}
+        for t in sb_tasks:
+            sb_by_seg.setdefault(t["segment"], []).append(t)
+        for v in sb_by_seg.values():
+            v.sort(key=lambda t: t.get("order") or 0)
         for vp in (pj.stage_data("n13_video", ep) or {}).get("video_plan", []):
             seg = vp.get("seg_id")
             if not seg:
                 continue
+            vd_refs, vd_no_img = split_refs(
+                pj, amap,
+                [r for r in (vp.get("reference_order") or [])
+                 if isinstance(r, dict) and r.get("asset_id") in amap],
+                prompts=prompts)
             vd_tasks.append({
                 "key": seg, "episode": ep, "segment": seg,
                 "prompt_ref": _rel("video", f"{seg}_VIDEO_PROMPT.txt"),
-                "storyboard_ref": sb_by_seg.get(seg, ""),
-                # 视频的补充参考图（首次显露覆盖用），认不出就留空
-                "reference_images": [
-                    {"image_n": r.get("image_n", i + 1),
-                     "asset_id": r.get("asset_id", ""),
-                     "file_ref": asset_out(pj, amap[r["asset_id"]])
-                     if r.get("asset_id") in amap else ""}
-                    for i, r in enumerate(vp.get("reference_order") or [])
-                    if r.get("asset_id") in amap
-                ],
+                # V6.2：视频必须带覆盖完整关键时间推进的**有序**故事板骨架。
+                # storyboard_ref 保留成第一张，只为了老产物和老页面还能读；
+                # 真正发给模型的是 storyboard_refs 整条。
+                "storyboard_ref": (sb_by_seg.get(seg) or [{}])[0].get("output", ""),
+                "storyboard_refs": [
+                    {"order": s["order"], "sheet_id": s["sheet_id"],
+                     "spine_role": s["spine_role"], "file_ref": s["output"]}
+                    for s in sb_by_seg.get(seg, [])],
+                # 视频的补充参考图（首次显露覆盖用）。**先按老规矩把资产表里
+                # 认不出的挑掉**（这一处历来如此，不在这次改动范围内），
+                # 剩下的再过一遍「会不会有图」。
+                "reference_images": vd_refs,
+                "no_image_refs": vd_no_img,
                 "params": {"duration": params.get("duration", 15),
                            "ratio": params.get("ratio", "9:16")},
                 "output": f"05_分段视频/{code}_{seg}.mp4",
             })
+
+    if sb_noprompt:
+        # V6.2 定死每个 SEG 必须有覆盖完整关键时间推进的故事板骨架。
+        # 一张提示词都没写的段，出图任务是 0 —— 而 0 个任务和「本来就不用出」
+        # 长得一模一样，所以必须说出来。
+        diagnose.record(pj.root, diagnose.warn(
+            "VIDEO_STORYBOARD_SPINE_MISSING",
+            f"有 {len(sb_noprompt)} 段的第十二环节没写出任何故事板提示词，"
+            f"所以这几段没有故事板出图任务："
+            + "、".join(sb_noprompt[:8]) + ("…" if len(sb_noprompt) > 8 else "")
+            + "。V6.2 第 19 章要求每个段落都有覆盖完整关键时间推进的故事板骨架，"
+            "没有骨架的段落出不了片（视频那一步会因为缺故事板停下）。"
+            "重跑这几段的第十二环节。",
+            stage="storyboard", target="build_tasks"))
+
+    if scst_skipped:
+        # 「少了几张场景状态图」看着和「本来就只有这几张」一模一样 ——
+        # 不记一笔的话，人只能靠数数发现。
+        diagnose.record(pj.root, diagnose.warn(
+            "SCSTATE_LOGICAL_ONLY",
+            f"有 {len(scst_skipped)} 条场景状态被第十一环节判成不出图，"
+            f"所以没有给它们派出图任务："
+            + "、".join(scst_skipped[:6]) + ("…" if len(scst_skipped) > 6 else "")
+            + "。这是按 skill 来的（判成 LOGICAL_ONLY / DEFER_TO_VIDEO 只出文字合同，"
+            "合同照旧落盘在 03_提示词/场景状态提示词/）。要是你认为其中某一条该出图，"
+            "去改它的判定再重跑第十一环节。",
+            stage="scstate", target="build_tasks"))
 
     tasks = {"system": "v34", "project_code": code, "episodes": eps,
              "asset_tasks": asset_tasks, "scstate_tasks": scstate_tasks,
              "storyboard_tasks": sb_tasks, "video_tasks": vd_tasks}
     pj.save_tasks(tasks)
     return tasks
+
+
+def with_identity_map(ap: dict) -> str:
+    """提示词正文里缺 `Image N = 资产ID` 那几行时，**从结构化字段补出来**。
+
+    n4b 的模板两样都要求：结构化的 `reference_role_map`，和正文里逐项分行的
+    `Image N = <asset_id> <名称>` + 六个字段。模型经常写了前者、漏了后者 ——
+    实跑一次里 7 个资产都这样（PI008、PSET001、PH006/007/010/011、PI009）。
+    出图那一层于是硬停：「要传 2 张参考图，却没说哪张是谁」。
+
+    **但那两样是同一份信息。** role_map 里每一项都带着 image_n、asset_id、
+    名称和六个字段 —— 正文里那几行就是它的文字形式。既然数据在手上，
+    补出来是确定性的，不用再花一次调用去问模型「请把你已经写过的东西再写一遍」。
+
+    只在正文里**一行都没有**的时候补。写了一部分说明模型有自己的排版，
+    我们插进去只会打乱它 —— 那种情况交给出图前的校验去报。
+    """
+    from .produce import _IMAGE_MAP      # 同一个正则，不另写一份
+    prompt = str(ap.get("prompt") or "")
+    rows = [r for r in (ap.get("reference_role_map") or []) if isinstance(r, dict)]
+    if not rows or _IMAGE_MAP.search(prompt):
+        return prompt
+    lines = []
+    for i, r in enumerate(rows, 1):
+        aid = str(r.get("asset_id") or "").strip()
+        if not aid:
+            continue                    # 说不出是谁的那一项补了也没用
+        n = r.get("image_n") or i
+        lines.append(f"Image {n} = {aid} {r.get('asset_name') or ''}".rstrip())
+        for label, key in (("是谁/是什么 + 画面可见内容", "who_what_visible"),
+                           ("故事时间 / 当前状态", "story_time_state"),
+                           ("有权控制", "must_preserve"),
+                           ("无权控制", "must_not_copy"),
+                           ("适用范围", "applicable_scope")):
+            v = str(r.get(key) or "").strip()
+            # **没数据就不写这一行。** 写个「（未填）」等于骗过校验：
+            # 那一项看起来填了，实际什么都没说。缺项让校验报个提醒是对的 ——
+            # 提醒不挡生产，而假装填了会把真问题藏起来。
+            if v:
+                lines.append(f"  {label}：{v}")
+    if not lines:
+        return prompt
+    return "【参考图身份映射】\n" + "\n".join(lines) + "\n\n" + prompt
 
 
 def write_prompt_files(pj: Project, episode: str) -> int:
@@ -1378,18 +1654,28 @@ def write_prompt_files(pj: Project, episode: str) -> int:
     for ap in (pj.stage_data("n4b_asset_prompts", "") or {}).get("asset_prompts", []):
         if ap.get("prompt"):
             write_prompt_txt(pj, _rel("asset", ap.get("filename")
-                                      or f"{ap['asset_id']}_PROMPT.txt"), ap["prompt"])
+                                      or f"{ap['asset_id']}_PROMPT.txt"),
+                             with_identity_map(ap))
             n += 1
     for sc in (pj.stage_data("n11_scstate", episode) or {}).get("scstates", []):
         if sc.get("prompt") and sc.get("scstate_id"):
+            # **场景状态图也要回填身份映射。** 以前只有资产提示词享受这个 ——
+            # 而 n11 的 schema 里有一模一样的 `reference_role_map`，
+            # 模型照旧经常写了结构化字段、漏了正文里那几行。
+            # 于是「要传 8 张参考图，却没说哪张是谁」，整条硬停在出图之前。
+            # 数据就在手上，补出来是确定性的，不用再花一次调用去问。
             write_prompt_txt(pj, _rel("scstate", f"{sc['scstate_id']}_PROMPT.txt"),
-                             sc["prompt"])
+                             with_identity_map(sc))
             n += 1
     for pkg in (pj.stage_data("n12_storyboard", episode) or {}).get("sbpkg", []):
-        if pkg.get("storyboard_prompt") and pkg.get("seg_id"):
-            write_prompt_txt(pj, _rel("storyboard",
-                                      f"{pkg['seg_id']}_STORYBOARD_PROMPT.txt"),
-                             pkg["storyboard_prompt"])
+        seg = pkg.get("seg_id")
+        if not seg:
+            continue
+        # V6.2：**逐张**落盘。整包一份的老形状由 sb_sheets 归一成单张，
+        # 文件名一个字不变 —— 改了等于把已经出好的几百张判成没出。
+        for sh in sb_sheets(pkg, seg):
+            write_prompt_txt(pj, _rel("storyboard", sb_prompt_name(seg, sh)),
+                             sh["prompt"])
             n += 1
     for vp in (pj.stage_data("n13_video", episode) or {}).get("video_plan", []):
         if vp.get("video_prompt") and vp.get("seg_id"):

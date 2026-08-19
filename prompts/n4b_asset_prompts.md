@@ -66,6 +66,11 @@
 模型把另一个角色的脸套了上去。它知道这张图管哪些维度，
 不知道这张图是哪个人。
 
+**`decision` 是 `logical_only` / `defer_to_video` / `existing_canonical` /
+`skip` 的资产不出图**（第七章那张表写着「出图：否」），所以不要把它写进
+`reference_assets` —— 它没有图可传。它的约束本来就是文字形式的
+（服装看 `costume_contracts`），需要就把那段文字写进正文。
+
 所以每个槽位写全六项，编号顺序**严格等于 `reference_assets` 的顺序**
 （程序按这个顺序上传）：
 

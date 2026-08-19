@@ -26,15 +26,22 @@ class NothingToAssembleTests(unittest.TestCase):
                     "没有任何一集能拼接。EP01：EP01 没有可拼接的分段视频"):
             self.assertEqual(diagnose.code_of(msg), "NOTHING_TO_ASSEMBLE", msg)
 
-    def test_it_points_at_the_gates_not_at_ffmpeg(self):
+    def test_it_points_upstream_not_at_ffmpeg(self):
         """★ 这一步不是源头。指向 ffmpeg 会让人查一个没坏的东西。"""
         d = diagnose.CATALOG["NOTHING_TO_ASSEMBLE"]
-        self.assertIn("闸门", d["where"])
         self.assertIn("不是失败的源头", d["why"])
+        self.assertIn("任务明细", d["where"])
         # 「怎么改」这几步一个都不许把人支去查 ffmpeg —— 那个没坏。
         # （why 里提 ffmpeg 是为了说「别去查它」，那是对的。）
         self.assertNotIn("ffmpeg", "".join(d["fix"]))
-        self.assertTrue(any("闸门" in f for f in d["fix"]))
+        self.assertTrue(any("任务明细" in f or "故事板" in f for f in d["fix"]))
+
+    def test_it_no_longer_blames_the_gates(self):
+        """★ 连续性检查早就不挡生产了 —— 还指向它就是让人去找一个不存在的拦截。"""
+        d = diagnose.CATALOG["NOTHING_TO_ASSEMBLE"]
+        self.assertNotIn("闸门拦住", d["why"])
+        self.assertNotIn("闸门", d["where"])
+        self.assertNotIn("闸门是红的", "".join(d["fix"]))
 
     def test_it_does_not_steal_the_missing_ffmpeg_case(self):
         """ffmpeg 真的没装是另一回事，别被这条兜走。"""

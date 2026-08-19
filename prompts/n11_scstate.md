@@ -55,6 +55,11 @@ CVS（谁在哪、什么状态）
 理由：
 ```
 
+**这个决定必须同时写进输出里的 `decision` 栏**（见下面的输出结构）。
+只写在正文里的话程序读不到，会照样给它派一个出图任务 ——
+而一份文字合同没有参考图映射，出图前的校验会报「没说哪张图是谁」，
+报错指向映射，真正的毛病是这条压根不该出图。
+
 **只有命中下面任一条才允许出图**：
 
 1. 新人物或新 LOOK 首次出现
@@ -211,6 +216,7 @@ Image 2 = S001 雅加达私人医院（场景）
   "segment": "{{SEGMENT}}",
   "scstates": [
     {"scstate_id": "SCST_{{EPISODE}}_SC01_01",
+     "decision": "LOGICAL_ONLY|VISUAL_ANCHOR_REQUIRED|VISUAL_QC_REQUIRED|DEFER_TO_VIDEO",
      "source_cvs": "CVS_{{EPISODE}}_SC01_01",
      "story_time": "", "reality_thread": "RT_MAIN",
      "previous_scstate": "上一个稳定状态的编号；本段第一个就写 NONE",
