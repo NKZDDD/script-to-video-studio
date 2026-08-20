@@ -314,6 +314,50 @@ FIELDS: list = [
      "source": "params", "maps_to": "duration", "group": "生产参数",
      "why": "**这是一个容器的容量，不是一集多长。** 混为一谈会让第九环节"
             "把整集压进 15 秒 —— 实跑撞过。"},
+    # ---- 总时长 / 集数 / 每集时长：**三个量互相决定** ----
+    #
+    # 以前只有「每集多少秒」一个旋钮，而集数是**环节1 按剧本自带的章节切的**。
+    # 两者没有任何关联，于是用户实遇：选了 60 秒一集，程序照着剧本里的 21 章
+    # 切成 21 集 = 21 分钟 —— 而他要的是「按总时长切」。
+    #
+    # 用户原话：「节奏已经被我修改了，所以集数就要跟着逻辑变，
+    # 总时间和总集数、每集的时间应该是互相影响的逻辑才对」。对。
+    #
+    # 规则：填两个算第三个；填一个另外两个由环节1 定；三个都填而且乘不通 → 报冲突。
+    {"key": "total_seconds", "label": "全剧总时长（秒，0 = 不指定）",
+     "type": "int", "default": 0, "source": "settings", "group": "生产参数",
+     "local": True,
+     "why": "和「每集多少秒」一起填就能算出集数 —— **那时候集数按这个算，"
+            "不按剧本里的章节数**。剧本写着 21 章但你要 60 分钟、每集 60 秒，"
+            "那就是 60 集，环节1 会照 60 集去切。\n"
+            "只填这一个：集数和每集时长由环节1 在这个总长里分配。"},
+    {"key": "episode_count", "label": "总集数（0 = 不指定）",
+     "type": "int", "default": 0, "source": "settings", "group": "生产参数",
+     "local": True,
+     "why": "**填了就是硬的**：环节1 必须切成这么多集，不看剧本里有几章。\n"
+            "和总时长一起填 → 每集时长 = 总时长 ÷ 集数；"
+            "和每集时长一起填 → 总时长 = 集数 × 每集时长。"},
+    {"key": "pacing", "label": "剧情节奏速度", "type": "enum",
+     "options": ["compact", "standard", "unhurried"],
+     "zh": {"compact": "紧凑（只留主线因果，压掉描写）",
+            "standard": "标准",
+            "unhurried": "舒展（留呼吸和情绪停顿）"},
+     "default": "standard", "source": "settings", "group": "生产参数",
+     "local": True,
+     "why": "**只在总时长没指定时起作用** —— 那时候环节1 要自己判断这部剧该多长，"
+            "这一项告诉它往哪边靠。总时长填了就以总时长为准，节奏只影响"
+            "同样长度里塞多少事件。"},
+    {"key": "episode_seconds", "label": "每集固定多少秒（0 = 让环节1 按剧情定）",
+     "type": "int", "default": 0, "source": "settings", "group": "生产参数",
+     "local": True,
+     "why": "**填了就是硬的**：程序在切集之后直接把每集的 duration_sec 覆盖成这个数，"
+            "不经过模型。写在「特殊要求」里不管用 —— 那是给模型看的提示，"
+            "而环节1 的原则是「按剧情事件定秒数」，它会按自己的判断给数。\n"
+            "0 = 不指定，照旧由环节1 定（每集可以不一样长）。\n"
+            "**改它要重跑环节1**，而且如果环节2 已经切过段，段数会跟着变 —— "
+            "那时必须从环节2 重跑，不能只改这个数就去出片。\n"
+            "每集想不一样长：留 0，然后手改 01_剧本与分段/episodes.json 里各集的 "
+            "duration_sec。"},
     {"key": "project_id", "label": "项目编号", "type": "text",
      "source": "params", "maps_to": "project_code", "group": "生产参数"},
 
@@ -511,8 +555,19 @@ BASIC_KEYS = (
     "visual_medium", "visual_style", "cultural_setting",
     "adaptation_authority",
     "dialogue_language",
+    # 长度计划四件套。按上面那条判据（「换一部剧会不会改」）它们最该展开 ——
+    # 总时长和节奏是**每部剧开工第一件要定的事**，而且它们决定集数：
+    # 折在「生产参数」里的后果实际发生过 —— 用户选了「每集 60 秒」，
+    # 而集数还是按剧本里的 21 章切的，因为他没找到总时长那一栏。
+    "total_seconds", "episode_count", "episode_seconds", "pacing",
     "subtitle", "subtitle_lang", "subtitle_burn",
+    # 画面里本来就该有的文字：留空 = 一律禁止，而有弹幕的剧必须填 ——
+    # 不填的话弹幕会被那条禁令**静默**拦掉（图出来了、没有弹幕、不报错）。
+    "on_screen_text",
     "narration", "narration_style", "narration_voice", "narration_on_screen",
+    # 对白怎么呈现：解说剧和正常剧就差这一项，每部剧都要过一遍。
+    # 加它的时候漏了这张表，于是它一直折着，而它正是解说剧唯一要改的开关。
+    "dialogue_mode",
     "special_notes",
 )
 
@@ -720,6 +775,84 @@ def medium_rule(pj: Project) -> str:
     """
     v = load(pj)
     return f"视频类型：{MEDIUM_ZH.get(v.get('visual_medium') or 'live_action', '真人短剧')}"
+
+
+def plan_lengths(vals: dict) -> dict:
+    """总时长 / 集数 / 每集时长 —— 三个量互相决定，算出缺的那一个。
+
+    返回 `{total, count, per, given, conflict}`（秒 / 集 / 秒）。0 = 没定。
+
+    规则：
+        填两个   → 算第三个
+        填一个   → 另外两个由环节1 定（但填的那个是硬的）
+        填三个   → 乘不通就报冲突，**不静默挑一个**
+        都不填   → 全由环节1 定（老行为）
+
+    三个都填而且乘不通时以「集数 × 每集」为准 —— 那两个直接决定怎么切，
+    而总时长只是个结果。但必须说出来：悄悄改掉用户填的数字，
+    比报错难查得多。
+    """
+    def _n(k):
+        try:
+            return max(0, int(float(vals.get(k) or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    total, count, per = _n("total_seconds"), _n("episode_count"), _n("episode_seconds")
+    given = [k for k, v in (("总时长", total), ("集数", count), ("每集", per)) if v]
+    conflict = ""
+    if total and count and per:
+        want = count * per
+        # 容差给一集：整数除不尽时不该判成冲突
+        if abs(want - total) > per:
+            conflict = (f"你填的三个数乘不通：{count} 集 × {per} 秒 = {want} 秒，"
+                        f"而总时长填的是 {total} 秒（差 {abs(want - total)} 秒）。"
+                        f"**按「集数 × 每集」算了** —— 那两个直接决定怎么切，"
+                        f"总时长只是结果。要按总时长走就把集数或每集时长清成 0。")
+        total = want
+    elif total and per:
+        count = max(1, round(total / per))
+    elif total and count:
+        per = max(1, round(total / count))
+    elif count and per:
+        total = count * per
+    return {"total": total, "count": count, "per": per,
+            "given": given, "conflict": conflict}
+
+
+def length_plan(pj: Project) -> str:
+    """发给环节1 的那段话：总时长/集数/每集时长谁说了算。
+
+    合成一段而不是丢三个数过去 —— 模型要的是**关系**：
+    「集数是算出来的，不是数剧本里有几章」这句话才是重点，
+    而三个孤立的数字说不出这件事。
+    """
+    v = load(pj)
+    p = plan_lengths(v)
+    if not p["given"]:
+        return (f"全剧总时长、集数、每集时长都没指定 —— 三个都由你按剧情事件定。"
+                f"节奏速度：{_zh_of('pacing', v)}。")
+    rows = []
+    if p["total"]:
+        rows.append(f"全剧总时长 {p['total']} 秒"
+                    + ("（你指定）" if "总时长" in p["given"] else "（算出来的）"))
+    if p["count"]:
+        rows.append(f"集数 {p['count']} 集"
+                    + ("（你指定）" if "集数" in p["given"] else "（算出来的）"))
+    if p["per"]:
+        rows.append(f"每集 {p['per']} 秒"
+                    + ("（你指定）" if "每集" in p["given"] else "（算出来的）"))
+    out = "；".join(rows) + "。"
+    if p["count"]:
+        out += (f"\n**必须切成 {p['count']} 集，不多不少** —— "
+                f"这个数是按时长算出来的，**不是数剧本里有几章**。"
+                f"剧本自带的章节编号只是参考，节奏由上面这几个数定。"
+                f"章节比 {p['count']} 多就合并，少就在剧情转折处再切开。")
+    if not p["total"] or not p["per"]:
+        out += f"\n没定的那几项由你按剧情定；节奏速度：{_zh_of('pacing', v)}。"
+    if p["conflict"]:
+        out += "\n⚠ " + p["conflict"]
+    return out
 
 
 def narration_rule(pj: Project) -> str:

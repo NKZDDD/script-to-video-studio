@@ -212,10 +212,82 @@ def seg_target(pj: Project, episode: str, params: dict) -> tuple:
 
 
 # ---------------------------------------------------------------- 落盘 / 读取
+def force_seconds(res: dict, want: int) -> dict:
+    """把每集时长**硬性**覆盖成 want 秒。0 就不动。
+
+    为什么是在代码里覆盖，而不是写进提示词：用户把「每集 3 分钟」写在
+    「特殊要求」里不管用 —— 那是给模型看的一句话，而环节1 的原则写着
+    「按剧情事件定秒数，不要按字数换算」，它会按自己的判断给数。
+    两句话打架时模型听自己的那一条，而且**不报错**，只是时长不是你要的。
+
+    所以这一条落在切集之后：环节1 照旧按剧情给它的判断（`pacing_note` 留着，
+    还能看出它本来想给多少），程序再把秒数按你的要求改掉。
+
+    体检照旧跑（字数 / 时长 比例离谱时提醒）—— 硬性指定不等于指定得合理，
+    3600 字要撑 60 秒的话得让人看见。
+    """
+    want = int(want or 0)
+    if want <= 0:
+        return res
+    for e in res.get("episodes") or []:
+        was = e.get("duration_sec") or 0
+        if was != want:
+            # 环节1 原来给的留一份，不然「为什么每集都一样长」查不出来源
+            e["duration_sec_by_stage1"] = was
+        e["duration_sec"] = want
+    res["episode_seconds_forced"] = want
+    _recheck_density(res)
+    return res
+
+
+def _recheck_density(res: dict) -> None:
+    """覆盖秒数之后重跑那条「字数撑不撑得住」的体检。
+
+    不重跑的话 issues 里留的是按环节1 原来那个秒数算的比例 —— 数字对不上，
+    而人会照着它去判断，那比没有提醒更坏。
+    """
+    keep = [i for i in (res.get("issues") or [])
+            if "每分钟" not in str(i.get("reason") or "")]
+    for e in res.get("episodes") or []:
+        sec, chars = e.get("duration_sec") or 0, e.get("chars") or 0
+        if not sec or chars < 120:
+            continue
+        per_min = chars / (sec / 60)
+        if per_min < 100 or per_min > 2000:
+            keep.append({
+                "episode": e["episode"], "level": "warn",
+                "reason": f"正文 {chars} 字要撑 {sec} 秒 = 每分钟 {per_min:.0f} 字"
+                          f"（这个秒数是你在设置里指定的）。"
+                          + ("内容可能撑不满这个时长（会注水）" if per_min < 100
+                             else "这个时长可能塞不下这些剧情")
+                          + f"；环节1 本来想给 {e.get('duration_sec_by_stage1') or '?'} 秒，"
+                            f"理由：{e.get('pacing_note') or '（没写）'}"})
+    res["issues"] = keep
+
+
 def build(pj: Project, script: str, s1: dict) -> dict:
     """环节1 跑完后调用：切集并存盘。"""
+    from . import settings as _st
     res = split(script, (s1 or {}).get("episode_ranges") or [])
     res["scope"] = (s1 or {}).get("scope", "")
+    # 总时长 / 集数 / 每集时长是**互相决定**的（见 settings.plan_lengths）。
+    # 环节1 收到的是同一份计划，这里只做两件程序该做的事：
+    #   · 每集秒数按计划覆盖（硬的，不经过模型）
+    #   · 集数没切对就说出来
+    plan = _st.plan_lengths(_st.load(pj) or {})
+    force_seconds(res, plan["per"])
+    res["length_plan"] = {k: plan[k] for k in ("total", "count", "per")}
+    got = len(res.get("episodes") or [])
+    if plan["count"] and got and got != plan["count"]:
+        # **不改它切出来的东西**，只报。集边界是内容判断，程序合并或者
+        # 拆开只会切在错的地方 —— 那比集数不对更难查。
+        res.setdefault("issues", []).append({
+            "episode": "", "level": "warn",
+            "reason": f"按长度计划该切 {plan['count']} 集，环节1 实际切出 "
+                      f"{got} 集。程序不替它合并或拆开 —— 集边界是内容判断，"
+                      f"切在错的地方比集数不对更难查。"
+                      f"{'章节比目标多，让它合并相邻章节' if got > plan['count'] else '章节比目标少，让它在剧情转折处再切开'}："
+                      f"重跑环节1；或者把设置里的集数/总时长改成 {got} 那一档。"})
     pj.save_stage(FILE[:-5], res)          # → 01_剧本与分段/episodes.json
     return res
 

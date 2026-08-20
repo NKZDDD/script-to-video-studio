@@ -725,10 +725,35 @@ const AUTO_REMEMBER = {autoConc: 'concurrency', autoEpConc: 'llm_episodes',
 // 尺寸/比例/时长的候选：取「这条链上每一家都支持」的交集 ——
 // 只有交集里的值才保证自动换家时不会因为参数不支持而挂掉。
 // 交集为空（各家完全不重叠）就退回首选那家的清单，并标出来提醒。
+// 「时长档位」那个框：`模型名=4,8,15,30`，分号或换行分隔多条；`*=…` 给这家兜底。
+//
+// 为什么需要它：各家文档对现役模型的时长常常**根本没写**。程序猜不出来，
+// 而两种猜法都有代价 —— 报宽了人会当成「支持」，报窄了能力被埋掉。
+// 所以程序只报有依据的，你实测过的写在这里。
+function parseDurationRules(text) {
+  const out = {};
+  String(text || '').split(/[;\n]+/).forEach(part => {
+    const i = part.indexOf('=');
+    if (i < 0) return;
+    const model = part.slice(0, i).trim();
+    const secs = part.slice(i + 1).split(/[,，\s]+/)
+      .map(x => parseInt(x, 10)).filter(n => n > 0);
+    if (model && secs.length) out[model] = secs.sort((a, b) => a - b);
+  });
+  return out;
+}
 function effectiveBlock(capability, blockName, model) {
   const base = (capability && capability[blockName]) || {};
   const modelOpt = ((base.model_options || {})[model]) || {};
-  return {...base, ...modelOpt};
+  const eff = {...base, ...modelOpt};
+  // 用户填的档位**盖在最后** —— 他实测过，比文档和我们的猜测都硬。
+  if (blockName === 'video' && capability) {
+    const saved = (BOOT.providers_public || {})[capability.id] || {};
+    const rules = parseDurationRules(saved.durations);
+    const hit = rules[model] || rules['*'];
+    if (hit) eff.durations = hit;
+  }
+  return eff;
 }
 // 上面那三个下拉的选项是**跟着模型走**的，不是跟着服务商走。
 // 不显示来源的话会撞上一个很费解的情况：明明知道 seedance 2.5 能出 29 秒，
@@ -2325,6 +2350,12 @@ function renderProviders() {
         <div><label>每隔几秒查一次</label>
           <input data-pv="${c.id}" data-f="poll_interval" type="number" min="2" max="60"
                  value="${saved.poll_interval || (isVideo ? 10 : 5)}"></div>
+        ${isVideo ? `<div style="grid-column:1/-1"><label>时长档位（实测过的写在这里）
+          <span class="muted">各家文档对现役模型的秒数常常根本没写 ——
+            程序只报有依据的，你验过的写在这里就会出现在下拉里</span></label>
+          <input data-pv="${c.id}" data-f="durations"
+                 placeholder="sd2.5-720p-301010=4,8,15,30；另一个模型=4,8,12　（* 给这家兜底）"
+                 value="${esc(saved.durations || '')}"></div>` : ''}
       </div>${blocks}
       <div class="row" style="margin-top:8px"><button class="btn sm" data-save="${c.id}">保存</button></div></div>`;
   }).join('');

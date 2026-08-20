@@ -360,6 +360,12 @@ def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
         raise ValueError(f"服务商 {pid} 未配置{label} Key（在「服务商」页签保存）")
     # worker 仍只接收统一的 api_key；在进入 worker 前完成按能力路由。
     out["api_key"] = key
+    # **哪个分组要带下去。** 算出来却扔掉的话，日志和失败记录里只有模型名，
+    # 看不出这一次用的是哪一把 Key —— 而有几家（超模的 1K/4K、坤鸡的令牌分组）
+    # 的行为是**按分组**不一样的：实遇超模 1K 分组把内嵌图片字段截在 4096 字符，
+    # 排查时第一个要问的就是「那次是哪个分组」，而答案原本谁都给不出来。
+    out["key_slot"] = slot
+    out["key_slot_label"] = _KEY_LABELS.get(slot, slot)
     # 参考图上传配置是全局共用的（一个对象存储服务所有服务商），
     # 但某家自己的上传端点能不能用是按家配的
     out["upload"] = dict(cfg.get("upload") or {})   # 上传配置全局共用一份
@@ -552,7 +558,10 @@ def api_get(path: str, q: dict) -> dict:
                 # 再点一次保存就被默认值盖掉了，而且一声不吭。
                 "providers_public": {
                     k: {f: v[f] for f in ("base_url", "poll_timeout",
-                                          "poll_interval") if f in v}
+                                          "poll_interval",
+                                          # 用户实测出来的时长档位。不回显的话
+                                          # 保存一次就看不见了，等于填了个黑洞。
+                                          "durations") if f in v}
                     for k, v in (cfg.get("providers") or {}).items()},
                 "capabilities": list_capabilities(),
                 # 两套体系的环节表都下发，前端按项目的 system 挑一套显示。
