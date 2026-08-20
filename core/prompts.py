@@ -83,7 +83,42 @@ def _spec(name: str) -> tuple:
             if tpl == name:
                 st = next((x for x in stages if x["id"] == sid), {})
                 return st.get("no", 0), st.get("name", name), req
-    return 0, "所有环节共用的系统提示词", []
+    return 0, _UNDERSCORE.get(name, ("这一份不属于任何环节", ""))[0], []
+
+
+# 下划线开头这几份不属于任何环节。**每份得有自己的名字。**
+#
+# 原来它们共用一个兜底名「所有环节共用的系统提示词」—— 三份长得一模一样。
+# 用户按这个名字挑了一份去改「画面内禁止出现任何文字、字幕」，
+# 挑到的是 `_settings_extract.md`；而那一行在那份里只是**引用的一个反面
+# 例子**（用来教模型认出散文互相矛盾），改它对出图出片没有任何影响。
+# 保存成功、标「已改写」，然后画面照旧 —— 用户原话「好像不听我的」。
+#
+# 第二项是「这一份管什么」，直接显示在编辑框上面。
+_UNDERSCORE = {
+    "_common": (
+        "全局规则（每个环节都带上它）",
+        "出图出片的硬规则就在这一份里。**第 10 条「画面里能不能有文字」"
+        "是按设置生成的**（{{SUBTITLE_RULE}}）—— 想让画面里出现字或者"
+        "不出现字，改「设置 → 字幕」那一组，不要在这里写散文："
+        "散文和生成出来的那一句会互相矛盾，而矛盾没有任何一处会报错，"
+        "结果是其中一方悄悄失效。"),
+    "_settings_extract": (
+        "把你写的一段话读成设置项（只在「设置」页点识别时用）",
+        "**它不参与出图出片。** 只负责把你随手写的一段要求"
+        "读成一条条设置项。里面引用的那些规则原文是给它做对照用的"
+        "反面例子，改了不会改变画面 —— 想改画面去改 `_common.md`，"
+        "或者直接改「设置」页对应的那一项。"),
+    "_soften": (
+        "提示词被审核拒了之后，怎么改写重试",
+        "**只在出图出片被服务商拒了之后才用。** 平时一次都不会被调到，"
+        "所以在这里改规则不会影响正常流程。"),
+}
+
+
+def note_of(name: str) -> str:
+    """这一份模板管什么 —— 显示在编辑框上面，免得改错那一份。"""
+    return _UNDERSCORE.get(name, ("", ""))[1]
 
 
 def all_template_names() -> list:
@@ -241,6 +276,9 @@ def read(name: str, pj=None, scope: str = "") -> dict:
     text = {"global": g or b, "project": p or inherited}.get(scope, p or g or b)
     return {"name": name, "system": system_of_template(name),
             "stage_no": no, "label": label, "scope": scope,
+            # 「这一份管什么」。不说的话，改错那一份是必然的 ——
+            # 三份下划线模板长得像，而改错之后一切正常、只是不生效。
+            "note": note_of(name),
             "text": text, "builtin": b, "global_text": g,
             "project_text": p, "inherited": inherited,
             "customized": L["effective"] != "builtin",

@@ -2859,7 +2859,11 @@ function makePromptEditor(host, scope) {
     $$$('state').innerHTML =
       `<span class="chip ${c.effective === 'builtin' ? '' : 'on'}">当前生效：${eff}</span>`
       + `<span class="muted" style="margin-left:6px">${chain}</span>`
-      + (c.stale ? `<div class="alert err" style="margin-top:8px">⚠ ${esc(c.stale)}</div>` : '');
+      + (c.stale ? `<div class="alert err" style="margin-top:8px">⚠ ${esc(c.stale)}</div>` : '')
+      // 「这一份管什么」。三份下划线模板以前在下拉里叫同一个名字，
+      // 挑错一份去改，保存成功、标「已改写」，然后画面照旧 ——
+      // 改错的那份根本不参与出图出片，而没有任何一处说过这件事。
+      + (c.note ? `<div class="alert" style="margin-top:8px">${mdBold(c.note)}</div>` : '');
     const v = (list, cls) => list.map(x =>
       `<span class="chip ${cls}">{{${esc(x)}}}</span>`).join('');
     $$$('meta').innerHTML =
