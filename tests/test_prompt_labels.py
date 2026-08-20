@@ -80,40 +80,59 @@ class LabelTests(unittest.TestCase):
 
 
 class TheRealLeverTests(unittest.TestCase):
-    """画面里能不能有字，靠的是设置，不是改散文。"""
+    """画面里能不能有字，靠的是设置，不是改散文。
+
+    而这里只剩一个开关：字幕。剧情本身要求的文字一律允许 ——
+    用户原话「实际上画面上的字都是要有的，我需要控制的只是有没有字幕」。
+    """
 
     def setUp(self):
         self.pj = Project(tempfile.mkdtemp(prefix="onscreen-"))
         self.pj.init_dirs()
 
-    def test_the_default_forbids_all_text(self):
-        r = S.subtitle_rule(self.pj)
-        self.assertIn("禁止出现任何文字", r)
+    def test_story_text_is_allowed_by_default(self):
+        """★ 原来默认是「禁止出现任何文字」—— 手机屏幕、招牌、信件、
 
-    def test_asking_for_on_screen_text_flips_the_rule(self):
-        """★ 用户填的原文要**照抄**进去，不替他做提示词工程。"""
-        S.save(self.pj, {"on_screen_text": "手机屏幕上的微信消息"})
+        弹幕一起被禁掉，而且是静默的：图出来了、字没了、不报错。
+        """
         r = S.subtitle_rule(self.pj)
-        self.assertIn("画面内允许出现", r)
-        self.assertIn("手机屏幕上的微信消息", r)
+        self.assertIn("剧情本身要求的文字", r)
         self.assertNotIn("禁止出现任何文字", r)
 
-    def test_burned_subtitles_are_allowed_by_the_same_rule(self):
-        S.save(self.pj, {"subtitle": True, "subtitle_burn": True,
-                         "subtitle_lang": "中文"})
-        self.assertIn("中文字幕（烧录进画面）", S.subtitle_rule(self.pj))
+    def test_subtitles_are_off_by_default(self):
+        self.assertIn("不要字幕", S.subtitle_rule(self.pj))
 
-    def test_subtitles_that_are_not_burned_do_not_open_the_gate(self):
-        """★ 不烧录的字幕是后期合成的，画面里不该有字。"""
-        S.save(self.pj, {"subtitle": True, "subtitle_burn": False})
-        self.assertIn("禁止出现任何文字", S.subtitle_rule(self.pj))
+    def test_the_switch_turns_subtitles_on(self):
+        S.save(self.pj, {"subtitle": True, "subtitle_lang": "中文"})
+        r = S.subtitle_rule(self.pj)
+        self.assertIn("中文字幕", r)
+        self.assertIn("直接印进画面", r)
+        self.assertNotIn("不要字幕", r)
+
+    def test_watermarks_and_ui_stay_forbidden_either_way(self):
+        """★ 放开剧情文字不等于放开水印和 UI 面板。"""
+        for on in (True, False):
+            S.save(self.pj, {"subtitle": on})
+            self.assertIn("水印", S.subtitle_rule(self.pj))
 
     def test_it_actually_reaches_the_system_prompt(self):
         """★ 这才是「听不听我的」的判据 —— 两套体系共用这一条路径。"""
-        S.save(self.pj, {"on_screen_text": "手机屏幕上的微信消息"})
+        S.save(self.pj, {"subtitle": True, "subtitle_lang": "中英双语"})
         sp = ST.system_prompt(self.pj, {})
-        self.assertIn("手机屏幕上的微信消息", sp)
+        self.assertIn("中英双语字幕", sp)
         self.assertNotIn("{{SUBTITLE_RULE}}", sp)
+
+    def test_a_retired_field_is_still_readable(self):
+        """★ `load()` 只走 FIELDS —— 字段一删，用户填过的值就再也读不到。
+
+        那是他亲手写的东西，悄悄丢掉正是这套东西要防的那一类。
+        """
+        self.assertIn("on_screen_text", S.RETIRED_KEYS)
+        meta = dict(self.pj.meta() or {})
+        meta["settings"] = {"on_screen_text": "弹幕字号不要太小"}
+        self.pj.save_meta(meta)
+        self.assertEqual(S.load(self.pj)["on_screen_text"], "弹幕字号不要太小")
+        self.assertIn("弹幕字号不要太小", S.subtitle_rule(self.pj))
 
 
 if __name__ == "__main__":

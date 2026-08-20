@@ -270,9 +270,14 @@ class BasicKeysTests(unittest.TestCase):
         for k in ("total_seconds", "episode_count", "episode_seconds", "pacing"):
             self.assertEqual(S.tier_of(k), "basic", k)
 
-    def test_the_two_per_drama_switches_are_expanded_too(self):
-        """弹幕和对白呈现也是每部剧要过一遍的，加的时候漏了这张表。"""
-        for k in ("on_screen_text", "dialogue_mode"):
+    def test_the_per_drama_switches_are_expanded_too(self):
+        """字幕和对白呈现是每部剧要过一遍的，加的时候漏了这张表。
+
+        `on_screen_text` 从这里去掉了 —— 剧情本身要求的文字改成一律允许，
+        不再需要用户逐部剧声明（用户原话「画面上的字都是要有的，
+        我需要控制的只是有没有字幕」）。
+        """
+        for k in ("subtitle", "dialogue_mode"):
             self.assertEqual(S.tier_of(k), "basic", k)
 
     def test_the_tuning_knobs_stay_folded(self):

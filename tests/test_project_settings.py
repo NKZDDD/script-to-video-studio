@@ -61,10 +61,19 @@ class DefaultsTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.pj.root, ignore_errors=True)
 
-    def test_an_untouched_project_keeps_the_original_rule(self):
-        """★ 没填过设定的项目，第 10 条要一字不差还是原来那句。"""
+    def test_an_untouched_project_forbids_subtitles_but_not_story_text(self):
+        """没填过设定的项目：不要字幕，而剧情里的字照旧允许。
+
+        **这一条原来断言的是那句无条件禁令**（「画面内禁止出现任何文字、
+        字幕、水印、UI 面板」）。那句话把手机屏幕上的短信、店铺招牌、
+        信件正文、报纸标题、弹幕一起禁掉了 —— 而禁掉是**静默的**：
+        图出来了、字没了、不报错。
+        用户原话：「实际上画面上的字都是要有的，我需要控制的只是有没有字幕」。
+        """
         sp = S.system_prompt(self.pj, {})
-        self.assertIn("画面内禁止出现任何文字、字幕、水印、UI 面板", sp)
+        self.assertIn("剧情本身要求的文字", sp)
+        self.assertIn("不要字幕", sp)
+        self.assertNotIn("画面内禁止出现任何文字、字幕、水印、UI 面板", sp)
 
     def test_defaults_are_listed_but_marked_as_defaults(self):
         """★ skill 第 0 章：「采用**明确标注的默认值**」。
@@ -100,30 +109,46 @@ class SubtitleRuleTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.pj.root, ignore_errors=True)
 
-    def test_burning_subtitles_rewrites_the_no_text_rule(self):
-        ST.save(self.pj, {"subtitle": True, "subtitle_burn": True,
-                          "subtitle_lang": "中英双语"})
+    def test_asking_for_subtitles_rewrites_the_rule(self):
+        ST.save(self.pj, {"subtitle": True, "subtitle_lang": "中英双语"})
         sp = S.system_prompt(self.pj, {})
-        # 措辞收敛成原样陈述了（不再替用户写「放在底部安全区、
-        # 不遮挡人物面部」那种提示词工程），所以按事实断言。
-        self.assertIn("画面内允许出现", sp)
-        self.assertIn("烧录进画面", sp)
-        self.assertIn("中英双语", sp)
+        self.assertIn("中英双语字幕", sp)
+        self.assertIn("直接印进画面", sp)
         # 原来那句无条件禁令必须消失，否则两句并存又是矛盾
         self.assertNotIn("画面内禁止出现任何文字、字幕、水印、UI 面板", sp)
 
     def test_other_text_is_still_forbidden(self):
         """★ 放开字幕不等于放开水印和 UI —— 只松该松的那一项。"""
-        ST.save(self.pj, {"subtitle": True, "subtitle_burn": True})
+        ST.save(self.pj, {"subtitle": True})
         sp = S.system_prompt(self.pj, {})
-        self.assertIn("除此之外禁止出现", sp)
-        self.assertIn("水印", sp)
+        self.assertIn("禁止出现水印", sp)
+        self.assertIn("不属于剧情的叠加文字", sp)
 
-    def test_subtitles_not_burned_in_keep_the_original_rule(self):
-        """要字幕但走后期合成 —— 画面里仍然不该有文字。"""
-        ST.save(self.pj, {"subtitle": True, "subtitle_burn": False})
-        sp = S.system_prompt(self.pj, {})
-        self.assertIn("画面内禁止出现任何文字、字幕、水印、UI 面板", sp)
+    def test_story_text_is_allowed_either_way(self):
+        """★ 剧情里的字不该跟着字幕开关走 —— 它本来就在故事里。"""
+        for on in (True, False):
+            ST.save(self.pj, {"subtitle": on})
+            self.assertIn("剧情本身要求的文字", S.system_prompt(self.pj, {}))
+
+    def test_the_switch_is_the_only_thing_left(self):
+        """★ 原来是四项（要不要 / 语言 / 印不印 / 画面里该有的文字）。
+
+        用户原话：「你这个复杂了」。印不印进画面这一项特别多余 ——
+        本程序做的是出图出片，画面里有字幕就是烧录进去的，没有第二种做法。
+        """
+        keys = [f["key"] for f in ST.FIELDS if f.get("group") == "字幕"]
+        self.assertEqual(keys, ["subtitle", "subtitle_lang"])
+
+    def test_an_old_projects_typed_requirement_is_not_thrown_away(self):
+        """★ 「画面里本来就该有的文字」那一栏去掉了，但填过的话不许丢。
+
+        用户可能在里面写了别处没有的要求（「弹幕字号不要太小」），
+        悄悄丢掉正是这套东西要防的那一类。
+        """
+        meta = dict(self.pj.meta() or {})
+        meta["settings"] = {"on_screen_text": "弹幕字号不要太小"}
+        self.pj.save_meta(meta)
+        self.assertIn("弹幕字号不要太小", S.system_prompt(self.pj, {}))
 
 
 class DependentFieldTests(unittest.TestCase):
