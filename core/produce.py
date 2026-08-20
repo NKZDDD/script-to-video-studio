@@ -556,6 +556,20 @@ def _soften_rounds(provider_cfg: dict) -> int:
     return soften.clamp_rounds(v)
 
 
+def _who_line(provider_cfg: dict, model: str) -> str:
+    """这一次用的是哪家、哪个模型、**哪一把 Key**。
+
+    分组必须写出来：有几家的行为是按分组不一样的（超模的 1K/4K、
+    坤鸡的令牌分组），而排查时第一句问的就是「那次是哪个分组」。
+    以前日志里只有模型名 —— 那个问题谁都答不上来。
+    """
+    bits = [str(provider_cfg.get("provider") or "?"), str(model or "?")]
+    slot = str(provider_cfg.get("key_slot_label") or "")
+    if slot and slot not in ("图片", "视频"):
+        bits.append(f"用「{slot} Key」")
+    return " / ".join(bits)
+
+
 def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
                       llm_factory: Optional[Callable] = None) -> Callable:
     """kind: asset | storyboard。返回 worker(task, log, cancel)。
@@ -610,7 +624,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
             if map_warn:
                 log(f"⚠️ {map_warn}")
         refs = [to_ref(s, log) for _, s in srcs]
-        log(f"参考图×{len(refs)}")
+        log(f"{_who_line(provider_cfg, model)}　参考图×{len(refs)}")
         meta = soften.run_with_softening(
             lambda p: prov.generate_image(
                 ImageTask(prompt=p, refs=refs, size=want, model=model),
@@ -649,6 +663,17 @@ def make_video_worker(pj: Project, provider_cfg: dict,
     n_acct = (accounts.configure(pid, provider_cfg["api_key"])
               if getattr(prov, "per_account_serial", False) else 0)
     pool = accounts.pool(pid) if n_acct else None
+    if n_acct:
+        # **把并发闸门的上限压到账号数。**
+        #
+        # 不压的话，等空账号这件事发生在 `with GATE.slot(provider)` **里面** ——
+        # 一个账号 + 并发 10 = 9 条任务占着全局槽位干等，而全局默认只有 8 个槽，
+        # 别家的出图会被这 9 条堵死。
+        #
+        # 压到账号数之后，多出来的任务卡在闸门外，进来的每一条都能立刻
+        # 拿到一个空账号。池子里的排队只剩下「换家补跑时账号数变了」这种边角。
+        from .executor import GATE
+        GATE.set_provider_limit(pid, n_acct)
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -681,10 +706,33 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                 f"V6.2 要求整条时间骨架都在：缺中间那几张的话，"
                 f"模型不知道这一段先发生什么后发生什么，出来的画面和剧情没有关系。")
         prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
+        # **提示词里的映射要覆盖整条骨架。**
+        #
+        # 出图那一层一直有这道校验，出片这一层以前没有 —— 而 V6.2 之后
+        # 一段有 1..N 张有序故事板，正文只映射了第一张的话，模型收到 N 张
+        # 没有标签的图、只知道其中一张是谁。**它不会报错**，只会把后段的
+        # 画面当成前段用，出来的片子时间顺序是乱的。
+        #
+        # 只提醒不硬停：出片是最贵的一步，为一句措辞把整段拦住不值得 ——
+        # 而这条提醒足够让人看出该回去改哪个环节。
+        if len(spine) > 1:
+            mapped = {a for _, a in _IMAGE_MAP.findall(prompt or "")}
+            miss = [os.path.splitext(os.path.basename(s))[0]
+                    for s in spine
+                    if not any(os.path.splitext(os.path.basename(s))[0].endswith(m)
+                               or m.endswith(os.path.splitext(os.path.basename(s))[0])
+                               for m in mapped)]
+            if miss:
+                log(f"⚠️ 这一段的故事板骨架有 {len(spine)} 张，但提示词里只映射了 "
+                    f"{len(mapped)} 张 —— 没提到的：{'、'.join(miss[:4])}。"
+                    f"模型收到的是几张没有标签的图，只知道其中一张是谁，"
+                    f"会把后段当前段用（不报错，出来的片子时间顺序是乱的）。"
+                    f"去重跑第十三环节，或者在「任务明细」里把缺的那几行补上 —— "
+                    f"`Image N = SBPKG_..._SHEET_B`，顺序和上面传的一致。")
         refs = [to_ref(s, log) for s in spine]
         if task.get("aux_reference"):
             refs.append(to_ref(task["aux_reference"], log))
-        log(f"model={model} {p.get('duration', 15)}s {want} "
+        log(f"{_who_line(provider_cfg, model)}　{p.get('duration', 15)}s {want} "
             f"故事板骨架×{len(spine)} 参考图×{len(refs)}")
 
         def _go(use, pr):

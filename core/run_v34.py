@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 from . import diagnose, episodes as _eps, ledger, system_v34 as V
 from .executor import LLM_GATE
-from .llm import LLMCancelled
+from .llm import LLMCancelled, refusal_reason
 from .stages import jd, load_prompt, prompt_files, render, system_prompt
 from .store import Project, keep_partial, write_text
 
@@ -100,6 +100,9 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
     # 只接一边的话，另一边渲染出来是原样的 {{MEDIUM_RULE}} ——
     # 模型会把它当成一个要填的空位。
     m["MEDIUM_RULE"] = _st.medium_rule(pj)
+    # 总时长/集数/每集时长三个量互相决定，合成一段发给环节1 ——
+    # 关键是那句「集数是算出来的，不是数剧本里有几章」。
+    m["LENGTH_PLAN"] = _st.length_plan(pj)
     m.update(_st.mapping(pj, params, {
         "episode_duration": _ep_seconds(pj, episode, params),
         "current_episode": episode,
@@ -993,6 +996,7 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     out = _one_call(pj, stage_id, llm=llm, params=params, episode=episode,
                     log=log, cancel=cancel)
     check_runtime(pj, stage_id, out, params, episode, log)
+    check_packing(pj, stage_id, out, params, episode, log)
     pj.save_stage(tpl_name, out, "" if V.scope_of(stage_id) == "series" else episode)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode or "全剧")
     if stage_id == "n1":
@@ -1050,6 +1054,96 @@ def check_runtime(pj: Project, stage_id: str, out: dict, params: dict,
     return
 
 
+def _shot_windows(pj: Project, episode: str) -> dict:
+    """第九环节排的每个镜头占哪一段时间：{镜头号: (start, end)}。"""
+    out = {}
+    for r in (pj.stage_data("n9_shots", episode) or {}).get("timing_plan") or []:
+        if not isinstance(r, dict):
+            continue
+        sid = str(r.get("shot_id") or "")
+        s, e = r.get("start"), r.get("end")
+        if sid and isinstance(s, (int, float)) and isinstance(e, (int, float)):
+            out[sid] = (float(s), float(e))
+    return out
+
+
+def check_packing(pj: Project, stage_id: str, out: dict, params: dict,
+                  episode: str, log: Callable = print) -> None:
+    """第十环节装箱：**第九环节排的镜头，有没有哪个没被装进任何一个容器。**
+
+    这是用户实遇那次全崩的**起点**，而它一路没人说话：
+
+      第十环节漏装了 SH_EP01_004（时间线上 30.0-38.0 秒）
+        → 第十一、十二环节照跑，它们只看装出来的 SEG，看不出少了一个镜头
+        → 到第十三环节，模型自己算出来了，在 time_budget_check 里写
+          「SH_EP01_004 的 8 秒执行窗口位于 30.0-38.0 秒，未被 30 秒容器分配
+          …因此不生成视频执行计划和可投喂提示词」，然后交了一份空提示词
+        → 我们收下了（那时候校验只查键在不在），十七个环节全崩
+
+    所以要在**装完箱就查**。查的是算术，不是判断：镜头在不在某个箱子里，
+    这件事没有第二种解释，不存在「这部剧就是这样」的例外。
+
+    两种漏法都要认：
+      · 压根没写进任何 `included_shots`
+      · 写进了，但同一个镜头被两个 SEG 都装了（那是重复付费 + 内容重复）
+
+    **主动砍掉的不算漏。** 模板允许边界校正时砍东西，只要在
+    `boundary_adjustments` 里交代了 —— 交代过的是决定，没交代的是窟窿。
+    """
+    if stage_id != "n10":
+        return
+    windows = _shot_windows(pj, episode)
+    if not windows:
+        return                      # 第九环节没排时间线，是另一回事
+
+    used: dict = {}
+    for sg in (out or {}).get("segs") or []:
+        if not isinstance(sg, dict):
+            continue
+        for sh in (sg.get("included_shots") or []):
+            used.setdefault(str(sh), []).append(str(sg.get("seg_id") or "?"))
+
+    # 交代过要砍的，从「漏」里除掉
+    said = ""
+    for adj in (out or {}).get("boundary_adjustments") or []:
+        if isinstance(adj, dict):
+            said += str(adj.get("what_was_cut") or "") + " " + str(adj.get("action") or "")
+
+    lost = [s for s in windows if s not in used and s not in said]
+    dup = {s: v for s, v in used.items() if len(v) > 1}
+    if not lost and not dup:
+        return
+
+    clip = int(params.get("duration") or 15) or 15
+    lines = []
+    for s in sorted(lost, key=lambda x: windows[x][0])[:8]:
+        a, b = windows[s]
+        lines.append(f"  · {s} 在时间线的 {a:g}-{b:g} 秒，没有任何容器装它")
+    for s, segs in list(dup.items())[:5]:
+        lines.append(f"  · {s} 被 {'、'.join(segs)} 重复装了 {len(segs)} 次")
+    more = ("" if len(lost) <= 8 else f"（还有 {len(lost) - 8} 个没列）")
+
+    msg = ("第九环节排了 {n} 个镜头，第十环节装箱之后 {bad} 个没有落到容器里"
+           "{more}：\n{lines}\n"
+           "一个 SEG 容器 {clip} 秒，本集的镜头铺到第 {last:g} 秒 —— "
+           "漏的那几个多半在最后那截，容器没装够。\n"
+           "**这不是提醒，是往下每一步都建在错的前提上。** "
+           "第十一、十二环节只看装出来的 SEG，看不出少了镜头；"
+           "要到第十三环节模型自己算出来、写一句「未被容器分配…因此不生成"
+           "视频执行计划」然后交一份空提示词 —— 中间那几个环节的钱全白花。\n"
+           "去改：重跑第十环节（多装一两箱把尾巴装进去）。"
+           "如果漏的那几个镜头本来就该砍，让它在 boundary_adjustments 的 "
+           "what_was_cut 里写清楚砍了什么 —— 交代过的就不算漏。"
+           ).format(n=len(windows), bad=len(lost) + len(dup), more=more,
+                    lines="\n".join(lines), clip=clip,
+                    last=max(b for _a, b in windows.values()))
+
+    diagnose.record(pj.root, diagnose.warn(
+        "SEG_SHOT_UNPACKED", msg,
+        stage=f"stage:{stage_id}", target=episode or "全剧"))
+    raise RuntimeError(msg)
+
+
 def _plan_seconds(out: dict) -> float:
     """时间计划铺到了第几秒。取最大的 end —— 不假设它是按顺序写的。"""
     ends = [float(t["end"]) for t in (out or {}).get("timing_plan") or []
@@ -1093,6 +1187,42 @@ def run_segment_stage(pj: Project, stage_id: str, *, llm, params: dict,
     by_id = {c.get("seg_id") or c.get("id"): c for c in prev.get(key, [])
              if c.get("seg_id") or c.get("id")}
     todo = [s for s in segs if s["seg_id"] not in by_id]
+    # **逐段的上游只做到哪几段，这一步就只能做到哪几段。**
+    #
+    # missing_deps 只查「上游产物存不存在」，查不出「它有没有覆盖这一段」。
+    # 实遇：第十二环节 5 段里成了 3 段就结束了，产物是存在的（3 条），
+    # 于是第十三环节照样把 5 段全做了 —— 那 2 段拿到的输入里没有自己的故事板，
+    # 模型会自己编一个，**而且不报错**。
+    #
+    # 这不是「就绪即派」的事：那一套只管出图出片。文字环节之间靠的是
+    # 这里的逐段对账。
+    blocked: dict = {}
+    _by_out = {s["out"]: s for s in V.STAGES if s.get("out")}
+    for dep in V.LLM_SPEC[stage_id][1]:
+        up = _by_out.get(dep)
+        if not up or V.scope_of(up["id"]) != "segment":
+            continue                       # 全剧级/逐集级的上游由 missing_deps 管
+        have = done_segments(pj, up["id"], episode)
+        for s in todo:
+            if s["seg_id"] not in have:
+                blocked.setdefault(s["seg_id"], []).append(
+                    f"第{up['no']}环节「{up['name']}」")
+    if blocked:
+        todo = [s for s in todo if s["seg_id"] not in blocked]
+        rows = "；".join(f"{k}（缺 {'、'.join(v)}）"
+                        for k, v in list(blocked.items())[:5])
+        log(f"⚠️ 有 {len(blocked)} 段的上游还没做出来，这一步跳过它们：{rows}"
+            + ("…" if len(blocked) > 5 else "")
+            + "。**不硬做** —— 硬做的话这几段拿到的输入里没有自己那一份，"
+              "模型会自己编一个，而且不报错。先把上游那几段补出来。")
+        diagnose.record(pj.root, diagnose.warn(
+            "SEG_UPSTREAM_MISSING",
+            f"{episode} 有 {len(blocked)} 段因为上游没做出来而跳过了"
+            f"第{V.by_id()[stage_id]['no']}环节：" + rows
+            + ("…" if len(blocked) > 5 else "")
+            + "。重跑上游那个环节把缺的段补上，再跑这一步 —— "
+              "这一步会自动只补跳过的那几段。",
+            stage=f"stage:{stage_id}", target=episode))
     log(f"{episode} {stage_id} 共 {len(segs)} 段，已完成 {len(by_id)} 段，"
         f"本次做 {len(todo)} 段")
 
@@ -1118,6 +1248,15 @@ def run_segment_stage(pj: Project, stage_id: str, *, llm, params: dict,
                     on_usage=_usage(pj, stage_id, episode, sid),
                     on_partial=keep_partial(pj, stage_id, episode, sid, llm=llm))
             item = (out.get(key) or [{}])[0]
+            # **盖之前先看它写的是哪一段。** 原来这里是无条件盖成 sid ——
+            # 模型跑偏、写的是另一段的内容时，
+            # 我们把它的段号改成我们要的那一段，**把唯一的证据擦掉了**。
+            # 用户实遇：SCST_EP01_SC01_01 的提示词正文写着 EP01-SEG09，
+            # 而字段是 EP01-SEG01（我们盖的）—— 于是第一段拿到第九段的
+            # 世界状态去出图，画面和剧情没关系，而一路不报错。
+            drift = seg_drift(item, sid)
+            if drift:
+                raise RuntimeError(drift)
             item["seg_id"] = sid
             if on_item:
                 on_item(sid, item)
@@ -1150,6 +1289,47 @@ def run_segment_stage(pj: Project, stage_id: str, *, llm, params: dict,
     result = {key: _ordered(by_id, segs)}
     pj.save_stage(tpl_name, result, episode)
     return result, failed, cancelled
+
+
+# 段号长什么样：EP01-SEG09。**只认这个形状** —— 场次号（SC01）和镜头号
+# （SH_EP01_004）都不是段号，混进来会天天误报。
+_SEG_ID_RE = re.compile(r"\bEP\d{2,3}-SEG\d{1,3}\b")
+
+# 正文里提到别的段号，多数时候是合法的（「承接上一段的…」）。
+# 所以只在**一次都没提到本段**、却提到了别的段的时候才算跑偏 ——
+# 那时候它整条都在写另一段。
+_SEG_REF_FIELDS = ("prompt", "storyboard_prompt", "video_prompt")
+
+
+def seg_drift(item: dict, want: str) -> str:
+    """这一条产物写的是不是**另一段**。是就返回该说的话，不是返回空串。
+
+    两道，都便宜：
+
+      ① 它自己填的段号和我们要的不是同一个 —— 这条没有第二种解释
+      ② 段号它没填（或填对了），但正文里**一次都没提本段**、
+         只提别的段 —— 那是整条跑到别段去了
+
+    第二道刻意收得很紧：正文提到相邻段是正常的（转场、承接），
+    所以只有「完全没提本段」才算。
+    """
+    got = str(item.get("seg_id") or "").strip()
+    if got and got != want:
+        return (f"这一条要的是 {want}，模型返回的是 {got} —— 它写的是**另一段**的内容。\n"
+                f"以前这里会把段号直接改成 {want} 存下来，于是 {want} 拿到 {got} 的"
+                f"世界状态去出图，画面和这一段的剧情没有关系，而一路不报错。\n"
+                f"重跑这一段。还是偏的话，看这一段的第十环节装箱是不是有问题"
+                f"（段号错位常常是上一环节的段落表本身就乱了）。")
+
+    text = " ".join(str(item.get(f) or "") for f in _SEG_REF_FIELDS)
+    if not text.strip():
+        return ""
+    others = {m for m in _SEG_ID_RE.findall(text) if m != want}
+    if others and want not in text:
+        return (f"这一条要的是 {want}，可它的正文里一次都没提 {want}，"
+                f"提的是 {'、'.join(sorted(others)[:3])} —— 整条写到别段去了。\n"
+                f"重跑这一段。")
+    return ""
 
 
 def _ordered(by_id: dict, segs: list) -> list:
@@ -1356,9 +1536,23 @@ def asset_out(pj: Project, a: dict) -> str:
 # 结构化字段已经补进模板（`decision`），但**已经跑完的项目里没有那一栏**，
 # 所以这里同时认正文里的原话。正则只咬模板自己规定的那两种写法，
 # 不去扫别的词 —— 免得把提到 LOGICAL_ONLY 的说明文字也误判成判定。
+# 实遇的三种写法（都出自同一个模型，同一个模板）：
+#     当前判定：LOGICAL_ONLY。候选图片角色：无；本条不生成图片。
+#     决定：LOGICAL_ONLY
+#     本条判定为LOGICAL_ONLY，不派发图片任务，因此没有reference_assets
+#
+# 第三种以前认不出 —— 我要求了「判定」后面有冒号。少认一种的后果是任务照建，
+# 然后停在「提示词里没有 Image N 的映射」上（一份文字合同当然没有映射）。
+#
+# 判据仍然只咬**判词**，不咬内容名词：「LOGICAL_ONLY」「不派发图片任务」
+# 「不生成图片」是模板规定的词，不会出现在剧情描写里。
 _SCST_NO_IMAGE_RE = re.compile(
-    r"(?:决定|当前判定)\s*[:：]\s*(?:LOGICAL_ONLY|DEFER_TO_VIDEO)"
-    r"|本条不生成图片")
+    r"(?:决定|判定|判断)\s*(?:为|是)?\s*[:：]?\s*(?:LOGICAL_ONLY|DEFER_TO_VIDEO)"
+    r"|不派发图片任务|不生成图片|不出图片")
+
+
+# 「模型明确拒绝产出」的识别搬去了 llm.py —— 那儿是校验发生的地方，
+# 而 llm 是本模块的上游，放这儿会让 llm 反向 import 成环。
 
 
 def scstate_no_image(sc: dict) -> str:
@@ -1566,7 +1760,10 @@ def build_tasks(pj: Project, params: dict) -> dict:
 
     # ---- 场景状态图 / 故事板 / 视频：逐集逐段 ----
     scstate_tasks, sb_tasks, vd_tasks = [], [], []
-    scst_skipped: list = []       # 判成不出图的场景状态 —— 记一笔，别默默少几张
+    # 判成不出图的场景状态：{编号: 为什么}。**必须带编号** ——
+    # 下面要拿它和故事板的参考图对一遍，两个环节对同一条的判断可能打架。
+    scst_skipped: dict = {}
+    sb_conflict: list = []        # 故事板引了「判成不出图」的场景状态
     sb_noprompt: list = []        # 环节12 一张提示词都没写的段 —— 那一段没有骨架
     for ep in eps:
         for sc in (pj.stage_data("n11_scstate", ep) or {}).get("scstates", []):
@@ -1582,7 +1779,7 @@ def build_tasks(pj: Project, params: dict) -> dict:
             # 而一份文字合同本来就不该有参考图映射，报错指错了地方。
             why = scstate_no_image(sc)
             if why:
-                scst_skipped.append(f"{sid}（{why}）")
+                scst_skipped[sid] = why
                 continue
             refs, no_img = split_refs(pj, amap, sc.get("reference_assets"),
                                       prompts=prompts)
@@ -1611,6 +1808,17 @@ def build_tasks(pj: Project, params: dict) -> dict:
                 # EP01-SEG06 等一张 S003.png。所以和资产那边走同一个筛子。
                 refs, no_img = split_refs(pj, amap, sh["reference_order"],
                                           prompts=prompts, resolve=scst_out.get)
+                # **两个环节对同一条的判断打架了。**
+                # 第十一环节判这条 SCSTATE 不出图（只留文字合同），
+                # 第十二环节又把它当参考图 —— 而故事板结构上需要一个主参考。
+                #
+                # 这一条**不能像 CST002 那样挑掉**：挑掉之后故事板没有主参考了。
+                # 也不能悄悄放过：出图那步只会说「参考图不存在」，
+                # 看不出是两个环节各自都对、凑起来做不出来。
+                for r in refs:
+                    rid = str(r.get("asset_id") or "")
+                    if rid in scst_skipped:
+                        sb_conflict.append((seg, sh["sheet_id"], rid))
                 sb_tasks.append({
                     "key": (seg if sh.get("legacy")
                             else f"{seg}_{sh['sheet_id']}"),
@@ -1675,6 +1883,26 @@ def build_tasks(pj: Project, params: dict) -> dict:
             "重跑这几段的第十二环节。",
             stage="storyboard", target="build_tasks"))
 
+    if sb_conflict:
+        # 放在 scst_skipped 那条**前面**报：它更要紧，而且能解释那一条。
+        rows = "；".join(f"{seg} 的 {sheet} 引了 {rid}"
+                         for seg, sheet, rid in sb_conflict[:5])
+        diagnose.record(pj.root, diagnose.warn(
+            "SCSTATE_STORYBOARD_CONFLICT",
+            f"有 {len(sb_conflict)} 处故事板引了「第十一环节判成不出图」的场景状态："
+            + rows + ("…" if len(sb_conflict) > 5 else "")
+            + "。两个环节各自都没错，凑起来做不出来：第十一环节按物化门控判这条"
+              "只留文字合同（不出图），第十二环节又把它当参考图，"
+              "而那张 png 永远不会存在。\n"
+              "**这一条不能靠挑掉参考图解决** —— 挑掉之后故事板就没有主参考了，"
+              "出来的画面和这一段没有关系。两条出路选一条：\n"
+              "① 让它出图：改那条场景状态的判定（第十一环节的物化门控七条触发器，"
+              "跨 SEG 入口和首次显露都算），然后重跑第十一、十二环节；\n"
+              "② 让故事板改引原子资产：Image 1 换成本段人物的当前造型资产，"
+              "再补场景环境资产和关键道具 —— 位置、支撑、朝向以那份文字合同为准。"
+              "第十二环节的模板里已经写了这一条怎么做，重跑第十二环节即可。",
+            stage="storyboard", target="(判定打架)"))
+
     if scst_skipped:
         # 「少了几张场景状态图」看着和「本来就只有这几张」一模一样 ——
         # 不记一笔的话，人只能靠数数发现。
@@ -1682,7 +1910,8 @@ def build_tasks(pj: Project, params: dict) -> dict:
             "SCSTATE_LOGICAL_ONLY",
             f"有 {len(scst_skipped)} 条场景状态被第十一环节判成不出图，"
             f"所以没有给它们派出图任务："
-            + "、".join(scst_skipped[:6]) + ("…" if len(scst_skipped) > 6 else "")
+            + "、".join(f"{k}（{v}）" for k, v in list(scst_skipped.items())[:6])
+            + ("…" if len(scst_skipped) > 6 else "")
             + "。这是按 skill 来的（判成 LOGICAL_ONLY / DEFER_TO_VIDEO 只出文字合同，"
             "合同照旧落盘在 03_提示词/场景状态提示词/）。要是你认为其中某一条该出图，"
             "去改它的判定再重跑第十一环节。",

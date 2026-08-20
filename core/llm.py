@@ -175,7 +175,90 @@ def _balanced(text: str, opener: str, closer: str):
     return None
 
 
-def _truncated(body: str, n: int, reason: str = "") -> "LLMError":
+def _brackets_balanced(s: str) -> bool:
+    """括号配平了吗。**字符串里的括号不算** —— 提示词正文里全是中文标点和
+    引号，把它们一起数进来的话结论是随机的。
+    """
+    depth, in_str, esc = 0, False, False
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and not in_str
+
+
+# json 的报错措辞 → 人和模型都能照着改的说法。
+#
+# 只说「JSON 解析失败」等于什么都没说：少个逗号、字符串里多个引号、
+# 正文里有裸换行，三种的改法完全不同，而模型收到含糊反馈只会原样再写一遍。
+_JSON_HINTS = (
+    ("Expecting ',' delimiter",
+     "多半是**某个字符串里多了一个双引号**，把它提前闭合了，后面的正文就变成了"
+     "裸文本；也可能是两项之间少了逗号。正文里要出现双引号必须写成 \\\"。"),
+    ("Invalid control character",
+     "**字符串里有裸换行**。JSON 的字符串不能跨行 —— 换行必须写成 \\n 两个字符。"),
+    ("Unterminated string",
+     "有个字符串没有收尾的双引号。"),
+    ("Expecting property name enclosed in double quotes",
+     "多半是**最后一项后面多了一个逗号**（尾逗号），或者键没有用双引号包起来。"),
+    ("Expecting value",
+     "有个位置该给值却是空的 —— 多半是连着两个逗号，或者写了 None / undefined。"),
+    ("Extra data",
+     "前面那份 JSON 之后还跟了别的东西。"),
+)
+
+
+def _decode_err(body: str):
+    """让 json 从第一个 `{` / `[` 试着解一次，只为拿它的报错。成功就返回 None。
+
+    用在「括号配不平」那条路上：配不平可能是真写到一半，也可能是引号错位
+    把扫描器带偏了。前者 json 会停在末尾，后者会停在中间 —— 有了它的报错
+    才分得清，而分不清就只能说「没闭合」，那句话在后一种情况下是错的。
+    """
+    i = min([p for p in (body.find("{"), body.find("[")) if p >= 0] or [-1])
+    if i < 0:
+        return None
+    try:
+        json.JSONDecoder().raw_decode(body[i:])
+    except json.JSONDecodeError as exc:
+        # 位置要换算回整段的坐标，不然「第 N 个字符」指的是别处
+        exc.pos = int(getattr(exc, "pos", 0) or 0) + i
+        return exc
+    return None
+
+
+def _json_fault(body: str, err) -> str:
+    """把 json 的报错翻成「哪里坏了、怎么改」。拿不到细节就返回空串。"""
+    if err is None:
+        return ""
+    msg = str(getattr(err, "msg", "") or err)
+    pos = int(getattr(err, "pos", 0) or 0)
+    where = ""
+    if 0 < pos <= len(body):
+        # 出错点前后各截一段。**这一段是最有用的东西** ——
+        # 模型看到自己写坏的那一处，才知道要改哪里。
+        where = ("\n出错的位置在第 {} 个字符附近：\n…{}\n            ^ 就是这里\n"
+                 .format(pos, re.sub(r"\s+", " ", body[max(0, pos - 90):pos + 30])))
+    hint = next((h for k, h in _JSON_HINTS if k in msg), "")
+    return (f"JSON 解析器报的是「{msg}」（第 {getattr(err, 'lineno', '?')} 行"
+            f"第 {getattr(err, 'colno', '?')} 列）。" + (hint and " " + hint)
+            + where)
+
+
+def _truncated(body: str, n: int, reason: str = "", err=None) -> "LLMError":
     """JSON 没闭合。**为什么没闭合，决定了该跟模型说什么。**
 
     这段话是给模型的反馈（json_call 会附在下一次的提示词后面），
@@ -209,6 +292,38 @@ def _truncated(body: str, n: int, reason: str = "") -> "LLMError":
     但重试的意义在于「再传一次」，不在于「让它写少点」。
     """
     tail = re.sub(r"\s+", " ", body[-100:])
+    # **有解析器原话的时候，一个字都不要提括号。**
+    #
+    # 以前这里无条件写「括号始终没有闭合」。实遇一次（s8 EP01-SEG01）：
+    # 花括号数出来是 7 对 7，真正的毛病是模型在一段长正文中间多打了一个
+    # 双引号，把字符串提前闭合了。报错说括号、重试指令也说「重点检查括号
+    # 配对」—— 人跟着去数括号，模型跟着去补括号，两边都白忙，那一轮白烧。
+    #
+    # 而且引号一错位，「括号配没配平」根本不是一个有定义的问题：扫描器分不清
+    # 哪个括号在字符串里。所以拿得到 json 的报错就照它说的讲，讲不出来
+    # （`_balanced` 压根找不到配平点，那才是真没写完）再说括号。
+    # **判据是解析停在哪里，不是括号数得对不对。**
+    #
+    #   停在末尾    → 后面没内容了，就是写到一半（真截断）
+    #   停在中间    → 后面还有几千字，说明它写完了、只是中间坏了一处
+    #
+    # 括号配平不能当判据：引号一错位，扫描器就分不清哪个括号在字符串里，
+    # 结论是随机的。实遇 s8 那次花括号数出来 7 对 7，而 `_brackets_balanced`
+    # 因为多出来的引号返回 False —— 拿它做判据会把格式错误当成截断。
+    pos = int(getattr(err, "pos", 0) or 0) if err is not None else 0
+    left = max(0, n - pos)
+    mid_fault = err is not None and left > max(40, n * 0.05)
+    fault = _json_fault(body, err) if mid_fault else ""
+    if fault:
+        fault += f"（解析停在这里，后面还有 {left} 字 —— 所以内容是写完了的。）\n"
+        return LLMError(
+            f"上一次的输出解析不了（收到 {n} 字，停在「…{tail}」）。\n{fault}"
+            + ("而结束原因是 stop —— 你**认为自己已经写完了**，所以这不是长度问题，"
+               "是 JSON 写坏了。\n" if (reason or "").lower() == "stop" else
+               "结束原因服务商没给，但内容已经收全了 —— 是格式坏了，不是被切断。\n")
+            + "**按上面报的那个位置改那一处就行**，不要去找少掉的括号，"
+            "也**不要删减任何字段或条目** —— 内容是对的，坏的只是格式。\n"
+            "提醒：正文里要出现双引号必须写成 \\\"，换行必须写成 \\n。")
     head = (f"上一次的输出没有形成完整的 JSON（收到 {n} 字，括号始终没有闭合，"
             f"停在「…{tail}」）。")
     if (reason or "").lower() == "stop":
@@ -235,8 +350,10 @@ def _first_json(inner: str, log: Optional[Callable] = None,
     """
     try:
         obj, end = json.JSONDecoder().raw_decode(inner)
-    except json.JSONDecodeError:
-        raise _truncated(inner, len(inner), reason)   # 前面就没写完，是截断
+    except json.JSONDecodeError as exc:
+        # 把解析器的原话带上。丢掉它的话只能说「没闭合」——
+        # 而那句话在括号其实是配平的时候是错的，会把人和模型都带偏。
+        raise _truncated(inner, len(inner), reason, exc)
     rest = inner[end:].strip()
     if rest and log:
         # 说一声。不说的话，模型每次都多吐一截也没人知道 ——
@@ -269,20 +386,32 @@ def extract_json(text: str, log: Optional[Callable] = None,
         try:
             return json.loads(inner)
         except json.JSONDecodeError:
-            return _first_json(inner, log, reason)
+            return _first_json(inner, log, reason)   # 里面会带上解析器原话
     # 开了围栏却没闭合 = 写到一半断了
     if re.search(r"```(?:json)?\s", body):
-        raise _truncated(body, len(body), reason)
+        raise _truncated(body, len(body), reason)      # 围栏没闭合 = 真的写到一半
     if "{" in body:
         blk = _balanced(body, "{", "}")
         if blk is not None:
-            return json.loads(blk)
-        # 有 { 但配不平 —— 就是没写完。**不许**再去找 []，
-        # 那样会捞出一个内层数组冒充整个文档。
-        raise _truncated(body, len(body), reason)
+            try:
+                return json.loads(blk)
+            except json.JSONDecodeError as exc:
+                # 括号配平了但内容坏了（多个引号、裸换行、尾逗号）。
+                # 以前这里直接把 JSONDecodeError 抛出去 —— 那句英文报错
+                # 既不会进重试反馈，也没人看得懂坏在哪。
+                raise _truncated(blk, len(blk), reason, exc)
+        # 有 { 但配不平。**不许**再去找 []，那样会捞出一个内层数组冒充整个文档。
+        #
+        # 配不平有两种：真的写到一半，或者**某个引号错位把扫描器带偏了**
+        # （那时括号其实是齐的）。所以先让 json 自己说一句 ——
+        # 拿不到它的意见就只能报「没闭合」，而那句话在第二种情况下是错的。
+        raise _truncated(body, len(body), reason, _decode_err(body))
     blk = _balanced(body, "[", "]")
     if blk is not None:
-        return json.loads(blk)
+        try:
+            return json.loads(blk)
+        except json.JSONDecodeError as exc:
+            raise _truncated(blk, len(blk), reason, exc)
     # 把模型实际回了什么带上。只说「没找到 JSON」等于什么都没说 ——
     # 它到底是写了一段散文、拒答了、还是用了别的围栏，改法完全不同：
     #   散文/解说   → 模板或 _common 里的「只输出 JSON」被改掉了
@@ -298,14 +427,82 @@ def extract_json(text: str, log: Optional[Callable] = None,
         + "。完整原文见项目里的 07_检查与记录/失败原文/")
 
 
+# 模型「我不给」的时候会写在哪几栏。**它说的话要抛出来，不能收下一个空产物。**
+#
+# 实遇 n13 的一段：`video_prompt` 是空字符串，而同一条里写着
+#   capability_note:   REFERENCE_DIMENSION_COVERAGE_GAP; VIDEO_PROMPT_RELEASE_BLOCKED
+#   time_budget_check: 不通过：…SH_EP01_004 的 8 秒执行窗口位于 30.0-38.0 秒，
+#                      未被 30 秒容器分配…因此不生成视频执行计划和可投喂提示词。
+#
+# 它把「为什么不给」写得比我们能诊断出来的还清楚 —— 而我们一个字都没读。
+_REFUSAL_FIELDS = ("time_budget_check", "capability_note", "quality_priority_note",
+                   "coverage_note", "spine_note", "carrier_reason", "note")
+
+# 这些是 skill 定义的「我拒绝」代号，出现在上面那几栏里就是明确拒绝。
+_REFUSAL_RE = re.compile(
+    r"[A-Z_]*BLOCKED|[A-Z_]*_GAP|不通过|不生成|无法(生成|完成|合法)"
+    r"|拒绝|停在准入阶段")
+
+
+def refusal_reason(row: dict) -> str:
+    """这一条是不是模型**明确拒绝**产出，以及它给的理由。不是就返回空串。
+
+    只在产物真的空了的时候才问这个 —— 有内容的时候那几栏只是说明，
+    里面出现「不生成其他文字」这种正常措辞不该被当成拒绝。
+    """
+    bits = []
+    for k in _REFUSAL_FIELDS:
+        v = str(row.get(k) or "").strip()
+        if v and _REFUSAL_RE.search(v):
+            bits.append(f"{k}：{v}")
+    return "\n".join(bits[:3])
+
+
+def refused_because(data: Any, missing: list) -> str:
+    """只在有 `!`（值空了）的缺失时，把模型自己写的拒绝理由找出来。
+
+    在**任意深度**找 —— 拒绝理由和空掉的那个值通常在同一行对象里
+    （`video_plan[i]` 里既有 `video_prompt: ""` 也有 `time_budget_check`），
+    但也可能挂在顶层。所以整棵走一遍，去重后取前几条。
+    """
+    if not any(str(m).endswith("!") for m in missing):
+        return ""                      # 是真缺键，不是被拒 —— 别乱猜原因
+    seen, out = set(), []
+    stack = [data]
+    while stack and len(out) < 3:
+        n = stack.pop()
+        if isinstance(n, dict):
+            why = refusal_reason(n)
+            if why and why not in seen:
+                seen.add(why)
+                out.append(why)
+            stack.extend(n.values())
+        elif isinstance(n, list):
+            stack.extend(n)
+    if not out:
+        return ""
+    return ("\n\n**模型不是没按格式答 —— 它明确拒绝产出，理由是它自己写的：**\n"
+            + "\n".join(out)
+            + "\n\n所以重试没有意义（同一份输入进去，它会给同一个拒绝）。"
+              "按上面这段理由去改**上游**那一环，改完重跑上游，再跑这一环。")
+
+
 def check_keys(data: Any, required: list) -> list:
     """轻量结构校验。返回缺失项列表。
 
-    三种写法：
+    四种写法：
 
         "a"        这个键要在
+        "a!"       键要在，而且**值不能是空字符串 / 空列表 / 空字典**
         "b[]"      必须是**非空**数组 —— 空了等于这一步什么都没产出
         "b[]?"     必须是数组，**可以为空**
+
+    第二种是后加的，因为「键存在」拦不住一类很贵的失败：实遇 n13 的一段
+    返回 `"video_prompt": ""`，而它在 `capability_note` 里写着
+    `VIDEO_PROMPT_RELEASE_BLOCKED`、在 `time_budget_check` 里写着
+    「因此不生成视频执行计划和可投喂提示词」—— **它明确拒绝生产**。
+    而键是在的，于是校验通过，我们把空提示词落盘、当成这一段做完了。
+    下游拿着一份空提示词去出片，或者干脆出不了片，而**前面一路没有报错**。
 
     第三种是后加的，因为「非空」在很多地方是一个**关于剧本的假设**，
     而剧本没法穷举：
@@ -327,6 +524,9 @@ def check_keys(data: Any, required: list) -> list:
             may_empty = part.endswith("[]?")
             if may_empty:
                 part = part[:-1]                # 去掉 ?，剩下 xxx[]
+            want_value = part.endswith("!")     # a! —— 值不许是空的
+            if want_value:
+                part = part[:-1]
             is_list = part.endswith("[]")
             key = part[:-2] if is_list else part
             nxt = []
@@ -341,6 +541,9 @@ def check_keys(data: Any, required: list) -> list:
                         break
                     nxt.extend(v)
                 else:
+                    if want_value and (v is None or v == "" or v == [] or v == {}):
+                        ok = False
+                        break
                     nxt.append(v)
             if not ok:
                 break
@@ -693,11 +896,27 @@ class LLM:
                 got = sum(len(p) for p in parts)
                 if got:
                     log(f"正在生成… 已等 {waited} 秒，收到 {got} 字")
-                else:
+                elif waited < 180:
                     log(f"正在等模型开口… 已等 {waited} 秒，**还没收到第一个字**。"
                         f"这是思考期，线上没有任何数据 —— "
                         f"中转站看不到数据可能会在 125 秒左右切断（HTTP 524）。"
                         f"输入越大想得越久，这一次发了 {sent} 字。")
+                else:
+                    # 熬过 180 秒还没被切，说明**这条线路不会因为没数据就切** ——
+                    # 那句「125 秒左右会 524」再刷下去就是假警报，人会一直等着
+                    # 看一个不会来的错误。改成说真话：还能等多久、到点会怎样。
+                    #
+                    # 实遇：n12 的一段等了 615 秒、一个字没收到、也没有 524。
+                    # 那时候刷的还是「可能 125 秒切断」，看着像卡在网络上，
+                    # 而实际是模型在想 —— 两种的处理完全不同。
+                    left = max(0, int(self.timeout) - waited)
+                    log(f"还在思考… 已等 {waited} 秒，一个字都没收到。"
+                        f"熬过 180 秒没被切，说明这条线路容得下长思考，"
+                        f"不是网络问题。**再等 {left} 秒还没开口就会判失败**"
+                        f"（读超时 {int(self.timeout)} 秒，这一类不重试 ——"
+                        f"同样的输入重试必然同样慢）。"
+                        f"这一次发了 {sent} 字：嫌久就把这一步的输入调小，"
+                        f"或者换个想得快的模型。")
 
         if log:
             threading.Thread(target=beat, daemon=True).start()
@@ -880,7 +1099,14 @@ class LLM:
                 data = extract_json(text, log, stop)
                 missing = check_keys(data, required or [])
                 if missing:
-                    raise LLMError(f"输出缺少必需字段: {missing}")
+                    # **值空了的时候，模型往往自己写了为什么。** 不读出来的话
+                    # 报的是「输出缺少必需字段: ['video_plan[].video_prompt!']」——
+                    # 看着像模型没按格式答，实际是它明确拒绝生产、还写清了原因
+                    # （「SH_EP01_004 的 8 秒窗口位于 30.0-38.0 秒，未被 30 秒
+                    # 容器分配，因此不生成视频执行计划和可投喂提示词」）。
+                    # 照着假原因去重试，三次全废，而真正要改的在上游。
+                    why = refused_because(data, missing)
+                    raise LLMError(f"输出缺少必需字段: {missing}" + why)
                 problems = validator(data) if validator else []
                 if problems and on_soft:
                     # **业务规则不拦，只记。**

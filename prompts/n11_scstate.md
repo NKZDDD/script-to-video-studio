@@ -60,6 +60,16 @@ CVS（谁在哪、什么状态）
 而一份文字合同没有参考图映射，出图前的校验会报「没说哪张图是谁」，
 报错指向映射，真正的毛病是这条压根不该出图。
 
+**判成不出图时，`reference_assets` 和 `reference_role_map` 必须是空数组。**
+
+这两样和正文要一致。实遇一次自相矛盾的输出：正文写着「本条判定为
+LOGICAL_ONLY，不派发图片任务，**因此没有 reference_assets，也没有 Image
+编号映射**」，而同一条的 `reference_assets` 字段里填了 5 个资产。
+
+后果是两边各按自己看到的做：程序信字段（建了一条要传 5 张参考图的任务），
+提示词用正文（里面没有 Image 映射），于是出图前硬停在「要传 5 张却没说哪张
+是谁」。**两边都没错，是这份产物自己前后不一致。**
+
 **只有命中下面任一条才允许出图**：
 
 1. 新人物或新 LOOK 首次出现
@@ -231,6 +241,7 @@ Image 2 = S001 雅加达私人医院（场景）
        "这一状态里**绝对不许**发生的位置变化，比如「C001 不许离开床沿」"
      ],
      "reference_assets": ["C001", "S001", "PI001"],
+     "_注": "decision 是 LOGICAL_ONLY / DEFER_TO_VIDEO 时，reference_assets 和 reference_role_map 都必须是空数组 —— 这一条不出图，没有参考图可传",
      "reference_role_map": [
        {"image_n": 1, "asset_id": "C001", "asset_name": "Aisyah",
         "who_what_visible": "这张图是谁/是什么 + 画面里能看见什么（必填）",

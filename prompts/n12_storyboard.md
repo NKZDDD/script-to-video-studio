@@ -211,6 +211,30 @@ Image 2.. = 只在 SCSTATE 覆盖不足时补：关键道具的可读细节、
 
 **默认不要把所有原子资产再传一遍** —— 那正是以前参考图互相打架的原因。
 
+### 本段 SCSTATE 没有图的时候（必读）
+
+第十一环节的物化门控可能把本段 SCSTATE 判成 `LOGICAL_ONLY` 或
+`DEFER_TO_VIDEO` —— **那一条不出图**，只留文字合同。
+
+这时候 `Image 1` **不是它**。它压根没有 png，写进去的话出图那一步会报
+「参考图不存在或者是个空文件」，本段故事板永远出不来。
+
+改成按这个顺序引**原子资产**（就是第十一环节在那条 SCSTATE 的
+`reference_assets` 里列的那几个，信息已经在手上）：
+
+```
+Image 1 = 本段主要人物的当前 LOOK / 造型资产
+Image 2 = 本段场景的 LOC_VIEW / 环境资产
+Image 3.. = 关键道具、第二人物，按画面里的重要性排
+```
+
+而**位置、支撑、朝向、道具持有关系一律以那份文字合同为准** ——
+删掉 SCSTATE 的图不等于删掉它的 Source CVS、Zone、Anchor、Support、
+Route、Orientation。那些照旧不可变，只是以文字形式给你。
+
+判断依据写进 `spine_note` 或那一张 Sheet 的 `carrier_reason` 里，
+一句话说清「本段 SCSTATE 是文字合同，Image 1 改引 XXX」。
+
 逐张写，编号顺序**严格等于 `reference_order` 的顺序**，六项写全：
 
 ```

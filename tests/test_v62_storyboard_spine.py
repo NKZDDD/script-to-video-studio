@@ -260,7 +260,9 @@ class TemplateTests(unittest.TestCase):
         """
         req = V.LLM_SPEC["n12"][2]
         self.assertIn("sbpkg[].sheets[]", req)
-        self.assertIn("sbpkg[].sheets[].storyboard_prompt", req)
+        # 末尾的 `!` = 值不许为空。只查键存在拦不住 `"storyboard_prompt": ""`
+        # —— 那时装配层建不出任务，而这不报错，只是没有故事板。
+        self.assertIn("sbpkg[].sheets[].storyboard_prompt!", req)
         self.assertNotIn("sbpkg[].storyboard_prompt", req)
 
 

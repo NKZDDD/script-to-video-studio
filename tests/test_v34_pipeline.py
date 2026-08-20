@@ -129,15 +129,60 @@ class PipelineTests(unittest.TestCase):
         names = os.listdir(self.pj.p("06_成片"))
         self.assertTrue(any(n.endswith(f"_{EP1}_MASTER.mp4") for n in names), names)
 
-    def test_production_order_assets_then_scstate_then_board_then_video(self):
-        """★ 顺序错了不报错，只是参考图指不到文件、或者同一角色出两张脸。"""
+    def test_every_task_runs_after_its_own_inputs_exist(self):
+        """★ **这一条的判据被改过，方向要写清楚。**
+
+        原来钉的是「资产图全出完 → 场景状态图全出完 → 故事板 → 视频」，
+        即阶段严格串行。那个不变量比实际需要的强得多：EP01-SEG01 的故事板
+        只需要它自己那张场景状态图，不需要等另外 239 段。
+
+        改成就绪即派之后，四类活并发跑，保证变成**逐条**的：
+        一条任务开跑时，它自己声明的输入必须都已经在磁盘上。
+        没有输入的任务（这个 fixture 里故事板的 reference_order 是空的）
+        先跑是**对的**，不是乱序。
+
+        所以这里验的是真正要紧的那件事 —— 没有任何一条任务在自己的输入
+        齐之前就开跑了。顺序错了不报错，只是参考图指不到文件、
+        或者同一角色出两张脸。
+        """
         self._run()
         made = self.prov.made
-        def first(frag):
-            return next(i for i, p in enumerate(made) if frag in p)
-        self.assertLess(first("固定资产"), first("场景状态图"), "资产图没排在场景状态图前")
-        self.assertLess(first("场景状态图"), first("故事板"), "场景状态图没排在故事板前")
-        self.assertLess(first("故事板"), first("分段视频"), "故事板没排在视频前")
+        order = {os.path.normcase(p): i for i, p in enumerate(made)}
+        tasks = self.pj.tasks()
+        checked = 0
+        for kind in ("asset_tasks", "scstate_tasks",
+                     "storyboard_tasks", "video_tasks"):
+            for t in tasks.get(kind) or []:
+                mine = order.get(os.path.normcase(
+                    self.pj.p(*t["output"].split("/"))))
+                if mine is None:
+                    continue                    # 这一条没做（跳过/失败），不算
+                ins = [r.get("file_ref") for r in (t.get("reference_images") or [])]
+                ins += [s.get("file_ref") for s in (t.get("storyboard_refs") or [])]
+                ins += [t.get("storyboard_ref"), t.get("aux_reference")]
+                for f in ins:
+                    if not f or str(f).startswith("http"):
+                        continue
+                    j = order.get(os.path.normcase(self.pj.p(*str(f).split("/"))))
+                    if j is None:
+                        continue                # 输入不是这一轮做的（已存/别处来的）
+                    checked += 1
+                    self.assertLess(j, mine,
+                                    f"{t['key']} 在它的输入 {f} 之前就开跑了")
+        self.assertGreater(checked, 0, "一条依赖都没验到 —— 这个测试等于没测")
+
+    def test_the_produce_steps_do_not_wait_for_each_other_as_whole_stages(self):
+        """★ 反过来钉一次：阶段之间不再整批等齐。
+
+        不钉的话，谁把 `_produce_all` 改回串行也不会有测试变红 ——
+        而那正是这次改动要去掉的东西。
+        """
+        import inspect
+
+        from core import pipeline_v34 as P34
+        src = inspect.getsource(P34._produce_all)
+        self.assertIn("ThreadPoolExecutor", src)
+        self.assertIn("ready_of", inspect.getsource(P34.run))
 
     def test_the_global_phase_runs_once_and_comes_first(self):
         """★ 全剧级环节只排一次，而且全部排在逐集之前。

@@ -165,7 +165,11 @@ _FIXTURES = {
                             "kf_range": "KF04-KF06", "spine_role": "EXIT",
                             "reference_order": [],
                             "storyboard_prompt": "p2"}]}]},
-    "n13": {"video_plan": [{"seg_id": SEGS[0], "windows": [],
+    # **别在这儿写死 seg_id。** 逐段的环节是一段一次调用，段号由程序盖；
+    # 写死成 SEGS[0] 的话，跑 SEG02 时这份夹具返回的是「第一段」——
+    # 而那正是真实产物里的跑偏（用户实遇 SCST_EP01_SC01_01 正文写着
+    # EP01-SEG09），现在会被 seg_drift 拦下来。夹具不该模拟那个 bug。
+    "n13": {"video_plan": [{"windows": [],
                             "reference_order": [], "video_prompt": "p"}]},
     "n14": {"findings": []},
 }

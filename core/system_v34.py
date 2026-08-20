@@ -190,7 +190,7 @@ LLM_SPEC = {
     ]),
     "n11": ("n11_scstate", ["n4_assets", "n5_spatial", "n8_cvs", "n10_segs"], [
         "scstates[]", "scstates[].scstate_id", "scstates[].source_cvs",
-        "scstates[].reference_assets", "scstates[].prompt",
+        "scstates[].reference_assets", "scstates[].prompt!",
     ]),
     # V6.2：提示词和参考图顺序从**包一级下移到 sheet 一级** ——
     # 一个 SEG 要 1..N 张有序 Sheet（或有序独立 KF 锚点）才能覆盖完整时间推进。
@@ -199,11 +199,20 @@ LLM_SPEC = {
     "n12": ("n12_storyboard", ["n9_shots", "n10_segs", "n11_scstate"], [
         "sbpkg[]", "sbpkg[].sbpkg_id", "sbpkg[].kf",
         "sbpkg[].sheets[]", "sbpkg[].sheets[].sheet_id",
-        "sbpkg[].sheets[].reference_order", "sbpkg[].sheets[].storyboard_prompt",
+        "sbpkg[].sheets[].reference_order",
+        "sbpkg[].sheets[].storyboard_prompt!",
     ]),
+    # video_prompt 后面那个 `!` 是**值不许为空**，不只是键要在。
+    #
+    # 实遇：模型返回 `"video_prompt": ""`，同时在 capability_note 里写
+    # `VIDEO_PROMPT_RELEASE_BLOCKED`、在 time_budget_check 里写
+    # 「因此不生成视频执行计划和可投喂提示词」—— **它明确拒绝生产**，
+    # 理由也写清楚了（上游镜头时间轴超出 SEG 容器）。
+    # 而「键存在」是满足的，于是校验通过、空提示词落盘、这一段算做完了。
+    # 下游拿着空提示词去出片，而**前面一路没有报错**。
     "n13": ("n13_video", ["n9_shots", "n10_segs", "n12_storyboard"], [
         "video_plan[]", "video_plan[].seg_id", "video_plan[].windows",
-        "video_plan[].reference_order", "video_plan[].video_prompt",
+        "video_plan[].reference_order", "video_plan[].video_prompt!",
     ]),
     "n14": ("n14_audit", ["n8_cvs", "n10_segs", "n12_storyboard", "n13_video"], [
         "findings[]?",
@@ -245,6 +254,9 @@ COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
                        "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT",
                        "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY",
                        "NARRATION_RULE", "MEDIUM_RULE",
+                       # 总时长 / 集数 / 每集时长三个量互相决定，合成的那一段。
+                       # 只有环节1 用得上，但白名单是全局的。
+                       "LENGTH_PLAN",
                        # 分批跑的两个：这一批做什么范围、前面几批做过什么。
                        # 没分批时也有值（「一次处理全剧」/「这是第一次排」），
                        # 所以任何模板用它们都不会渲染成空。

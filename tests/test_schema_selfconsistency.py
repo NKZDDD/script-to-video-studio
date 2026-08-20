@@ -87,7 +87,7 @@ class V34Tests(unittest.TestCase):
                 parts = spec.split(".")
                 node, missing_at = d, ""
                 for i, part in enumerate(parts):
-                    key = part.rstrip("?").rstrip("[]")
+                    key = part.rstrip("?").rstrip("!").rstrip("[]")
                     if not isinstance(node, dict):
                         break               # 走不下去了，交给上面那条整体验
                     if key not in node:

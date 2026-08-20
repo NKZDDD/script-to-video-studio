@@ -296,14 +296,29 @@ def _dep_data(pj: Project, deps: list, episode: str) -> dict:
 
 def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
              episode: str, script: str) -> dict:
-    """整集级环节（s1-s6）往模板里填的那张表。真跑和预览共用。"""
+    """整集级环节（s1-s6）往模板里填的那张表。真跑和预览共用。
+
+    **设置项也要并进来。** 这一份和 `settings.mapping()` 是两份不同的表：
+    那一份只渲染 `_common.md`（系统提示词），这一份渲染业务模板。
+    不并的话，业务模板里写的设置项占位符会**原样发给模型** ——
+    实遇 `{{EPISODE_SECONDS}}`：s1_global.md 里写了，这里没接，
+    于是提示词里出现一个字面的 `{{EPISODE_SECONDS}}`，模型把它当成
+    一个要填的空位。电影级那边（run_v34.mapping）一直是并的，只有这边漏了。
+    """
     from . import episodes as _eps
+    from . import settings as _st
     tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
     slim = {k: params[k] for k in _PROMPT_PARAMS if k in params}
     slim["episode"] = episode or params.get("episode", "")
     seg_n, seg_why = (_eps.seg_target(pj, episode, params)
                       if is_per_episode(stage_id) and episode else (0, ""))
-    return {
+    out = dict(_st.mapping(pj, params, {}))     # 设置项先铺底
+    # 总时长/集数/每集时长三个量互相决定，合成一段发给环节1 ——
+    # 关键是那句「集数是算出来的，不是数剧本里有几章」。
+    # 放业务模板这一份而不是 _common：只有环节1 用得上，
+    # 塞进 _common 等于给另外 11 个环节每次调用都发一遍无关信息。
+    out["LENGTH_PLAN"] = _st.length_plan(pj)
+    out.update({
         "PARAMS": jd(slim),
         "SCRIPT": script,
         "EPISODE": episode or params.get("episode", "EP01"),
@@ -330,7 +345,8 @@ def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
         # 整集共用的 180 度轴线约定（环节3 定的）。老项目的产物里没有，
         # 那就是空的 —— 环节7 会自己定轴，和以前一样。
         "AXIS": jd((data.get("s3_states") or {}).get("axis_convention") or {}),
-    }
+    })
+    return out
 
 
 def _s5_filter(pj: Project, data: dict, claim: bool = True,
@@ -968,12 +984,55 @@ def check_prompt_refs(pj: Project, out: dict, episode: str, log=None) -> list:
     return bad
 
 
+def _ran_s5(pj: Project, a: dict) -> bool:
+    """这个资产所属的那一集，环节5 跑过了吗。
+
+    判据是**产物在不在**，不是任何运行记录 —— 和这个项目其它「做过没有」
+    的判断保持同一个口径（重启、换机器、手删产物都认得出来）。
+
+    资产是逐集产出的，`used_by_segs` 里的段号自带集号（EP03-SEG01）。
+    一集都认不出来时按「跑过了」算：宁可多报一条真提醒，
+    也别把真的漏掉的资产藏起来。
+    """
+    eps = {str(s).split("-")[0] for s in (a.get("used_by_segs") or [])
+           if str(s).startswith("EP")}
+    if not eps:
+        return True
+    return any(pj.stage_data("s5_asset_prompts", ep) for ep in eps)
+
+
+def _space_master_ids(out: dict) -> dict:
+    """`space_masters[]` 里声明的空间 → {id: 名字}。
+
+    这些是**结构声明，没有图** —— 真正有图的是它 regions 里的
+    `environment_asset_id`。分不清的话报错只会说「参考资产不存在」，
+    把人往「哪个资产丢了」的方向带，而实际是**引错了一类东西**。
+    """
+    out = out or {}
+    rows = out.get("space_masters") or out.get("spatial_masters") or []
+    return {str(r.get("space_id") or r.get("spatial_id") or ""): r
+            for r in rows if isinstance(r, dict)
+            and (r.get("space_id") or r.get("spatial_id"))}
+
+
+def _wrong_kind_note(sid: str, sm: dict) -> str:
+    """把「你引的是空间母资产」这件事说成能照着改的一句话。"""
+    envs = [str(r.get("environment_asset_id") or "")
+            for r in (sm.get("regions") or []) if isinstance(r, dict)
+            and r.get("environment_asset_id")]
+    return (f"{sid} 是**空间母资产**（结构声明，没有图）"
+            + (f"，这个空间的图是它 regions 里的 {'、'.join(envs[:4])}"
+               if envs else "，它 regions 里也没写 environment_asset_id")
+            + " —— 参考图要引那个，不是引 " + sid + "。")
+
+
 def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
     """按TXT检查父资产、连续性状态依赖和基础资产原子性。"""
     assets = out.get("assets") or []
     if not assets:
         return []
     by_id = {a.get("asset_id"): a for a in assets}
+    spaces = _space_master_ids(out)
     # 加上前面几集已建的：本集锚点可以引用早先建好的人物/场景/道具。
     for a in known_assets(pj, episode):
         by_id.setdefault(a.get("asset_id"), a)
@@ -998,8 +1057,12 @@ def check_asset_scope(pj: Project, out: dict, episode: str, log=None) -> list:
             if refs:
                 reasons.append("基础原子资产不应引用其他资产")
         unknown = [r for r in refs if r not in by_id]
-        if unknown:
-            reasons.append("参考资产不存在：" + "、".join(unknown))
+        for u in unknown:
+            # 先看它是不是**声明过的空间母资产**。是的话这不是「资产不存在」，
+            # 是类别用错了 —— 说清楚人才知道该改成引哪个。
+            sm = spaces.get(u)
+            reasons.append(_wrong_kind_note(u, sm) if sm
+                           else f"参考资产不存在：{u}")
         if reasons:
             bad.append((aid, a.get("name", ""), reasons))
     cycles = asset_dependency_cycles(assets)
@@ -1370,6 +1433,15 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
         log(f"{episode or '本集'} 有 {len(no_shots)} 段还没排出分镜，这次不编："
             f"{'、'.join(no_shots[:8])}{'…' if len(no_shots) > 8 else ''}"
             f"（先把环节7 那几段补上，再点一次「开始」会自动补编）")
+        # 也记一条：日志会滚过去，而「成片少了几段」要几个环节之后才看得出来。
+        # 电影级那边是同一条口径（见 run_v34.run_segment_stage）。
+        diagnose.record(pj.root, diagnose.warn(
+            "SEG_UPSTREAM_MISSING",
+            f"{episode or '本集'} 有 {len(no_shots)} 段没有分镜，环节8 跳过了它们："
+            + "、".join(no_shots[:8]) + ("…" if len(no_shots) > 8 else "")
+            + "。这几段不会有故事板和视频，成片会少这几段。"
+              "重跑环节7 把它们补出来，再跑环节8 会自动只补这几段。",
+            stage="stage:s8", target=episode or ""))
     if not segs:
         raise RuntimeError(
             f"{episode or '本集'} 一段分镜都没有，没东西可编。先把环节7 跑通。")
@@ -1551,13 +1623,18 @@ def _build_tasks(pj: Project, params: dict) -> dict:
     asset_tasks = []
     ghost: dict = {}          # 目标 → 声明了、但资产表里根本没有的那些引用
     noprompt = []             # 环节4 说要出、环节5 却没写提示词的
+    pending_prompt = []       # 那一集还没跑环节5 —— 不是漏，是还没轮到
     for a in assets:
         if a.get("decision") == "skip":
             continue
         if a["asset_id"] not in aprompts:
             # 环节4 判定要出，环节5 却没给提示词 —— 以前 continue 掉，
             # 结果是这个资产**永远不会出图**，任务列表里连它都没有，没人吭声。
-            noprompt.append(f"{a['asset_id']} {a.get('name', '')}".strip())
+            #
+            # 但要分清「那一集还没跑环节5」：一键跑到底是逐集推的，
+            # 后面几集的资产必然还没有提示词。报成「永远不会出图」看着像事故。
+            label = f"{a['asset_id']} {a.get('name', '')}".strip()
+            (noprompt if _ran_s5(pj, a) else pending_prompt).append(label)
             continue
         ap = aprompts[a["asset_id"]]
         # 状态资产的父资产排第一，再与环节4/5的全部依赖合并。
@@ -1589,6 +1666,7 @@ def _build_tasks(pj: Project, params: dict) -> dict:
     # ---- 故事板 / 视频：逐集展开 ---------------------------------------
     sb_tasks, vd_tasks = [], []
     noref, uncompiled = [], []
+    pending_seg = []          # 那一集还没跑环节8 —— 同上
     for ep in eps:
         bindings = {b["id"]: b for b in (pj.stage_data("s6_binding", ep) or {}).get("bindings", [])}
         compiled = (pj.stage_data("s8_compile", ep) or {}).get("compiled", [])
@@ -1598,9 +1676,15 @@ def _build_tasks(pj: Project, params: dict) -> dict:
         # 环节2 切了段、环节8 却没编出来的：那几段根本不会有故事板和视频任务。
         # 不记一笔的话，「6 段只出了 4 段」看起来就像本来只有 4 段。
         done_ids = {c.get("id") for c in compiled}
-        uncompiled += [s.get("id") for s in
-                       (pj.stage_data("s2_segments", ep) or {}).get("segments", [])
-                       if s.get("id") and s.get("id") not in done_ids]
+        miss = [s.get("id") for s in
+                (pj.stage_data("s2_segments", ep) or {}).get("segments", [])
+                if s.get("id") and s.get("id") not in done_ids]
+        # **「这一集还没跑到环节8」和「跑过了但漏了几段」是两件事。**
+        # 一键跑到底是逐集往下推的，装配随时可能在中途发生（出图那一步会先装配）。
+        # 不分清的话，正在跑的那几集会被报成「成片会直接少这几段」——
+        # 看着像事故，实际只是还没轮到它。实遇：EP03 刚跑完 s4，
+        # 它的 6 段全被报成没编译。
+        (uncompiled if compiled else pending_seg).extend(miss)
         for c in compiled:
             sid = c["id"]
             seg = sid.split("-")[-1]
@@ -1675,6 +1759,26 @@ def _build_tasks(pj: Project, params: dict) -> dict:
             + "。人脸、场景全靠模型现编，跨段必然不一致。"
             "多半是环节6 没给这几段绑资产，重跑环节6 再重跑环节8。",
             stage="storyboard", target="(无参考图)"))
+    if pending_prompt or pending_seg:
+        # **这一条是进度，不是问题。** 记成 note 级别的提醒，措辞上和
+        # 「真的漏了」明确分开 —— 否则正在跑的项目面板上一片红，
+        # 人会去查一个根本不存在的故障。
+        bits = []
+        if pending_prompt:
+            bits.append(f"{len(pending_prompt)} 个资产还没写提示词"
+                        f"（{'、'.join(pending_prompt[:4])}"
+                        f"{'…' if len(pending_prompt) > 4 else ''}）")
+        if pending_seg:
+            bits.append(f"{len(pending_seg)} 段还没编译"
+                        f"（{'、'.join(pending_seg[:4])}"
+                        f"{'…' if len(pending_seg) > 4 else ''}）")
+        diagnose.record(pj.root, diagnose.warn(
+            "STILL_RUNNING",
+            "有些集还没跑到对应的环节：" + "；".join(bits)
+            + "。**这不是故障** —— 一键跑到底是逐集往下推的，"
+            "而装配随时会发生（点出图前会先装配一次）。等那几集跑到就有了。"
+            "如果流程已经跑完了还看到这一条，那才是真的漏了，去看那几集的报错。",
+            stage="progress", target="(还没跑到)"))
     if uncompiled:
         diagnose.record(pj.root, diagnose.warn(
             "SEG_NOT_COMPILED",
@@ -1687,7 +1791,9 @@ def _build_tasks(pj: Project, params: dict) -> dict:
     for cleared, targets in ((not ghost, {t["key"] for t in sb_tasks} | {t["key"] for t in asset_tasks}),
                              (not noprompt, {"(缺提示词)"}),
                              (not noref, {"(无参考图)"}),
-                             (not uncompiled, {"(未编译的段)"})):
+                             (not uncompiled, {"(未编译的段)"}),
+                             (not (pending_prompt or pending_seg),
+                              {"(还没跑到)"})):
         if cleared:
             for tg in targets:
                 diagnose.clear(pj.root, "storyboard", tg)
