@@ -156,7 +156,14 @@ class FieldTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
-    """集数没切对要说出来，但**不替它改**。"""
+    """集数没切对要**停**，但程序不替它改边界。
+
+    原来这里只记一条提醒然后照原样往下跑。用户原话：「我现在用 60 秒一集，
+    他就把文档中的集和我要求的时间对上，他没进行切割」—— 剧本里写着
+    「第一集」「第二集」，环节1 照抄那几个章节当集边界，我们再把每集秒数
+    硬盖成 60，于是一集 60 秒里塞着原本好几分钟的剧情。往下每一个环节都
+    建在错的集边界上，第九环节要把几分钟的戏压进 60 秒，一路崩到成片。
+    """
 
     def test_the_mismatch_is_reported(self):
         import inspect
@@ -167,8 +174,25 @@ class BuildTests(unittest.TestCase):
     def test_it_says_which_direction_to_fix(self):
         import inspect
         src = inspect.getsource(E.build)
-        self.assertIn("合并相邻章节", src)
+        self.assertIn("相邻章节", src)
         self.assertIn("剧情转折处再切开", src)
+
+    def test_a_wrong_episode_count_stops_instead_of_warning(self):
+        """★ 只提醒的话，人看不见 —— 而后面每一步都在错的集边界上工作。"""
+        import inspect
+        src = inspect.getsource(E.build)
+        self.assertIn("raise RuntimeError(msg)", src)
+        self.assertIn('"level": "error"', src)
+
+    def test_it_still_saves_before_raising(self):
+        """★ 抛之前先存盘 —— 不存的话 episodes.json 里看不到这条 issue，
+
+        而页面上那一栏正是用户会去看的地方。
+        """
+        import inspect
+        src = inspect.getsource(E.build)
+        self.assertLess(src.index("pj.save_stage"), src.index("raise RuntimeError"),
+                        "先抛后存等于没存")
 
     def test_the_plan_is_recorded_in_the_product(self):
         """★ 存一份，否则「为什么是这个集数」事后查不到。"""

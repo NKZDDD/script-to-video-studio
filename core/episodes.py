@@ -279,15 +279,37 @@ def build(pj: Project, script: str, s1: dict) -> dict:
     res["length_plan"] = {k: plan[k] for k in ("total", "count", "per")}
     got = len(res.get("episodes") or [])
     if plan["count"] and got and got != plan["count"]:
-        # **不改它切出来的东西**，只报。集边界是内容判断，程序合并或者
-        # 拆开只会切在错的地方 —— 那比集数不对更难查。
+        # **这里原来只记一条提醒，然后照原样往下跑。**
+        #
+        # 用户原话：「我现在用 60 秒一集，他就把文档中的集和我要求的时间
+        # 对上，他没进行切割」。就是这个 —— 剧本里写着「第一集」「第二集」，
+        # 环节1 照抄那几个章节当集边界，我们再把每集秒数硬盖成 60，
+        # 于是一集 60 秒里塞着原本一集（好几分钟）的剧情。
+        #
+        # 只提醒不行：往下每一个环节都建在错的集边界上，
+        # 第九环节要把几分钟的戏压进 60 秒，然后一路崩到成片。
+        # 所以**停**。程序仍然不替它合并或拆开 —— 集边界是内容判断，
+        # 程序切在错的地方比集数不对更难查；停下来让环节1 重切。
+        more = got > plan["count"]
+        msg = (f"按长度计划该切 {plan['count']} 集（总时长 {plan['total']} 秒 ÷ "
+               f"每集 {plan['per']} 秒），环节1 实际切出 {got} 集 —— "
+               f"它多半是照剧本里写的「第几集」直接抄下来的，"
+               f"**而集数是按你设的节奏算出来的，不是数剧本里有几章**。\n"
+               f"就这么往下跑的话：每集秒数会被硬盖成 {plan['per']} 秒，"
+               f"于是一集 {plan['per']} 秒里塞着原本"
+               f"{'不止' if more else '好几集'}那么多的剧情，"
+               f"第九环节要把它压进去，然后一路崩到成片 —— "
+               f"而中间每一步都不报错。\n"
+               f"两条出路选一条：\n"
+               f"① 重跑环节1，要求它切成 {plan['count']} 集"
+               f"（{'把相邻章节合并' if more else '在剧情转折处再切开'}，"
+               f"边界仍然由它按剧情判断，程序不代切）；\n"
+               f"② 把设置里的集数或总时长改成和 {got} 集对得上的那一档"
+               f"（{got} 集 × {plan['per']} 秒 = {got * plan['per']} 秒）。")
         res.setdefault("issues", []).append({
-            "episode": "", "level": "warn",
-            "reason": f"按长度计划该切 {plan['count']} 集，环节1 实际切出 "
-                      f"{got} 集。程序不替它合并或拆开 —— 集边界是内容判断，"
-                      f"切在错的地方比集数不对更难查。"
-                      f"{'章节比目标多，让它合并相邻章节' if got > plan['count'] else '章节比目标少，让它在剧情转折处再切开'}："
-                      f"重跑环节1；或者把设置里的集数/总时长改成 {got} 那一档。"})
+            "episode": "", "level": "error", "reason": msg})
+        pj.save_stage(FILE[:-5], res)      # 先存盘 —— issues 要看得见
+        raise RuntimeError(msg)
     pj.save_stage(FILE[:-5], res)          # → 01_剧本与分段/episodes.json
     return res
 

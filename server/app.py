@@ -1526,8 +1526,16 @@ def api_post(path: str, body: dict) -> dict:
         pj = proj_of(body)
         meta = pj.meta()
         params = params_of(cfg, pj, with_script=False)
+        # 手动拼接也要对账「这一集该有几段」—— 缺段的成片不能交付。
+        # 段的出处按体系分：电影级看第十环节装的箱子，通用级看环节2 划的段。
+        if system_of(pj) == "v34":
+            from core import run_v34 as _R
+            want = lambda p, ep: [x["seg_id"] for x in _R.segments_of(p, ep)]
+        else:
+            want = S.segment_ids
         return {"ok": True,
-                "result": S.assemble(pj, params, episode=(body.get("episode") or "").strip())}
+                "result": S.assemble(pj, params, expect_segs=want,
+                                     episode=(body.get("episode") or "").strip())}
 
     if path == "/api/selftest":
         out = {}

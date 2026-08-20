@@ -354,7 +354,10 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 job.set_item(key, state="running")
                 only = s.get("only") or []
                 r = S.assemble(pj, params, log=log,
-                               episode=only[0] if len(only) == 1 else "")
+                               episode=only[0] if len(only) == 1 else "",
+                               # 该有几段按环节2 划的段算 —— 那是这套体系里
+                               # 「一集有哪些段」唯一的出处。缺段不许拼。
+                               expect_segs=S.segment_ids)
                 n = len(r.get("masters", [])) or (1 if r.get("master") else 0)
                 job.set_item(key, state="ok", msg=f"出了 {n} 个成片")
 

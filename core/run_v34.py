@@ -432,6 +432,9 @@ def _ref_limit_block(params: dict) -> str:
     return (f"本次目标模型一次最多接受 {lim} 张参考图。"
             f"这是**容量上限，不是推荐装满的数量** —— "
             f"按最小充分集挑，够用就停。"
+            f"**额度先给故事板骨架，剩下的才是补图的** —— "
+            f"骨架那几张不在可裁范围内，裁掉一张就是那段时间没人告诉模型"
+            f"发生了什么；要裁只裁补图。"
             f"{'超过 5 张时必须逐张写清缺的是哪一项权威。' if lim > 5 else ''}")
 
 
@@ -996,6 +999,7 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
     out = _one_call(pj, stage_id, llm=llm, params=params, episode=episode,
                     log=log, cancel=cancel)
     check_runtime(pj, stage_id, out, params, episode, log)
+    check_timeline(pj, stage_id, out, params, episode, log)
     check_packing(pj, stage_id, out, params, episode, log)
     pj.save_stage(tpl_name, out, "" if V.scope_of(stage_id) == "series" else episode)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode or "全剧")
@@ -1052,6 +1056,87 @@ def check_runtime(pj: Project, stage_id: str, out: dict, params: dict,
         log(f"⚠️ 这一集排成 {got:g} 秒，按剧情该有 {want} 秒（压掉 "
             f"{100 - got * 100 / want:.0f}%）—— 已记下，不挡后面")
     return
+
+
+# 相邻镜头之间允许差多少秒。取整、四舍五入本来就会有零点几秒的出入，
+# 而真正的跳秒是好几秒 —— 用户实遇的那条从 24 跳到 30。
+_GAP_TOL = 0.35
+
+
+def check_timeline(pj: Project, stage_id: str, out: dict, params: dict,
+                   episode: str, log: Callable = print) -> None:
+    """第九环节排的时间线，**中间不许跳秒，也不许叠在一起。**
+
+    用户原话：「一直跳时间」。跳的是这个：
+
+        SH_EP01_003  16.0 - 24.0
+        SH_EP01_004  30.0 - 38.0      ← 24 到 30 这 6 秒没有任何镜头
+
+    跳掉的那几秒既没有画面也没有人负责，而下游没有一处会发现：
+    第十环节按 `included_shots` 装箱（它只看镜头号，不看秒数），
+    第十二、十三环节按段拿数据。要到成片拼出来才看得见 —— 那时候
+    每一段都是单独生成的，中间少几秒表现为**动作接不上**，
+    而不是一段黑屏，所以连肉眼都不容易认出来是时间线的问题。
+
+    叠在一起是另一头：两个镜头占同一段时间，那段内容会被做两遍
+    （两次生成、两次付费），拼起来是同一件事演两回。
+
+    容许 0.35 秒的出入 —— 取整和四舍五入本来就会有零点几秒的差。
+    """
+    if stage_id != "n9":
+        return
+    rows = [r for r in (out or {}).get("timing_plan") or []
+            if isinstance(r, dict)
+            and isinstance(r.get("start"), (int, float))
+            and isinstance(r.get("end"), (int, float))]
+    if len(rows) < 2:
+        return                      # 没有相邻关系可查
+
+    rows.sort(key=lambda r: float(r["start"]))
+    gaps, overlaps, backwards = [], [], []
+    for a, b in zip(rows, rows[1:]):
+        ae, bs = float(a["end"]), float(b["start"])
+        d = bs - ae
+        if d > _GAP_TOL:
+            gaps.append((a.get("shot_id") or "?", b.get("shot_id") or "?", ae, bs))
+        elif d < -_GAP_TOL:
+            overlaps.append((a.get("shot_id") or "?", b.get("shot_id") or "?", bs, ae))
+    for r in rows:
+        if float(r["end"]) < float(r["start"]) - _GAP_TOL:
+            backwards.append((r.get("shot_id") or "?",
+                              float(r["start"]), float(r["end"])))
+    if not gaps and not overlaps and not backwards:
+        return
+
+    lines = []
+    for a, b, ae, bs in gaps[:6]:
+        lines.append(f"  · {a} 在第 {ae:g} 秒结束，下一个 {b} 从第 {bs:g} 秒开始"
+                     f" —— 中间 {bs - ae:g} 秒没有任何镜头")
+    for a, b, bs, ae in overlaps[:4]:
+        lines.append(f"  · {a} 和 {b} 叠在一起：{b} 从第 {bs:g} 秒开始，"
+                     f"而 {a} 要到第 {ae:g} 秒才结束（重了 {ae - bs:g} 秒）")
+    for s, a, b in backwards[:3]:
+        lines.append(f"  · {s} 的结束时间 {b:g} 秒早于开始时间 {a:g} 秒")
+
+    msg = ("{ep} 第九环节排的时间线接不上（{n} 处）：\n{lines}\n"
+           "**跳掉的那几秒既没有画面，也没有人负责。** 下游一处都发现不了："
+           "第十环节按镜头号装箱，不看秒数；第十二、十三环节按段拿数据。"
+           "要到成片拼出来才看得见，而那时候表现为**动作接不上**"
+           "（不是一段黑屏），连肉眼都不容易认出是时间线的问题。\n"
+           "叠在一起是另一头：那段内容会被做两遍、付两次钱，"
+           "拼起来是同一件事演两回。\n"
+           "去改：重跑第九环节 —— 要求 timing_plan 里相邻镜头首尾相接"
+           "（上一个的 end 等于下一个的 start）。"
+           "如果那几秒本来就该是空镜或者留白，那就给它一个镜头，"
+           "别让时间线上有一段没人负责。"
+           ).format(ep=episode or "全剧",
+                    n=len(gaps) + len(overlaps) + len(backwards),
+                    lines="\n".join(lines))
+
+    diagnose.record(pj.root, diagnose.warn(
+        "SHOT_TIMELINE_BROKEN", msg,
+        stage=f"stage:{stage_id}", target=episode or "全剧"))
+    raise RuntimeError(msg)
 
 
 def _shot_windows(pj: Project, episode: str) -> dict:
@@ -1765,6 +1850,10 @@ def build_tasks(pj: Project, params: dict) -> dict:
     scst_skipped: dict = {}
     sb_conflict: list = []        # 故事板引了「判成不出图」的场景状态
     sb_noprompt: list = []        # 环节12 一张提示词都没写的段 —— 那一段没有骨架
+    # 参考图超上限的段：(段号, 骨架张数, 补图张数, 上限)。
+    # 骨架不许为了凑额度被裁 —— 所以骨架和补图要分开算。
+    vd_over: list = []
+    ref_limit = int(params.get("ref_limit") or 0)
     for ep in eps:
         for sc in (pj.stage_data("n11_scstate", ep) or {}).get("scstates", []):
             sid = sc.get("scstate_id")
@@ -1868,6 +1957,43 @@ def build_tasks(pj: Project, params: dict) -> dict:
                            "ratio": params.get("ratio", "9:16")},
                 "output": f"05_分段视频/{code}_{seg}.mp4",
             })
+            if ref_limit:
+                spine_n = len(sb_by_seg.get(seg, []))
+                if spine_n + len(vd_refs) > ref_limit:
+                    vd_over.append((seg, spine_n, len(vd_refs), ref_limit))
+
+    if vd_over:
+        # **故事板给了 N 张，视频只用得上 M 张 —— 这一条以前一个字都不说。**
+        #
+        # 用户原话：「故事板给了 2 个，视频只用一个故事板被锁死了」。
+        # 出片那一层按上限截断（或者服务商直接拒），而被截掉的正是骨架
+        # 后面那几张 —— 于是模型只看见前半段，后半段自己编。
+        #
+        # 这里分两种，改法完全不同：
+        #   · 骨架本身就超上限 → 结构和模型对不上，得让第十二环节合并
+        #     承载颗粒度，或者换一个吃得下的模型。**不许砍骨架。**
+        #   · 骨架装得下、加上补图才超 → 砍补图就行，第十三环节自己能做
+        rows = "；".join(
+            f"{seg}（骨架 {sp} 张" + (f" + 补图 {ex} 张" if ex else "") + f"，上限 {lim} 张）"
+            for seg, sp, ex, lim in vd_over[:6])
+        spine_alone = [x for x in vd_over if x[1] > x[3]]
+        diagnose.record(pj.root, diagnose.warn(
+            "VIDEO_REF_OVER_LIMIT",
+            f"有 {len(vd_over)} 段的视频参考图超过了本次模型的上限："
+            + rows + ("…" if len(vd_over) > 6 else "")
+            + "。\n出片那一层会按上限截掉多的（或者服务商直接拒），"
+              "而被截掉的正是骨架后面那几张 —— 模型只看见前半段，"
+              "后半段自己编，**画面出得来，和剧情没关系，不报错**。\n"
+            + (f"其中 {len(spine_alone)} 段是**骨架本身就超上限**"
+               f"（{'、'.join(x[0] for x in spine_alone[:5])}）："
+               f"这是这一段的结构和这个模型对不上，"
+               f"**不许砍骨架** —— 让第十二环节把这一段的 Sheet 合并到"
+               f"上限以内（合并的是承载颗粒度，不是时间覆盖），"
+               f"或者换一个一次吃得下更多参考图的视频模型。\n"
+               if spine_alone else "")
+            + "其余几段是骨架装得下、加上补图才超的：重跑第十三环节，"
+              "让它把补图减到额度以内（补图只补骨架表达不了的局部覆盖）。",
+            stage="video", target="build_tasks"))
 
     if sb_noprompt:
         # V6.2 定死每个 SEG 必须有覆盖完整关键时间推进的故事板骨架。
@@ -2077,7 +2203,11 @@ def assemble(pj: Project, params: dict, log: Callable = print,
     直接复用，只把成片文件名换成这套体系的。"""
     from .stages import assemble as _assemble
     return _assemble(pj, params, log, episode,
-                     master_name=lambda code, ep: f"{code}_{ep}_MASTER.mp4")
+                     master_name=lambda code, ep: f"{code}_{ep}_MASTER.mp4",
+                     # 该有几段按第十环节装的箱子算 —— 那是这套体系里
+                     # 「一集有哪些段」唯一的出处。
+                     expect_segs=lambda p, ep: [s["seg_id"]
+                                                for s in segments_of(p, ep)])
 
 
 def _usage(pj: Project, stage_id: str, episode: str, target: str = "") -> Callable:

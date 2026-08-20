@@ -1966,8 +1966,16 @@ def find_ffmpeg() -> str:
     return probe.find_ffmpeg()          # 只保留一份查找逻辑，见 core/probe.py
 
 
+def segment_ids(pj: Project, episode: str) -> list:
+    """这一集该有哪些段（V6.1）。段是环节2 按节奏划的，不是按秒数除的。"""
+    return [s.get("id", "") for s in
+            (pj.stage_data("s2_segments", episode) or {}).get("segments", [])
+            if s.get("id")]
+
+
 def assemble(pj: Project, params: dict, log: Callable = print,
-             episode: str = "", master_name: Optional[Callable] = None) -> dict:
+             episode: str = "", master_name: Optional[Callable] = None,
+             expect_segs: Optional[Callable] = None) -> dict:
     """环节12：按段号排序、硬切拼接、生成成片。
 
     一部剧有 40 集就出 40 个成片，绝不能把所有集拼成一个文件。
@@ -1976,6 +1984,16 @@ def assemble(pj: Project, params: dict, log: Callable = print,
     master_name(code, ep) 决定成片文件名 —— 两套体系的命名不一样，
     但拼接本身（排序、concat 清单、流拷贝失败退回重编码）是体系无关的，
     没必要复制一份。
+
+    expect_segs(pj, ep) 返回这一集**该有**哪几段。给了就对账 ——
+    这是补一个真实踩过的洞：原来只拼「找得到的」分段视频，不查该有几段，
+    于是第十二环节有一段没做成 → 第十三环节跳过那一段（记了一条提醒）
+    → 出片少一条 → **这里照样拼，还报「拼好 1 集」**。
+    成片短了一段，而全程没有一处说过「缺了 SEG04」。
+    
+
+    段与段之间的接不上，肉眼也难认：每一段本来就是单独生成的，
+    中间少一段表现为动作接不上，不是一段黑屏。
     """
     from . import episodes as _eps
     eps = _eps.ids(pj)
@@ -1983,7 +2001,8 @@ def assemble(pj: Project, params: dict, log: Callable = print,
         outs, failed = [], []
         for e in eps:
             try:
-                outs.append(dict(assemble(pj, params, log, e, master_name), episode=e))
+                outs.append(dict(assemble(pj, params, log, e, master_name,
+                                          expect_segs), episode=e))
             except RuntimeError as exc:
                 failed.append(f"{e}：{exc}")
                 log(f"{e} 跳过 —— {exc}")
@@ -2002,6 +2021,23 @@ def assemble(pj: Project, params: dict, log: Callable = print,
     exist = [v for v in vids if probe.have_output(pj.p(*v["file_ref"].split("/")))]
     if not exist:
         raise RuntimeError(f"{ep} 没有可拼接的分段视频")
+    # **缺一段的成片不是成片。** 少拼一段不会报错，只会短一截 ——
+    # 而少的那一段往往正是前面某个环节没做成的那一段。
+    if expect_segs:
+        want = [s for s in (expect_segs(pj, ep) or []) if s]
+        have = {str(v.get("id") or "") for v in exist}
+        lost = [s for s in want if s not in have]
+        if lost:
+            raise RuntimeError(
+                f"{ep} 该有 {len(want)} 段，只有 {len(have)} 段出了片，"
+                f"缺：{'、'.join(lost[:8])}"
+                f"{'…' if len(lost) > 8 else ''}。\n"
+                f"**缺一段的成片不能交付**，所以这里不拼 —— 拼出来只是短一截，"
+                f"而少的那一段往往正是前面某个环节没做成的那一段"
+                f"（第十二环节缺故事板、第十三环节没给视频提示词，"
+                f"都会让这一段静悄悄地不出片）。\n"
+                f"去「流程」页看这几段停在哪一环，补跑那一环，"
+                f"再出这几段的片，然后重新拼接 —— 已经出好的段不会重做。")
     lines = ["file '" + os.path.relpath(pj.p(*v["file_ref"].split("/")),
                                         pj.p("06_成片")).replace("\\", "/") + "'" for v in exist]
     concat = pj.p("06_成片", f"{ep}_concat.txt")
