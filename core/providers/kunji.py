@@ -107,6 +107,19 @@ class KunjiProvider(Provider):
     aliases = ("yunfei", "坤鸡", "banana")
     default_base_url = "https://img.yunfei.best"
     supports = ("image", "video")
+    # **Key 分四把各自填**（页面上跟超模一样，一把一个框）。
+    # 存回 api_key 时拼成 `1k=…;4k=…;high=…;default=…`，`parse_keys` 认这个。
+    # 只填一把也行 —— 那把当所有档位的默认。
+    key_fields = (
+        ("image_1k_api_key", "1k", "图片 1K Key",
+         "最高只出 1K。只填这一把的话，选 2K/4K 会被静默降级"),
+        ("image_4k_api_key", "4k", "图片 4K Key",
+         "1K/2K/4K 都能出。要 4K 就必须有这一把"),
+        ("image_high_api_key", "high", "图片 high Key",
+         "只有 quality=high 那条线用；没有就留空"),
+        ("video_api_key", "default", "视频 Key",
+         "veo 出片用。没配分组的档位也回落到它"),
+    )
     # gpt-image-2 的 edits 是 multipart，只收文件字节；香蕉和 veo 收链接/base64。
     # 默认按最严的 bytes 声明，香蕉那条在 accepts_url 里放开。
     ref_mode = "bytes"

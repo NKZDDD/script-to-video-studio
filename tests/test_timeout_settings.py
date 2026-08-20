@@ -45,8 +45,12 @@ class ClampTests(unittest.TestCase):
     def test_clamped_on_save_not_only_on_use(self):
         """存的时候不夹住，config.json 里就一直躺着个不合法的值，
         页面回显也是它，人会以为那个值是有效的。"""
+        # **别按固定字数截。** 原来截 2200 字，往这段里加一行注释就会把
+        # `_timeout(` 挤出窗口，于是测试报「保存时没夹住」—— 而代码没问题。
+        # 截到下一个路由分支为止。
         i = APP.index('if path == "/api/config"')
-        blk = APP[i:i + 2200]
+        j = APP.find('if path == "', i + 10)
+        blk = APP[i:j if j > i else len(APP)]
         self.assertIn("_timeout(", blk)
         self.assertIn("_poll(", blk)
 

@@ -251,11 +251,80 @@ def _provider_api_key(provider_id: str, provider_cfg: dict, capability: str,
     return str((provider_cfg or {}).get(field or "api_key") or "").strip()
 
 
+def _key_fields(provider_id: str) -> tuple:
+    """这一家的 Key 分几把各自填。取不到就当不分 —— 照旧一个框。"""
+    try:
+        from core import providers as _P
+        cls = _P.REGISTRY.get(_P.resolve_id(provider_id or ""))
+        return tuple(getattr(cls, "key_fields", ()) or ())
+    except Exception:                                   # noqa: BLE001
+        return ()
+
+
+def _merge_group_keys(provider_id: str, incoming: dict, saved: dict) -> dict:
+    """把 `image_4k_api_key` 这几把合并进 `api_key`，返回改过的 incoming。
+
+    页面上是几个各自命名的框（跟超模一样）；存下来仍然是
+    `1k=…;4k=…;high=…` 这一个字符串 —— 服务商那边本来就认它
+    （`kunji.parse_keys`），也是用户直接粘客服那段文本时的形状。
+    这样不用改服务商一行代码，老项目存的单把 Key 也照旧能用。
+
+    **每一把各自「留空 = 不改」。** 不按把合并的话，改 4K 那一把会把 1K
+    那把清掉 —— 而清掉之后 1K 回落到 default，图照样出得来，
+    只是用的是另一把 Key，谁都看不出来。
+    """
+    fields = _key_fields(provider_id)
+    if not fields:
+        return incoming
+    names = [f[0] for f in fields]
+    if not any(n in incoming for n in names):
+        return incoming                 # 这次没动这几个框，别碰 api_key
+
+    from core.providers.kunji import parse_keys as _pk
+    # **这次一起提交了 `api_key` 那一栏时，以它为底。** 用户的用法是
+    # 「把客服给的 `1k=…;4k=…` 整段粘进来，再单独改某一把」——
+    # 拿已存的当底就会把刚粘进来的那段丢掉，而丢掉之后不报错，
+    # 只是有几档用的还是旧 Key。
+    typed = str((incoming or {}).get("api_key") or "").strip()
+    base = typed if (typed and "…" not in typed and "•" not in typed) \
+        else str((saved or {}).get("api_key") or "")
+    out = dict(_pk(base))
+    for (name, gid, _label, _why) in fields:
+        if name not in incoming:
+            continue                    # 这一把没提交，保持原样
+        val = str(incoming.pop(name) or "").strip()
+        if not val or "…" in val or "•" in val:
+            continue                    # 留空 / 是掩码回显 → 不改这一把
+        out[gid] = val
+    order = [f[1] for f in fields if out.get(f[1])]
+    # 老的单把 Key（`{"default": …}`）要一起写回去 —— 它是「没配分组的档位」
+    # 的回落。只写分组那几把的话，一个原来单填一把、现在补了 4K 的人
+    # 会发现 1K 那一档没 Key 了。`parse_keys` 认 `default=` 这个键。
+    if out.get("default") and "default" not in order:
+        order.append("default")
+    if order:
+        incoming["api_key"] = ";".join(f"{g}={out[g]}" for g in order)
+    return incoming
+
+
 def _provider_key_status(provider_id: str, provider_cfg: dict) -> dict:
     """只返回有没有配置，不把密钥本身送到浏览器。"""
     out = {cap: bool(_provider_api_key(provider_id, provider_cfg, cap))
            for cap in ("llm", "image_1k", "image_4k", "video")}
     out["image"] = out["image_1k"] or out["image_4k"]
+    # 分把填的家：逐把报「配了没有」，页面用它显示「已保存，留空不改」。
+    # 不报的话每个框都写着「粘贴 key」，人会以为没存上，然后重新粘一遍 ——
+    # 而重新粘的时候很容易只粘一把，把另外几把冲掉。
+    fields = _key_fields(provider_id)
+    if fields:
+        from core.providers.kunji import parse_keys as _pk
+        have = _pk(str((provider_cfg or {}).get("api_key") or ""))
+        for (name, gid, _l, _w) in fields:
+            out[name] = bool(have.get(gid))
+        # 只有一把通用 Key（老项目、或者客服只给了一把）：那把在 default 上，
+        # 而 default 是「视频 Key」那一格的分组 —— 所以那一格照样显示已保存。
+        out["key_default_only"] = bool(have.get("default")) and not any(
+            have.get(f[1]) for f in fields if f[1] != "default")
     return out
 
 
@@ -767,7 +836,10 @@ def api_post(path: str, body: dict) -> dict:
         # 密钥类字段「留空 = 不改」。前端拿到的是掩码后的值，
         # 直接 update 会把已保存的密钥覆盖成空。
         SECRET = ("api_key", "llm_api_key", "image_api_key", "image_1k_api_key",
-                  "image_4k_api_key", "video_api_key", "secret_key", "access_key")
+                  "image_4k_api_key", "video_api_key", "secret_key", "access_key",
+                  # 坤鸡那几把也在这张表里（image_1k/4k、video 已经有了），
+                  # 补上 high 那一把 —— 漏了的话它会以明文原样存进 config。
+                  "image_high_api_key")
 
         def _is_mask(v) -> bool:
             """这个值是我们自己打码出来的回显，不是真密钥。
@@ -784,6 +856,11 @@ def api_post(path: str, body: dict) -> dict:
             if k == "providers" and isinstance(v, dict):
                 cur.setdefault("providers", {})
                 for pid, pv in v.items():
+                    # 分组 Key（坤鸡的 1K/4K/high）先按组合并成一个 api_key，
+                    # 再走下面那道「留空 = 不改」—— 顺序不能反：反了的话
+                    # 合并出来的 api_key 会被当成「这次没填」而丢掉。
+                    pv = _merge_group_keys(pid, dict(pv),
+                                           (cur.get("providers") or {}).get(pid) or {})
                     pv = {kk: vv for kk, vv in pv.items()
                           if not (kk in SECRET
                                   and (not str(vv).strip() or _is_mask(vv)))}

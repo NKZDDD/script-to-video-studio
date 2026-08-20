@@ -224,6 +224,10 @@ def list_capabilities() -> list:
             # 用户没地方粘第二个账号，而且看不出为什么并发上不去。
             cap.setdefault("per_account_serial",
                            bool(getattr(cls, "per_account_serial", False)))
+            # 同理：漏了的后果是那家还按单个密码框渲染，用户没地方填 4K 分组
+            # 那一把，然后 4K 被静默降级成 1K —— 图在、不报错、只是不对。
+            cap.setdefault("key_fields",
+                           [list(g) for g in getattr(cls, "key_fields", ())])
             out.append(cap)
         except Exception as exc:                     # noqa: BLE001
             out.append({"id": pid, "name": getattr(cls, "name", pid),

@@ -2312,7 +2312,14 @@ function renderProviders() {
     const status = (BOOT.provider_keys_configured || {})[c.id] || {};
     const ready = fields.filter(x => status[x[2]]).length;
     const has = ready > 0;
-    const state = split ? (ready ? `已配置 ${ready}/4` : '未配置') : (has ? '已配置' : '未配置');
+    // 分把填的家也报 n/几 —— 只报「已配置」的话，缺 4K 那一把看不出来，
+    // 而缺它的后果是 4K 被静默降级成 1K。
+    const kf = c.key_fields || [];
+    const kfReady = kf.filter(x => status[x[0]]).length;
+    const state = split ? (ready ? `已配置 ${ready}/4` : '未配置')
+      : kf.length ? (kfReady ? `已配置 ${kfReady}/${kf.length}`
+                             : (status.key_default_only ? '已配置（只有一把通用 Key）' : '未配置'))
+      : (has ? '已配置' : '未配置');
     // 按账号计费、一个账号只能同时跑一条的家（HVTALD）：多账号粘贴框。
     // 密码框只能放一行，粘不进第二个账号 —— 而这一家**并发上限就是账号数**，
     // 只能配一个账号的话它永远是串行的，而且看不出为什么慢。
@@ -2324,6 +2331,18 @@ function renderProviders() {
            style="width:100%;font-family:ui-monospace,monospace;font-size:12px"
            placeholder="${status.video ? '已保存，留空不改' : 'deviceId=…;token=…;webdav=…;user=…;password=…\n第二个账号写下一行'}"></textarea>
          <div class="muted" id="acctBox_${c.id}" style="margin-top:6px">加载中…</div></div>`
+      // Key 分几把各自填的家（坤鸡：4K 是**令牌分组**的区别，不是模型的区别）。
+      // 底层一直支持 `1k=sk-a;4k=sk-b` 这个写法，但只给一个框的话，
+      // 用户得自己知道它 —— 不知道就只填一把，然后要 4K 时拿 1K 分组的 Key
+      // 去要，服务商**静默降级**：以为出了 4K，实际是 1K，图在、不报错。
+      // 所以跟超模一样，一把一个框。
+      : (c.key_fields || []).length
+      ? (c.key_fields || []).map(([field, _gid, label, why]) =>
+          `<div><label>${label} <span class="muted">${why}</span></label>
+            <input data-pv="${c.id}" data-f="${field}" type="password"
+             placeholder="${status[field] ? '已保存，留空不改'
+               : (field === 'video_api_key' && status.key_default_only
+                  ? '已保存（只填了一把通用 Key），留空不改' : '粘贴 key')}"></div>`).join('')
       : fields.map(([field, label, cap]) =>
         `<div><label>${label}</label><input data-pv="${c.id}" data-f="${field}" type="password"
           placeholder="${status[cap] ? '已保存，留空不改' : '粘贴 key'}"></div>`).join('');
