@@ -220,23 +220,91 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
     """
     rounds = clamp_rounds(rounds)
     used = prompt
+    reasons = []                    # 每一轮服务商说的话 —— 用来看是不是同一个坎
     for attempt in range(1, rounds + 2):
         try:
             return gen(used)
         except Exception as exc:                            # noqa: BLE001
             # 把这一轮实际发出去的提示词交给判定：报错里回显了它的话要先剔掉
-            if (attempt > rounds or llm is None
-                    or not is_content_rejection(exc, used)):
+            if attempt > rounds:
+                _gave_up(exc, attempt - 1, rounds, rounds, reasons,
+                         f"改写了 {rounds} 轮，每一轮都还是被拒", log)
                 raise
+            if llm is None:
+                _gave_up(exc, attempt - 1, attempt - 1, rounds, reasons,
+                         "没有可用的分析引擎，这一条没做自动改写", log)
+                raise
+            if not is_content_rejection(exc, used):
+                # **这一条以前完全看不见。** 不是审核问题就一轮都不改 ——
+                # 对的（改措辞治不了网络错误），但如果判错了（服务商这一次
+                # 回的是一句笼统的「任务失败」，没有判词），看起来就是
+                # 「它只肯试两次」。所以把这个决定说出来。
+                _gave_up(exc, attempt - 1, attempt - 1, rounds, reasons,
+                         f"这一次的失败没被认成审核问题，所以没有继续改写。"
+                         f"服务商这次说的是：{str(exc)[:200]}", log)
+                raise
+            reasons.append(str(exc))
             log(f"  被审核拒了：{str(exc)[:200]}")
             log(f"  交给分析引擎优化提示词（第 {attempt}/{rounds} 轮）"
                 + ("" if attempt == 1 else "，接着上一版继续"))
             new = soften(used, str(exc), llm=llm, pj=pj, kind=kind, key=key,
                          round_no=attempt, log=log, origin=prompt)
             if not new:
+                # 验收没过（`_check`）。**这一条也以前只 log 一行** ——
+                # 而它正是「明明还有几轮没用，却停下来了」的原因。
+                _gave_up(exc, attempt - 1, attempt, rounds, reasons,
+                         f"第 {attempt} 轮改写没通过验收，被扔掉了"
+                         f"（上一条日志里写了是哪一项不合格）。"
+                         f"扔掉的那一版没有落盘 —— 用它出图会悄悄少东西。",
+                         log)
                 raise
             used = new
     raise AssertionError("到不了这里")   # pragma: no cover
+
+
+def _same_wall(reasons: list) -> bool:
+    """每一轮被拒的理由是不是**同一个坎**。
+
+    判据取服务商判词里的关键名词交集太脆，所以只做一件确定的事：
+    看这几段话去掉数字和空白之后是不是一样。一样就说明改措辞没有触动它 ——
+    那多半不是措辞问题，是题材（儿童形象、真实人物、血腥）。
+    这种情况下再改十轮也过不了，得让人知道，别以为是轮数不够。
+    """
+    if len(reasons) < 2:
+        return False
+    norm = {re.sub(r"[\s\d]+", "", r)[:400] for r in reasons}
+    return len(norm) == 1
+
+
+def _gave_up(exc: Exception, done: int, tried: int, rounds: int, reasons: list,
+             why: str, log: Callable) -> None:
+    """改写这条路走不下去了 —— 把原因**挂在那个异常上**，别自己记一条。
+
+    为什么不记一条：`diagnose.record` 对同一个 (stage, target) 只保留最新，
+    而这个异常紧接着就会被上层记成一条失败 —— 自己先记一条只会被那条盖掉。
+    挂在 `exc.extra_fix` 上则会进到**活下来的那条记录**的「怎么改」里
+    （见 diagnose.build：服务商可以挂 extra_fix）。
+
+    不挂的后果就是用户看到的那样：页面上只剩上一轮改写成功那条
+    「已改写第 2 版」，而轮数其实给了 5 —— 看起来像「它只肯试两次」，
+    没有一个字解释为什么停。
+    """
+    lines = [f"自动改写停在第 {done} 轮（设置里给了 {rounds} 轮，"
+             f"这次用掉 {tried} 轮）：{why}"]
+    if _same_wall(reasons):
+        lines.append("每一轮被拒的理由**一模一样** —— 改措辞没有触动它，"
+                     "这多半不是措辞问题而是题材（儿童形象、真实人物、"
+                     "血腥这一类）。再改十轮也过不了：要么改这一条的内容本身，"
+                     "要么换一家审核尺度不同的服务商，"
+                     "要么用「任务明细」里的「手动放图」放一张自己的。")
+    if rounds - tried > 0:
+        lines.append(f"还剩 {rounds - tried} 轮没试 —— 不是轮数不够，"
+                     f"是上面那个原因让它停下来的。调大轮数没有用。")
+    try:
+        exc.extra_fix = list(getattr(exc, "extra_fix", None) or []) + lines
+    except Exception:                                       # noqa: BLE001
+        pass            # 有些异常对象不让加属性；那就只剩日志，不该因此炸掉
+    log(f"    改写到此为止（用了 {done}/{rounds} 轮）：{why}")
 
 
 def clamp_rounds(v) -> int:
