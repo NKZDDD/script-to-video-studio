@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from . import (diagnose, episodes as _eps, gates_v34 as G, probe,
-               run_v34 as R, system_v34 as V)
+               relay as _relay, run_v34 as R, system_v34 as V)
 from .apiutil import BATCH_FATAL
 from .llm import LLMCancelled
 from .executor import LLM_GATE, Job, run_chain
@@ -240,6 +240,12 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                     bad_eps.add(ep)
             return "failed"
 
+    # 出图出片全程就绪即派。登记（谁产出什么）**不能在这里做** ——
+    # 这会儿 tasks.json 还没装配（它在全部文字环节跑完之后才生成），
+    # 登记出来是空的，于是下游会把「还没生成的文件」当成「没人会做它」，
+    # 立刻派出去撞空。所以只建对象，登记挪到出图出片真正开始那一刻。
+    relay = _relay.Relay(pj)
+
     def do_produce(s: dict) -> str:
         key = s["label"]
         if halt(s):
@@ -290,7 +296,11 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                             pj.p(*t["output"].split("/"))),
                         max_retry=max_retry,
                         log=lambda m, _k=key: job.log(_k, m),
-                        deps_of=deps.get if deps else None)
+                        deps_of=deps.get if deps else None,
+                        ready_of=relay.ready_of(s["produce"]))
+        # **成没成都要报「这一批完了」** —— 这是下游停止等待的唯一信号。
+        # 漏了的话，等它产物的那些任务会一直等到超时上限。
+        relay.finished(s["produce"])
         left = one["left"]
         if s["task_key"] == "asset_tasks":
             # 出完就登记指纹。登记是为了后面能查出「文件被人换过」——
@@ -444,17 +454,60 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                         with st_lock:
                             failed.append(s["label"])
                 tail = [s for s in tail if s["kind"] != "produce"]
+    # 出图出片那几步**并发跑**，不再一步等一步。
+    #
+    # 以前是 p1 资产 → p2 场景状态图 → p3 故事板 → p4 视频，四步串行：
+    # 全部资产出完才开始第一张场景状态图，全部场景状态图出完才开始第一张
+    # 故事板……而依赖关系其实是**逐段独立**的：EP01-SEG01 的故事板只需要
+    # 它自己那张场景状态图，不需要等另外 239 段。
+    #
+    # 现在四步同时开跑，每条任务自己等自己的输入（core/relay.py）。
+    # 资产是唯一真要等齐的一类（全剧共享），而它在自己那一批里本来就是就绪即派。
+    idx = {s["label"]: i for i, s in enumerate(tail)}
+    prod = [s for s in tail if s["kind"] == "produce"]
     for i, s in enumerate(tail):
         if job.aborted or job.cancelled:
             _mark_stopped(job, tail[i:])
             break
         if s["kind"] == "produce":
-            do_produce(s)
-        elif s["kind"] == "llm":
+            if prod and s is prod[0]:
+                # 到这儿 tasks.json 已经装配好了，登记才有内容。
+                # **必须一次登记全**：漏了哪一类，等它产物的下游就会误判成
+                # 「没人会做它」而立刻开跑。
+                for _s in prod:
+                    relay.declare(_s["produce"],
+                                  pj.tasks().get(_s["task_key"]) or [])
+                _produce_all(prod, do_produce, job)
+            continue                       # 其余几步已经在上面那一把里跑了
+        if s["kind"] == "llm":
             do_llm(s)
         else:
             do_deliver(s)
     return _finish(job, failed, bad_eps)
+
+
+def _produce_all(steps: list, do_produce: Callable, job: Job) -> None:
+    """把出图出片那几步一起放出去跑。
+
+    **顺序仍然有意义**：一条任务的输入没齐时它会在 run_batch 里等，
+    所以实际执行顺序还是「资产 → 场景状态图 → 故事板 → 视频」这个偏序，
+    只是不再要求**整批**齐了才动下一批。
+
+    一步炸了不拖累别的 —— 它自己那批的失败记录已经写好了，
+    而下游本来就在等输入，等不到会由出图那一层报清缺哪张。
+    """
+    if len(steps) == 1:
+        do_produce(steps[0])
+        return
+    with ThreadPoolExecutor(max_workers=len(steps)) as pool:
+        futs = {pool.submit(do_produce, s): s for s in steps}
+        for f in futs:
+            try:
+                f.result()
+            except Exception as exc:                        # noqa: BLE001
+                # do_produce 内部已经把业务失败记进 job 了；能冒到这里的
+                # 是程序自己的问题，必须说出来而不是吞掉。
+                job.log(futs[f]["label"], f"这一步的调度出错了：{exc}")
 
 
 def start(job: Job, pj, **kw) -> None:

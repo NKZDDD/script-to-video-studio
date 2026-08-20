@@ -30,7 +30,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
-from . import diagnose, episodes as _eps, probe, stages as S
+from . import diagnose, episodes as _eps, probe, relay as _relay, stages as S
 from .store import _host
 from .apiutil import BATCH_FATAL
 from .llm import LLMCancelled
@@ -107,6 +107,29 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
                       "only": list(prod) if prod else None,
                       "label": f"环节12 拼接成片{ptag}"})
     return steps
+
+
+def _produce_all(steps: list, do_step: Callable, job: Job) -> None:
+    """把出图出片那几步一起放出去跑。
+
+    **顺序仍然有意义**：一条任务的输入没齐时它会在 run_batch 里等，
+    所以实际执行顺序还是「资产 → 故事板 → 视频」这个偏序，
+    只是不再要求**整批**齐了才动下一批。
+
+    一步的调度炸了要说出来，不能吞 —— 业务失败 do_step 自己记了，
+    能冒到这里的是程序问题。（实际逮到过一次：run_chain 还没接 ready_of 参数，
+    四步全静默失败，只有这条日志看得出来。）
+    """
+    if len(steps) == 1:
+        do_step(steps[0])
+        return
+    with ThreadPoolExecutor(max_workers=len(steps)) as pool:
+        futs = {pool.submit(do_step, s): s for s in steps}
+        for f in futs:
+            try:
+                f.result()
+            except Exception as exc:                        # noqa: BLE001
+                job.log(futs[f]["label"], f"这一步的调度出错了：{exc}")
 
 
 def _llm_done(pj, stage: str, episode: str) -> bool:
@@ -202,6 +225,9 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             return True
         return False
 
+    # 只建对象；登记（谁产出什么）要等 tasks.json 装配好之后才做。
+    relay = _relay.Relay(pj)
+
     def do_step(s: dict) -> str:
         """跑一步。返回 ok/skipped/failed/cancelled/aborted。异常都在里面消化掉。"""
         key = s["label"]
@@ -282,7 +308,11 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                               done_of=lambda t: probe.have_output(
                                   pj.p(*t["output"].split("/"))),
                               max_retry=max_retry, log=log,
-                              deps_of=deps.get if deps else None)
+                              deps_of=deps.get if deps else None,
+                              ready_of=relay.ready_of(s["produce"]))
+                # **成没成都要报** —— 这是下游停止等待的唯一信号。
+                # 漏了的话，等它产物的任务会一直等到超时上限。
+                relay.finished(s["produce"])
                 used = " → ".join(f"{a['provider']}/{a['model']}" for a in r["attempts"])
                 if r["left"] == 0:
                     job.set_item(key, state="ok",
@@ -467,9 +497,24 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         # 别的集还没存盘时的状态，这里补一遍，确保清单是完整的
         if tail and not stop_now():
             S.build_tasks(pj, params)
+        # 出图出片那几步**并发跑**，不再一步等一步。
+        #
+        # 以前是 资产图 → 故事板 → 视频 串行：全部资产出完才开始第一张故事板，
+        # 全部故事板出完才开始第一条视频。而依赖是**逐段独立**的 ——
+        # EP01-SEG01 的视频只需要它自己那张故事板。
+        #
+        # 现在同时开跑，每条任务自己等自己的输入（core/relay.py）。
+        # **登记必须在这儿做**，不能更早：tasks.json 是上面那一行刚装配的。
+        prod = [s for s in tail if s["kind"] == "produce"]
+        for s in prod:
+            relay.declare(s["produce"], pj.tasks().get(s["task_key"]) or [])
         for s in tail:
             if halt(s):
                 continue
+            if s["kind"] == "produce":
+                if s is prod[0]:
+                    _produce_all(prod, do_step, job)
+                continue                       # 其余几步已经在上面那一把里跑了
             do_step(s)
 
     job.finished_at = __import__("time").time()
