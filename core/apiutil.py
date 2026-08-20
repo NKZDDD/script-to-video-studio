@@ -341,13 +341,24 @@ def extract_image_items(data: Any) -> list:
     strict = data_array_images(data)
     if strict:
         return strict
-    items: list = []
+    # **链接和内嵌数据分开收，最后链接排前面。**
+    #
+    # 以前是一个列表按遇到的顺序收，而 dict 分支先看 `b64_json`、再往下走 ——
+    # 于是同一份响应里既有 url 又有 b64 时，取到的是 b64。
+    # 上面那条严格路径是链接优先的，但它只在 `{"data":[...]}` 这种规范结构上生效；
+    # 轮询 `/v1/images/{id}` 回来的结构一旦不是那个形状就落到这里。
+    #
+    # 代价是实打实的：超模那条线路把 b64 字段**截在 4096 字符**
+    # （解出来 3055 字节的残 PNG），而同一份响应里的 url 是好的。
+    # 取错一次 = 一张残图 + 两次重试 = 一张资产出三次图。
+    urls: list = []
+    embeds: list = []
 
     def walk(node: Any):
         if isinstance(node, dict):
             b64 = node.get("b64_json")
             if isinstance(b64, str) and b64:
-                items.append("data:image/png;base64," + b64)
+                embeds.append("data:image/png;base64," + b64)
             for v in node.values():
                 walk(v)
         elif isinstance(node, (list, tuple)):
@@ -355,13 +366,14 @@ def extract_image_items(data: Any) -> list:
                 walk(v)
         elif isinstance(node, str):
             if node.startswith("data:image"):
-                items.append(node)
+                embeds.append(node)
             elif node.startswith("http"):
                 base = node.split("?", 1)[0].lower()
                 if base.endswith(MEDIA_IMAGE) or "image" in base:
-                    items.append(node)
+                    urls.append(node)
 
     walk(data)
+    items = urls + embeds
     if items:
         seen, out = set(), []
         for it in items:
@@ -507,6 +519,26 @@ def _incomplete_image(dest: str) -> str:
             f"「Truncated File Read」，而那时候看不出是这一张的问题。")
 
 
+def _field_cap(src: str) -> int:
+    """内嵌数据的长度看着像个「字段上限」吗。是就返回那个长度，否则 0。
+
+    判据是**整数**：1024 的整数倍，或者 2 的整数次方（4096、8192、65536…）。
+    随机截断落在这种数上的概率极低，而字段上限恰恰都是这种数。
+
+    分清这两件事的意义是钱：随机截断重试一次经常就好，字段上限重试三次
+    是三次都拿同一张残图 —— 而出图是按次计费的。
+    """
+    m = re.search(r"（(\d+) 字符", src or "")
+    if not m:
+        return 0
+    n = int(m.group(1))
+    if n < 1024:
+        return 0
+    if n % 1024 == 0 or (n & (n - 1)) == 0:
+        return n
+    return 0
+
+
 def _check_saved(dest: str, src: str) -> None:
     """落盘之后验一遍。**0 字节的文件是最坏的一种失败。**
 
@@ -526,6 +558,25 @@ def _check_saved(dest: str, src: str) -> None:
         if not bad:
             return
         os.remove(dest)     # 同样必须删：留着下次会被当成「已经做过了」跳过
+        # **内嵌数据被截在一个整数长度上 = 这条线路的字段上限，重试没有意义。**
+        #
+        # 实遇超模：`响应内嵌数据（4096 字符…）` —— 4096 是 2 的 12 次方，
+        # 不是巧合。减去 `data:image/png;base64,` 那 22 个前缀 = 4074 字符，
+        # 4074×3/4 = 3055 字节，和量出来的残图一模一样。
+        # 每次都截在同一处，所以那两次重试是**确定性地白花钱**：
+        # 一张资产出了三次图，三次都是同一张残图。
+        cap = _field_cap(src)
+        if cap:
+            raise ApiError(
+                f"{bad}\n来源：{src}\n"
+                f"**{cap} 是个整数上限，不是随机截断** —— 这条线路把内嵌图片"
+                f"字段截在这里，每次都一样，所以重试不会有不同结果（已经不再重试）。\n"
+                f"两条出路：让这家改成返回图片**链接**（我们本来就发了 "
+                f"response_format=url 和 async=true，是它没给）；"
+                f"或者把这类活排给别家 —— 图越大越容易撞这个上限。\n"
+                f"上面那行日志里有这一次用的服务商 / 模型 / **Key 分组** ——"
+                f"问服务商时把它一起发过去，有几家的上限是**按分组**不一样的。",
+                status=0, kind=TASK_FATAL)
         raise ApiError(f"{bad}\n来源：{src}", 0, RETRYABLE)
     head = ""
     if n:
@@ -721,10 +772,34 @@ class HttpSession:
             # 大小检查放它过去，下次 isfile 为真于是永远跳过，
             # 成片里那一段是坏的。改名是原子的，要么完整要么没有。
             part = dest + ".part"
+            # 服务商自报的字节数。**拿来核对**，别只是收着 ——
+            # `.part` + 原子改名防的是「断在中途」（那时会抛异常），
+            # 防不住「干净地少给一半」：有些 CDN / 代理在长传输上会正常关闭连接，
+            # iter_content 不抛异常就结束了，于是我们改名收下一个半截文件。
+            #
+            # 图片有末尾标记（IEND / FFD9）兜底，**视频没有** —— `_END_MARK`
+            # 表里只有 .png/.jpg，.mp4 走到那里直接放行。而半截的 mp4 往往
+            # 还能播，只是短了几秒：拼接出来的成片少一段，没有任何报错。
+            want = 0
+            try:
+                want = int(r.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                want = 0
+            got = 0
             try:
                 with open(part, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1 << 20):
                         f.write(chunk)
+                        got += len(chunk)
+                if want and got < want:
+                    raise ApiError(
+                        f"下载没下完：服务商说这个文件有 {want:,} 字节，"
+                        f"实际只收到 {got:,} 字节（缺 {want - got:,}）。"
+                        f"连接是正常关闭的，所以没有网络报错 —— "
+                        f"这种半截文件往往还能打开、只是短了一截，"
+                        f"收下的话成片会少一段而且不报错，所以这里判失败。\n"
+                        f"来源：{item[:200]}",
+                        status=0, kind=RETRYABLE)
                 os.replace(part, dest)
             finally:
                 if os.path.exists(part):

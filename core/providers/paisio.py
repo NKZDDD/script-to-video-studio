@@ -24,8 +24,28 @@ from ..apiutil import ApiError, extract_image_items, extract_task_id, extract_vi
 from .base import ImageTask, Provider, VideoTask
 
 
-SEEDANCE25_MODELS = ("seedance-2.5-480p", "seedance-2.5-720p")
-SEEDANCE25_DURATIONS = list(range(4, 30))
+# 2026-08-19 用真 Key 实拉 GET /v1/models 校正过。
+# **上一版写的 `seedance-2.5-480p` / `-720p` 根本不存在**（多了连字符、少了档位号），
+# 发出去只会 503 no available channel —— 模型名不能靠文档或旧材料猜。
+SEEDANCE25_MODELS = (
+    "seedance2.5-4-1-720p",                      # 广场按次分组：3.5/次，4-30s，图10/视频0/音频0
+    "seedance2.5-00-720p", "seedance2.5-00-480p",
+    "seedance2.5-26-720p", "seedance2.5-26-480p",
+    "sd2.5-ultra-720p",
+    "paisiodance-2.5-720p", "paisiodance-2.5-480p",
+)
+SEEDANCE25_DURATIONS = list(range(4, 31))        # 广场标 4-30s（不是 4-29）
+# 广场上标出来的硬约束，只写有依据的那几个
+DURATION_RULES = {
+    "seedance2.5-4-1-720p": tuple(range(4, 31)),
+    "seedance2-4-2-fast-720p": (10,),
+    "seedance2-4-8-720p": (10, 15),
+    "seedance2-4-1-720p": tuple(range(4, 16)),
+    "seedance2-4-4-720p": tuple(range(4, 16)),
+}
+# (图, 视频, 音频)。seedance2.5-4-1-720p 广场标 10/0/0 —— **不收参考视频和音频**
+REF_LIMITS = {"seedance2.5-4-1-720p": (10, 0, 0)}
+REF_LIMITS_DEFAULT = (30, 10, 10)
 SEEDANCE25_RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "3:2", "2:3"]
 
 
@@ -87,41 +107,28 @@ class PaisioProvider(Provider):
                 # 分辨率写在模型名里，所以不用也不能传 resolution。
                 # 名字里带 fast 的便宜、带 480p 的更便宜 —— 调试和试跑用它们。
                 "models": [
-                    # sd3 系（新）
-                    "sd3-fast-480p", "sd3-fast-720p", "sd3-480p", "sd3-720p", "sd3-1080p",
-                    # sd2 系（实测过的一档在这里）
-                    "sd2-pro-720p", "sd2-pro1-720p",
-                    "sd2-fast-480p", "sd2-fast-720p", "sd2-fast-1080p",
-                    "sd2-480p", "sd2-720p", "sd2-1080p",
-                    # seedance 系
-                    "seedance2.0-official2-480p", "seedance2.0-official2-720p",
-                    "seedance2.0-official2-1080p", "seedance2.0-official1-720p",
-                    "seedance2.0-fast2-480p", "seedance2.0-fast2-720p",
-                    "seedance-discount-720p", "seedance-discount-fast-720p",
-                    "seedance-2-0-fast", "seedance-2-0-mini",
-                    # Seedance 2.5（2026-08-08 文档新增）
-                    *SEEDANCE25_MODELS,
-                    # video 系
-                    "video-fast-480p", "video-fast-720p",
-                    "video-pro-480p", "video-pro-1080p",
-                    "video431-fast-480p", "video431-fast-720p",
-                    # grok
-                    "grok-imagine-video-1.5-fast", "grok-imagine-video-1.5",
-                    "grok-imagine-video-1.5-preview", "grok-imagine-1.0-video",
-                    # 下面这批是对着 ComfyUI 那边的清单补齐的
-                    # （he_nodes.HE_VIDEO_MODELS / seedance_nodes.*）——
-                    # 那份是跟着服务商文档在维护的，两边对不上就等于
-                    # studio 这边少了一半可选项，而页面上完全看不出来。
-                    "paisiodance2.0", "paisiodance2.0-fast", "paisiodance2.0-mini",
-                    "paisiodance2.0-720p", "paisiodance933-720p",
+                    # 2026-08-19 用真 Key 实拉 GET /v1/models 校正。
+                    # **上一版这份清单里大半是死的**（sd2-pro-720p、
+                    # seedance2.0-official2-*、seedance-discount-*、video-fast-* …），
+                    # 页面上照样能选中，跑起来才 503 —— 而失败记录里只看到"生成失败"。
+                    # 名字只能来自 /v1/models 或模型广场，不能照文档抄。
+                    "sd2-720p", "sd2-480p", "sd2-1080p",
+                    "sd2-fast-720p", "sd2-fast-480p",
+                    "sd2-ultra-720p", "sd2-ultra-fast-720p",
+                    "sd2-video20-mini-720p", "sd2-video20-mini-480p",
+                    "sd3-720p", "sd3-480p", "sd3-1080p",
+                    "sd3-fast-720p", "sd3-fast-480p",
                     "seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
-                    "seedance2.0-fast",
-                    "sd2-720p-fast", "sd2-720p-mini",
-                    "sd2-1080p-fast", "sd2-1080p-mini",
-                    "video-2.0", "video-2.0-fast",
-                    "官方稳定seedance-2.0-720p-fast", "官方稳定seedance-2.0-720p-max",
+                    "paisiodance2.0-720p", "paisiodance2.0-fast-720p",
+                    # 按次分组
+                    "seedance2-4-1-720p", "seedance2-4-2-fast-720p",
+                    "seedance2-4-4-720p", "seedance2-4-8-720p",
+                    # Seedance 2.5 全家
+                    *SEEDANCE25_MODELS,
+                    "grok-imagine-video-1.5", "grok-imagine-video-1.5-fast",
+                    "minimax-h3", "mx-h3",
                 ],
-                "default_model": "sd2-pro-720p",
+                "default_model": "sd2-720p",
                 "ratios": ["9:16", "16:9", "1:1"],
                 "durations": [4, 5, 8, 10, 12, 15],
                 "default_duration": 15,
@@ -144,7 +151,7 @@ class PaisioProvider(Provider):
                 "notes": "分辨率写在模型名里，不用也不能单独传。名字带 fast 的便宜、"
                          "带 480p 的更便宜 —— 试跑和调提示词用 sd3-fast-480p / "
                          "sd2-fast-480p，定稿再换 720p/1080p。"
-                         "sd2-pro-720p 实测稳定（17/17 一次通过），sd3 系较新未实测。"
+                         "sd2-720p 一档实测稳定；**模型名以 /v1/models 为准**，2026-08-19 实拉发现旧清单里大半已下线。"
                          "旧模型参考图可用压缩 data URI；Seedance 2.5 必须使用公网 URL，"
                          "支持4-29秒、30图/10视频/10音频。",
             },
@@ -198,7 +205,7 @@ class PaisioProvider(Provider):
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
-        model = task.model or "sd2-pro-720p"
+        model = task.model or "sd2-720p"
         if model in SEEDANCE25_MODELS:
             body = self._seedance25_body(task, model)
         else:
@@ -245,16 +252,26 @@ class PaisioProvider(Provider):
         ratio = task.ratio or "9:16"
 
         problems = []
-        if not 4 <= duration <= 29:
-            problems.append(f"时长只能是4-29秒，收到{duration}秒")
+        allowed = DURATION_RULES.get(model)
+        if allowed and duration not in allowed:
+            problems.append(f"{model}的时长只能是{min(allowed)}-{max(allowed)}秒，收到{duration}秒"
+                            if len(allowed) == max(allowed) - min(allowed) + 1
+                            else f"{model}的时长只能是{'、'.join(map(str, allowed))}秒，收到{duration}秒")
+        elif not allowed and not 4 <= duration <= 30:
+            problems.append(f"时长按4-30秒处理，收到{duration}秒")
         if ratio not in SEEDANCE25_RATIOS:
             problems.append(f"比例只支持{'、'.join(SEEDANCE25_RATIOS)}，收到{ratio}")
-        if len(refs) > 30:
-            problems.append(f"图片最多30张，收到{len(refs)}张")
-        if len(videos) > 10:
-            problems.append(f"视频素材最多10条，收到{len(videos)}条")
-        if len(audios) > 10:
-            problems.append(f"音频素材最多10条，收到{len(audios)}条")
+        cap_i, cap_v, cap_a = REF_LIMITS.get(model, REF_LIMITS_DEFAULT)
+        if len(refs) > cap_i:
+            problems.append(f"{model}图片最多{cap_i}张，收到{len(refs)}张")
+        if len(videos) > cap_v:
+            # 标 10/0/0 的模型压根不收参考视频 —— 发过去被忽略，
+            # 与其静默丢掉不如直接说，免得以为运镜参考生效了
+            problems.append(f"{model}不支持参考视频，收到{len(videos)}条" if cap_v == 0
+                            else f"视频素材最多{cap_v}条，收到{len(videos)}条")
+        if len(audios) > cap_a:
+            problems.append(f"{model}不支持参考音频，收到{len(audios)}条" if cap_a == 0
+                            else f"音频素材最多{cap_a}条，收到{len(audios)}条")
         local_refs = [r for r in refs if not str(r).startswith(("http://", "https://"))]
         if local_refs:
             problems.append("参考图必须先转成公网 http/https URL（请配置对象存储）")

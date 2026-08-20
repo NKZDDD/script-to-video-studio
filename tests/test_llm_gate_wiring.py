@@ -108,21 +108,36 @@ class ProviderModelTests(unittest.TestCase):
                   "gpt-image2-4K-Native"):
             self.assertIn(m, got)
 
-    def test_paisio_has_the_paisiodance_family(self):
-        """★ ComfyUI 那边有、studio 这边一直没有的一批。"""
+    def test_paisio_models_all_exist_upstream(self):
+        """★ 2026-08-19 用真 Key 拉过 /v1/models 校正。
+
+        这条以前断言的是 `paisiodance2.0`、`video-2.0`、`官方稳定seedance-2.0-720p-fast`
+        之类 —— **上游一个都没有**，是照着旧文档抄的。清单里留着假名字比缺名字更糟：
+        页面上能选中，跑起来才 503，而失败记录里只写「生成失败」。
+        所以这里改成断言「只列真实存在的」。
+        """
         got = self._models("paisio", "video")
-        for m in ("paisiodance2.0", "paisiodance2.0-fast", "paisiodance2.0-mini",
-                  "paisiodance2.0-720p", "paisiodance933-720p"):
+        for m in ("paisiodance2.0-720p", "paisiodance2.0-fast-720p",
+                  "seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
+                  "sd2-720p", "sd2-fast-720p", "sd2-ultra-720p",
+                  "sd3-720p", "sd3-fast-720p",
+                  "grok-imagine-video-1.5", "grok-imagine-video-1.5-fast",
+                  "minimax-h3"):
             self.assertIn(m, got, m)
 
-    def test_paisio_has_the_selfsur_and_stable_ones(self):
+    def test_paisio_lists_no_retired_models(self):
+        """实拉确认已下线的，别再出现在下拉里。"""
+        got = set(self._models("paisio", "video"))
+        for dead in ("sd2-pro-720p", "paisiodance2.0", "paisiodance933-720p",
+                     "seedance2.0-official2-720p", "seedance-discount-720p",
+                     "video-2.0", "seedance-2.5-720p"):
+            self.assertNotIn(dead, got, f"{dead} 已下线，不该还在清单里")
+
+    def test_paisio_has_the_real_seedance25_family(self):
         got = self._models("paisio", "video")
-        for m in ("seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
-                  "seedance2.0-fast", "video-2.0", "video-2.0-fast",
-                  "官方稳定seedance-2.0-720p-fast", "官方稳定seedance-2.0-720p-max",
-                  "sd2-720p-fast", "sd2-720p-mini",
-                  "sd2-1080p-fast", "sd2-1080p-mini",
-                  "grok-imagine-1.0-video", "grok-imagine-video-1.5-preview"):
+        for m in ("seedance2.5-4-1-720p", "seedance2.5-00-720p",
+                  "seedance2.5-26-720p", "sd2.5-ultra-720p",
+                  "paisiodance-2.5-720p"):
             self.assertIn(m, got, m)
 
     def test_no_duplicates_crept_in(self):

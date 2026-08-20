@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """生产页要显示「这几个下拉的选项是谁给的」。
 
-不显示的话会撞上一个很费解的情况：明明知道 seedance 2.5 能出 29 秒，
+不显示的话会撞上一个很费解的情况：明明知道 seedance 2.5 能出 30 秒，
 下拉里却只有 15 —— 因为链上首选的是别的模型，而整家声明的上限就是 15。
-这次就是这么被绊住的：以为是程序漏了 29 秒，其实是选项跟着模型走。
+这次就是这么被绊住的：以为是程序漏了 30 秒，其实是选项跟着模型走。
 
 这个文件钉两件事：
-  · 各家/各模型的秒数声明**没写错**（29 是真的，不是我记岔了）
+  · 各家/各模型的秒数声明**没写错**（30 是真的，不是我记岔了）
   · 页面上确实把来源显示出来了
 """
 import io
@@ -30,20 +30,20 @@ class Seedance25Tests(unittest.TestCase):
     """seedance 2.5 的能力声明必须和接口的实际校验一致。"""
 
     def test_the_model_declares_four_to_twentynine_seconds(self):
-        d = effective("paisio", "video", "seedance-2.5-720p")["durations"]
+        d = effective("paisio", "video", "seedance2.5-4-1-720p")["durations"]
         self.assertEqual(min(d), 4)
-        self.assertEqual(max(d), 29)
+        self.assertEqual(max(d), 30)
 
     def test_the_declaration_matches_what_the_request_builder_enforces(self):
         """★ 声明和校验是两处代码，写歪了就会「页面上能选、发出去被拒」。"""
         src = io.open(os.path.join(ROOT, "core", "providers", "paisio.py"),
                       encoding="utf-8").read()
-        self.assertIn("if not 4 <= duration <= 29", src)
-        d = effective("paisio", "video", "seedance-2.5-720p")["durations"]
-        self.assertEqual(set(d), set(range(4, 30)))
+        self.assertIn("DURATION_RULES", src)   # 改成按模型查表，不再是一刀切的 29
+        d = effective("paisio", "video", "seedance2.5-4-1-720p")["durations"]
+        self.assertEqual(set(d), set(range(4, 31)))   # 广场标 4-30s
 
     def test_twentynine_is_not_offered_at_the_provider_level(self):
-        """★ 故意的：29 写成整家通用值的话，切回旧模型时前端还允许选 29，
+        """★ 故意的：30 写成整家通用值的话，切回旧模型时前端还允许选 30，
         要到付费请求发出去才收到 400。"""
         base = CAPS["paisio"]["video"]["durations"]
         self.assertEqual(max(base), 15)
@@ -54,16 +54,16 @@ class Seedance25Tests(unittest.TestCase):
 
     def test_the_model_needs_public_urls_for_references(self):
         """2.5 只收公网链接。没配对象存储的话它会直接拒，值得在页面上提醒。"""
-        e = effective("paisio", "video", "seedance-2.5-720p")
+        e = effective("paisio", "video", "seedance2.5-4-1-720p")
         self.assertEqual(e["ref_mode"], "url")
         self.assertEqual(e["max_refs"], 30)
 
     def test_it_is_the_only_model_trusted_for_multishot(self):
         """能力冻结把它标成 RELIABLE，六类转场才全放开。"""
         from core.run_v34 import _MULTISHOT, detect_capability
-        self.assertEqual(detect_capability("seedance-2.5-720p"), "RELIABLE")
+        self.assertEqual(detect_capability("seedance2.5-4-1-720p"), "RELIABLE")
         self.assertEqual(detect_capability("sd2-pro-720p"), "UNKNOWN")
-        self.assertEqual(list(_MULTISHOT), ["seedance-2.5"])
+        self.assertEqual(list(_MULTISHOT), ["seedance2.5", "sd2.5-ultra", "paisiodance-2.5"])
 
 
 class HintWiringTests(unittest.TestCase):

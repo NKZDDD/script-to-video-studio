@@ -83,9 +83,39 @@ class XiaobalongTests(unittest.TestCase):
         而越界只是 400（不结算）。所以这里断言 DURATION_RULES 是空的。
         """
         self.assertEqual(DURATION_RULES, {})
-        self.assertEqual(_fit_duration("sd2.5-720p-301010", 30), 15)
-        self.assertEqual(_fit_duration("sd2.5-720p-301010", 1), 4)
+        # **不猜就不改**：以前这里对未知模型一律 min(15,…)，你要 29 秒它悄悄发 15 秒，
+        # 片子短一半、任务还标成功。那个 15 是文档 r21 对已下线模型的说法。
+        for want in (8, 15, 20, 29, 30):
+            self.assertEqual(_fit_duration("sd2.5-720p-301010", want), want,
+                             f"{want} 秒不该被悄悄改掉")
         self.assertEqual(_fit_duration("sd2-720p-933", 8), 8)
+
+    def test_it_only_offers_seconds_it_has_grounds_for(self):
+        """★ **这一条的立场被用户改过，改动方向要写清楚。**
+
+        原来报的是 4-30，是**故意报宽**的，理由是「报宽只会吃 400（不计费），
+        报窄会把能力埋掉」。那个权衡有它的道理，但有个说不出口的前提：
+        下拉里出现 30 秒，人会当成「这家支持 30 秒」，而我们根本不知道。
+
+        用户的要求是「模型能用多少秒就可以选多少秒」，所以现在只报有依据的 ——
+        文档 r21 给过的数字是 4-15，那就是基线。实测能出更长的，
+        写进「服务商 → 时长档位」，页面会按模型放开（见 test_run_panel_memory
+        那边的 parseDurationRules）。
+        """
+        from core.providers.xiaobalong import XiaobalongProvider
+        d = XiaobalongProvider().capabilities()["video"]["durations"]
+        self.assertEqual(min(d), 4)
+        self.assertEqual(max(d), 15, "又报宽了 —— 没依据的秒数不许出现在下拉里")
+
+    def test_an_out_of_range_value_is_still_sent_as_is(self):
+        """★ 别把两件事混了：**下拉报窄，不等于把用户填的值改掉。**
+
+        下拉是「我们敢说支持的」，而用户手填 / 老项目里存着 29 秒时，
+        照旧原样发出去 —— 越界网关 400（不计费），比悄悄改成 15 秒
+        然后出一条短一半的片子安全得多。
+        """
+        from core.providers.xiaobalong import _fit_duration
+        self.assertEqual(_fit_duration("sd2.5-720p-301010", 29), 29)
 
     def test_model_list_is_the_live_one_not_the_doc(self):
         """文档 r21 的 20 个视频模型 2026-08-16 实拉只剩 2 个还在 —— 别再照文档抄。"""

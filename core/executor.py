@@ -50,6 +50,25 @@ class Gate:
                     self._sems.pop(k, None)
             self._per_conf = new_conf
 
+    def set_provider_limit(self, provider: str, limit: int) -> None:
+        """单独改某一家的并发上限，不动别家。
+
+        给「按账号串行」那种家用（HVTALD）：它的上限**就是账号数**，
+        而账号数是从密钥文本里解出来的，configure() 那份来自 config 的表
+        不知道这个数。
+
+        为什么必须让 GATE 卡住而不是在 worker 里等：worker 是在
+        `with GATE.slot(provider)` **里面**跑的。一个账号 + 并发 10 的话，
+        9 条任务会占着全局槽位干等 —— 而全局默认只有 8 个槽，
+        别家的出图会被这 9 条堵死。卡在 GATE 上就不会进来占槽。
+        """
+        n = max(1, int(limit or 1))
+        with self._lock:
+            if self._per_conf.get(provider) == n:
+                return
+            self._per_conf[provider] = n
+            self._sems.pop(provider, None)     # 下一个任务按新上限重建
+
     def _sem_for(self, provider: str):
         limit = self._per_conf.get(provider)
         if not limit:
@@ -294,7 +313,8 @@ class JobManager:
 
 def run_chain(tasks: list, *, chain: list, worker_of: Callable, job_of: Callable,
               key_of: Callable, done_of: Callable, max_retry: int = 2,
-              log: Callable = print, deps_of: Optional[Callable] = None) -> dict:
+              log: Callable = print, deps_of: Optional[Callable] = None,
+              ready_of: Optional[Callable] = None) -> dict:
     """按优先级依次尝试各家服务商：上一家因为「这家不行」挂了就换下一家补剩下的。
 
     chain 是有序的 [{provider, model, ...}, ...]，第一个是首选。
@@ -316,7 +336,8 @@ def run_chain(tasks: list, *, chain: list, worker_of: Callable, job_of: Callable
             log(f"改用第 {idx + 1} 家「{who}」补剩下的 {len(todo)} 项")
         sub = job_of(pcfg, len(todo))
         run_batch(sub, todo, worker_of(pcfg), key_of=key_of, max_retry=max_retry,
-                  provider=pcfg.get("provider", ""), deps_of=deps_of)
+                  provider=pcfg.get("provider", ""), deps_of=deps_of,
+                  ready_of=ready_of)
         c = sub.counts()
         attempts.append({"provider": pcfg.get("provider", ""), "model": pcfg.get("model", ""),
                          "job_id": sub.id, "counts": c, "aborted": sub.aborted,
@@ -347,13 +368,19 @@ def run_chain(tasks: list, *, chain: list, worker_of: Callable, job_of: Callable
             "switched": max(0, len(attempts) - 1)}
 
 
+# 「在等跨批输入」最多等多久。等待的正常终点是上游那一批跑完，
+# 这个上界只防依赖图里出现没想到的环。到点就照旧派出去 ——
+# 让出图那一层现有的硬停说清缺哪张，而不是在这里另造一条报错。
+_CROSS_WAIT_SECONDS = 5400
+
 _DONE_STATES = ("ok", "skipped")
 _DEAD_STATES = ("failed", "aborted", "cancelled")
 
 
 def run_batch(job: Job, tasks: list, worker: Callable, *,
               key_of: Callable, max_retry: int = 2, provider: str = "",
-              deps_of: Optional[Callable] = None) -> None:
+              deps_of: Optional[Callable] = None,
+              ready_of: Optional[Callable] = None) -> None:
     """并发跑 tasks。worker(task, log_fn, cancel_fn) 成功返回 dict，失败抛异常。
 
     每个任务在真正发请求前经过 GATE（服务商配额 + 全局总闸）。
@@ -443,7 +470,7 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                     if attempt >= max_retry:
                         fail()
 
-    if deps_of is None:
+    if deps_of is None and ready_of is None:
         with ThreadPoolExecutor(max_workers=max(1, job.concurrency)) as pool:
             list(pool.map(one, tasks))
         return
@@ -457,9 +484,15 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
     mine = {key_of(t) for t in tasks}
 
     def _deps(key: str) -> list:
+        if deps_of is None:
+            return []
         return [d for d in (deps_of(key) or ()) if d in mine and d != key]
 
     left = list(tasks)
+    # 「在等跨批输入」那种等待要有个上界。正常情况下等待的终点是上游那一批
+    # 跑完（ready_of 那边会知道），这个上界只防依赖图里出现没想到的环 ——
+    # 那时候没有任何信号会到来，而**静默挂着是最难查的一种失败**。
+    idle_since = 0.0
     with ThreadPoolExecutor(max_workers=max(1, job.concurrency)) as pool:
         running: dict = {}
         while left or running:
@@ -481,23 +514,59 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                                      + ("…" if len(dead) > 4 else "")
                                      + "。先把那几条弄成，这条会自动跟着能跑。")
                     continue
-                (fire if all(_state(d) in _DONE_STATES for d in deps)
-                 else hold).append(t)
-            left = hold
+                if not all(_state(d) in _DONE_STATES for d in deps):
+                    hold.append((t, ""))        # 等同批的 —— 空的等待说明
+                    continue
+                # 同批的依赖齐了，再问一句**跨批**的输入齐没齐 ——
+                # 出图出片四类活是并发跑的，故事板可能比它要的场景状态图先排到。
+                waits = ""
+                if ready_of is not None:
+                    ok, waits = ready_of(t)
+                    if not ok:
+                        hold.append((t, waits))
+                        continue
+                fire.append(t)
+            left = [t for t, _ in hold]
             for t in fire:
                 running[pool.submit(one, t)] = t
-            if not running:
-                # 没有在跑的、也没有能跑的。派任务前的成环检查该拦住这种情况，
-                # 拦漏了也**绝不静默挂着** —— 那是最难查的一种「卡住」。
-                for t in left:
-                    job.set_item(key_of(t), state="failed", kind=TASK_FATAL,
-                                 msg="它等的参考图既没做成也没在跑（多半是互相引用成了环）："
-                                     + "、".join(_deps(key_of(t))[:4]))
-                break
-            done, _ = wait(running, return_when=FIRST_COMPLETED)
-            for f in done:
-                running.pop(f, None)
-                f.result()          # one 内部已消化业务异常；这里让程序 bug 冒出来
+            if running:
+                idle_since = 0.0
+                done, _ = wait(running, return_when=FIRST_COMPLETED)
+                for f in done:
+                    running.pop(f, None)
+                    f.result()      # one 内部已消化业务异常；这里让程序 bug 冒出来
+                continue
+            # 没有在跑的、也没有能跑的。两种情况，处理方式完全不同：
+            #
+            #   全都在等**跨批**输入  → 上游那一批还在跑，等就对了（不是错误）
+            #   等的是**同批**依赖    → 只可能是成环，当场报出来
+            #
+            # 混在一起处理的话，「四类活并发跑、故事板比场景状态图先排到」
+            # 这种完全正常的情况会被整批误杀。
+            crossing = [(t, w) for t, w in hold if w]
+            if crossing:
+                now = time.time()
+                if not idle_since:
+                    idle_since = now
+                    for t, w in crossing[:6]:
+                        job.log(key_of(t),
+                                f"在等上游产物：{w}（齐了就自动开跑，不用管）")
+                if now - idle_since < _CROSS_WAIT_SECONDS:
+                    time.sleep(2)
+                    continue
+                job.log("等待超时", f"等上游产物等了 {int(now - idle_since)} 秒还没齐，"
+                                    f"不再等了 —— 剩下 {len(crossing)} 条照旧派出去，"
+                                    f"缺什么由出图那一步报清楚")
+                for t, _ in crossing:
+                    running[pool.submit(one, t)] = t
+                left = [t for t, w in hold if not w]
+                continue
+            # 派任务前的成环检查该拦住这种情况，拦漏了也**绝不静默挂着**。
+            for t, _ in hold:
+                job.set_item(key_of(t), state="failed", kind=TASK_FATAL,
+                             msg="它等的参考图既没做成也没在跑（多半是互相引用成了环）："
+                                 + "、".join(_deps(key_of(t))[:4]))
+            break
 
     job.finished_at = time.time()
     if job.aborted:

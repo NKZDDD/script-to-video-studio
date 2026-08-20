@@ -16,8 +16,8 @@ from test_v34_run import EP1, PARAMS, FakeLLM, new_project
 class DetectTests(unittest.TestCase):
 
     def test_known_multishot_model_is_reliable(self):
-        self.assertEqual(R.detect_capability("seedance-2.5-720p"), "RELIABLE")
-        self.assertEqual(R.detect_capability("paisio/seedance-2.5-480p"), "RELIABLE")
+        self.assertEqual(R.detect_capability("seedance2.5-4-1-720p"), "RELIABLE")
+        self.assertEqual(R.detect_capability("paisio/seedance2.5-00-480p"), "RELIABLE")
 
     def test_unknown_model_is_not_assumed_capable(self):
         """★ 认不出的一律 UNKNOWN，按有限档走。
@@ -57,7 +57,7 @@ class FreezeTests(unittest.TestCase):
         shutil.rmtree(self.pj.root, ignore_errors=True)
 
     def test_freeze_writes_the_execution_contract(self):
-        cap = R.freeze_capability(self.pj, PARAMS, "seedance-2.5-720p",
+        cap = R.freeze_capability(self.pj, PARAMS, "seedance2.5-4-1-720p",
                                   log=lambda *a: None)
         self.assertEqual(cap["native_multishot_support"], "RELIABLE")
         self.assertEqual(cap["transition_execution_mode"], "MODEL_NATIVE_ONLY")
@@ -67,7 +67,7 @@ class FreezeTests(unittest.TestCase):
     def test_freeze_is_sticky(self):
         """★ 冻结不是每次现算：中途换模型会让前后两段用不同的转场策略，
         接起来就是断的。要换得显式改配置。"""
-        R.freeze_capability(self.pj, PARAMS, "seedance-2.5-720p", log=lambda *a: None)
+        R.freeze_capability(self.pj, PARAMS, "seedance2.5-4-1-720p", log=lambda *a: None)
         again = R.freeze_capability(self.pj, PARAMS, "某个弱模型", log=lambda *a: None)
         self.assertEqual(again["native_multishot_support"], "RELIABLE",
                          "换了模型就把冻结的档位冲掉了")
@@ -76,13 +76,13 @@ class FreezeTests(unittest.TestCase):
         """★ 冻结了但没进提示词，等于白冻。"""
         llm = FakeLLM()
         q = lambda *a, **k: None
-        R.freeze_capability(self.pj, PARAMS, "seedance-2.5-720p", log=q)
+        R.freeze_capability(self.pj, PARAMS, "seedance2.5-4-1-720p", log=q)
         for sid in ("n1", "n2"):
             R.run_stage(self.pj, sid, llm=llm, params=PARAMS, log=q)
         for sid in ("n3", "n4", "n4b", "n5", "n6", "n7", "n8", "n9"):
             R.run_stage(self.pj, sid, llm=llm, params=PARAMS, episode=EP1, log=q)
         user = llm.user_for("n9")
-        self.assertIn("seedance-2.5-720p", user)
+        self.assertIn("seedance2.5-4-1-720p", user)
         self.assertIn("RELIABLE", user)
         self.assertIn("VFX_THREAD_TRANSITION", user, "高档位没放开全部机制")
 
@@ -131,11 +131,11 @@ class PipelineFreezeTests(unittest.TestCase):
         P.run(job, self.pj, llm_factory=lambda: llm,
               provider_factory=lambda kind: [
                   {"provider": "paisio", "api_key": "k",
-                   "model": "seedance-2.5-720p" if kind == "video" else "gpt-image-2"}],
+                   "model": "seedance2.5-4-1-720p" if kind == "video" else "gpt-image-2"}],
               params=PARAMS, concurrency=1, ep_concurrency=1, seg_concurrency=1,
               include_produce=False, include_deliver=False)
         cap = R.capability_of(self.pj)
-        self.assertEqual(cap["target_video_model"], "seedance-2.5-720p",
+        self.assertEqual(cap["target_video_model"], "seedance2.5-4-1-720p",
                          "拿了出图模型去判多镜头能力")
         self.assertEqual(cap["native_multishot_support"], "RELIABLE")
 

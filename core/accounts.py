@@ -34,9 +34,15 @@ from typing import Callable, Optional
 
 from . import paths
 
-# 一次任务最多等一个空账号多久。等不到就报错，不是无限挂着 ——
-# 无限挂着的话页面上那一条永远显示「运行中」，人只能自己去猜。
-WAIT_SECONDS = 3600
+# **不能用绝对时间当上限。** 原来写的是 3600 秒，而合法的等待远超它：
+# 一个账号 × 50 条视频 × 每条 5 分钟 = 4 小时以上，第十几条之后就会报
+# 「等了 3600 秒也没等到空账号」—— 而它其实在正常排队。
+# 用户原话：「如果我只填一个账号也是可以一个做完做下一个的」。对。
+#
+# 换成**按进度**判断：只要还有账号在被归还，就说明队伍在往前走，接着等。
+# 连这么久都没有任何账号被归还，才是真卡住了（比一次出片的轮询上限
+# 还长一截 —— 出片本来就慢）。
+STUCK_SECONDS = 3600
 
 # 计数保留多少天。留着看趋势，但别让文件无限长。
 KEEP_DAYS = 60
@@ -135,6 +141,9 @@ class _Pool:
         self._free: queue.Queue = queue.Queue()
         for a in self.accounts:
             self._free.put(a)
+        # 最后一次有账号被归还的时刻。**判「卡住了」用它，不用绝对等待时长** ——
+        # 一个账号排 50 条队是正常的，等 4 小时也正常。
+        self._last_release = time.time()
 
     def __len__(self) -> int:
         return len(self.accounts)
@@ -158,21 +167,26 @@ class _Pool:
                 waited += 2
                 if log and not told and waited >= 4:
                     told = True
-                    log(f"{len(self.accounts)} 个账号都在忙，排队等一个空的"
-                        f"（这一家一个账号只能同时生成一条，想更快就多配账号）")
-                if waited >= WAIT_SECONDS:
+                    log(f"{len(self.accounts)} 个账号都在忙，排队等一个空的 —— "
+                        f"这一家一个账号只能同时生成一条，"
+                        f"{len(self.accounts)} 个账号就是 {len(self.accounts)} 路并发，"
+                        f"剩下的按顺序一条一条来（想更快就多配账号）。")
+                idle = time.time() - self._last_release
+                if idle >= STUCK_SECONDS:
                     raise RuntimeError(
-                        f"等了 {int(waited)} 秒也没等到空账号。"
-                        f"这一家一个账号同时只能生成一条，"
-                        f"当前配了 {len(self.accounts)} 个账号 —— "
-                        f"要么前面那几条卡住了，要么把并发降到账号数以内，"
-                        f"要么再加几个账号。")
+                        f"已经 {int(idle)} 秒没有任何账号被归还了 —— 队伍不动了。"
+                        f"（自己等了 {int(waited)} 秒。这一家一个账号同时只能生成一条，"
+                        f"当前配了 {len(self.accounts)} 个账号，排队本身是正常的，"
+                        f"但这么久一条都没做完不正常。）"
+                        f"去看在跑的那几条是不是卡在轮询上，或者把出片的"
+                        f"「等出结果最多多久」调小一点。")
         if log:
             log(f"用账号 {acct.label}（这一家一个账号只能同时跑一条）")
         try:
             yield acct
         finally:
             self._free.put(acct)
+            self._last_release = time.time()   # 队伍往前走了一格
 
 
 def configure(provider: str, api_key: str) -> int:

@@ -65,6 +65,18 @@ IMAGE_RESOLUTIONS = {"image2-2k4k": ("2K", "4K"), "image2-4k": ("4K",)}
 # 现存这批的档位官方没给，**不猜** —— 猜错时长会按错的长度出片并计费，
 # 而参数越界只是 400（不结算），后者安全得多。
 DURATION_RULES: dict = {}
+# 前端下拉的可选秒数。
+#
+# **这里原来报的是 4-30，是故意报宽的** —— 理由是「报宽只会吃 400（不计费），
+# 报窄会把能力埋掉」。那个权衡有它的道理，但它有个说不出口的前提：
+# 下拉里出现 30 秒，人会当成「这家支持 30 秒」，而我们**根本不知道**。
+#
+# 现在的立场：**只报有依据的**。文档 r21 给的是 4-15（那批模型已下线，
+# 但那是这家唯一给过的数字），所以基线就是 4-15。
+# 某个模型实测能出更长的，写进「服务商 → 时长档位」那个框里
+# （`sd2.5-720p-301010=4,8,15,30`），页面就会给那个模型放开到 30。
+#
+# 这样两边都不吃亏：没依据的不假装支持，验过的也不会被埋掉。
 DEFAULT_DURATIONS = tuple(range(4, 16))
 
 MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 9, 3, 3
@@ -76,13 +88,27 @@ _CTYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
            ".mp4": "video/mp4"}
 
 
-def _fit_duration(model: str, want: int) -> int:
-    """把时长收敛到该模型允许的档位（文档 12.2）。"""
+def _fit_duration(model: str, want: int, *, log=None) -> int:
+    """收敛时长。**只在有明确依据时才改**，没依据就原样发出去。
+
+    以前这里对未知模型一律 `min(15, ...)` —— 你要 29 秒，它悄悄发 15 秒出去，
+    片子短了一半、任务还标成功，**没有任何提示**。而那个 15 是文档 r21 里
+    「大多数模型 4-15」的说法，那批模型 2026-08-16 实拉已经全部下线了，
+    等于拿一条过期规则去砍现役模型。
+
+    现在的立场：拿不准就发用户填的值。参数越界网关会 400，**400 不计费**，
+    比默默出一条时长不对的片子安全得多 —— 后者要到成片看完才发现。
+    """
     sec = int(want or 5)
     allowed = DURATION_RULES.get(model)
-    if allowed:
-        return min(allowed, key=lambda a: abs(a - sec))
-    return min(15, max(4, sec))
+    if allowed and sec not in allowed:
+        near = min(allowed, key=lambda a: abs(a - sec))
+        if log:
+            log(f"{model} 的时长档位是 {allowed}，已把 {sec} 秒纠正为 {near} 秒")
+        return near
+    if sec < 1:
+        return 1
+    return sec
 
 
 def _is_remote(ref: str) -> bool:
@@ -220,9 +246,7 @@ class XiaobalongProvider(Provider):
         model = task.model or "bh2.0-720p"
         if not (task.prompt or "").strip():
             raise ApiError("小霸龙 prompt 必填且不可为空")
-        sec = _fit_duration(model, task.duration)
-        if sec != int(task.duration or 5):
-            log(f"小霸龙 {model} 的时长档位有限（文档 12.2），已把 {task.duration} 收敛为 {sec}")
+        sec = _fit_duration(model, task.duration, log=log)
 
         refs = [r for r in (task.refs or []) if _is_remote(r)][:MAX_IMAGES]
         dropped = len(task.refs or []) - len(refs)

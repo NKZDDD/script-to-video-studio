@@ -329,3 +329,114 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QueueForeverTests(unittest.TestCase):
+    """★ 一个账号也要能一条接一条做完 —— 用户原话。
+
+    原来 `WAIT_SECONDS = 3600` 是**绝对**上限，而合法的等待远超它：
+    一个账号 × 50 条视频 × 每条 5 分钟 = 4 小时以上，第十几条之后就会报
+    「等了 3600 秒也没等到空账号」—— 它其实在正常排队。
+
+    换成按**进度**判断：只要还有账号在被归还，队伍就在往前走，接着等。
+    """
+
+    def setUp(self):
+        A._POOLS.clear()
+
+    def test_a_long_queue_on_one_account_does_not_time_out(self):
+        """★ 这就是那个 bug。把判据调到 0.3 秒，让「一直有人归还」跑赢它。"""
+        orig = A.STUCK_SECONDS
+        A.STUCK_SECONDS = 0.3
+        try:
+            A.configure("hvtald", ONE)
+            pool = A.pool("hvtald")
+            done = []
+            for _ in range(8):                 # 8 轮，总时长远超 0.3 秒
+                with pool.slot():
+                    time.sleep(0.1)
+                    done.append(1)
+            self.assertEqual(len(done), 8, "排队排到一半自己报错了")
+        finally:
+            A.STUCK_SECONDS = orig
+
+    def test_the_stuck_check_is_progress_based(self):
+        """判据必须是「多久没有账号被归还」，不是「自己等了多久」。"""
+        import inspect
+        src = inspect.getsource(A._Pool.slot)
+        self.assertIn("_last_release", src)
+        self.assertIn("没有任何账号被归还", src)
+
+    def test_a_release_resets_the_clock(self):
+        A.configure("hvtald", ONE)
+        pool = A.pool("hvtald")
+        before = pool._last_release
+        time.sleep(0.05)
+        with pool.slot():
+            pass
+        self.assertGreater(pool._last_release, before)
+
+    def test_a_truly_stuck_queue_still_fails(self):
+        """★ 别修过头：真卡住了还是要报，不能无限挂着。"""
+        orig = A.STUCK_SECONDS
+        A.STUCK_SECONDS = 0.2
+        try:
+            A.configure("hvtald", ONE)
+            pool = A.pool("hvtald")
+            with pool.slot():                  # 占住不放
+                with self.assertRaises(RuntimeError) as cm:
+                    with pool.slot():
+                        pass
+            self.assertIn("队伍不动了", str(cm.exception))
+        finally:
+            A.STUCK_SECONDS = orig
+
+    def test_the_wait_message_explains_the_queue(self):
+        """排队不是故障 —— 那句话要让人看懂是在排队。"""
+        import inspect
+        src = inspect.getsource(A._Pool.slot)
+        self.assertIn("按顺序一条一条来", src)
+
+
+class GateLimitTests(unittest.TestCase):
+    """★ 等账号必须发生在闸门**外**，否则堵死别家。"""
+
+    def test_the_gate_is_capped_at_the_account_count(self):
+        """不压的话：一个账号 + 并发 10 = 9 条占着全局槽位干等，
+
+        而全局默认只有 8 个槽 —— 别家的出图全被堵死。
+        """
+        import inspect
+
+        from core import produce as P
+        src = inspect.getsource(P.make_video_worker)
+        self.assertIn("GATE.set_provider_limit(pid, n_acct)", src)
+
+    def test_the_setter_only_touches_that_provider(self):
+        from core.executor import Gate
+        g = Gate(8, {"paisio": 6})
+        g.set_provider_limit("hvtald", 3)
+        snap = g.snapshot()["per_provider_limit"]
+        self.assertEqual(snap["hvtald"], 3)
+        self.assertEqual(snap["paisio"], 6, "动了别家的上限")
+
+    def test_it_rebuilds_the_semaphore_on_change(self):
+        """★ 不重建的话改了上限也不生效 —— 老信号量还在用旧的计数。"""
+        from core.executor import Gate
+        g = Gate(8, {})
+        g.set_provider_limit("hvtald", 1)
+        with g.slot("hvtald"):
+            pass
+        g.set_provider_limit("hvtald", 4)
+        self.assertEqual(g.snapshot()["per_provider_limit"]["hvtald"], 4)
+        self.assertNotIn("hvtald", g._sems, "旧信号量没被丢掉")
+
+    def test_setting_the_same_limit_is_a_no_op(self):
+        """每建一次 worker 都会调它 —— 同值时别把在途任务的信号量拆了。"""
+        from core.executor import Gate
+        g = Gate(8, {})
+        g.set_provider_limit("hvtald", 2)
+        with g.slot("hvtald"):
+            sem = g._sems.get("hvtald")
+            g.set_provider_limit("hvtald", 2)
+            self.assertIs(g._sems.get("hvtald"), sem)
