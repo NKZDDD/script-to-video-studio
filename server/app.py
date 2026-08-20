@@ -509,6 +509,54 @@ def ref_limit_of(cfg: dict, kind: str = "video") -> int:
         return 0                                        # 拿不到就说未知，别编
 
 
+def _override(over, allow: tuple) -> dict:
+    """「一键跑到底」/「补生产」面板送来的出图尺寸 / 画幅 / 单段秒数。
+
+    **面板为准；面板那一项为空就不覆盖** —— 于是回落到项目参数，
+    再回落到「设置 → 默认参数」。这三档的顺序是用户定的。
+
+    秒数用 float 再取整，不用 `int(v)`：面板送 `null` 时（下拉是空的，
+    JS 的 NaN 序列化成 null）`int(None)` 直接抛 TypeError，
+    而那个异常从「开始」那个请求里冒出来，报的是一句 Python 类型错误，
+    看不出是「视频链没配好、秒数候选是空的」。`"30.0"` 同理。
+
+    两处入口以前各写一遍，条件还不一样（一处认 `"None"` 字符串、
+    一处不认）—— 同一个空值在一条路上被忽略、在另一条路上让整轮跑崩。
+    """
+    out = {}
+    for k, v in (over or {}).items():
+        if k not in allow:
+            continue
+        if v is None or str(v).strip() in ("", "None", "NaN", "undefined"):
+            continue                    # 空 = 不覆盖，让它回落
+        if k == "duration":
+            try:
+                out[k] = int(float(v))
+            except (TypeError, ValueError):
+                continue                # 不是个数就当没给，别把整轮跑废掉
+        else:
+            out[k] = str(v)
+    return out
+
+
+def _task_index(pj: Project) -> dict:
+    """tasks.json → {类别: {key: 那一条}}。手动放图要按 key 找到它的输出路径。
+
+    **不自己拼路径。** 拼的话就得复制一份「家族 → 目录名」的表，
+    而那张表在 run_v34 里 —— 两份迟早对不上，对不上的后果是图放在
+    没人读的位置：出图那步照样重新生成一张，把人工挑的那张顶掉，不报错。
+    """
+    data = pj.tasks() or {}
+    out = {}
+    for kind in ("asset_tasks", "scstate_tasks", "storyboard_tasks", "video_tasks"):
+        rows = {}
+        for r in (data.get(kind) or []):
+            if isinstance(r, dict) and r.get("key") and r.get("output"):
+                rows[str(r["key"])] = r
+        out[kind] = rows
+    return out
+
+
 def params_of(cfg: dict, pj: Project, with_script: bool = True) -> dict:
     """跑环节要的那套参数。五个入口以前各拼一遍，漏一项就静默少一项输入。"""
     meta = pj.meta()
@@ -1007,9 +1055,8 @@ def api_post(path: str, body: dict) -> dict:
         params = params_of(cfg, pj, with_script=False)
         # 出图尺寸/画面比例/单段时长：点「开始」时给的值优先于「默认参数」。
         # 这些会被环节8 装配进 tasks.json，所以要在跑之前就定下来。
-        for k, v in (body.get("params_override") or {}).items():
-            if k in ("image_size", "ratio", "duration") and str(v).strip():
-                params[k] = int(v) if k not in ("image_size", "ratio") else v
+        params.update(_override(body.get("params_override"),
+                                ("image_size", "ratio", "duration")))
         script_path = pj.p("01_剧本与分段", "原始剧本.txt")
         if os.path.isfile(script_path):
             from core.store import read_text
@@ -1416,6 +1463,109 @@ def api_post(path: str, body: dict) -> dict:
         rep["accounts"] = n
         return {"ok": True, "provider": pid, "report": rep}
 
+    if path == "/api/task/manual":
+        """手动放图：把用户自己的图放到某条出图任务该落的位置。
+
+        为什么需要：有些资产就该用真实素材（演员定妆照、真实场景照、
+        品牌道具），或者模型怎么都画不对，人工挑一张更快。
+        以前只能自己往文件夹里拷 —— 而**家族目录名要猜对**，
+        猜错了图放在那儿也没人读，出图那步照样重新生成一张，
+        既花钱又把人工挑的那张顶掉，且不报错。
+
+        两种情况分开处理，差别很大：
+
+          位置是空的  → 直接写进去、登记指纹。出图那步看到文件在就跳过。
+          已经有一张  → **不原地覆盖。** 建一个新版本（R02、R03…），
+                        因为引用过旧那张的故事板还指着旧文件；
+                        原地换的话它们的指纹全部对不上，
+                        而更糟的是：**内容变了、引用没变，没人报错**。
+                        建新版本之后要重装配任务（tasks.json 里记的还是旧路径），
+                        所以这里顺手重装配，并把这件事说出来。
+        """
+        import base64
+        pj = proj_of(body)
+        kind = str(body.get("kind") or "").strip()
+        key = str(body.get("key") or "").strip()
+        raw = base64.b64decode(body.get("content_b64") or "")
+        if not raw:
+            raise ValueError("没有收到文件内容")
+        if len(raw) > 40 * 1024 * 1024:
+            raise ValueError("文件超过 40MB")
+        # **先确认它真是一张图。** 一个改了扩展名的文件放进去之后，
+        # 「出没出」那道检查只看大小，会判成已出 —— 然后下游把它当参考图
+        # 发给服务商，报的是一句服务商的解码错误，看不出是这张图的事。
+        try:
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(BytesIO(raw))
+            im.verify()
+            fmt = (im.format or "").upper()
+        except Exception as exc:                        # noqa: BLE001
+            raise ValueError(f"这个文件不是能读的图片（{exc}）。"
+                             f"如果是 HEIC/WebP 之类，先转成 PNG 或 JPG 再放。")
+        # **太小的文件放进去等于没放。** 「做出来了没有」全程只看文件在不在
+        # 加一个体积下限（probe.have_output，用来挡 0 字节空壳）——
+        # 比它还小的图会被判成「还没出」，然后出图那一步照样生成一张盖掉它。
+        # 图在盘上、被顶掉了、一句话都没有。
+        if len(raw) < probe.MIN_OUTPUT_BYTES:
+            raise ValueError(
+                f"这张图只有 {len(raw)} 字节，比「算做出来了」的下限"
+                f"（{probe.MIN_OUTPUT_BYTES} 字节）还小 —— 放进去也会被判成"
+                f"「还没出」，然后出图那一步生成一张把它盖掉，而且不报错。"
+                f"用一张正常分辨率的图（正片的资产图通常几百 KB）。")
+
+        tasks = _task_index(pj)
+        row = (tasks.get(kind) or {}).get(key)
+        if not row:
+            have = "、".join(sorted(tasks.get(kind) or {})[:6]) or "（这一类没有任务）"
+            raise ValueError(f"这个项目的「{kind}」里没有 {key}。"
+                             f"当前有：{have}…。任务是环节5 / 环节8 装配出来的，"
+                             f"先把文字环节跑完再放图。")
+
+        rel = row["output"]
+        rebuilt = 0
+        note = ""
+        if os.path.isfile(pj.p(*rel.split("/"))) and kind == "asset_tasks":
+            # 已经有一张 —— 建新版本，别原地换
+            from core import registry_v34 as REG
+            rev = REG.bump(pj, key, "人工放入的图")
+            rel = re.sub(r"_R\d{2}(\.\w+)$", lambda m: f"_R{rev:02d}{m.group(1)}", rel)
+            note = (f"这个位置本来已经有一张了，所以建了第 {rev} 版（{rel}）"
+                    f"而不是原地覆盖 —— 引用过旧那张的故事板还指着旧文件，"
+                    f"原地换的话它们用的图变了而引用没变，没有一处会报错。")
+        elif os.path.isfile(pj.p(*rel.split("/"))):
+            note = ("这个位置本来已经有一张，已被这次放入的图覆盖。"
+                    "（故事板和场景状态图没有版本机制，只能覆盖 ——"
+                    "如果有别的东西引用过旧那张，去「连续性检查」看一眼。）")
+
+        dst = pj.p(*rel.split("/"))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as f:
+            f.write(raw)
+
+        if kind == "asset_tasks":
+            from core import registry_v34 as REG
+            try:
+                REG.promote(pj, key, rel)
+            except Exception as exc:                    # noqa: BLE001
+                # 登记失败要说 —— 不登记的话参考图解析那一步找不到它，
+                # 报的是「注册表里没有这个资产」，看不出是放图这一步没登完。
+                note += f"（登记指纹失败：{exc} —— 参考图解析可能会找不到它）"
+            if rel != row["output"]:
+                from core import run_v34 as R
+                params = params_of(cfg, pj, with_script=False)
+                built = R.build_tasks(pj, params)
+                pj.save_tasks(built)
+                rebuilt = len(built.get("asset_tasks") or [])
+
+        pj.log_event({"stage": "manual_image", "kind": kind, "target": key,
+                      "result": "ok", "file": rel, "bytes": len(raw),
+                      "format": fmt})
+        return {"ok": True, "file": rel, "bytes": len(raw), "format": fmt,
+                "rebuilt": rebuilt, "note": note,
+                "msg": f"{key} 已用手动放入的图（{fmt}，{len(raw) // 1024} KB）。"
+                       f"出图那一步看到文件在就会跳过它，不会再生成、也不会再花钱。"}
+
     if path == "/api/tasks/rebuild":
         pj = proj_of(body)
         meta = pj.meta()
@@ -1455,11 +1605,7 @@ def api_post(path: str, body: dict) -> dict:
         # 免得一次试跑把装配结果永久改掉。
         allow = {"video": ("ratio", "duration"), "asset": ("size",),
                  "storyboard": ("size",)}[kind]
-        ov = {}
-        for k, v in (body.get("params_override") or {}).items():
-            if k not in allow or str(v).strip() in ("", "None"):
-                continue
-            ov[k] = int(v) if k == "duration" else v
+        ov = _override(body.get("params_override"), allow)
         if ov:
             items = [dict(t, params=dict(t.get("params") or {}, **ov)) for t in items]
         # 未完成数（已存在的会在 worker 里跳过，这里只用于提示）

@@ -233,7 +233,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <label style="margin:0" title="资产图和故事板的出图尺寸">出图尺寸
         <select id="autoSize"></select></label>
       <label style="margin:0" title="视频画面比例">比例 <select id="autoRatio"></select></label>
-      <label style="margin:0" title="每段视频多少秒">单段秒数
+      <label style="margin:0" title="每段视频多少秒。和下面「项目参数」里的是同一个 —— 在哪边改都会存进项目参数">单段秒数
         <select id="autoDur"></select></label>
       <label style="margin:0"><input id="autoProduce" type="checkbox" checked> 包含出图出片</label>
       <label style="margin:0"><input id="autoDeliver" type="checkbox" checked> 包含复核+拼接</label>
@@ -335,11 +335,6 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <button class="btn" id="saveBrief">保存基础信息</button>
       <span class="muted" id="briefHint"></span>
     </div>
-  </div>
-  <div class="card">
-    <h2>项目参数 <span class="tag">影响环节 2/7/8 的编译结果</span></h2>
-    <div class="grid g3" id="paramBox"></div>
-    <div class="row" style="margin-top:10px"><button class="btn ghost sm" id="saveParams">保存参数</button></div>
   </div>
   <div class="card">
     <!-- 标题跟着项目的体系走。写死「十二环节」的后果：跑十七章的项目时
@@ -897,7 +892,6 @@ async function openProject(root) {
 
   $('#projTag').textContent = root.split(/[\\/]/).pop();
   await refreshProject();
-  renderParams();
   renderBrief();
   $$('nav button')[1].click();
 }
@@ -1049,9 +1043,18 @@ function renderAuto() {
   };
   const opt = (list, cur) => (list || []).map(x =>
     `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`).join('');
-  $('#autoSize').innerHTML  = opt(capOf('asset','image').sizes || ['1024x1536'], d.image_size);
-  $('#autoRatio').innerHTML = opt(capOf('video','video').ratios || ['9:16'], d.ratio);
-  $('#autoDur').innerHTML   = opt(capOf('video','video').durations || [15], d.duration);
+  // **这三个跟「项目参数」是同一个旋钮，不是第二份。**
+  //
+  // 原来它们用 `d`（= 全局默认）初始化 —— 而跑的时候面板送的值
+  // 盖在项目参数上面。于是项目里存的 15 被面板里显示的 30 无声盖掉，
+  // 而单段秒数是环节 2/7/8 编译进产物的：文字按 15 秒装箱、
+  // 视频按 30 秒生成，中间一处都不报错。
+  // 所以读的必须是 currentParams()（全局默认 ← 项目参数），
+  // 而且改了要写回项目参数（见 #autoRun 那边）。
+  const pp = currentParams();
+  $('#autoSize').innerHTML  = opt(capOf('asset','image').sizes || ['1024x1536'], pp.image_size);
+  $('#autoRatio').innerHTML = opt(capOf('video','video').ratios || ['9:16'], pp.ratio);
+  $('#autoDur').innerHTML   = opt(capOf('video','video').durations || [15], pp.duration);
   $('#autoCapHint').innerHTML = capHint(ch);
   const bad = CHAIN_KINDS.some(([k]) => !(ch[k] || []).length);
   $('#autoRun').disabled = bad;
@@ -1170,9 +1173,10 @@ function autoBody() {
           include_deliver: $('#autoDeliver').checked,
           only_episodes: only.length ? only : null,
           produce_episodes: prod.length ? prod : null,
-          params_override: {image_size: $('#autoSize').value,
-                            ratio: $('#autoRatio').value,
-                            duration: +$('#autoDur').value}};
+          // 面板为准；**面板为空就回落「设置 → 默认参数」** ——
+          // 所以空的那一项不送。送 null 的话服务端那句 int(v) 直接炸，
+          // 而这三个下拉在链没配好（能力表拿不到候选）时真的会是空的。
+          params_override: runParams()};
 }
 // 「只测第一集」：两个范围一起设。分开填容易只填一个 ——
 // 只填分析范围会漏掉出图出片，只填出图范围会白跑 40 集的文字。
@@ -1278,6 +1282,11 @@ $('#autoRun').onclick = async () => {
   if (!PROJ) return alert('先打开项目');
   renderGates().catch(() => {});
   $('#autoRun').disabled = true;
+  // **面板为准，而且要写回项目。**
+  // 单跑某个环节（环节列表右边的「执行」）读的是项目 meta.params，
+  // 不经过这个面板 —— 不写回的话，一键跑到底按 30 秒跑，
+  // 而单跑环节2 按设置默认的 15 秒编译，两个数都不报错。
+  await saveRunParams().catch(() => {});
   const r = await api.post('/api/pipeline/run', autoBody());
   $('#autoRun').disabled = false;
   if (r.error) return $('#autoPlan').innerHTML = `<div class="alert err">${esc(r.error)}</div>`;
@@ -1639,20 +1648,44 @@ $('#saveBrief').onclick = async () => {
   setTimeout(() => { $('#briefHint').textContent = ''; }, 4000);
 };
 
-function renderParams() {
-  const p = currentParams();
-  $('#paramBox').innerHTML = PARAM_FIELDS.map(([k, label, t]) =>
-    paramField(k, label, t, p[k], 'data-pk')).join('');
+// 「项目参数」那张卡去掉了 —— 它和「一键跑到底」面板里的
+// 出图尺寸/比例/单段秒数**是同一个旋钮**，而且两处显示的值会不一样
+// （用户实遇：面板 30、项目参数 15），跑的时候面板那个赢。
+// 单段秒数是环节 2/7/8 编译进产物的东西，两个数就是文字按一个秒数装箱、
+// 视频按另一个生成，而中间一处都不报错。
+//
+// **存留着**（项目 meta.params）：单跑某个环节走的是它，不经过面板。
+// 现在由面板在点「开始」时写回去，见 saveRunParams()。
+// 面板上那三个值。空的不给 —— 让它回落到「设置 → 默认参数」。
+function runParams() {
+  const out = {};
+  const take = (id, key, num) => {
+    const v = ($(id) || {}).value;
+    if (v !== undefined && String(v).trim() !== '') out[key] = num ? +v : v;
+  };
+  take('#autoSize', 'image_size');
+  take('#autoRatio', 'ratio');
+  take('#autoDur', 'duration', true);
+  return out;
 }
-$('#saveParams').onclick = async () => {
-  const params = {};
-  $$('#paramBox input').forEach(i => params[i.dataset.pk] = i.type === 'number' ? +i.value : i.value);
-  // 尺寸/比例/时长现在是 select，别漏了
-  $$('#paramBox select').forEach(s => params[s.dataset.pk] = s.dataset.num === '1' ? +s.value : s.value);
+
+async function saveRunParams() {
+  if (!PROJ) return;
+  const params = runParams();
+  if (!Object.keys(params).length) return;      // 面板全空 —— 按设置默认跑
+  const was = currentParams();
+  if (Object.keys(params).every(k => String(was[k]) === String(params[k])))
+    return;                           // 没改，别白写一遍
+  // 单段秒数变了、而按旧秒数编译的环节已经跑过 —— 那几份产物是按旧值排的。
+  // 不说的话：段落表还是旧秒数装的箱，视频按新秒数生成，一处都不报错。
+  if (String(was.duration) !== String(params.duration))
+    log('#autoLog', `⚠️ 单段秒数从 ${was.duration} 改成 ${params.duration} 秒。`
+      + '这个数会被环节 2/7/8 编译进产物 —— 已经跑过的那几个环节是按旧秒数排的，'
+      + '要让新秒数生效得重跑它们（做过的环节这次会自动跳过，不会重跑）。');
   await api.post('/api/project/params', {project_root: PROJ, params});
-  renderAuto();                       // 一键跑到底那三个下拉跟着刷新
-  log('#flowLog', '参数已保存（只作用于当前项目；「设置 → 默认参数」是新建项目的初值）');
-};
+  const m = BOOT.projects.find(p => p.root === PROJ);
+  if (m) m.params = Object.assign({}, m.params || {}, params);
+}
 
 // ---------- 环节
 // 这个项目用哪套生产体系。建项目时定，之后不改 —— 两套的产物文件名、
@@ -2682,19 +2715,19 @@ async function renderTasks(fresh) {
       <div class="steps"><div class="s ${g.done >= g.total && g.total ? 'full' : g.done ? '' : 'none'}">
         ${esc(g.label)}（${esc(g.stage)}） ${g.done}/${g.total}
         ${g.failed ? ` · <b style="color:#c0392b">${g.failed} 项没做成</b>` : ''}</div></div>
-      ${rows.map(taskRow).join('') || '<p class="muted">（这一类没有待办）</p>'}
+      ${rows.map(r => taskRow(r, g.key)).join('') || '<p class="muted">（这一类没有待办）</p>'}
     </div>`;
   }).join('');
   document.querySelectorAll('#tkBody .segrow > .hd').forEach(el => {
     el.onclick = () => el.parentElement.querySelector('.bd').classList.toggle('hide');
   });
 }
-function taskRow(r) {
+function taskRow(r, kind) {
   const lamp = (on, t, warn) =>
     `<span class="chip ${on ? 'on' : (warn ? 'warn' : 'off')}">${t}</span>`;
   const refBad = r.refs.filter(x => !x.file.exists).length;
   const sp = r.spend || {};
-  return `<div class="segrow">
+  return `<div class="segrow" data-kind="${esc(kind || '')}">
     <div class="hd">
       <b style="font-size:12px">${esc(r.key)}</b>
       <span class="sname">${esc(r.name || r.episode)}</span>
@@ -2740,10 +2773,63 @@ function taskRow(r) {
       ${r.output.exists && /\.mp4$/i.test(r.output.rel)
         ? `<video src="${fileUrl(r.output.rel)}" controls preload="metadata"
             style="width:220px;border-radius:6px;margin-top:6px"></video>` : ''}
+      ${kind === 'video_tasks' ? '' : manualBlock(r, kind)}
       ${r.prompt.exists ? promptBlock(r.prompt, '发出去的提示词')
         : '<div class="alert warn" style="margin-top:8px">提示词文件不在 —— 先跑对应的文字环节</div>'}
     </div></div>`;
 }
+// 手动放图。有些资产就该用真实素材（演员定妆照、真实场景照、品牌道具），
+// 或者模型怎么都画不对，人工挑一张更快。
+//
+// 以前只能自己往文件夹里拷 —— 而**家族目录名要猜对**（人物身份资产 /
+// 人物造型资产 / 连续状态资产 / 场景资产…），猜错了图放在那儿也没人读：
+// 出图那步照样重新生成一张，把人工挑的那张顶掉，而且不报错。
+// 所以路径由后端从 tasks.json 里取，页面一个字都不拼。
+function manualBlock(r, kind) {
+  const id = 'mf' + Math.random().toString(36).slice(2, 9);
+  return `<div style="margin-top:8px">
+    <b class="muted">手动放图</b>
+    <span class="muted" style="font-size:11px">用自己的图替这一条，
+      ${r.output.exists ? '这个位置已经有一张了 —— 放入会' + (kind === 'asset_tasks'
+        ? '<b>建一个新版本</b>（不覆盖旧的：引用过旧那张的故事板还指着它）'
+        : '<b>覆盖</b>它（故事板和场景状态图没有版本机制）')
+        : '放进去之后出图那一步会跳过它，不再生成、也不再花钱'}</span>
+    <div class="row" style="margin-top:4px">
+      <input type="file" id="${id}" accept="image/png,image/jpeg,image/webp"
+             style="font-size:12px">
+      <button class="btn ghost sm" id="${id}b">放入</button>
+      <span class="muted" id="${id}m"></span>
+    </div></div>`;
+}
+// 事件用委托挂 —— taskRow 是拼字符串重画的，直接 onclick 在重画后就没了。
+document.addEventListener('click', async ev => {
+  const b = ev.target;
+  if (!b.id || !b.id.startsWith('mf') || !b.id.endsWith('b')) return;
+  const base = b.id.slice(0, -1);
+  const inp = document.getElementById(base), msg = document.getElementById(base + 'm');
+  const row = b.closest('.segrow');
+  if (!inp || !row) return;
+  const f = (inp.files || [])[0];
+  if (!f) { msg.textContent = '先选一个图片文件'; return; }
+  const key = row.querySelector('.hd b').textContent;
+  const kind = row.dataset.kind;
+  b.disabled = true; msg.textContent = '放入中…';
+  try {
+    const b64 = await new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result).split(',')[1] || '');
+      fr.onerror = rej;
+      fr.readAsDataURL(f);
+    });
+    const rr = await api.post('/api/task/manual', {project_root: PROJ, kind, key,
+                                                  filename: f.name, content_b64: b64});
+    if (rr.error) { msg.innerHTML = `<b style="color:#c0392b">${esc(rr.error)}</b>`; return; }
+    msg.textContent = rr.msg + (rr.note ? '　' + rr.note : '');
+    await renderTasks(true);
+  } catch (e) {
+    msg.innerHTML = `<b style="color:#c0392b">${esc(String(e))}</b>`;
+  } finally { b.disabled = false; }
+});
 $('#tkRefresh').onclick = () => renderTasks(true);
 $('#tkEp').onchange = () => renderTasks(true);
 $('#tkOnlyBad').onchange = () => renderTasks(false);
