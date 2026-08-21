@@ -16,6 +16,12 @@
 body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg)}
 header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:10}
 header h1{font-size:15px;margin:0;font-weight:600}
+/* 体系徽标：这一版 exe 主打哪套。分体系打包后两个 exe 能同时开着
+   （端口不同），徽标 + 标签页标题让人一眼分清看的是哪套的页面。 */
+.flavor{display:inline-block;padding:2px 10px;border-radius:11px;font-size:12px;font-weight:600;white-space:nowrap}
+.flavor.v34{color:#f5a623;border:1px solid rgba(245,166,35,.5);background:rgba(245,166,35,.12)}
+.flavor.v61{color:#4a9eff;border:1px solid rgba(74,158,255,.5);background:rgba(74,158,255,.12)}
+.flavor.all{color:#3ecf8e;border:1px solid rgba(62,207,142,.5);background:rgba(62,207,142,.12)}
 header .sp{flex:1}
 .gauge{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
 .gauge b{color:var(--fg);font-weight:600}
@@ -145,6 +151,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 <body>
 <header>
   <h1>剧本 → AI视频 自动化生产台</h1>
+  <span id="flavorTag" class="flavor all" title="这一版主打的生产体系（分体系打包的 exe 各自带标志，源码方式跑 = 全体系）"></span>
   <span class="muted" id="projTag">未选择项目</span>
   <span class="sp"></span>
   <div class="gauge" id="gauge" title="此刻正在发给服务商的请求数 / 允许的上限。同时做几部剧也共用这一个上限。">
@@ -833,6 +840,17 @@ $$('nav button').forEach(b => b.onclick = () => {
 // ---------- bootstrap
 async function boot() {
   BOOT = await api.get('/api/bootstrap');
+  // 体系徽标：后端 flavor_name 给的就是正式名（电影级十七章 / 通用十二环节 /
+  // 全体系），别在这里另写一份 —— 名字打架的事发生过（见 SYSTEM_LABELS 注释）。
+  {
+    const f = BOOT.flavor || '全体系';
+    const ft = $('#flavorTag');
+    if (ft) {
+      ft.textContent = f;
+      ft.className = 'flavor ' + (f.includes('电影') ? 'v34' : f.includes('通用') ? 'v61' : 'all');
+    }
+    document.title = `剧本 → AI视频 自动化生产台 · ${f}`;
+  }
   $('#projDir').textContent = BOOT.projects_dir;
   renderProjects();
   fillSystemPicker();   // 选项从 bootstrap 来，按这一版能建哪几套过滤

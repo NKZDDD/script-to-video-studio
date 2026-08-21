@@ -16,6 +16,8 @@ outputs/
 dist/
 build/
 *.spec
+# 打包依赖（pip --target 装的，沙箱不让写全局 site-packages 时的本地安装位）
+.deps/
 
 # Python
 __pycache__/
