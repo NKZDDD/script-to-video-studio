@@ -96,7 +96,13 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
         for sid, key, kind in PRODUCE:
             st = next(s for s in S.STAGES if s["id"] == sid)
             steps.append({"kind": "produce", "stage": sid, "task_key": key,
-                          "produce": kind, "episode": "",
+                          "produce": kind,
+                          # relay 的 kind 用**步**的 id，不用 worker 类型。
+                          # V6.1 这三类今天不重名，所以没踩到；但电影级那边
+                          # p2/p3 都叫 "storyboard"，一步跑完就提前解除了另一步
+                          # 下游的等待（2026-08-20 实跑：视频被派早 4 分钟）。
+                          # 同一个隐患在这儿，先按步分掉。
+                          "batch": sid, "episode": "",
                           "only": list(prod) if prod else None,
                           "label": f"环节{st['no']} {st['name']}{ptag}"})
     if include_deliver:
@@ -309,10 +315,10 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                                   pj.p(*t["output"].split("/"))),
                               max_retry=max_retry, log=log,
                               deps_of=deps.get if deps else None,
-                              ready_of=relay.ready_of(s["produce"]))
+                              ready_of=relay.ready_of(s["batch"]))
                 # **成没成都要报** —— 这是下游停止等待的唯一信号。
                 # 漏了的话，等它产物的任务会一直等到超时上限。
-                relay.finished(s["produce"])
+                relay.finished(s["batch"])
                 used = " → ".join(f"{a['provider']}/{a['model']}" for a in r["attempts"])
                 if r["left"] == 0:
                     job.set_item(key, state="ok",
@@ -510,7 +516,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         # **登记必须在这儿做**，不能更早：tasks.json 是上面那一行刚装配的。
         prod = [s for s in tail if s["kind"] == "produce"]
         for s in prod:
-            relay.declare(s["produce"], pj.tasks().get(s["task_key"]) or [])
+            relay.declare(s["batch"], pj.tasks().get(s["task_key"]) or [])
         for s in tail:
             if halt(s):
                 continue

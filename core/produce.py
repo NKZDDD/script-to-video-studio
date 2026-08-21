@@ -543,6 +543,39 @@ def _lazy_llm(llm_factory: Optional[Callable]) -> Callable:
     return get
 
 
+def _fit_size(provider_cfg: dict, model: str, media: str,
+              want, log: Callable = print):
+    """把要的尺寸换成**这一家吃得下**的写法。换不过来就抛，让人去改配置。
+
+    用户原话（2026-08-21）：「尺寸应该按照服务商的 api 规范去转换成他能吃的值
+    确保尺寸正确」。
+
+    起因：实跑里 7 张资产图请求 `16:9`、回来的是 `1024x1536`、`1086x1448`、
+    `1254x1254` —— 三个人物出成竖图、两个场景出成方图。各家的写法根本不是
+    一套（像素 / 比例 / 1K-4K 档位），同一个值换一家就可能不合法，
+    而**不合法的后果不是报错**：多数家自己挑一个默认值出图，
+    图出来了、尺寸不是你要的、任务标 ok。
+
+    拿不到这一家的清单时**原样发**，不自己发明 —— 清单是服务商自己声明的，
+    没声明就说明我们不知道它收什么，猜一个只会换一种错法。
+    """
+    from . import providers as _P
+    from . import sizes as _sz
+    try:
+        cls = _P.REGISTRY.get(_P.resolve_id(provider_cfg.get("provider") or ""))
+        cap = (cls().capabilities() if cls else {}) or {}
+        blk = cap.get(media) or {}
+        supported = blk.get("sizes" if media == "image" else "ratios") or []
+    except Exception:                                       # noqa: BLE001
+        supported = []
+    val, note = _sz.resolve(want, supported)
+    if val is None:
+        raise RuntimeError(note)
+    if note and log:
+        log(f"⚠️ 尺寸换了：{note}")
+    return val
+
+
 def _soften_rounds(provider_cfg: dict) -> int:
     """改写几轮。0 = 关掉，上限 5。设置页的「被审核拒绝后改写重试」。
 
@@ -588,7 +621,8 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
-        want = (task.get("params") or {}).get("size", "1024x1536")
+        want = _fit_size(provider_cfg, model, "image",
+                         (task.get("params") or {}).get("size", "1024x1536"), log)
         if probe.have_output(out):
             # 跳过也要重新量一遍：不然「比例不对」的提醒会被这次跳过悄悄清掉，
             # 而文件其实还是那个躺倒的文件。以磁盘上的东西为准。
@@ -678,7 +712,8 @@ def make_video_worker(pj: Project, provider_cfg: dict,
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
         p = task.get("params") or {}
-        want = p.get("ratio", "9:16")
+        want = _fit_size(provider_cfg, model, "video",
+                         p.get("ratio", "9:16"), log)
         if probe.have_output(out):
             # 同上：跳过时也重新量，别把「比例不对」的提醒清没了
             return {"skipped": True, "msg": "已经有了，跳过",

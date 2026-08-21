@@ -76,6 +76,8 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
             steps.append({"kind": "produce", "stage": sid,
                           "task_key": s["task_key"],
                           "produce": _worker_kind(sid),
+                          # relay 用这个，**不用 produce** —— 见 _batch_kind
+                          "batch": _batch_kind(sid),
                           "episode": "", "only": list(eps) if eps else None,
                           "label": _label(sid) + _scope_tag(eps, pj)})
 
@@ -108,8 +110,29 @@ def _scope_tag(eps: list, pj) -> str:
 
 
 def _worker_kind(stage_id: str) -> str:
-    """出图出片那一层认的类型。scstate 和故事板都是出图，走同一个 worker。"""
+    """出图出片那一层认的类型。scstate 和故事板都是出图，走同一个 worker。
+
+    **这个值只用来选 worker，不许当「这一批活」的标识。**
+    p2（场景状态图）和 p3（故事板）在这里故意返回同一个字符串 —— 对选
+    worker 是对的，对「这一批跑完了没有」是错的：它们是**两批活**。
+
+    拿它当 relay 的 kind 出过一次事（2026-08-20 实跑）：p2 跑完就调了
+    `relay.finished("storyboard")`，而 p3 还在跑 —— 从那一秒起，每一张还没出
+    的 sheet 都被判成「没人会做它了」，视频立刻派出去撞空。
+    时间线：18:20:17 场景状态图最后一条出好 → 18:20:19 视频报「故事板不存在」
+    → 18:20:50~18:24:55 故事板才陆续落盘。故事板一张都没少。
+    要「这一批活」的标识用 `_batch_kind()`。
+    """
     return {"p1": "asset", "p2": "storyboard", "p3": "storyboard", "p4": "video"}[stage_id]
+
+
+def _batch_kind(stage_id: str) -> str:
+    """**这一批活**的标识 —— relay 的 declare / finished / ready_of 用它。
+
+    一步一个，绝不共用。共用就会让一步的完成信号提前解除另一步下游的等待，
+    而那条路径（「没人会做它了」）本身是合法的，所以不报错。
+    """
+    return stage_id
 
 
 def _llm_done(pj, stage_id: str, episode: str) -> bool:
@@ -297,10 +320,10 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                         max_retry=max_retry,
                         log=lambda m, _k=key: job.log(_k, m),
                         deps_of=deps.get if deps else None,
-                        ready_of=relay.ready_of(s["produce"]))
+                        ready_of=relay.ready_of(s["batch"]))
         # **成没成都要报「这一批完了」** —— 这是下游停止等待的唯一信号。
         # 漏了的话，等它产物的那些任务会一直等到超时上限。
-        relay.finished(s["produce"])
+        relay.finished(s["batch"])
         left = one["left"]
         if s["task_key"] == "asset_tasks":
             # 出完就登记指纹。登记是为了后面能查出「文件被人换过」——
@@ -475,7 +498,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 # **必须一次登记全**：漏了哪一类，等它产物的下游就会误判成
                 # 「没人会做它」而立刻开跑。
                 for _s in prod:
-                    relay.declare(_s["produce"],
+                    relay.declare(_s["batch"],
                                   pj.tasks().get(_s["task_key"]) or [])
                 _produce_all(prod, do_produce, job)
             continue                       # 其余几步已经在上面那一把里跑了

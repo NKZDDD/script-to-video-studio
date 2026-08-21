@@ -80,26 +80,35 @@ class RelayTests(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_it_stops_waiting_when_the_upstream_batch_is_done(self):
-        """★ **这一条是等待的终点。**
+        """★ **这一条是等待的终点。** 但终点不是「派出去」。
 
-        上游那一批跑完了、东西还是没有 → 不再等，照旧派出去，
-        让出图那一层报清缺哪张。不然要挂到超时上限。
+        上游那一批跑完了、东西还是没有 → 不再等（不然要挂到超时上限），
+        而返回的是 `None` = **条件不具备，别派**。
+
+        用户原话（2026-08-21）：「他缺少实际条件他不能去做才对」。
+        原来这里返回 True，让出图那层的硬停去报 —— 面板上留下的是一条
+        「失败」，而它不是失败，是这一条还不能做。两者长得一样，
+        人就分不出「这条要修」和「这条在等前面」。
         """
         self.relay.declare("scstate", [_task("03b/s1.png")])
         t = _task("04/a.png", refs=["03b/s1.png"])
-        self.assertFalse(self.relay.ready_of("storyboard")(t)[0])
+        self.assertIs(self.relay.ready_of("storyboard")(t)[0], False,
+                      "上游还在跑，应该是「等」")
         self.relay.finished("scstate")
-        self.assertTrue(self.relay.ready_of("storyboard")(t)[0],
-                        "上游已经跑完了还在等 —— 会挂到超时")
+        ok, why = self.relay.ready_of("storyboard")(t)
+        self.assertIsNone(ok, "上游跑完了还是没有 —— 该判成条件不具备")
+        self.assertIn("03b/s1.png", why, "得说清缺的是哪个文件")
 
     def test_an_input_nobody_produces_does_not_wait(self):
-        """★ 没人会做它（比如 SP001 那种引错类别的）→ 立刻派出去。
+        """★ 没人会做它（比如 SP001 那种引错类别的）→ **当场判成不能做**。
 
-        等一个不会有人做的东西，等到超时才报错，比当场报错糟得多。
+        等一个不会有人做的东西，等到超时才说话，比当场说清糟得多。
+        而「当场说清」不等于「派出去撞一次空」—— 见上一条。
         """
-        ok, _ = self.relay.ready_of("asset")(
+        ok, why = self.relay.ready_of("asset")(
             _task("02/a.png", refs=["02/SP001.png"]))
-        self.assertTrue(ok)
+        self.assertIsNone(ok)
+        self.assertIn("SP001", why)
 
     def test_the_ordered_spine_counts_as_input(self):
         """★ V6.2 的视频要整条有序骨架 —— 每一张都要等。"""

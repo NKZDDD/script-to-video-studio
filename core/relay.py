@@ -110,7 +110,13 @@ class Relay:
         return [f for f in dict.fromkeys(want) if not self._have(f)]
 
     def ready_of(self, kind: str) -> Callable:
-        """给 run_batch 用的就绪判断。返回 (能不能跑, 在等什么)。"""
+        """给 run_batch 用的就绪判断。返回 (状态, 说明)，状态三种：
+
+            True   可以跑
+            False  在等上游那一批，等就对了
+            None   **条件不具备**：缺的东西没人会做出来，别派 ——
+                   用户原话「他缺少实际条件他不能去做才对」
+        """
 
         def ready(task: dict) -> tuple:
             miss = self._missing(task)
@@ -122,9 +128,16 @@ class Relay:
                            if self._makers.get(f)
                            and self._makers[f] not in self._done_kinds]
             if not waiting:
-                # 没人会做它了（上游那一批已经跑完，或者压根没这活）——
-                # **照旧派出去**，让出图那一层现有的硬停说清缺哪张。
-                return True, ""
+                # 没人会做它了（上游那一批已经跑完，或者压根没这活）。
+                #
+                # **这里原来是「照旧派出去，让出图那层的硬停说话」。用户否掉了：**
+                # 「他缺少实际条件他不能去做才对」。对 —— 派出去撞一次空，
+                # 面板上留下的是一条「失败」，而它不是失败，是**条件不具备**。
+                # 两者在面板上长得一样，人分不出「这条要修」和「这条在等」。
+                #
+                # 所以现在返回「不能做」，并带上缺的是哪几个文件。
+                # run_batch 会把它标成没做成、写清缺什么，**不发请求**。
+                return None, "、".join(miss[:4]) + ("…" if len(miss) > 4 else "")
             return False, "、".join(waiting[:3]) + ("…" if len(waiting) > 3 else "")
 
         return ready

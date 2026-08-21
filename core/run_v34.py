@@ -376,6 +376,40 @@ def _drop_path(obj, path: str):
     return dict(obj, **{key: _drop_path(rows, rest)})
 
 
+def split_scstates(obj):
+    """把场景状态表分成「有图的」和「只有文字合同的」两组。
+
+    **十二听十一**：以前这两类混在同一个数组里，只差一个 `decision` 字段 ——
+    模型得自己记住「decision 是 LOGICAL_ONLY 的那几条没有 png、不许当参考图」。
+    实测记不住：同一次运行里 SEG04 遵守了、SEG05 照样引了一条，
+    然后故事板任务指向一个永远不会存在的文件。
+
+    分开发之后这条规则不再依赖模型的记性 —— 它看到的是两个不同的清单，
+    其中一个的名字就叫「不许当参考图」。
+    """
+    if not isinstance(obj, dict):
+        return obj
+    rows = obj.get("scstates")
+    if not isinstance(rows, list) or not rows:
+        return obj
+    ok, only = [], []
+    for sc in rows:
+        (only if (isinstance(sc, dict) and scstate_no_image(sc)) else ok).append(sc)
+    if not only:
+        return obj                      # 没有文字合同，别多塞一个空数组
+    out = dict(obj)
+    out["scstates"] = ok
+    out["scstates_logical_only"] = only
+    out["_注"] = (
+        "`scstates` 是**会出图**的那几条，只有它们可以出现在 reference_order 里。"
+        "`scstates_logical_only` 是第十一环节判成只留文字合同的 —— "
+        "**它们没有 png，永远不会有**，把它们写进 reference_order 就是引用一个"
+        "不存在的文件，那一段的故事板做不出来。"
+        "它们的 Source CVS、Zone、Anchor、Support、朝向照旧是权威，"
+        "按那份文字合同去引原子资产（本段人物的当前造型 + 场景环境 + 关键道具）。")
+    return out
+
+
 def project_product(stage_id: str, out_name: str, obj):
     """把上游产物裁成这个环节真正需要的部分。
 
@@ -383,6 +417,10 @@ def project_product(stage_id: str, out_name: str, obj):
     「同一份 2.8 万字发给 4 个下游、其中 3 个还是逐集的」，
     既把网关的输入上限试出来，又按集重复付钱。
     """
+    # 场景状态表发给故事板之前先分组 —— 见 split_scstates。
+    # 放在裁剪**之前**：裁剪只挑字段，不改结构。
+    if out_name == "n11_scstate" and stage_id == "n12":
+        obj = split_scstates(obj)
     spec = V.needs_of(stage_id, out_name)
     if not spec or not isinstance(obj, dict):
         return obj
@@ -1139,6 +1177,63 @@ def check_timeline(pj: Project, stage_id: str, out: dict, params: dict,
     raise RuntimeError(msg)
 
 
+def check_scstate_coverage(pj: Project, episode: str,
+                          log: Callable = print) -> None:
+    """**十一有十二的**：每个 SEG 至少要有一张会出图的场景状态图。
+
+    V6.2 要求每个 SEG 都有故事板，而故事板结构上需要一个主参考
+    （n12 模板：`Image 1 = 本段的 SCSTATE（主参考）`）。
+    所以第十一环节把某个 SEG 的**全部** SCSTATE 都判成只留文字合同时，
+    它造出了一个**结构上做不出故事板的段落**。
+
+    这件事在第十一环节跑完就能查（段落表 + 判定），不用等到第十二环节
+    引了一条、再到出图前才发现 —— 中间隔着四个环节的钱。
+
+    用户定的方向：「要么十二听十一的，要么十一有十二的」。这一条是后者：
+    把第十二环节的结构性需求（每段要一个主参考）告诉第十一环节。
+    """
+    segs = [s["seg_id"] for s in segments_of(pj, episode)]
+    if not segs:
+        return
+    rows = (pj.stage_data("n11_scstate", episode) or {}).get("scstates") or []
+    if not rows:
+        return                          # 一条都没有是另一回事（上游对账管）
+    have, only = {}, {}
+    for sc in rows:
+        if not isinstance(sc, dict):
+            continue
+        seg = str(sc.get("seg_id") or "")
+        why = scstate_no_image(sc)
+        (only if why else have).setdefault(seg, []).append(
+            str(sc.get("scstate_id") or "?"))
+    bad = [s for s in segs if not have.get(s) and only.get(s)]
+    if not bad:
+        return
+
+    rows_txt = "；".join(f"{s}（{len(only[s])} 条全判成只留文字合同："
+                        f"{'、'.join(only[s][:3])}"
+                        f"{'…' if len(only[s]) > 3 else ''}）" for s in bad[:5])
+    msg = ("{ep} 有 {n} 段的场景状态**全部**判成只留文字合同，一张图都不会出：\n"
+           "  {rows}{more}\n"
+           "**这样的段落做不出故事板。** V6.2 要求每个 SEG 都有故事板，"
+           "而故事板结构上需要一个主参考（模板里写的是"
+           "「Image 1 = 本段的 SCSTATE（主参考）」）—— 一张图都没有的话，"
+           "第十二环节只有两条路：引一条永远不会存在的 png（那一段做不出来），"
+           "或者改引原子资产（能做，但主参考的等价性要它自己保证）。\n"
+           "**在这里停，是因为这里是唯一还能便宜地改的地方。** 往下走的话，"
+           "第十二环节要花钱、故事板要出图、到视频那一步才撞上 —— "
+           "中间隔着四个环节。\n"
+           "去改：重跑这几段的第十一环节，让物化门控至少给每段留一条出图的"
+           "（跨 SEG 入口、首次显露、不可逆结果这几条触发器本来就该命中一条）；"
+           "或者确认这几段真的只要文字合同，那就在第十二环节按原子资产做主参考"
+           "（模板里写了怎么做），做完这条检查会自己过。"
+           ).format(ep=episode, n=len(bad), rows=rows_txt,
+                    more="…" if len(bad) > 5 else "")
+    diagnose.record(pj.root, diagnose.warn(
+        "SCSTATE_SEG_NO_IMAGE", msg, stage="stage:n11", target=episode))
+    raise RuntimeError(msg)
+
+
 def _shot_windows(pj: Project, episode: str) -> dict:
     """第九环节排的每个镜头占哪一段时间：{镜头号: (start, end)}。"""
     out = {}
@@ -1373,6 +1468,12 @@ def run_segment_stage(pj: Project, stage_id: str, *, llm, params: dict,
 
     result = {key: _ordered(by_id, segs)}
     pj.save_stage(tpl_name, result, episode)
+    # **十一有十二的**：第十一环节跑完立刻查「每段至少有一张会出图的场景状态」。
+    # 放在存盘之后、返回之前：产物要留着（人得看得见判定），但这一集不许
+    # 被当成可以往下走。只在这一集**全段都做完**时查 —— 还有段没做的时候
+    # 查会误报（那几段本来就还没有判定）。
+    if stage_id == "n11" and not failed and not cancelled:
+        check_scstate_coverage(pj, episode, log)
     return result, failed, cancelled
 
 

@@ -522,6 +522,17 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                 waits = ""
                 if ready_of is not None:
                     ok, waits = ready_of(t)
+                    if ok is None:
+                        # **条件不具备，不是失败也不是等待。**
+                        # 用户原话：「他缺少实际条件他不能去做才对」。
+                        # 派出去撞一次空，面板上留下的是一条「失败」——
+                        # 而它不是失败，是这一条**还不能做**。两者长得一样，
+                        # 人就分不出「这条要修」和「这条在等前面」。
+                        job.set_item(key_of(t), state="failed", kind=TASK_FATAL,
+                                     msg="条件不具备，没发请求：缺 " + (waits or "上游产物")
+                                         + "。而且没有任何一步会做出它们 —— "
+                                           "先把产它的那一环跑出来，这条会自动跟着能跑。")
+                        continue
                     if not ok:
                         hold.append((t, waits))
                         continue
