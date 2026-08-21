@@ -71,7 +71,12 @@ FIELDS: list = [
      "default": "live_action", "source": "settings", "group": "项目"},
     {"key": "visual_style", "label": "视觉风格", "type": "text",
      "hint": "电影写实 / 都市情感 / 末日废土 / 古装写实…",
-     "source": "settings", "group": "项目"},
+     "source": "settings", "group": "项目",
+     # 填空 + 下拉：自由文本，但输入框带历史下拉（以前用过的值 + 几个起手选项）。
+     # 只属于另一种媒介的词（3D / 真人 / 动画…）不放进 seeds ——
+     # 媒介归「拍成什么形式」管，这里出现的每个词都得和它兼容。
+     "suggest": True,
+     "seeds": ["电影写实", "都市情感", "末日废土", "古装写实"]},
     {"key": "cultural_setting", "label": "文化与地域设定", "type": "text",
      "source": "settings", "group": "项目",
      "why": "skill 明写：**不要把提示词语言等同于文化设定**。"
@@ -825,6 +830,7 @@ def plan_lengths(vals: dict) -> dict:
 
     total, count, per = _n("total_seconds"), _n("episode_count"), _n("episode_seconds")
     given = [k for k, v in (("总时长", total), ("集数", count), ("每集", per)) if v]
+    per_only = bool(per and not total and not count)
     conflict = ""
     if total and count and per:
         want = count * per
@@ -842,7 +848,7 @@ def plan_lengths(vals: dict) -> dict:
     elif count and per:
         total = count * per
     return {"total": total, "count": count, "per": per,
-            "given": given, "conflict": conflict}
+            "given": given, "conflict": conflict, "per_only": per_only}
 
 
 def length_plan(pj: Project) -> str:
@@ -856,6 +862,21 @@ def length_plan(pj: Project) -> str:
     p = plan_lengths(v)
     if not p["given"]:
         return (f"全剧总时长、集数、每集时长都没指定 —— 三个都由你按剧情事件定。"
+                f"节奏速度：{_zh_of('pacing', v)}。")
+    if p["per_only"]:
+        return (f"每集 {p['per']} 秒（你指定）。\n"
+                f"**集数由你算**：看完剧本后估这部剧总该多长"
+                f"（按剧情事件密度估，不按剧本章节数，不按字数 —— "
+                f"1700 字可能是 5 个紧凑事件，也可能是 12 个），"
+                f"集数 = round(你估的总时长 ÷ {p['per']})，"
+                f"然后切成那个集数。\n"
+                f"**必须切成你算出来的那个集数，不多不少** —— "
+                f"不是数剧本里有几章。"
+                f"剧本自带的章节编号只是参考："
+                f"章节比算出来的集数多就合并相邻章节，"
+                f"少就在剧情转折处再切开"
+                f"（新目标出现 / 新威胁 / 重要信息揭示 / 关系变化 / 完成一次反转）。\n"
+                f"每集的 duration_sec 填 {p['per']}。"
                 f"节奏速度：{_zh_of('pacing', v)}。")
     rows = []
     if p["total"]:

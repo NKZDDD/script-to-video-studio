@@ -994,6 +994,37 @@ def api_get(path: str, q: dict) -> dict:
     raise ValueError(f"未知 GET 路由: {path}")
 
 
+def _free_text_history(cfg: dict, key: str, seeds: list) -> list:
+    """某个自由文本字段「以前都填过什么」—— 扫所有项目的 settings。
+
+    不另存一份历史文件：历史就是各项目真实用过的值，项目删了
+    历史自然消掉，不会攒出一份和真值对不上的清单。
+    最近动过的项目排在前面；seeds 兜底（全新安装一次历史都没有时，
+    下拉框也不是空的）。
+    """
+    vals: dict = {}
+    base = cfg.get("projects_dir") or ""
+    if base and os.path.isdir(base):
+        for name in os.listdir(base):
+            root = os.path.join(base, name)
+            if not os.path.isdir(root):
+                continue
+            try:
+                s = ((Project(root).meta() or {}).get("settings") or {})
+                v = str(s.get(key) or "").strip()
+                if not v:
+                    continue
+                mtime = os.path.getmtime(root)
+                vals[v] = max(vals.get(v, 0), mtime)
+            except Exception:
+                continue          # 一个坏目录不该让设置页打不开
+    out = sorted(vals, key=lambda v: -vals[v])
+    for s in seeds or []:
+        if s not in out:
+            out.append(s)
+    return out[:12]
+
+
 def api_post(path: str, body: dict) -> dict:
     cfg = load_config()
 
@@ -1425,7 +1456,11 @@ def api_post(path: str, body: dict) -> dict:
                 if f["source"] == "params"
                 else derived.get(f["key"], "")),
                 # 「这个设定影响哪几个环节」是**扫模板得出的**，不是手写表
-                used_by=used.get(ST.placeholder_of(f["key"])) or [])
+                used_by=used.get(ST.placeholder_of(f["key"])) or [],
+                # suggest 字段带历史下拉：以前填过的值，见 _free_text_history
+                history=_free_text_history(
+                    cfg, f["key"], f.get("seeds"))
+                if f.get("suggest") and f["source"] == "settings" else [])
                 for f in ST.FIELDS],
             "groups": list(dict.fromkeys(f["group"] for f in ST.FIELDS)),
         }

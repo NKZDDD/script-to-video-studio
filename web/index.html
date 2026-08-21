@@ -1497,9 +1497,18 @@ async function renderBrief() {
         `<option value="${esc(o)}"${String(o) === String(val(f)) ? ' selected' : ''}
          >${esc(o)}${(f.zh || {})[o] ? '（' + esc(f.zh[o]) + '）' : ''}</option>`).join('')
         + '</select>';
-    else
-      ctl = `<input${dk}${ro} type="${f.type === 'int' ? 'number' : 'text'}"
-             value="${esc(String(val(f)))}" placeholder="${esc(f.hint || '')}">`;
+    else {
+      // 自由文本 + 历史下拉（datalist）：能自由输入，聚焦/输入时
+      // 下拉列出以前用过的值。后端给哪些字段带 history 是 schema 说了算
+      //（见 /api/project/settings），页面不自己维护名单。
+      const hist = (f.history || []);
+      const listAttr = hist.length ? ` list="hist_${esc(f.key)}"` : '';
+      ctl = `<input${dk}${ro} type="${f.type === 'int' ? 'number' : 'text'}"${listAttr}
+             value="${esc(String(val(f)))}" placeholder="${esc(f.hint || '')}">`
+          + (hist.length ? `<datalist id="hist_${esc(f.key)}">`
+            + hist.map(v => `<option value="${esc(v)}"></option>`).join('')
+            + '</datalist>' : '');
+    }
     // ★ 「影响哪几个环节」是扫模板得出的。空 = 填了也没人看，必须标出来，
     //   否则人会以为填了就生效。
     const uses = (f.used_by || []).length

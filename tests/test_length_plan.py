@@ -290,5 +290,42 @@ class BasicKeysTests(unittest.TestCase):
         n = sum(1 for f in S.FIELDS if S.tier_of(f["key"]) == "basic")
         self.assertLessEqual(n, 24, f"默认展开 {n} 项，又开始堆了")
 
+class PerOnlyTests(unittest.TestCase):
+    """★ 只填每集秒数 —— 集数由环节1 看完剧本后估总时长反推。
+
+    用户原话：「40 集的剧本就会因为我锁定60秒变成21集了，
+    因为我总时长在拿到剧本的时候我是无法判断的但是我想要的每集秒数是可以知道的」
+    """
+
+    def test_per_only_flag_is_set(self):
+        p = _plan(episode_seconds=60)
+        self.assertTrue(p["per_only"])
+
+    def test_per_only_flag_is_not_set_when_total_given(self):
+        p = _plan(total_seconds=3600, episode_seconds=60)
+        self.assertFalse(p.get("per_only"))
+
+    def test_per_only_flag_is_not_set_when_nothing_given(self):
+        p = _plan()
+        self.assertFalse(p.get("per_only"))
+
+    def test_text_tells_stage_one_to_estimate_total(self):
+        t = _text(episode_seconds=60)
+        self.assertIn("集数由你算", t)
+        self.assertIn("估这部剧总该多长", t)
+
+    def test_text_tells_stage_one_to_compute_count(self):
+        t = _text(episode_seconds=60)
+        self.assertIn("round(你估的总时长 ÷ 60)", t)
+
+    def test_text_says_not_to_count_chapters(self):
+        t = _text(episode_seconds=60)
+        self.assertIn("不是数剧本里有几章", t)
+
+    def test_text_says_each_episode_is_per_seconds(self):
+        t = _text(episode_seconds=60)
+        self.assertIn("duration_sec 填 60", t)
+
+
 if __name__ == "__main__":
     unittest.main()
