@@ -949,6 +949,15 @@ def api_post(path: str, body: dict) -> dict:
                         pj=Project(root) if root else None,
                         scope=body.get("scope", "global"))
 
+    if path == "/api/prompts/upgrade":
+        """把缺失的必需占位符补回这份改写里 —— **只提议，不保存。**
+
+        提议而不直接存：这份东西是用户手写的，程序不该替他按保存。
+        他看过差异再决定，和「看差异」「恢复继承」是同一层的操作。
+        """
+        from core import prompts as _pt
+        return {"ok": True, **_pt.upgrade(body["name"], body.get("text", ""))}
+
     if path == "/api/prompts/reset":
         from core import prompts as _pt
         root = str(body.get("project_root") or "")

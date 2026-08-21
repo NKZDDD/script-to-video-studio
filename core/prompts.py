@@ -35,8 +35,53 @@ REQUIRED_VARS = {
     "s6_binding": ["EPISODE", "SEGMENTS", "STATES", "ASSETS"],
     "s7_shots": ["EPISODE", "SEGMENTS", "STATES", "BINDINGS"],
     "s8_compile": ["EPISODE", "SEGMENTS", "STATES", "ASSETS", "BINDINGS", "SHOTS"],
-    "_common": [],
+    # **这三个以前是空的，那是个洞。**
+    #
+    # 它们各自承载一整组设置：程序按取值生成一句话，塞进这个位置。
+    # 占位符被删掉（或者改写是基于「那时候还写死一句话」的旧版内置做的），
+    # 那一组设置生成的句子就**没有位置可去，静静地被丢掉**——
+    # 页面上照旧显示着那几个下拉，存了、显示着，就是一个字都进不了提示词。
+    #
+    # 用户实遇：全局 `_common.md` 改写里第 10 条是写死的
+    # 「画面内禁止出现字幕」，第 11/12/13 是手写的「3D漫剧风格」
+    # 「无需剧内对话全部改为画外音」「男女主颜值」—— 三个占位符一个都不在。
+    # 于是字幕、旁白、媒介三组设置对他的每一个项目都完全无效，
+    # 而他手写的第 11、12 条正好在替代后两个 —— 他多半是**发现设置不管用
+    # 才手写的**，或者反过来，手写之后就再没发现设置被架空。
+    "_common": ["SUBTITLE_RULE", "NARRATION_RULE", "MEDIUM_RULE"],
 }
+
+# 占位符 → 它承载的是哪一组设置。用来把「缺了 {{X}}」翻译成人话
+# 「**字幕**那一组设置现在一个字都进不了提示词」。
+#
+# 只说「占位符不见了」没用：读的人不知道 SUBTITLE_RULE 是什么，
+# 也就不知道自己刚才在设置页填的东西白填了。
+VAR_GROUPS = {
+    "SUBTITLE_RULE": "字幕（画面里要不要字幕、字幕语言）",
+    "NARRATION_RULE": "旁白 / 画外音（有没有、什么形式、谁的声音、要不要动嘴）",
+    "MEDIUM_RULE": "拍成真人还是 3D（视觉媒介与风格）",
+    "PARAMS": "生产参数（单段秒数、画幅、图片尺寸）",
+    "SCRIPT": "剧本正文",
+    # 下面这些是**上一环节的产物**。删了同样不报错，只是那一环节收不到
+    # 它该看的东西，然后自己编一份 —— 编出来的和剧情没关系。
+    "EPISODE": "本集编号（这一环节只处理哪一集）",
+    "GLOBAL": "环节1 的全局设定产物",
+    "SEGMENTS": "环节2 划出来的段落表",
+    "SEGMENTS_TARGET": "这一集预计切几段",
+    "STATES": "环节3 的段落状态时间线",
+    "ASSETS": "环节4 的资产表",
+    "ASSET_CATALOG": "已有资产清单（跨集复用靠它）",
+    "KNOWN_ASSETS": "已登记的资产编号（防止同一个角色出两份定义）",
+    "KNOWN_SPACES": "已登记的空间编号",
+    "BINDINGS": "环节6 的资产-段落绑定",
+    "SHOTS": "环节7 的镜头表",
+    "TONE": "这部剧的整体调性",
+}
+
+
+def groups_of(missing: list) -> list:
+    """缺了这几个占位符 = 哪几组设置现在不生效。认不出的原样返回。"""
+    return [VAR_GROUPS.get(v, v) for v in missing]
 
 
 def required_vars(name: str) -> list:
@@ -205,6 +250,96 @@ def _stale(name: str, L: dict, pj=None) -> str:
     return ""
 
 
+# 旧版内置里写死过、现在已经改成占位符的那几句。**认出来是为了替换掉它**，
+# 而不是在它旁边再加一条 —— 两条并存就是「散文和生成出来的句子互相矛盾」，
+# 正是这一整套占位符要解决的问题。
+#
+# 只认**判词**，不认整句：用户多半在原句上又改过几个字。
+_OLD_HARDCODED = {
+    "SUBTITLE_RULE": re.compile(r"画面内(禁止|不(允许|得))出现.*(文字|字幕)"),
+    "NARRATION_RULE": re.compile(r"^\s*\d+\.\s*.{0,12}(旁白|画外音)"),
+    "MEDIUM_RULE": re.compile(r"^\s*\d+\.\s*.{0,12}(真人|3D|漫剧|二维动画|视觉风格)"),
+}
+
+# 编号列表那一行：`10. 内容`
+_NUMBERED = re.compile(r"^(\s*)(\d+)\.\s*(.*)$")
+
+
+def voided(name: str, text: str) -> list:
+    """这份模板里缺了哪几个必需占位符 —— 用**设置组的名字**说。
+
+    「缺了 {{SUBTITLE_RULE}}」对读的人没有意义；
+    「**字幕**那一组设置现在一个字都进不了提示词」才有意义。
+
+    这一条比 `_stale` 更硬：`_stale` 说的是「内置更新过、新改动不生效」，
+    读的人会想「那我少几条新规则，无所谓」。而这里说的是
+    **你在设置页填的东西白填了** —— 完全不是一件事。
+    """
+    have = set(re.findall(r"\{\{(\w+)\}\}", text or ""))
+    return [v for v in required_vars(name) if v not in have]
+
+
+def upgrade(name: str, text: str) -> dict:
+    """把缺失的必需占位符补回这份改写里。返回 {text, changes}。
+
+    **只提议，不保存。** 调用方把结果放进编辑框，人看过差异再决定存不存 ——
+    这份东西是他手写的，程序不该替他按下保存。
+
+    两步，都刻意保守：
+
+      ① 能认出「这一行就是旧版写死的那句」→ 原地换成占位符（保留行号）。
+         不认出来就不动它。
+      ② 还缺的 → 在编号列表末尾补一行，编号接着排。
+
+    **不重排编号，不移动任何现有行。** 想「放回原来的位置」就得猜他的编号
+    和内置的编号怎么对应，猜错了会把他自己写的规则挪走或覆盖掉。
+    补在末尾看着不如原位整齐，但不会动他的东西 —— 而占位符在第几条不影响效果。
+    """
+    miss = voided(name, text)
+    if not miss:
+        return {"text": text, "changes": []}
+
+    lines = (text or "").splitlines()
+    changes = []
+
+    # ① 原地替换认得出的旧写死行
+    still = []
+    for v in miss:
+        pat = _OLD_HARDCODED.get(v)
+        hit = -1
+        if pat is not None:
+            for i, ln in enumerate(lines):
+                if pat.search(ln):
+                    hit = i
+                    break
+        if hit < 0:
+            still.append(v)
+            continue
+        m = _NUMBERED.match(lines[hit])
+        keep = f"{m.group(1)}{m.group(2)}. " if m else ""
+        changes.append(f"第 {hit + 1} 行原来写死的「{lines[hit].strip()[:40]}」"
+                       f"换成了 {{{{{v}}}}}（{VAR_GROUPS.get(v, v)}）")
+        lines[hit] = f"{keep}{{{{{v}}}}}"
+
+    # ② 剩下的补在编号列表末尾
+    if still:
+        last, num = -1, 0
+        for i, ln in enumerate(lines):
+            m = _NUMBERED.match(ln)
+            if m:
+                last, num = i, int(m.group(2))
+        add = [f"{num + k}. {{{{{v}}}}}" for k, v in enumerate(still, 1)]
+        if last < 0:
+            lines = lines + [""] + add          # 没有编号列表，接在最后
+        else:
+            lines = lines[:last + 1] + add + lines[last + 1:]
+        for v in still:
+            changes.append(f"补了一条 {{{{{v}}}}}（{VAR_GROUPS.get(v, v)}）"
+                           f"—— 接在编号列表末尾，没有动你现有的任何一行")
+
+    return {"text": "\n".join(lines), "changes": changes}
+
+
 def _same(a: str, b: str) -> bool:
     """两个路径指的是不是同一个文件。Windows 上不区分大小写。"""
     if not a or not b:
@@ -252,6 +387,12 @@ def catalog(pj=None) -> list:
             "required_vars": required_vars(name),
             "required_fields": req,
             "stale": _stale(name, L, pj),
+            # 缺了哪几组设置。**比 stale 更要紧**：stale 说的是
+            # 「新规则不生效」，这一条说的是「你在设置页填的东西白填了」。
+            # catalog() 里这一份文本叫 cur，不叫 text —— 两处的变量名不一样，
+            # 一起替换就会在这儿留一个 NameError（只有真跑到才炸）。
+            "voided": groups_of(voided(name, cur)),
+            "can_upgrade": bool(voided(name, cur)),
             **L,
         })
     out.sort(key=lambda x: (x["system"] or "zz", x["stage_no"] or 99, x["name"]))
@@ -286,6 +427,10 @@ def read(name: str, pj=None, scope: str = "") -> dict:
             "required_vars": required_vars(name),
             "required_fields": req,
             "stale": _stale(name, L, pj),
+            # 缺了哪几组设置。**比 stale 更要紧**：stale 说的是
+            # 「新规则不生效」，这一条说的是「你在设置页填的东西白填了」。
+            "voided": groups_of(voided(name, text)),
+            "can_upgrade": bool(voided(name, text)),
             "vars": sorted(set(re.findall(r"\{\{(\w+)\}\}", text))),
             **L}
 
@@ -312,7 +457,9 @@ def check(name: str, text: str) -> dict:
     if missing:
         errors.append(
             "少了必需的占位符 " + "、".join(f"{{{{{v}}}}}" for v in missing)
-            + " —— 这些是程序往模板里填数据的口子，删了模型就收不到对应的输入")
+            + " —— 它们是程序往模板里填数据的口子。删了之后**这几组设置在"
+              "页面上照旧显示、存得下、就是一个字都进不了提示词**："
+            + "；".join(groups_of(missing)))
 
     dropped = sorted(orig - have - set(missing))
     if dropped:

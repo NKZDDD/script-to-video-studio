@@ -2931,6 +2931,26 @@ function makePromptEditor(host, scope) {
     await E.open($$$('sel').value);
   };
 
+  // 按钮随 state 一起重画，所以**每次 open 完都要重挂**。
+  // 写在工厂体里挂一次是错的：那时候按钮还不存在（$$$('upg') 是 null），
+  // 于是点它没反应 —— 又是一个「不报错、只是不生效」。
+  const wireUpgrade = () => {
+    const upg = $$$('upg');
+    if (!upg) return;
+    upg.onclick = async () => {
+    const r = await api.post('/api/prompts/upgrade',
+                             {name: E.cur.name, text: $$$('text').value});
+    if (r.error) return alert(r.error);
+    if (!(r.changes || []).length)
+      return $$$('msg').innerHTML = '<div class="alert warn">没有需要补的。</div>';
+    $$$('text').value = r.text;
+    $$$('msg').innerHTML = '<div class="alert warn"><b>已经放进编辑框，还没保存。</b>'
+      + '<ul style="margin:6px 0 0 18px;line-height:1.8">'
+      + r.changes.map(x => '<li>' + esc(x) + '</li>').join('')
+      + '</ul><div style="margin-top:6px">点「看差异」核对一遍，'
+      + '满意再点「保存」。不满意直接切一下模板下拉就回到原样。</div></div>';
+    };
+  };
   E.open = async name => {
     E.cur = await api.get('/api/prompts', {name, ...args()});
     const c = E.cur;
@@ -2946,6 +2966,22 @@ function makePromptEditor(host, scope) {
       `<span class="chip ${c.effective === 'builtin' ? '' : 'on'}">当前生效：${eff}</span>`
       + `<span class="muted" style="margin-left:6px">${chain}</span>`
       + (c.stale ? `<div class="alert err" style="margin-top:8px">⚠ ${esc(c.stale)}</div>` : '')
+      // **点名到组。** stale 那条说的是「新规则不生效」，读的人会想
+      // 「少几条新规则，无所谓」；而这一条说的是**你在设置页填的东西白填了**,
+      // 完全不是一件事。用户实遇：全局 _common.md 缺了三个占位符，
+      // 字幕/旁白/媒介三组设置对他每一个项目都一个字都没进过提示词。
+      + (c.voided && c.voided.length
+         ? `<div class="alert err" style="margin-top:8px">
+              ⚠ <b>这几组设置现在一个字都进不了提示词</b>（页面上照旧显示、存得下、就是没人读）：
+              <ul style="margin:6px 0 0 18px;line-height:1.8">${
+                c.voided.map(x => '<li>' + esc(x) + '</li>').join('')}</ul>
+              <div style="margin-top:6px">这份改写里少了它们的占位符 —— 多半是基于旧版内置改的，
+                那时候这几条还是写死的一句话。</div>
+              <div class="row" style="margin-top:6px">
+                <button class="btn sm" id="${id('upg')}">补回占位符</button>
+                <span class="muted">只往编辑框里放一版，存不存你自己定</span>
+              </div></div>`
+         : '')
       // 「这一份管什么」。三份下划线模板以前在下拉里叫同一个名字，
       // 挑错一份去改，保存成功、标「已改写」，然后画面照旧 ——
       // 改错的那份根本不参与出图出片，而没有任何一处说过这件事。
@@ -2960,6 +2996,7 @@ function makePromptEditor(host, scope) {
       + `<br><span class="muted">这一层存到：${esc(
           scope === 'project' ? c.project_path : c.global_path)}</span>`;
     $$$('msg').innerHTML = '';
+    wireUpgrade();
   };
 
   const show = r => {
@@ -2970,6 +3007,11 @@ function makePromptEditor(host, scope) {
   };
 
   $$$('sel').onchange = e => E.open(e.target.value).catch(er => alert(String(er)));
+  // 「补回占位符」。**只往编辑框里放一版，不保存** —— 这份东西是他手写的，
+  // 程序不该替他按保存。放完就地列出改了哪几行，他可以「看差异」再决定。
+  //
+  // 按钮是随 state 一起重画的，所以每次 open 之后重新挂 —— 挂在 E.open
+  // 末尾（这里）而不是用委托，是因为它只有一个、生命周期跟着编辑器。
   $$$('save').onclick = async () => {
     const text = $$$('text').value, name = E.cur.name;
     const body = {name, text, scope, project_root: scope === 'project' ? PROJ : ''};
