@@ -228,6 +228,12 @@ def list_capabilities() -> list:
             # 那一把，然后 4K 被静默降级成 1K —— 图在、不报错、只是不对。
             cap.setdefault("key_fields",
                            [list(g) for g in getattr(cls, "key_fields", ())])
+            # 账号表单同理：不下发页面就画不出来，改了后端等于没改。
+            af = dict(getattr(cls, "account_form", {}) or {})
+            for k in ("shared", "per"):
+                if k in af:
+                    af[k] = [list(x) for x in af[k]]
+            cap.setdefault("account_form", af)
             out.append(cap)
         except Exception as exc:                     # noqa: BLE001
             out.append({"id": pid, "name": getattr(cls, "name", pid),

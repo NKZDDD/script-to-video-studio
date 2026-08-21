@@ -251,6 +251,111 @@ def _provider_api_key(provider_id: str, provider_cfg: dict, capability: str,
     return str((provider_cfg or {}).get(field or "api_key") or "").strip()
 
 
+def _account_form(provider_id: str) -> dict:
+    """这一家的账号表单长什么样。没声明就返回空（页面回落成大文本框）。"""
+    try:
+        from core import providers as _P
+        cls = _P.REGISTRY.get(_P.resolve_id(provider_id or ""))
+        return dict(getattr(cls, "account_form", {}) or {})
+    except Exception:                                       # noqa: BLE001
+        return {}
+
+
+def _split_account_lines(api_key: str) -> tuple:
+    """把存下来的那段文本还原成 (共用项, 每个账号的项)。
+
+    还原是为了**回显**：不还原的话表单每次打开都是空的，人只能整批重填 ——
+    而重填的时候最容易漏掉某一项，然后又是「凭据不全」。
+
+    判据和 `accounts.parse_accounts` 一致：像账号开头的行是账号，
+    其余的是共用项。两边用同一个正则，不另写一份。
+    """
+    from core import accounts as _acct
+    raw = str(api_key or "").strip()
+    if not raw or raw.startswith(("{", "[")):
+        return {}, []                   # JSON 那种老写法不拆，交给下面兜底
+    shared, rows = {}, []
+
+    def _kv(line):
+        out = {}
+        for part in re.split(r"[;\n]+", line):
+            if "=" in part:
+                k, _, v = part.partition("=")
+                out[k.strip()] = v.strip()
+        return out
+
+    for ln in [x.strip() for x in raw.splitlines() if x.strip()]:
+        (rows.append(_kv(ln)) if _acct._HEAD.match(ln) else shared.update(_kv(ln)))
+    return shared, rows
+
+
+def _mask_form(provider_id: str, api_key: str) -> dict:
+    """给页面的账号表单数据。**密钥项只回传「有没有」，不回传值。**
+
+    非密钥项（deviceId、webdav 地址、用户名）原样回传 —— 用户答的是
+    「非密钥项回显，密钥项打码」。看得出有哪几个账号、哪一个填错了，
+    而密钥不进浏览器（截图、录屏、浏览器插件都看得到）。
+    """
+    form = _account_form(provider_id)
+    if not form:
+        return {}
+    shared, rows = _split_account_lines(api_key)
+    secret = {f[0] for grp in ("shared", "per")
+              for f in (form.get(grp) or ()) if len(f) > 2 and f[2]}
+
+    def show(d):
+        out = {}
+        for k, v in (d or {}).items():
+            out[k] = ("" if k in secret else v)
+            if k in secret and v:
+                out[k + "__set"] = True
+        return out
+    return {"shared": show(shared), "accounts": [show(r) for r in rows]}
+
+
+def _build_account_key(provider_id: str, payload: dict, saved: str) -> str:
+    """表单 → 存下来的那段文本。**每一项各自「留空 = 不改」。**
+
+    留空不改是必须的：密钥项回显的是空的（见 `_mask_form`），
+    不按项合并的话，用户改一个 deviceId 就会把所有 token 清掉 ——
+    而清掉之后报的是「凭据不全」，看不出是自己点了一下保存造成的。
+
+    共用项写在**前面**，账号自己那一行写在后面 —— 服务商解凭据是
+    「后面的覆盖前面的」，顺序决定了「单个账号可以覆盖共用项」。
+    """
+    form = _account_form(provider_id)
+    if not form:
+        return ""
+    old_shared, old_rows = _split_account_lines(saved)
+    keys_shared = [f[0] for f in (form.get("shared") or ())]
+    keys_per = [f[0] for f in (form.get("per") or ())]
+
+    def merge(new, old, keys):
+        out = {}
+        for k in keys:
+            v = str((new or {}).get(k) or "").strip()
+            if not v or "…" in v or "•" in v:
+                v = str((old or {}).get(k) or "").strip()
+            if v:
+                out[k] = v
+        return out
+
+    shared = merge(payload.get("shared"), old_shared, keys_shared)
+    rows = []
+    for i, row in enumerate(payload.get("accounts") or []):
+        old = old_rows[i] if i < len(old_rows) else {}
+        got = merge(row, old, keys_per)
+        # deviceId 是这一行的身份。没有它这一行不算账号 ——
+        # 留着会变成一堆共用项，把别的账号的值盖掉。
+        if got.get(keys_per[0] if keys_per else ""):
+            rows.append(got)
+    if not rows:
+        return ""
+    lines = [f"{k}={v}" for k, v in shared.items()]
+    lines += [";".join(f"{k}={v}" for k, v in r.items()) for r in rows]
+    return "\n".join(lines)
+
+
 def _key_fields(provider_id: str) -> tuple:
     """这一家的 Key 分几把各自填。取不到就当不分 —— 照旧一个框。"""
     try:
@@ -686,6 +791,13 @@ def api_get(path: str, q: dict) -> dict:
                                           # 保存一次就看不见了，等于填了个黑洞。
                                           "durations") if f in v}
                     for k, v in (cfg.get("providers") or {}).items()},
+                # 账号表单的当前值。**密钥项只回「有没有」，不回值** ——
+                # 见 _mask_form。不回显的话表单每次打开都是空的，
+                # 人只能整批重填，而重填最容易漏一项然后又「凭据不全」。
+                "provider_accounts": {
+                    pid: _mask_form(pid, (v or {}).get("api_key", ""))
+                    for pid, v in (cfg.get("providers") or {}).items()
+                    if _account_form(pid)},
                 "capabilities": list_capabilities(),
                 # 两套体系的环节表都下发，前端按项目的 system 挑一套显示。
                 # 不在这里挑：切项目不用重新拉一遍 bootstrap。
@@ -913,6 +1025,16 @@ def api_post(path: str, body: dict) -> dict:
                     # 分组 Key（坤鸡的 1K/4K/high）先按组合并成一个 api_key，
                     # 再走下面那道「留空 = 不改」—— 顺序不能反：反了的话
                     # 合并出来的 api_key 会被当成「这次没填」而丢掉。
+                    # 账号表单（一个账号一张卡）先合成那段 api_key 文本。
+                    # 放在最前面：后面那道「留空 = 不改」是按字段名过滤的，
+                    # 而表单送的是嵌套结构，过滤不到它。
+                    if isinstance(pv.get("account_form"), dict):
+                        merged = _build_account_key(
+                            pid, pv.pop("account_form"),
+                            ((cur.get("providers") or {}).get(pid)
+                             or {}).get("api_key", ""))
+                        if merged:
+                            pv["api_key"] = merged
                     pv = _merge_group_keys(pid, dict(pv),
                                            (cur.get("providers") or {}).get(pid) or {})
                     pv = {kk: vv for kk, vv in pv.items()

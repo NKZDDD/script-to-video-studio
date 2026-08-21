@@ -116,6 +116,29 @@ class HvtaldProvider(Provider):
     # 只会排队超时或者直接拒，而失败记录里只看得到「生成失败」。
     per_account_serial = True
 
+    # 账号表单。键名和上面 `_ALIAS` 认的一致 —— 不一致就是「填了读不到」。
+    #
+    # 共用/各自的分法按客服实际给凭据的形状来：deviceId + token 一个账号一份，
+    # webdav 那三项通常整批共用（写一次）。单个账号要用别的存储时可以覆盖。
+    account_form = {
+        "shared_label": "共用存储（WebDAV，填一次给所有账号用）",
+        "shared": (
+            ("webdav", "WebDAV 地址", False,
+             "客服给的那个 https 地址，成片会传到这里（**只保存 48 小时**）"),
+            ("user", "WebDAV 用户名", False, ""),
+            ("password", "WebDAV 密码", True, ""),
+        ),
+        "per_label": "账号（一个账号同时只能跑一条，配几个就是几路并发）",
+        "per": (
+            ("deviceId", "deviceId / 设备号", False, "客服给的那一串"),
+            ("token", "token", True, ""),
+            ("webdav", "这个账号单独用的 WebDAV 地址", False,
+             "留空 = 用上面共用的那个"),
+            ("user", "单独的用户名", False, "留空 = 用共用的"),
+            ("password", "单独的密码", True, "留空 = 用共用的"),
+        ),
+    }
+
     def __init__(self, api_key: str = "", base_url: str = "", proxy: str = "",
                  timeout: int = 900):
         super().__init__(api_key=api_key, base_url=base_url, proxy=proxy, timeout=timeout)

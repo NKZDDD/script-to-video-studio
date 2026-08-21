@@ -2335,6 +2335,71 @@ $('#doAssemble').onclick = async () => {
 };
 
 // ---------- 设置
+// 账号表单。服务商声明「共用哪几项、每个账号哪几项」，这里照着画 ——
+// 页面不维护第二份字段表（维护两份就要同步，漏一处就是「填了没生效」）。
+//
+// 密钥项回显的是空的（后端 _mask_form 不回传值），所以每个框都是
+// **留空 = 不改**；已经存过的那几个显示「已保存，留空不改」。
+function acctField(pid, scope, idx, f, val, isSet) {
+  const [key, label, secret, why] = f;
+  const name = scope === 'shared' ? `s.${key}` : `a.${idx}.${key}`;
+  return `<div><label>${esc(label)}${why ? ' <span class="muted">'
+    + mdBold(why) + '</span>' : ''}</label>
+    <input data-af="${pid}" data-af-name="${name}" type="${secret ? 'password' : 'text'}"
+      value="${secret ? '' : esc(val || '')}"
+      placeholder="${isSet ? '已保存，留空不改' : (secret ? '粘贴' : '')}"></div>`;
+}
+function acctCard(c, i, row) {
+  const per = c.account_form.per || [];
+  const key0 = (per[0] || [])[0];
+  const named = (row || {})[key0] || `账号 ${i + 1}`;
+  // 覆盖项（第 3 项起）折起来 —— 大多数人不用填，铺开只会让人以为必填。
+  const main = per.slice(0, 2), more = per.slice(2);
+  return `<div class="segrow" data-acct="${c.id}" style="margin-top:6px">
+    <div class="hd"><b style="font-size:12px">${esc(named)}</b>
+      <span><button class="btn ghost sm" data-acct-del="${i}">删掉这个账号</button></span></div>
+    <div class="bd" style="padding:8px">
+      <div class="grid g2">${main.map(f =>
+        acctField(c.id, 'per', i, f, (row || {})[f[0]], (row || {})[f[0] + '__set'])).join('')}</div>
+      ${more.length ? `<details style="margin-top:6px"><summary class="muted">
+        这个账号用不一样的存储（不填就用上面共用的）</summary>
+        <div class="grid g2" style="margin-top:6px">${more.map(f =>
+          acctField(c.id, 'per', i, f, (row || {})[f[0]], (row || {})[f[0] + '__set'])).join('')}</div>
+      </details>` : ''}
+    </div></div>`;
+}
+function accountForm(c, cur) {
+  const af = c.account_form, rows = (cur.accounts || []);
+  const list = rows.length ? rows : [{}];      // 一张空卡，别让人先找「添加」
+  return `<div style="grid-column:1/-1">
+    ${(af.shared || []).length ? `<label>${esc(af.shared_label || '共用项')}</label>
+      <div class="grid g3">${(af.shared || []).map(f =>
+        acctField(c.id, 'shared', 0, f, (cur.shared || {})[f[0]],
+                  (cur.shared || {})[f[0] + '__set'])).join('')}</div>` : ''}
+    <label style="margin-top:10px">${esc(af.per_label || '账号')}
+      <span class="muted">配几个就是几路并发</span></label>
+    <div id="acctList_${c.id}">${list.map((r, i) => acctCard(c, i, r)).join('')}</div>
+    <div class="row" style="margin-top:6px">
+      <button class="btn ghost sm" data-acct-add="${c.id}">+ 添加账号</button>
+      <span class="muted" id="acctBox_${c.id}">加载中…</span>
+    </div></div>`;
+}
+// 表单 → 嵌套结构。**空的也要送**：后端按项合并（留空 = 用已存的），
+// 不送的话「这一项被清掉了」和「这一项没动」就分不出来。
+function collectAccounts(pid) {
+  const out = {shared: {}, accounts: []};
+  $$(`[data-af="${pid}"]`).forEach(i => {
+    const n = i.dataset.afName || '';
+    if (n.startsWith('s.')) { out.shared[n.slice(2)] = i.value; return; }
+    const m = n.match(/^a\.(\d+)\.(.+)$/);
+    if (!m) return;
+    const k = +m[1];
+    while (out.accounts.length <= k) out.accounts.push({});
+    out.accounts[k][m[2]] = i.value;
+  });
+  return out;
+}
+
 function renderProviders() {
   $('#provBox').innerHTML = BOOT.capabilities.map(c => {
     const split = c.id === 'chaomo';
@@ -2356,7 +2421,14 @@ function renderProviders() {
     // 按账号计费、一个账号只能同时跑一条的家（HVTALD）：多账号粘贴框。
     // 密码框只能放一行，粘不进第二个账号 —— 而这一家**并发上限就是账号数**，
     // 只能配一个账号的话它永远是串行的，而且看不出为什么慢。
-    const keyBoxes = c.per_account_serial
+    // 声明了账号表单的家（HVTALD）：一个账号一张卡，每个框写清填什么。
+    //
+    // 以前是一个大文本框，让人把客服发的那段话粘进去。三个问题都真实发生过：
+    // 不知道要填哪几项（跑起来报「缺 webdav_url」才知道）、不知道怎么分隔、
+    // 共用字段只写一次会在拆分时丢掉（三条任务同一秒全失败就是这个）。
+    const keyBoxes = (c.account_form && (c.account_form.per || []).length)
+      ? accountForm(c, (BOOT.provider_accounts || {})[c.id] || {})
+      : c.per_account_serial
       ? `<div style="grid-column:1/-1"><label>账号（一行一个，或用空行分段）
            <span class="muted">这一家按账号计费，**一个账号同时只能生成一条** ——
              想并发就多粘几个账号，并发上限 = 账号数</span></label>
@@ -2420,10 +2492,44 @@ function renderProviders() {
       if (!i.value) return;
       obj[i.dataset.f] = NUM.includes(i.dataset.f) ? +i.value : i.value;
     });
+    // 账号表单是嵌套结构，走单独一个字段（后端 _build_account_key 合成 api_key）
+    if ($(`[data-af="${id}"]`)) obj.account_form = collectAccounts(id);
     await api.post('/api/config', {providers: {[id]: obj}});
     BOOT = await api.get('/api/bootstrap'); renderProviders();
   });
-  BOOT.capabilities.filter(c => c.per_account_serial).forEach(c => loadAccounts(c.id));
+  // 添加/删除账号。**委托挂**：卡片是拼字符串重画的，直接 onclick 会失效。
+  $$('#provBox [data-acct-add]').forEach(b => b.onclick = () => {
+    const pid = b.dataset.acctAdd;
+    const c = BOOT.capabilities.find(x => x.id === pid);
+    const box = $('#acctList_' + pid);
+    const i = box.querySelectorAll('[data-acct]').length;
+    box.insertAdjacentHTML('beforeend', acctCard(c, i, {}));
+    wireAcctRows(pid);
+  });
+  BOOT.capabilities.filter(c => c.per_account_serial).forEach(c => {
+    wireAcctRows(c.id);
+    loadAccounts(c.id);
+  });
+}
+
+// 卡片上的「删掉这个账号」+ 展开/收起。每次重画都要重挂。
+//
+// 删掉之后**要重编号**：`data-af-name` 里带着序号，不重编的话收集时
+// 会在中间留一个空洞，而空洞会被后端当成一个没有 deviceId 的账号丢掉 ——
+// 表现是「删了第二个，第三个也没了」。
+function wireAcctRows(pid) {
+  const box = $('#acctList_' + pid);
+  if (!box) return;
+  box.querySelectorAll('.hd').forEach(el => el.onclick = ev => {
+    if (ev.target.dataset.acctDel === undefined) return;
+    ev.stopPropagation();
+    const c = BOOT.capabilities.find(x => x.id === pid);
+    const rows = collectAccounts(pid).accounts;
+    rows.splice(+ev.target.dataset.acctDel, 1);
+    box.innerHTML = (rows.length ? rows : [{}])
+      .map((r, i) => acctCard(c, i, r)).join('');
+    wireAcctRows(pid);
+  });
 }
 
 // 每个账号今天做了多少条。用户要看的就是「这一家一天能做多少」。

@@ -121,14 +121,36 @@ def parse_accounts(api_key: str) -> list:
     # 先按空行分段
     blocks = [b.strip() for b in re.split(r"\n\s*\n", raw) if b.strip()]
     out: list = []
+    shared: list = []          # 不属于任何一个账号的那几行 —— 见下
     for b in blocks:
         lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
         # 这一段里有几个「开头字段」？多于一个说明是「一行一个账号」。
         heads = [ln for ln in lines if _HEAD.match(ln)]
         if len(heads) > 1:
-            out.extend(lines)
+            # **只写了一次的共用字段要留下来。**
+            #
+            # 客服给凭据的常见写法是：每个账号一行 deviceId+token，
+            # 而 webdav / user / password 只写一次（那三项本来就是共用的）。
+            # 按行拆完之后每个账号只剩 deviceId+token —— 服务商那边
+            # `parse_creds` 是在**单个账号的文本**上跑的，webdav 那几项
+            # 一个都没有，于是每一条都在凭据检查那儿抛「凭据不全」。
+            #
+            # 用户实遇（2026-08-21）：三条任务同一秒起、同一秒失败，
+            # 而日志上只有「没见过的错误」—— 那句写清了缺哪几项的话
+            # 被日志层吞了（见 diagnose.one_line）。
+            out.extend(heads)
+            shared.extend(ln for ln in lines if ln not in heads)
         else:
             out.append("\n".join(lines))
+    if shared and len(out) > 1:
+        # **共用的排在前面，账号自己那一行排后面。**
+        #
+        # 服务商那边解凭据是「一路扫过去，后面的覆盖前面的」
+        # （`parse_creds` 里 `out[key] = v`）。所以顺序决定谁说话算数：
+        # 共用在后 → 它会盖掉某个账号自己填的 webdav；共用在前 → 账号能覆盖。
+        # 而「共用一份、单个账号可覆盖」是用户定的形状。
+        head = "\n".join(dict.fromkeys(shared)) + "\n"
+        out = [head + o for o in out]
     return [Account(t, _label(t, i)) for i, t in enumerate(out, 1) if t.strip()]
 
 

@@ -440,3 +440,92 @@ class GateLimitTests(unittest.TestCase):
             sem = g._sems.get("hvtald")
             g.set_provider_limit("hvtald", 2)
             self.assertIs(g._sems.get("hvtald"), sem)
+
+
+class SharedFieldTests(unittest.TestCase):
+    """只写了一次的共用字段，要发给每个账号。
+
+    用户实遇（2026-08-21，HVTALD「即梦国际版」）：三条任务同一秒起、
+    同一秒失败，日志上只有「没见过的错误（这条不再重试）」。
+
+    客服给凭据的常见写法是**每个账号一行 deviceId+token，而 webdav / user /
+    password 只写一次**（那三项本来就是共用的）。按行拆成三个账号之后，
+    每个账号只剩 deviceId+token —— 而服务商那边 `parse_creds` 是在
+    **单个账号的文本**上跑的，webdav 那几项一个都没有，于是三条全在
+    凭据检查那儿抛「凭据不全」。
+
+    看起来是「这家不能用」，实际是我们把共用字段丢了。
+    """
+
+    SERVICE_STYLE = ("deviceId=dev-aaa111;token=tok-a\n"
+                     "deviceId=dev-bbb222;token=tok-b\n"
+                     "deviceId=dev-ccc333;token=tok-c\n"
+                     "webdav=https://dav.example.com/vid\n"
+                     "user=myuser\n"
+                     "password=mypass")
+
+    def test_three_accounts_each_end_up_complete(self):
+        """★ 这就是那个 bug：拆完之后每个账号都缺 webdav。"""
+        from core.providers.hvtald import parse_creds
+        acs = A.parse_accounts(self.SERVICE_STYLE)
+        self.assertEqual(len(acs), 3)
+        for a in acs:
+            miss = [k for k, v in parse_creds(a.api_key).items() if not v]
+            self.assertEqual(miss, [], f"{a.label} 还缺 {miss}")
+
+    def test_each_account_keeps_its_own_token(self):
+        """★ 共用字段继承下去，**不能把各自的那几项也抹平**。"""
+        from core.providers.hvtald import parse_creds
+        got = {parse_creds(a.api_key)["token"]
+               for a in A.parse_accounts(self.SERVICE_STYLE)}
+        self.assertEqual(got, {"tok-a", "tok-b", "tok-c"})
+
+    def test_accounts_that_are_each_complete_are_untouched(self):
+        """★ 各自写全的那种写法不许被改坏 —— 那是本来就对的写法。"""
+        from core.providers.hvtald import parse_creds
+        txt = ("deviceId=dev-aaa1;token=t1;webdav=w1;user=u1;password=p1\n"
+               "deviceId=dev-bbb2;token=t2;webdav=w2;user=u2;password=p2")
+        got = [parse_creds(a.api_key)["webdav_url"]
+               for a in A.parse_accounts(txt)]
+        self.assertEqual(got, ["w1", "w2"], "各自的 webdav 被共用字段盖掉了")
+
+    def test_a_single_account_is_still_one(self):
+        self.assertEqual(
+            len(A.parse_accounts("deviceId=dev-x;token=t;webdav=w;"
+                               "user=u;password=p")), 1)
+
+    def test_shared_lines_are_not_mistaken_for_an_account(self):
+        """★ 共用那几行不许自己变成一个账号 —— 那个「账号」没有 deviceId。"""
+        labels = [a.label for a in A.parse_accounts(self.SERVICE_STYLE)]
+        self.assertEqual(len(labels), 3)
+        self.assertTrue(all(l.startswith("dev-") for l in labels), labels)
+
+
+class UnknownErrorLogTests(unittest.TestCase):
+    """认不出来的报错，日志那一行必须带上原文。"""
+
+    def test_an_unknown_error_shows_its_text(self):
+        """★ `UNKNOWN` 的 why 里写着「具体内容看下面的原始报错」——
+
+        而日志只打 title，于是生产日志上就三个字：「没见过的错误」。
+        HVTALD 那几处报错本来写得很清楚（缺哪个凭据、该去哪配对象存储），
+        一个字都没显示出来。
+        """
+        from core import diagnose as D
+        from core.apiutil import ApiError
+        d = D.build(ApiError("HVTALD 凭据不全，缺：webdav_url、password。",
+                             status=0, kind="task_fatal"),
+                    stage="video", target="EP01-SEG01")
+        self.assertEqual(d["code"], "UNKNOWN")
+        line = D.one_line(d)
+        self.assertIn("凭据不全", line)
+        self.assertIn("webdav_url", line)
+
+    def test_a_recognized_error_does_not_get_the_raw_glued_on(self):
+        """★ 认出来的那些，title 本身就说清了 —— 再贴原文只会把日志刷满。"""
+        from core import diagnose as D
+        from core.apiutil import ApiError
+        d = D.build(ApiError("HTTP 429 rate limited", status=429),
+                    stage="video", target="X")
+        self.assertNotEqual(d["code"], "UNKNOWN")
+        self.assertNotIn("rate limited", D.one_line(d))
