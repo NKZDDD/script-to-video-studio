@@ -12,8 +12,10 @@
 
 并发：集与集之间除了环节4 没有依赖，所以逐集环节按集并行跑；环节8 内部段与段
 也没有依赖，段之间再并行一层。环节4 例外 —— 它要沿用前面几集已建好的资产编号，
-必须按集号排队，否则两集会各自给同一个新对象编号。**并发只改调度，产物和串行
-跑逐字一致。**
+必须按集号排队，否则两集会各自给同一个新对象编号。出图出片不再是「全部集分析
+完才开始」：三个泵和逐集分析**同时**跑，tasks.json 增量装配（每集环节5/8 落盘
+就重装），泵重扫捡新任务 —— EP01 分析完它的资产图就开始出，不等 EP21。
+**并发只改调度，产物和串行跑逐字一致。**
 
 出错策略是分层的，因为「继续跑」和「赶紧停」在不同情况下各是对的：
   · 余额不足 / 密钥失效  → 立刻停整条流水线。继续只是烧钱撞同一堵墙。
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
@@ -115,27 +118,104 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
     return steps
 
 
-def _produce_all(steps: list, do_step: Callable, job: Job) -> None:
-    """把出图出片那几步一起放出去跑。
+def _pump(pj, s: dict, run_chunk: Callable, llm_all_done: Callable,
+          should_stop: Callable, relay, log: Callable,
+          interval: float = 5.0) -> int:
+    """出图出片泵：和逐集分析**同时**跑，反复扫 tasks.json 捡新任务。
 
-    **顺序仍然有意义**：一条任务的输入没齐时它会在 run_batch 里等，
-    所以实际执行顺序还是「资产 → 故事板 → 视频」这个偏序，
-    只是不再要求**整批**齐了才动下一批。
+    原来这儿是一道整批闸：所有集的环节2-8 跑完（pool.map 屏障）才装配、
+    才声明、才派第一批出图。EP01 上午分析完，它的资产图也要等到 EP21
+    落盘才开始 —— 中间那段时间服务商的并发额度完全空转。
 
-    一步的调度炸了要说出来，不能吞 —— 业务失败 do_step 自己记了，
-    能冒到这里的是程序问题。（实际逮到过一次：run_chain 还没接 ready_of 参数，
-    四步全静默失败，只有这条日志看得出来。）
+    装配侧本来就是增量的（stages.py 里每集环节5/8 落盘就重装一遍
+    tasks.json），所以泵只要每 5 秒重扫一次，新任务自动到手。
+
+    两个写错**不报错**的语义（tests/test_pump.py 钉死了，改之前先看）：
+
+      · **finished 必须延迟** —— relay.finished() 只能等「分析全完 +
+        最终清空那轮没有新任务」才发。中间轮发了 = 假 finished，
+        等这批产物的任务会从「等」瞬间变「条件不具备」，成批误杀。
+
+      · **「没做成」不是终判** —— 一条任务这轮没做成（含「条件不具备，
+        没发请求」），等 relay 的声明清单**涨了版本**就重进一轮：
+        它缺的参考图很可能正是刚出生的那批。只有「做成了」（产物落盘，
+        _produce_todo 不再返回它）才永久除名。版本不涨就重试是白撞 ——
+        服务商拒绝的提示词 5 秒后再发一次还是被拒。
+
+    返回最终清空后还剩几条没做成（0 = 全部做成）；
+    中途停（取消/熔断）返回 -1，状态由调用方写。
     """
-    if len(steps) == 1:
-        do_step(steps[0])
-        return
-    with ThreadPoolExecutor(max_workers=len(steps)) as pool:
-        futs = {pool.submit(do_step, s): s for s in steps}
-        for f in futs:
-            try:
-                f.result()
-            except Exception as exc:                        # noqa: BLE001
-                job.log(futs[f]["label"], f"这一步的调度出错了：{exc}")
+    sent_at: dict = {}            # key → 发出那一轮的 relay 版本号
+    final_done = False            # 进没进最终清空轮
+    n_round = 0
+    task_key, only, batch = s["task_key"], s.get("only"), s["batch"]
+    while True:
+        if should_stop():
+            return -1
+        # 声明要每轮都做：别的泵声明的新产物也会让版本号涨，
+        # 而那正是本泵「没做成的」重进一轮的触发条件
+        relay.declare(batch, pj.tasks().get(task_key) or [])
+        v = relay.version
+        todo = _produce_todo(pj, task_key, only)
+        fresh = [t for t in todo
+                 if t["key"] not in sent_at or sent_at[t["key"]] < v]
+        if not final_done and llm_all_done():
+            # 最终清空轮：分析全完、清单定死。没做成的全部再给一轮完整
+            # 预算（等于用户再点一次「开始」），跑完就收摊
+            final_done = True
+            fresh = todo
+        if fresh:
+            n_round += 1
+            if n_round == 1:
+                log(f"边分析边出：先派 {len(fresh)} 项，后面每集分析落盘会自动跟上")
+            else:
+                log(f"第 {n_round} 轮：补派 {len(fresh)} 项（清单长了/上轮有没做成的）")
+            run_chunk(s, fresh)
+            # 记「发出这一轮之后的」版本：这轮自己声明过的不再触发自己
+            for t in fresh:
+                sent_at[t["key"]] = relay.version
+            if not final_done:
+                continue           # 马上重扫 —— 分析还在跑，可能又有新任务
+        if final_done:
+            # 成没成都要报 —— 这是下游停止等待的唯一信号。
+            # 漏了的话，等它产物的任务会一直等到超时上限。
+            relay.finished(batch)
+            return len(_produce_todo(pj, task_key, only))
+        time.sleep(interval)
+
+
+def _report_produce_left(pj, job: Job, s: dict, r: dict,
+                         st_lock: threading.Lock, failed: list,
+                         provider_factory: Callable) -> None:
+    """收摊时还有没做成的：挂最后一次尝试的诊断、记 failed、该停线就停线。
+
+    调用时机只有两个：泵收摊（run_pump）、单步直调（do_step 的 produce
+    分支）。中间轮**不许**调 —— 清单还会长，那不是终态。
+    """
+    key = s["label"]
+    attempts = r.get("attempts") or []
+    last = attempts[-1] if attempts else {}
+    diag = last.get("diag")
+    if not diag:
+        for f in diagnose.load(pj.root):
+            if f.get("stage") == s["produce"]:
+                diag = f
+                break
+    used = " → ".join(f"{a['provider']}/{a['model']}" for a in attempts)
+    job.set_item(key, state="failed", diag=diag,
+                 msg=f"还有 {r['left']} 项没做成"
+                     + (f"，已试过 {used}" if len(attempts) > 1 else "")
+                     + "；照面板上的说明处理后再点一次「开始」")
+    with st_lock:
+        failed.append(key)
+    # 所有家都因为账户级问题挂了 → 整条流水线没有继续的意义
+    # （泵的每一轮里已经先拦过一道，这里是单步直调路径的兜底）
+    chain = provider_factory(s["produce"])
+    if isinstance(chain, dict):
+        chain = [chain]
+    if diag and diag.get("scope") == "batch" and r.get("switched", 0) + 1 >= len(chain):
+        job.abort_diag = diag
+        job.abort_with(diag)
 
 
 def _llm_done(pj, stage: str, episode: str) -> bool:
@@ -231,8 +311,82 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
             return True
         return False
 
-    # 只建对象；登记（谁产出什么）要等 tasks.json 装配好之后才做。
+    # 只建对象；登记（谁产出什么）由泵每一轮做 —— tasks.json 是增量装配的，
+    # 声明也要跟着长（见 _pump）。
     relay = _relay.Relay(pj)
+
+    def run_produce_chunk(s: dict, todo: list) -> dict:
+        """跑**一轮**出图/出片（do_step 的 produce 分支抽出来，泵复用）。
+
+        只管这一轮：派单、换家、整批熔断的**立刻**停线。不在这儿写
+        ok/failed 终态 —— 清单还会长，收摊由 run_pump 统一写；
+        relay.finished 也不能在这儿发（中间轮发了 = 假 finished，
+        见 _pump 的注释）。
+
+        整批熔断（余额/密钥）不等收摊：后面还有几十分钟的分析在跑，
+        等它们全撞完同一堵墙再停，钱就白烧了。
+        """
+        key = s["label"]
+        chain = provider_factory(s["produce"])      # 按优先级排好的服务商列表
+        if isinstance(chain, dict):                 # 兼容只给一家的写法
+            chain = [chain]
+        first = chain[0]
+        job.set_item(key, state="running",
+                     msg=f"{len(todo)} 项待做 · 首选 {first['provider']} "
+                         f"{first.get('model','')}"
+                         + (f"（备选 {len(chain)-1} 家）" if len(chain) > 1 else ""))
+
+        def mk_worker(pcfg, kind=s["produce"]):
+            # llm_factory 要传下去：被审核拒绝时靠它改写提示词重发。
+            # 漏传不会报错，只是那个功能悄悄没了。
+            return (S.make_video_worker(pj, pcfg, llm_factory)
+                    if kind == "video"
+                    else S.make_image_worker(pj, pcfg, kind, llm_factory))
+
+        def mk_job(pcfg, n, kind=s["produce"]):
+            return (jobs.create(kind, n, concurrency, project_root=pj.root,
+                                project_name=os.path.basename(pj.root),
+                                provider=pcfg["provider"], model=pcfg.get("model", ""))
+                    if jobs else Job(kind, n, concurrency, project_root=pj.root,
+                                     provider=pcfg["provider"],
+                                     model=pcfg.get("model", "")))
+
+        # 资产图之间有依赖：状态资产依赖父资产及其他来源图，不管依赖地
+        # 并发的话父子同时跑，状态任务读不到来源 png 直接失败。
+        #
+        # 以前是分层（层内并发、层间串行），现在改成**就绪即派** ——
+        # 一条的参考图全好了它立刻开跑，不用等同层里那条慢的。
+        deps = (S.asset_deps(todo) if s["task_key"] == "asset_tasks" else {})
+        waiting = sum(1 for v in deps.values() if v)
+        if waiting:
+            job.log(key, f"{len(todo)} 项里有 {waiting} 项要等上游资产 —— "
+                         f"参考图一齐就开跑，不等整层出完")
+        r = run_chain(todo, chain=chain, worker_of=mk_worker, job_of=mk_job,
+                      key_of=lambda t: t["key"],
+                      # 不能用 isfile：0 字节的残骸也是「文件存在」，
+                      # 换家重试时会被当成上一家已经做好了，直接跳过。
+                      done_of=lambda t: probe.have_output(
+                          pj.p(*t["output"].split("/"))),
+                      max_retry=max_retry, log=lambda m: job.log(key, m),
+                      deps_of=deps.get if deps else None,
+                      ready_of=relay.ready_of(s["batch"]))
+        if r["left"]:
+            # 所有家都因为账户级问题挂了 → 整条流水线没有继续的意义，
+            # 现在就停，别让还在跑的分析继续烧钱
+            last = r["attempts"][-1] if r["attempts"] else {}
+            diag = last.get("diag")
+            if not diag:
+                for f in diagnose.load(pj.root):
+                    if f.get("stage") == s["produce"]:
+                        diag = f
+                        break
+            if diag and diag.get("scope") == "batch" \
+                    and r["switched"] + 1 >= len(chain):
+                with st_lock:
+                    failed.append(key)
+                job.abort_diag = diag
+                job.abort_with(diag)
+        return r
 
     def do_step(s: dict) -> str:
         """跑一步。返回 ok/skipped/failed/cancelled/aborted。异常都在里面消化掉。"""
@@ -262,6 +416,8 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 diagnose.clear(pj.root, f"stage:{s['stage']}", ep)
 
             # ---- 出图 / 出片 -----------------------------------------------
+            # 走 pump 的由 run_pump 收摊（见驱动段）；do_step 只兜底单步直调
+            # （比如只跑一步 produce 的接口路径）—— 一轮跑完就报终态。
             elif s["kind"] == "produce":
                 todo = _produce_todo(pj, s["task_key"], s.get("only"))
                 if not todo:
@@ -273,79 +429,19 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                                       "前置环节还没产出任务清单，这一步没东西可做"
                                       "（故事板要环节8 的提示词，资产图要环节5 的提示词）"))
                     return "skipped"
-                chain = provider_factory(s["produce"])      # 按优先级排好的服务商列表
-                if isinstance(chain, dict):                 # 兼容只给一家的写法
-                    chain = [chain]
-                first = chain[0]
-                job.set_item(key, state="running",
-                             msg=f"{len(todo)} 项待做 · 首选 {first['provider']} "
-                                 f"{first.get('model','')}"
-                                 + (f"（备选 {len(chain)-1} 家）" if len(chain) > 1 else ""))
-
-                def mk_worker(pcfg, kind=s["produce"]):
-                    # llm_factory 要传下去：被审核拒绝时靠它改写提示词重发。
-                    # 漏传不会报错，只是那个功能悄悄没了。
-                    return (S.make_video_worker(pj, pcfg, llm_factory)
-                            if kind == "video"
-                            else S.make_image_worker(pj, pcfg, kind, llm_factory))
-
-                def mk_job(pcfg, n, kind=s["produce"]):
-                    return (jobs.create(kind, n, concurrency, project_root=pj.root,
-                                        project_name=os.path.basename(pj.root),
-                                        provider=pcfg["provider"], model=pcfg.get("model", ""))
-                            if jobs else Job(kind, n, concurrency, project_root=pj.root,
-                                             provider=pcfg["provider"],
-                                             model=pcfg.get("model", "")))
-
-                # 资产图之间有依赖：状态资产依赖父资产及其他来源图，不管依赖地
-                # 并发的话父子同时跑，状态任务读不到来源 png 直接失败。
-                #
-                # 以前是分层（层内并发、层间串行），现在改成**就绪即派** ——
-                # 一条的参考图全好了它立刻开跑，不用等同层里那条慢的。
-                deps = (S.asset_deps(todo) if s["task_key"] == "asset_tasks" else {})
-                waiting = sum(1 for v in deps.values() if v)
-                if waiting:
-                    log(f"{len(todo)} 项里有 {waiting} 项要等上游资产 —— "
-                        f"参考图一齐就开跑，不等整层出完")
-                r = run_chain(todo, chain=chain, worker_of=mk_worker, job_of=mk_job,
-                              key_of=lambda t: t["key"],
-                              # 不能用 isfile：0 字节的残骸也是「文件存在」，
-                              # 换家重试时会被当成上一家已经做好了，直接跳过。
-                              done_of=lambda t: probe.have_output(
-                                  pj.p(*t["output"].split("/"))),
-                              max_retry=max_retry, log=log,
-                              deps_of=deps.get if deps else None,
-                              ready_of=relay.ready_of(s["batch"]))
-                # **成没成都要报** —— 这是下游停止等待的唯一信号。
-                # 漏了的话，等它产物的任务会一直等到超时上限。
-                relay.finished(s["batch"])
-                used = " → ".join(f"{a['provider']}/{a['model']}" for a in r["attempts"])
+                r = run_produce_chunk(s, todo)
+                relay.finished(s["batch"])        # 单步直调没有「后面还有」—— 当轮就是终点
                 if r["left"] == 0:
+                    used = " → ".join(f"{a['provider']}/{a['model']}"
+                                      for a in r["attempts"])
                     job.set_item(key, state="ok",
                                  msg=f"{len(todo)} 项完成"
                                      + (f"（换了 {r['switched']} 次家：{used}）"
                                         if r["switched"] else ""))
                     return "ok"
-                # 还有没做成的：把最后一次的诊断挂上去
-                last = r["attempts"][-1] if r["attempts"] else {}
-                diag = last.get("diag")
-                if not diag:
-                    for f in diagnose.load(pj.root):
-                        if f.get("stage") == s["produce"]:
-                            diag = f
-                            break
-                job.set_item(key, state="failed", diag=diag,
-                             msg=f"还有 {r['left']} 项没做成"
-                                 + (f"，已试过 {used}" if len(r["attempts"]) > 1 else "")
-                                 + "；照面板上的说明处理后再点一次「开始」")
-                with st_lock:
-                    failed.append(key)
-                # 所有家都因为账户级问题挂了 → 整条流水线没有继续的意义
-                if diag and diag.get("scope") == "batch" and r["switched"] + 1 >= len(chain):
-                    job.abort_diag = diag
-                    job.abort_with(diag)
+                _report_produce_left(pj, job, s, r, st_lock, failed)
+                if job.aborted:
                     return "aborted"
-                log(f"{r['left']} 项没做成，后面依赖它的步骤只做能做的部分")
                 return "failed"
 
             # ---- 复核清单 --------------------------------------------------
@@ -489,44 +585,88 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                     pool.shutdown()
 
         workers = max(1, min(int(ep_concurrency or 1), len(eps_order) or 1))
+        prod = [s for s in tail if s["kind"] == "produce"]
         if eps_order:
             job.log(steps[0]["label"],
                     f"逐集环节并发 {workers} 集"
                     + (f"，环节8 段内并发 {seg_concurrency}" if seg_concurrency > 1 else "")
                     + f"，LLM 在途上限 {LLM_GATE.snapshot()['llm_limit']}"
-                    + ("；环节4 按集号排队（跨集资产编号要沿用）" if workers > 1 else ""))
-        if workers > 1 and len(eps_order) > 1:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                list(pool.map(lambda a: run_episode(*a), list(enumerate(eps_order))))
-        else:
-            for a in enumerate(eps_order):
-                run_episode(*a)
+                    + ("；环节4 按集号排队（跨集资产编号要沿用）" if workers > 1 else "")
+                    + (f"；出图出片 {len(prod)} 个泵和分析同时跑"
+                       "（分析落盘一集就出一集，不再等全部集分析完）" if prod else ""))
 
-        # 出图出片前把 tasks.json 再装配一次：并行下最后一次装配可能读到的是
-        # 别的集还没存盘时的状态，这里补一遍，确保清单是完整的
-        if tail and not stop_now():
-            S.build_tasks(pj, params)
-        # 出图出片那几步**并发跑**，不再一步等一步。
+        # 出图出片不再等分析跑完 —— 拆掉原来那道整批闸（pool.map 屏障）。
+        # tasks.json 本来就是增量装配的（每集环节5/8 落盘就重装一遍，
+        # stages.py），泵每 5 秒重扫一次捡新任务：EP01 分析完的那一刻，
+        # 它的资产图就能开始出，不用等 EP21。
         #
-        # 以前是 资产图 → 故事板 → 视频 串行：全部资产出完才开始第一张故事板，
-        # 全部故事板出完才开始第一条视频。而依赖是**逐段独立**的 ——
-        # EP01-SEG01 的视频只需要它自己那张故事板。
-        #
-        # 现在同时开跑，每条任务自己等自己的输入（core/relay.py）。
-        # **登记必须在这儿做**，不能更早：tasks.json 是上面那一行刚装配的。
-        prod = [s for s in tail if s["kind"] == "produce"]
-        for s in prod:
-            relay.declare(s["batch"], pj.tasks().get(s["task_key"]) or [])
+        # 前提语义见 _pump 的注释；三个泵各管一类活，步内靠 relay 等输入。
+        llm_done = threading.Event()
+
+        def run_pump(s: dict) -> None:
+            """一个出图出片步骤的泵 + 收摊（终态在这里写，不在 chunk 里）。"""
+            key = s["label"]
+            stats: dict = {"rounds": 0, "last": None}
+
+            def chunk(step, todo):
+                stats["rounds"] += 1
+                stats["last"] = run_produce_chunk(step, todo)
+                return stats["last"]
+
+            try:
+                left = _pump(pj, s, chunk, llm_done.is_set, stop_now, relay,
+                             lambda m: job.log(key, m))
+            except Exception as exc:                    # noqa: BLE001
+                # 一步的调度炸了要说出来，不能吞 —— 业务失败 chunk 自己记了，
+                # 能冒到这里的是程序问题。
+                job.log(key, f"这一步的调度出错了：{exc}")
+                job.set_item(key, state="failed", msg=f"调度出错：{exc}")
+                with st_lock:
+                    failed.append(key)
+                return
+            if left < 0 or halt(s):
+                # 取消/熔断中途收手：取消 → halt 已写「已取消」；
+                # 熔断 → 原地留 running，abort_with 已经说明了原因
+                return
+            total = len(pj.tasks().get(s["task_key"]) or [])
+            if left == 0:
+                if not total:
+                    job.set_item(key, state="skipped",
+                                 msg="前置环节还没产出任务清单，这一步没东西可做"
+                                     "（故事板要环节8 的提示词，资产图要环节5 的提示词）")
+                elif not stats["rounds"]:
+                    job.set_item(key, state="skipped", msg="产物都齐了，跳过")
+                else:
+                    job.set_item(key, state="ok", msg=f"{total} 项完成")
+                return
+            _report_produce_left(pj, job, s, stats["last"] or {}, st_lock,
+                                 failed, provider_factory)
+
+        n_threads = workers + len(prod)
+        if eps_order or prod:
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                llm_futs = [pool.submit(run_episode, k, ep)
+                            for k, ep in enumerate(eps_order)]
+                pump_futs = [pool.submit(run_pump, s) for s in prod]
+                for f in llm_futs:
+                    f.result()         # do_step 自己不抛异常，这里只是等它跑完
+                # 出图出片前把 tasks.json 再装配一次：并行下最后一次装配可能
+                # 读到的是别的集还没存盘时的状态，这里补一遍，确保最终清空轮
+                # 看到的清单是完整的
+                if tail and not stop_now():
+                    S.build_tasks(pj, params)
+                llm_done.set()         # ← 放泵进最终清空轮（收摊）
+                for f in pump_futs:
+                    f.result()
+        # 复核清单、拼接这些非出图步骤照旧串行在最后
         for s in tail:
+            if s["kind"] == "produce":
+                continue               # 泵已经收摊了
             if halt(s):
                 continue
-            if s["kind"] == "produce":
-                if s is prod[0]:
-                    _produce_all(prod, do_step, job)
-                continue                       # 其余几步已经在上面那一把里跑了
             do_step(s)
 
-    job.finished_at = __import__("time").time()
+    job.finished_at = time.time()
     if job.aborted:
         job.status = "aborted"
     elif job.cancelled:

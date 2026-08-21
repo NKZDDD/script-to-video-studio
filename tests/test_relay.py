@@ -155,10 +155,17 @@ class WiringTests(unittest.TestCase):
 
         from core import pipeline as P61
         from core import pipeline_v34 as P34
-        for mod in (P61, P34):
-            src = inspect.getsource(mod._produce_all)
-            self.assertIn("ThreadPoolExecutor", src)
-            self.assertIn("调度出错了", src, "调度异常被吞掉了")
+        # 电影级：出图出片是泵（_pump），泵和分析并发提交进同一个池，
+        # 调度异常要说出来不能吞
+        self.assertIn("while True", inspect.getsource(P61._pump))
+        run_src = inspect.getsource(P61.run)
+        self.assertIn("ThreadPoolExecutor", run_src)
+        self.assertIn("pool.submit(run_pump", run_src, "泵没和分析并发起跑")
+        self.assertIn("调度出错了", run_src, "调度异常被吞掉了")
+        # 通用十二环节：还是 _produce_all 那一套
+        src34 = inspect.getsource(P34._produce_all)
+        self.assertIn("ThreadPoolExecutor", src34)
+        self.assertIn("调度出错了", src34, "调度异常被吞掉了")
 
     def test_both_pass_ready_of(self):
         import inspect
@@ -182,15 +189,27 @@ class WiringTests(unittest.TestCase):
 
         登记出来是空的，于是下游把「还没生成的文件」当成「没人会做它」，
         立刻派出去撞空。
+
+        电影级改成泵之后，这条不变式的形态变了：声明每一轮都做、
+        且必须**先于派单**（run_chunk）—— 中途声明不完备没关系，
+        没做成的会等版本号涨了重进（见 tests/test_pump.py）；
+        最终装配（build_tasks）必须先于 llm_done.set()，收摊轮
+        看到的清单才是完整的。通用十二环节仍是旧形态。
         """
         import inspect
 
         from core import pipeline as P61
         from core import pipeline_v34 as P34
-        for mod in (P61, P34):
-            src = inspect.getsource(mod.run)
-            self.assertLess(src.index("build_tasks"), src.index("relay.declare"),
-                            f"{mod.__name__}: 登记排在装配之前了")
+        src = inspect.getsource(P61._pump)
+        self.assertLess(src.index("relay.declare"), src.index("run_chunk(s, fresh)"),
+                        "core.pipeline: 派单之前没登记 —— 下游会把还没生成的"
+                        "文件当成没人会做")
+        run_src = inspect.getsource(P61.run)
+        self.assertLess(run_src.index("build_tasks"), run_src.index("llm_done.set"),
+                        "core.pipeline: 放泵收摊之前没做最终装配 —— 收摊轮清单不完整")
+        src34 = inspect.getsource(P34.run)
+        self.assertLess(src34.index("build_tasks"), src34.index("relay.declare"),
+                        "core.pipeline_v34: 登记排在装配之前了")
 
     def test_the_executor_supports_the_gate(self):
         import inspect

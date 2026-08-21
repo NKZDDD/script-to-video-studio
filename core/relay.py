@@ -64,16 +64,31 @@ class Relay:
         self._makers: dict = {}      # 产出路径 → 哪一类活会做它
         self._done_kinds: set = set()
         self._said: set = set()      # 已经说过「在等谁」的任务，别每轮都刷
+        # 声明清单每长一批（有新的产物会被做出来）就 +1。
+        # 泵靠它判断「有没有新信息值得把没做成的再试一轮」——
+        # 一条任务「条件不具备」往往是因为它要的文件还没人声明会做，
+        # 等声明它的那一环落盘、版本号涨了，这条就该重进一轮。
+        self._version = 0
 
     # ------------------------------------------------------------ 登记
 
     def declare(self, kind: str, tasks: list) -> None:
-        """这一类活会产出哪些文件。"""
+        """这一类活会产出哪些文件。幂等 —— 重复声明同一批不涨版本号。"""
+        added = False
         with self._lock:
             for t in tasks or []:
                 out = str(t.get("output") or "")
-                if out:
+                if out and out not in self._makers:
                     self._makers[out] = kind
+                    added = True
+            if added:
+                self._version += 1
+
+    @property
+    def version(self) -> int:
+        """声明清单的版本号。涨了 = 有新的产物会被做出来（任何一类都算）。"""
+        with self._lock:
+            return self._version
 
     def finished(self, kind: str) -> None:
         """这一类活跑完了 —— 成没成都算。
