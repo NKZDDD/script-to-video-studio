@@ -37,10 +37,29 @@ class LLMError(RuntimeError):
 
 
 class LLMFatal(LLMError):
-    """重试同一个提示词也解决不了的：超时、输出被长度上限截断。
+    """重试同一个提示词也解决不了的：输出被长度上限截断。
 
     这类必须往上抛，不能被 json_call 的「反馈重试」吞掉 ——
-    同一个提示词重试必然同样超时、同样截断，只是把钱花三倍。
+    同样的内容装不进同一个上限，重试只是把钱花三倍。
+
+    **超时不在这一类里**，见 LLMTransport。
+    """
+
+
+class LLMTransport(LLMFatal):
+    """链路没走通：读超时、流式卡住、连接被切断。
+
+    和 `LLMFatal` 的区别是**能不能靠重试解决**：
+
+        撞长度上限   同样的内容装不进同一个上限 → 重试白花钱
+        读超时/卡住  换一次连接、换一个边缘节点，结果真的会不一样 → 该重试
+
+    以前这两类混在一起、一律不重试。我当时的理由是「同一个提示词重试必然
+    同样超时」—— 而用户的实测把它推翻了：**手动再点一次任务开始就成了**
+    （2026-08-21）。手动能成，说明重试有用，只是我们让人去点。
+
+    继承 LLMFatal 是为了兼容：外面按 LLMFatal 捕获的地方行为不变，
+    只有明确认这个子类的地方（json_call 的重试循环）才会重。
     """
 
 
@@ -120,6 +139,13 @@ RETRY_STATUS = frozenset({429, 502, 503, 504,
 # **只在已经收到过字之后才算。** 一个字都没收到时字数也是「不变」的，
 # 但那是思考期 —— 正常可以几分钟，掐掉比现在更糟。
 STALL_SECONDS = 120
+
+# 链路没走通之后，等多久再原样重发。
+#
+# 短一点就好：要的只是**换一条连接**（多半也换一个边缘节点），
+# 不是等对面缓过来。等太久的代价很实在 —— 一次超时本身已经花了
+# 读超时那么长（默认 900 秒），再叠一分钟等待只是让人多盯一分钟。
+TRANSPORT_BACKOFF = 15
 
 
 def stop_note(reason: str, usage: Optional[dict] = None) -> str:
@@ -751,14 +777,15 @@ class LLM:
                     continue
                 raise LLMError(str(exc)) from exc
             except requests.Timeout as exc:
-                # 超时不重试：这不是抖动，是这次请求太重。重试只会再白等一轮，
-                # 而且上游可能已经算完并计了费。直接说清怎么办。
-                raise LLMFatal(
-                    f"等了 {tmo[1]} 秒还没收到新内容，判定超时（已放弃，没有重试——"
-                    f"重试只会再白等一轮，还可能让上游重复计费）。"
-                    f"这一步的输入是 {len(user)} 字。要么去「设置 → 分析引擎」"
-                    f"把超时调大，要么换一个出得快的模型，"
-                    f"要么把剧本拆小再跑。原始错误：{exc}") from exc
+                # **传输类，会被上层重试一次。** 见 LLMTransport 的说明：
+                # 用户手动再点一次就成，那件事该程序自己做。
+                raise LLMTransport(
+                    f"等了 {tmo[1]} 秒还没收到新内容，判定超时。"
+                    f"这一步的输入是 {len(user)} 字。\n"
+                    f"这一类是链路没走通（不是内容不合格），换一次连接经常就过了 —— "
+                    f"所以会自动重发。连着几次都这样的话："
+                    f"去「设置 → 分析引擎」把超时调大，或者换一个出得快的模型，"
+                    f"或者把这一步的输入拆小。原始错误：{exc}") from exc
             except requests.RequestException as exc:
                 last = exc
                 if attempt < retries - 1:
@@ -1103,19 +1130,49 @@ class LLM:
                   json_retries: int = 2, log=print, cancel=None,
                   on_usage=None, on_partial=None,
                   validator: Optional[Callable[[Any], list]] = None,
-                  on_soft: Optional[Callable[[list], None]] = None) -> Any:
-        """要求 JSON 输出；解析失败或缺键时把错误反馈给模型重试（≤json_retries）。
+                  on_soft: Optional[Callable[[list], None]] = None,
+                  transport_retries: int = 2) -> Any:
+        """要求 JSON 输出。两种重试，**budget 分开、做的事不一样**：
 
-        只有「模型这次答得不合格」才重试 —— 反馈具体哪里不对，让它再答一次。
-        超时和输出被截断**不重试**：同一个提示词重试必然同样超时、同样截断，
-        白花三倍的钱。这类直接往上抛，由诊断告诉用户去调什么。
+            json_retries       模型答得不合格 → 把哪里不对反馈给它，再答一次
+            transport_retries  链路没走通    → **原样重发**，什么都不加
+
+        分开是因为这两件事的修法相反。答得不合格要告诉它哪里错了；
+        而链路没走通时附一句「上次输出的问题」是错的 —— 上次压根没有输出，
+        那句话会让它以为自己写坏了，然后真的去改内容。
+
+        输出撞长度上限**仍然不重试**：同样的内容装不进同一个上限，白花钱。
+
+        为什么加 transport_retries：用户原话（2026-08-21）
+        「实际上我人工手动再点一次任务开始就可以了，所以我才想到用重试来
+        解决这个超时的问题」。手动能成，说明重试确实有用 ——
+        那就该程序自己做，不是让人守着点。
         """
         attempt_user = user
+        transport_left = max(0, int(transport_retries))
         for attempt in range(1 + json_retries):
             if cancel and cancel():
                 raise LLMCancelled("已按取消停止")
-            text = self.chat(system, attempt_user, log=log, cancel=cancel,
-                             on_usage=on_usage, on_partial=on_partial)
+            # **链路重发套在里面，不占 json_retries 的额度。**
+            # 占的话：一次超时之后只剩一次机会给「答得不合格」，
+            # 而那是两码事的预算。
+            while True:
+                try:
+                    text = self.chat(system, attempt_user, log=log, cancel=cancel,
+                                     on_usage=on_usage, on_partial=on_partial)
+                    break
+                except LLMTransport as exc:
+                    if transport_left <= 0:
+                        raise
+                    transport_left -= 1
+                    log(f"[链路重发] {str(exc)[:160]}")
+                    log(f"　这一类换一次连接经常就过了，等 {TRANSPORT_BACKOFF} 秒"
+                        f"原样重发（还剩 {transport_left} 次）。"
+                        f"**不改内容、不加反馈** —— 上次压根没有输出。")
+                    for _ in range(TRANSPORT_BACKOFF):
+                        if cancel and cancel():
+                            raise LLMCancelled("已按取消停止") from exc
+                        time.sleep(1)
             try:
                 # 结束原因决定了该跟模型说什么（见 _truncated）——
                 # 记了不用等于没记，而说错话会让它白白删内容。

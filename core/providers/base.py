@@ -89,6 +89,18 @@ class Provider:
     # 用户填完点保存、页面显示正常，跑起来报「凭据不全」。
     account_form: dict = {}
 
+    def selftest(self) -> Optional[dict]:
+        """这一家自己的连通性自检。返回 `{"ok": bool, "msg": str}`。
+
+        返回 `None` = 没有专门的自检，调用方回落到「拉一次模型列表」。
+
+        为什么要这个钩子：统一的「拉模型列表」对**凭据不止一把**的家是
+        假绿灯。HVTALD 的模型是固定一个、不联网 —— WebDAV 地址填错、
+        账号密码填错，自检照样显示「1 个模型」。
+        **假绿灯比没有检查更糟**：人会信它，然后去查别的地方。
+        """
+        return None
+
     def needs_url(self, model: str = "", media: str = "image") -> bool:
         """这家**只**收公网链接，给 data URI 会被丢掉。
 

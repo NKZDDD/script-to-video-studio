@@ -144,6 +144,9 @@ class HvtaldProvider(Provider):
         super().__init__(api_key=api_key, base_url=base_url, proxy=proxy, timeout=timeout)
         self.creds = parse_creds(api_key)
         self._timeout = timeout
+        self._outs = None        # 找到的成片目录（相对 webdav 地址），见 _find_outs
+        self._is_dir: dict = {}  # 上一次列目录时哪些名字是目录
+        self._tried: list = []   # 找 outs 时试过哪些路径 —— 报错要说出来
 
     # ------------------------------------------------------------ 能力
     def capabilities(self) -> dict:
@@ -170,6 +173,42 @@ class HvtaldProvider(Provider):
                      "也可用 HVTALD_* 环境变量。API 与 WebDAV 均为明文 HTTP。",
         }
 
+    def selftest(self) -> Optional[dict]:
+        """凭据齐不齐 → WebDAV 连不连得上 → `outs/` 在哪一层。
+
+        这三件按顺序查，因为**后一件依赖前一件**，而混在一起报的话
+        「401」和「地址填成网页版了」看起来一样。
+        """
+        ok, missing = self.ready()
+        if not ok:
+            return {"ok": False,
+                    "msg": f"凭据不全，缺：{'、'.join(missing)}"}
+        base = self.creds["webdav_url"]
+        try:
+            self._list_url(self._up(0), missing_ok=False)
+        except ApiError as exc:
+            m = str(exc)
+            hint = ""
+            if "404" in m:
+                hint = ("　这个地址本身就不存在。**最常见的是填了网页版的地址** ——"
+                        "网页版是给人看的页面，WebDAV 是另一个入口（客服给的那个），"
+                        "两者经常不是同一个地址。")
+            elif "401" in m or "403" in m:
+                hint = "　地址是对的，用户名或密码不对。"
+            return {"ok": False, "msg": f"WebDAV 连不上：{m[:160]}{hint}"}
+        outs = self._find_outs(lambda _m: None)
+        if not outs:
+            return {"ok": False,
+                    "msg": (f"WebDAV 通了（{base}），但整个空间里找不到 `outs/` —— "
+                            f"成片是从那里取的。已经试过 {len(self._tried)} 个路径；"
+                            f"这一层下面现有的目录："
+                            f"{'、'.join(self._child_dirs()) or '（一个都没有）'}")}
+        same = outs.rstrip("/") == self._up(0, "outs").rstrip("/")
+        return {"ok": True,
+                "msg": (f"WebDAV 通了，成片目录：{outs}"
+                        + ("" if same else "　（不在你填的那一层，程序自己找到的，"
+                                           "不用改地址）"))}
+
     def ready(self) -> tuple:
         """凭据齐不齐。缺哪项直接说，别等发出去才 401。"""
         missing = [k for k, v in self.creds.items() if not v]
@@ -183,9 +222,30 @@ class HvtaldProvider(Provider):
         base = self.creds["webdav_url"].rstrip("/")
         return f"{base}/{sub.strip('/')}" if sub.strip("/") else base
 
-    def _list(self, sub: str = "outs") -> list:
-        """PROPFIND 列目录 → [(文件名, 完整URL)]。WebDAV 就是 HTTP 扩展方法，不用额外依赖。"""
-        url = self._dav(sub)
+    def _up(self, levels: int, sub: str = "") -> str:
+        """把 webdav 地址往上剪 `levels` 层，再接上 `sub`。返回绝对地址。
+
+        **不用 URL 里的 `..`**：那要服务端自己规范化，而不少 WebDAV
+        （尤其自建的）不做 —— 结果是 404，而我们会当成「这一层没有」，
+        把一个本来找得到的目录判成找不到。自己裁是确定的。
+        """
+        u = urlparse(self.creds["webdav_url"].rstrip("/"))
+        parts = [p for p in u.path.split("/") if p]
+        if levels:
+            parts = parts[:-levels] if levels < len(parts) else []
+        path = "/".join(parts + ([sub.strip("/")] if sub.strip("/") else []))
+        return f"{u.scheme}://{u.netloc}/{path}" if path else f"{u.scheme}://{u.netloc}/"
+
+    def _list(self, sub: str = "outs", missing_ok: bool = True) -> list:
+        """PROPFIND 列目录 → [(文件名, 完整URL)]。相对 webdav 地址的那一版。"""
+        return self._list_url(self._dav(sub), missing_ok, sub)
+
+    def _list_url(self, url: str, missing_ok: bool = True, sub: str = "") -> list:
+        """按**绝对地址**列目录。WebDAV 就是 HTTP 扩展方法，不用额外依赖。
+
+        `missing_ok=False` 时，目录不存在会抛错而不是返回空列表 ——
+        **「目录不存在」和「目录是空的」不是一回事**，见 `_wait`。
+        """
         try:
             r = requests.request("PROPFIND", url, auth=self._auth(),
                                  headers={"Depth": "1", "Content-Type": "application/xml"},
@@ -193,7 +253,17 @@ class HvtaldProvider(Provider):
         except requests.RequestException as exc:
             raise ApiError(f"连不上 WebDAV（{url}）：{exc}")
         if r.status_code == 404:
-            return []
+            if missing_ok:
+                return []
+            raise ApiError(
+                f"WebDAV 上没有 `{sub or url}/` 这个目录（{url} 返回 404）。"
+                f"成片是从这里取的 —— 目录不在，就永远取不到。\n"
+                f"多半是 webdav 地址填到了**错的层级**：它应该指到\n"
+                f"`outs/` 的**上一层**，而不是某个线路目录（比如 `.../5051`）"
+                f"或者 `conf/` 下面。\n"
+                f"去「设置 → HVTALD → 共用存储」核对那个地址，"
+                f"或者用 WebDAV 网页版翻一下 `outs` 在哪一层。",
+                status=404, kind="task_fatal")
         if r.status_code >= 400:
             raise ApiError(f"WebDAV 列目录失败 HTTP {r.status_code}（{url}）"
                            f"—— 401/403 多半是空间账号密码不对")
@@ -211,8 +281,80 @@ class HvtaldProvider(Provider):
             if name:
                 full = raw if raw.startswith("http") else (
                     f"{urlparse(url).scheme}://{urlparse(url).netloc}{raw}")
+                # WebDAV 里目录的 href 以 `/` 收尾 —— 找 `outs` 要认这个。
+                self._is_dir[name] = raw.endswith("/")
                 out.append((name, full))
         return out
+
+    # ------------------------------------------------------------ 找 outs
+    # 往上最多剪几层。**一路剪到空间根**（路径有几段就剪几层，再封一个上界）——
+    # 实遇的地址是 `/project/pro_test/conf/sd2_HVTALD_0818/5051`，五段；
+    # 写死 4 层就正好差一层到不了根，而那恰好可能是 `outs` 所在的地方。
+    #
+    # 上界还是要有：PROPFIND 不便宜，无界搜索在大空间上能跑几分钟 ——
+    # 而那看起来就是「卡住了」。8 层足够覆盖任何合理的目录深度。
+    _UP_LEVELS = 8
+
+    def _find_outs(self, log: Callable = print) -> str:
+        """成片目录的**绝对地址**。找不到返回空串。
+
+        **不让用户去数目录层级。** 客服给的地址可能指到线路目录
+        （`.../conf/sd2_HVTALD_0818/5051`）、`conf/` 上面，或者空间根 ——
+        而 `outs` 在哪一层是查得出来的事。
+
+        找的顺序（每一步都比下一步便宜）：
+          ① 填的这一层就有 `outs/`   → 绝大多数情况
+          ② 往上剪几层再找 `outs`     → 客服给的常是线路目录
+          ③ 往下看一层的每个子目录里有没有 `outs`
+
+        找到之后记住，别每轮轮询都重找一遍。
+        """
+        if self._outs is not None:
+            return self._outs
+        tried = []
+
+        def take(url, note=""):
+            tried.append(url)
+            if not self._probe_url(url):
+                return False
+            self._outs = url
+            if note:
+                log(note + "（程序自己找到的，webdav 地址不用改）")
+            return True
+
+        # ① 这一层
+        if take(self._up(0, "outs")):
+            return self._outs
+        # ② 往上剪
+        # 只剪到根为止，多剪的那几层是同一个地址，白探
+        depth = len([x for x in urlparse(self.creds["webdav_url"]).path.split("/") if x])
+        for lv in range(1, min(depth, self._UP_LEVELS) + 1):
+            if take(self._up(lv, "outs"), f"HVTALD 成片目录在上 {lv} 层：{self._up(lv, 'outs')}"):
+                return self._outs
+        # ③ 往下一层
+        for name in self._child_dirs():
+            u = self._up(0, f"{name}/outs")
+            if take(u, f"HVTALD 成片目录在下一层：{u}"):
+                return self._outs
+        self._tried = tried
+        return ""
+
+    def _probe_url(self, url: str) -> bool:
+        """这个绝对地址是不是一个能列的目录。"""
+        try:
+            self._list_url(url, missing_ok=False)
+            return True
+        except ApiError:
+            return False
+
+    def _child_dirs(self) -> list:
+        """填的这一层下面有哪些子目录。列不出来就返回空。"""
+        self._is_dir.clear()
+        try:
+            self._list_url(self._up(0), missing_ok=True)
+        except ApiError:
+            return []
+        return [n for n, d in self._is_dir.items() if d][:12]
 
     def _download(self, url: str, dest: str) -> str:
         """带 basic auth 下载。**先写 .part 再改名** —— 下到一半断了不能留个够大的坏文件，
@@ -307,11 +449,29 @@ class HvtaldProvider(Provider):
 
         文档的回调示例里 videopath 就是 `{actionId}_xxx.mp4` 这个形状。
         """
+        # **先把成片目录找出来。** 不让用户去数目录层级 ——
+        # 客服给的地址可能指到线路目录、conf 上面或者空间根，
+        # 而哪一层有 `outs` 是查得出来的事。
+        outs = self._find_outs(log)
+        if not outs:
+            raise ApiError(
+                f"在 WebDAV 上找不到成片目录 `outs/`。成片是从那里取的，"
+                f"找不到就永远取不到。\n"
+                f"已经试过：{'、'.join(self._tried[:10])}"
+                f"{'…' if len(self._tried) > 10 else ''}\n"
+                f"（往上找了 {self._UP_LEVELS} 层、往下看了一层）。\n"
+                f"这一层下面现有的目录："
+                f"{'、'.join(self._child_dirs()) or '（一个都没有，多半是地址或账号密码不对）'}\n"
+                f"去「设置 → HVTALD → 共用存储」核对 WebDAV 地址 —— "
+                f"填空间里任意一层都行（程序会自己找），但得是这个空间。",
+                status=404, kind="task_fatal")
         start, seen = time.time(), -1
         while time.time() - start < timeout:
             if cancel and cancel():
                 raise ApiError("用户已取消")
-            files = self._list("outs")
+            # 目录已经确认存在了，所以这里用宽松模式：
+            # 临时挪走或网络抖一下不该判死这一条。
+            files = self._list_url(outs)
             if len(files) != seen:
                 log(f"HVTALD outs/ 现有 {len(files)} 个文件，等 {aid} …")
                 seen = len(files)
@@ -321,6 +481,11 @@ class HvtaldProvider(Provider):
                     return full
             time.sleep(interval)
         raise ApiError(
-            f"等了 {timeout} 秒没在 outs/ 看到 {aid} 开头的成片。"
-            f"这家按线路排队，满负荷时要等；任务没丢，actionId 记下来可以稍后取。",
+            f"等了 {timeout} 秒没在 `{outs}/` 看到 {aid} 开头的成片"
+            f"（那个目录在，只是里面没有这一条）。\n"
+            f"这家按线路排队，满负荷时要等；任务没丢，"
+            f"actionId={aid} 记下来可以稍后取。\n"
+            f"顺便说一句：`conf/.../used/` 不是成片目录 —— 那是「投文件式」"
+            f"用法里服务端取走配置后挪过去的地方，我们走的是 HTTP 接口，"
+            f"那个目录永远是空的，别拿它判断任务有没有发出去。",
             status=0, kind="retryable")

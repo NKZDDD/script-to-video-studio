@@ -314,6 +314,44 @@ PRODUCT_NEEDS = {
                                   "separation_note"]},
     # 资产系统要看状态变化（连续性状态资产就是从这儿来的），所以留着 state_deltas
     ("n4", "n1_truth"): {"drop": ["episode_ranges"]},
+
+    # 空间主表这两份一直是整块发的 —— 实遇一次输入 72008 字（约 36004 token），
+    # 三次全挂在传输层（流式卡住 / 中途切断 / 900 秒一个字没回）。
+    #
+    # 保留的都说得出用途：模板原话是「**先从场次、走位、镜头/关键帧需求和显露
+    # 包络提取真实空间需求**」（n5_spatial.md:110）——
+    #   scenes[].location_hint  哪一场在哪儿，跨场次路线靠它
+    #   scenes[].entry/exit_state  进出场时人在哪，走位
+    #   beats[].tactic_or_action  zone 要「支持什么剧情行为」，靠它
+    #   beats[].shot_need         模板明说要镜头需求
+    #   assets[].appearance       地点长什么样
+    #   prop_instances[].initial_zone  道具初始在哪个区，和分区对得上
+    #
+    # 裁掉的都是别的层要的：
+    ("n5", "n3_narrative"): {"drop": [
+        # 人物弧光 —— 空间不关心谁成长了
+        "episode_arcs",
+        # 戏剧张力的收尾，没有空间信息
+        "scenes[].unresolved_tension",
+        # 逐拍的表演与外观增量：state_delta 是第六环节账本要的
+        # （n2/n3 那两条注释已经这么定过），performance_result / change_kind /
+        # meaningful_change 是「这一拍演成什么样」，不改变房间的几何
+        "beats[].state_delta", "beats[].meaningful_change",
+        "beats[].change_kind", "beats[].performance_result",
+    ]},
+    ("n5", "n4_assets"): {"drop": [
+        # 服饰的结构、材质、领口、鞋履 —— 纯人物外观，和房间无关
+        "costume_contracts",
+        # 道具外观与可读文字策略是出图那一层的；**实例留着**
+        # （它带 initial_zone / initial_holder，和分区对得上）
+        "prop_specs", "prop_sets",
+        # 出图那一层的字段：能改什么、不能改什么、出图规格、覆盖范围、身份锚点
+        "assets[].allowed_change", "assets[].forbidden_change",
+        "assets[].output_spec", "assets[].coverage",
+        "assets[].identity_anchors",
+        # 生产顺序和自述 —— 给人看的，不是给空间用的
+        "production_order", "blueprint_note",
+    ]},
 }
 
 

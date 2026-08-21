@@ -1910,7 +1910,15 @@ def api_post(path: str, body: dict) -> dict:
                                  "msg": f"未配置{_KEY_LABELS[capability]} Key"}
                     continue
                 try:
-                    models = build_provider(pid, key, pc.get("base_url", "")).list_models()
+                    prov = build_provider(pid, key, pc.get("base_url", ""))
+                    # **有专门自检的先用它。** 统一的「拉模型列表」对凭据不止
+                    # 一把的家是假绿灯：HVTALD 的模型固定一个、不联网 ——
+                    # WebDAV 地址和账号密码全错，自检照样显示「1 个模型」。
+                    own = prov.selftest()
+                    if own is not None:
+                        out[name] = own
+                        continue
+                    models = prov.list_models()
                     out[name] = {"ok": bool(models), "count": len(models),
                                  "msg": f"{len(models)} 个模型" if models else "拉取失败"}
                 except Exception as exc:                 # noqa: BLE001
