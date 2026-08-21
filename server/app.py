@@ -564,7 +564,13 @@ def params_of(cfg: dict, pj: Project, with_script: bool = True) -> dict:
     params.update(meta.get("params") or {})
     params.update({"project_code": meta.get("project_code", "PROJ-001"),
                    "episode": meta.get("episode", "EP01"),
-                   "ref_limit": ref_limit_of(cfg, "video")})
+                   # 两个都给：出图那几步和出片那一步的上限不是一个数。
+                   # 只给一个的话，写故事板提示词的环节会按视频那家的上限
+                   # 去引参考图，到出图才撞上限（实遇：出图超模 9 张、
+                   # 视频派欧 30 张，故事板被告知 30）。
+                   "ref_limit": ref_limit_of(cfg, "video"),
+                   "ref_limit_video": ref_limit_of(cfg, "video"),
+                   "ref_limit_image": ref_limit_of(cfg, "asset")})
     if with_script:
         sp = pj.p("01_剧本与分段", "原始剧本.txt")
         if os.path.isfile(sp):

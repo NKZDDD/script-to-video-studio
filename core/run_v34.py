@@ -81,7 +81,7 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         # 能力档位必须进提示词，否则冻结了也白冻：第九环节会照着「六类机制
         # 随便挑」写，而模型做不出来 —— 转场糊掉或者变成一个长镜头，不报错。
         "CAPABILITY": _capability_block(pj),
-        "REF_LIMIT": _ref_limit_block(params),
+        "REF_LIMIT": _ref_limit_block(params, stage_id),
         # 分批用的两个，**必须有默认值**：没分批时（老项目没切集、预览）
         # 留空的话模板里会原样出现 `{{BATCH_SCOPE}}`，模型会把它当成
         # 一个要填的空位或者一句奇怪的指令。
@@ -106,7 +106,9 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
     m.update(_st.mapping(pj, params, {
         "episode_duration": _ep_seconds(pj, episode, params),
         "current_episode": episode,
-        "reference_capacity_per_call": params.get("ref_limit", ""),
+        "reference_capacity_per_call": (
+            params.get(f"ref_limit_{_LIMIT_CONSUMER.get(stage_id, 'video')}")
+            or params.get("ref_limit", "")),
         "target_video_model": (capability_of(pj) or {}).get("target_video_model", ""),
         "native_multishot_support": (capability_of(pj) or {}).get(
             "native_multishot_support", ""),
@@ -451,7 +453,23 @@ def trim_saving(pj: Project, stage_id: str, episode: str = "") -> str:
     return "按环节裁剪：" + "、".join(parts)
 
 
-def _ref_limit_block(params: dict) -> str:
+# 这一步写出来的提示词，最后是**谁**拿去出东西的 —— 参考图上限得按那一家算。
+#
+# 以前只有一个 `ref_limit`，取的是**视频链**首选那家的上限，然后发给所有环节。
+# 于是第十二环节（它自己的参考图是给**出图**用的）被告知了视频那家的上限：
+# 实遇一次出图是超模（9 张）、视频是派欧 seedance（30 张），
+# 故事板被告知 30 —— 按 30 张引的话到出图那步撞上限，而那时提示词已经写好了。
+#
+# 一个数发给用途不同的两拨人，是「两个环节各自都对、凑起来做不出来」的又一种。
+_LIMIT_CONSUMER = {
+    "n4b": "image",     # 资产提示词 → 资产出图
+    "n11": "image",     # 场景状态图提示词 → 出图
+    "n12": "image",     # 故事板提示词 → 出图（它自己那几张参考图）
+    "n13": "video",     # 视频提示词 → 出片
+}
+
+
+def _ref_limit_block(params: dict, stage_id: str = "") -> str:
     """本次生产的模型一次能吃几张参考图。
 
     这个数服务商注册表里一直有（灵感鸭 sora-2 只收 1 张，坤鸡 9 张），
@@ -462,7 +480,9 @@ def _ref_limit_block(params: dict) -> str:
     拿不到就明说未知，别编一个数：编大了会让它多引，编小了会让它漏掉
     真正需要的覆盖图。
     """
-    lim = params.get("ref_limit")
+    who = _LIMIT_CONSUMER.get(stage_id, "video")
+    # 按用途取；取不到就回落到那个老的单一值（老配置里只有它）
+    lim = params.get(f"ref_limit_{who}") or params.get("ref_limit")
     if not lim:
         return ("本次目标模型一次能吃几张参考图：未知。"
                 "按最小充分集来，不确定就少传 —— 撞上限会直接失败，"
@@ -1191,6 +1211,15 @@ def check_scstate_coverage(pj: Project, episode: str,
 
     用户定的方向：「要么十二听十一的，要么十一有十二的」。这一条是后者：
     把第十二环节的结构性需求（每段要一个主参考）告诉第十一环节。
+
+    **只记，不停。** 我第一版写成了硬停，那是错的 —— 第十二环节的模板里
+    有一整节「本段 SCSTATE 没有图的时候（必读）」，写了完整的替代路径
+    （改引本段人物的当前造型 + 场景环境 + 关键道具，位置朝向以文字合同为准）。
+    也就是说**这个情况下一环节本来就能处理**，硬停在这儿等于凭空造出一个
+    「两个环节冲突、要人工介入」的点 —— 正是用户要消灭的那种东西。
+
+    留着这条记录是因为它值得知道：这几段的主参考不是场景状态图而是原子资产，
+    出来的画面风格会和别的段落不太一样。但那是**结果差异**，不是错误。
     """
     segs = [s["seg_id"] for s in segments_of(pj, episode)]
     if not segs:
@@ -1231,7 +1260,6 @@ def check_scstate_coverage(pj: Project, episode: str,
                     more="…" if len(bad) > 5 else "")
     diagnose.record(pj.root, diagnose.warn(
         "SCSTATE_SEG_NO_IMAGE", msg, stage="stage:n11", target=episode))
-    raise RuntimeError(msg)
 
 
 def _shot_windows(pj: Project, episode: str) -> dict:
@@ -1468,10 +1496,10 @@ def run_segment_stage(pj: Project, stage_id: str, *, llm, params: dict,
 
     result = {key: _ordered(by_id, segs)}
     pj.save_stage(tpl_name, result, episode)
-    # **十一有十二的**：第十一环节跑完立刻查「每段至少有一张会出图的场景状态」。
-    # 放在存盘之后、返回之前：产物要留着（人得看得见判定），但这一集不许
-    # 被当成可以往下走。只在这一集**全段都做完**时查 —— 还有段没做的时候
-    # 查会误报（那几段本来就还没有判定）。
+    # **十一有十二的**：第十一环节跑完记一条「这几段没有场景状态图，
+    # 第十二环节会走原子资产」。**只记不停** —— 第十二环节有完整的替代路径，
+    # 停在这儿等于凭空造一个要人工介入的点。
+    # 只在这一集**全段都做完**时查：还有段没做的时候查会误报。
     if stage_id == "n11" and not failed and not cancelled:
         check_scstate_coverage(pj, episode, log)
     return result, failed, cancelled
@@ -2167,8 +2195,17 @@ def with_identity_map(ap: dict) -> str:
     我们插进去只会打乱它 —— 那种情况交给出图前的校验去报。
     """
     from .produce import _IMAGE_MAP      # 同一个正则，不另写一份
-    prompt = str(ap.get("prompt") or "")
-    rows = [r for r in (ap.get("reference_role_map") or []) if isinstance(r, dict)]
+    # 正文字段和结构化字段各环节叫法不同 —— 认全，别只认资产那一套。
+    #
+    # 这就是「回填只覆盖两类」的原因：这个函数原来只认 `prompt` +
+    # `reference_role_map`，而故事板叫 `storyboard_prompt` + `reference_order`、
+    # 视频叫 `video_prompt` + `reference_order`。于是那两类一行都补不上，
+    # 缺映射时直接硬停在出图/出片之前 ——「要传 N 张参考图，却没说哪张是谁」。
+    prompt = str(ap.get("prompt") or ap.get("storyboard_prompt")
+                 or ap.get("video_prompt") or "")
+    rows = [r for r in (ap.get("reference_role_map")
+                        or ap.get("reference_order") or [])
+            if isinstance(r, dict)]
     if not rows or _IMAGE_MAP.search(prompt):
         return prompt
     lines = []
@@ -2228,13 +2265,22 @@ def write_prompt_files(pj: Project, episode: str) -> int:
         # V6.2：**逐张**落盘。整包一份的老形状由 sb_sheets 归一成单张，
         # 文件名一个字不变 —— 改了等于把已经出好的几百张判成没出。
         for sh in sb_sheets(pkg, seg):
+            # **故事板也要回填身份映射。** 以前只有资产和场景状态图享受这个，
+            # 而 sheet 一级同样有 `reference_order`（带 image_n / asset_id /
+            # 名称 / 六个字段）—— 模型照旧经常写了结构化字段、漏了正文那几行。
+            # 缺了就硬停在出图之前，而数据一直在手上。
             write_prompt_txt(pj, _rel("storyboard", sb_prompt_name(seg, sh)),
-                             sh["prompt"])
+                             with_identity_map(
+                                 {"prompt": sh["prompt"],
+                                  "reference_order": sh.get("reference_order")}))
             n += 1
     for vp in (pj.stage_data("n13_video", episode) or {}).get("video_plan", []):
         if vp.get("video_prompt") and vp.get("seg_id"):
+            # 视频同理。它的 `reference_order` 里骨架那几张排在前面
+            # （image_n 1..N），补图接在后面 —— 和出片时的上传顺序一致，
+            # 所以直接按 image_n 补出来编号就是对的。
             write_prompt_txt(pj, _rel("video", f"{vp['seg_id']}_VIDEO_PROMPT.txt"),
-                             vp["video_prompt"])
+                             with_identity_map(vp))
             n += 1
     return n
 

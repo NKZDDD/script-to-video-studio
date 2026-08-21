@@ -765,10 +765,29 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                     f"去重跑第十三环节，或者在「任务明细」里把缺的那几行补上 —— "
                     f"`Image N = SBPKG_..._SHEET_B`，顺序和上面传的一致。")
         refs = [to_ref(s, log) for s in spine]
+        # **骨架之后是补图。以前这几张压根没被上传过。**
+        #
+        # 出片这一层只读 `aux_reference`，而那个字段只有 V6.1 会设
+        # （stages.py 里从 `aux_reference_asset_id` 来）。电影级把补图放在
+        # `reference_images`（n13 的 reference_order 里骨架之后那几条，
+        # 每一条还带着「这一张解决哪项骨架给不了的权威缺口」的论证）——
+        # 没有一处读它。
+        #
+        # 后果不是报错：提示词里写着 `Image 3 = LK002 当前造型`，
+        # 实际只传了骨架那两张 —— 编号整体错位，模型把补图的说明套在
+        # 骨架第二张上。**画面出得来，用的是错的参考。**
+        aux = sorted((task.get("reference_images") or []),
+                     key=lambda r: r.get("image_n") or 0)
+        for r in aux:
+            f = str(r.get("url") or r.get("file_ref") or "")
+            if f:
+                refs.append(to_ref(f, log))
+        # V6.1 的老字段照旧认（那条路径一直是对的）
         if task.get("aux_reference"):
             refs.append(to_ref(task["aux_reference"], log))
         log(f"{_who_line(provider_cfg, model)}　{p.get('duration', 15)}s {want} "
-            f"故事板骨架×{len(spine)} 参考图×{len(refs)}")
+            f"故事板骨架×{len(spine)} 补图×{len(refs) - len(spine)} "
+            f"参考图共×{len(refs)}")
 
         def _go(use, pr):
             return use.generate_video(

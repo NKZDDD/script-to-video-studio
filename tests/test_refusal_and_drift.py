@@ -213,3 +213,57 @@ class DriftTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkillCodeTests(unittest.TestCase):
+    """skill 定义的失败码族，程序要认得 —— 认不出就报成「输出缺少必需字段」。
+
+    V6.2 原文（.claude/skills/script-to-video-cinematic-v62/）里这一族有几十个，
+    后缀是有规律的。原来只认 `_BLOCKED` 和 `_GAP` 两种，14 个真实存在的拒绝码
+    只认得 3 个 —— 剩下 11 个返回时报的还是「输出缺少必需字段」，方向完全错。
+    """
+
+    # 都是从 skill 原文里抄的，不是编的
+    REAL = ("STORYBOARD_REFERENCE_CAPACITY_BLOCKED",
+            "STORYBOARD_REFERENCE_ADMISSION_FAILED",
+            "STORYBOARD_DENSITY_BLOCKED",
+            "VIDEO_STORYBOARD_SPINE_MISSING",
+            "VIDEO_REFERENCE_UNIQUE_UTILITY_UNPROVEN",
+            "VIDEO_REFERENCE_AUTHORITY_CONFLICT",
+            "VIDEO_ACTION_PHASE_INCOMPLETE",
+            "VIDEO_CAMERA_GRAMMAR_INSUFFICIENT",
+            "VIDEO_PROMPT_EXECUTION_DETAIL_INSUFFICIENT",
+            "VIDEO_EXECUTION_OVERLOADED",
+            "REFERENCE_DIMENSION_COVERAGE_GAP",
+            "IMAGE_COMPLEXITY_OVER_BUDGET",
+            "IMAGE_MATERIALIZATION_UNJUSTIFIED",
+            "SCSTATE_STORY_MISMATCH",
+            "MULTIVIEW_RECONCILIATION_BLOCKED",
+            "VIEW_DISTINCTNESS_BLOCKED",
+            "SEG_BOUNDARY_DESIGN_BLOCKED")
+
+    # 这些是**正常状态**，出现在每条合格产物上 —— 误判成拒绝比漏判更糟，
+    # 因为人会开始无视报错。
+    NORMAL = ("STORYBOARD_REFERENCE_ADMISSION_GATE: REQUIRED",
+              "micro_performance_contract = required",
+              "ADMITTED", "MUST NOT COPY", "LOGICAL_ONLY", "DEFER_TO_VIDEO",
+              "ORDERED_CONTINUATION_SHEETS", "MODEL_NATIVE_ONLY",
+              "通过：全部镜头落在容器内")
+
+    def test_every_skill_refusal_code_is_recognized(self):
+        bad = [c for c in self.REAL
+               if not refusal_reason({"capability_note": c})]
+        self.assertEqual(bad, [], f"这些拒绝码认不出来：{bad}")
+
+    def test_normal_statuses_are_not_read_as_refusal(self):
+        bad = [c for c in self.NORMAL
+               if refusal_reason({"capability_note": c})]
+        self.assertEqual(bad, [], f"这些正常状态被误判成拒绝：{bad}")
+
+    def test_it_matches_on_code_shape_not_a_hardcoded_list(self):
+        """★ 写死一张名单的话，skill 加一个码就漏一个。
+
+        按形状认（全大写 + 下划线 + 那几个后缀），加新码不用改程序。
+        """
+        made_up = "SOMETHING_WE_HAVE_NEVER_SEEN_BLOCKED"
+        self.assertTrue(refusal_reason({"capability_note": made_up}))

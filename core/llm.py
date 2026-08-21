@@ -439,9 +439,36 @@ _REFUSAL_FIELDS = ("time_budget_check", "capability_note", "quality_priority_not
                    "coverage_note", "spine_note", "carrier_reason", "note")
 
 # 这些是 skill 定义的「我拒绝」代号，出现在上面那几栏里就是明确拒绝。
+# 判据分两半。
+#
+# 上半：**skill 定义的失败码族**。V6.2 的原文里这一族有几十个，
+# 而它们的后缀是有规律的（`_BLOCKED` / `_FAILED` / `_UNPROVEN` /
+# `_INSUFFICIENT` / `_INCOMPLETE` / `_CONFLICT` / `_GAP` / `_MISMATCH` /
+# `_OVERLOADED` / `_UNJUSTIFIED` / `_OVER_BUDGET`）。
+# 原来只认 `_BLOCKED` 和 `_GAP` 两种 —— 11 个真实存在的拒绝码只认得 3 个，
+# 剩下 8 个返回时报的还是那句「输出缺少必需字段」，方向完全错。
+# 实际会撞到的几个：
+#   STORYBOARD_REFERENCE_ADMISSION_FAILED        故事板错版/错时/错位
+#   VIDEO_REFERENCE_UNIQUE_UTILITY_UNPROVEN      补图证不出独有作用
+#   VIDEO_ACTION_PHASE_INCOMPLETE                动作阶段没写全
+#   VIDEO_PROMPT_EXECUTION_DETAIL_INSUFFICIENT   执行细节不够
+#   IMAGE_COMPLEXITY_OVER_BUDGET                 单图复杂度超预算
+#   VIDEO_STORYBOARD_SPINE_MISSING               骨架缺失
+#
+# `_MISSING` 我一开始故意排除了（怕咬到散文里的「missing」），但它确实是
+# skill 的拒绝码之一。敢加是因为**有形状约束**：整块必须是全大写代号 +
+# 至少一个下划线，散文里的 missing 匹配不上。
+#
+# **要求整块是个代号**（全大写 + 至少一个下划线），不然「must not copy」
+# 这种正常措辞会被咬到。
+#
+# 下半：中文判词。这些是模板要求模型写的话。
+# 注意别把 `REQUIRED` 算进去 —— `..._GATE: REQUIRED` 是策略状态，
+# 每条合格产物上都写着。
 _REFUSAL_RE = re.compile(
-    r"[A-Z_]*BLOCKED|[A-Z_]*_GAP|不通过|不生成|无法(生成|完成|合法)"
-    r"|拒绝|停在准入阶段")
+    r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BLOCKED|FAILED|UNPROVEN|INSUFFICIENT"
+    r"|INCOMPLETE|CONFLICT|GAP|MISMATCH|OVERLOADED|UNJUSTIFIED|BUDGET|MISSING)\b"
+    r"|不通过|不生成|无法(生成|完成|合法)|拒绝|停在准入阶段")
 
 
 def refusal_reason(row: dict) -> str:
