@@ -88,11 +88,29 @@ class DefaultsTests(unittest.TestCase):
         self.assertIn("不是用户的决定", brief)
 
     def test_filling_one_in_clears_its_default_mark(self):
-        ST.save(self.pj, {"visual_medium": "3d"})
+        ST.save(self.pj, {"visual_medium": "3D漫剧"})
         line = [l for l in ST.brief_block(self.pj).splitlines()
                 if l.startswith("- 拍成什么形式")][0]
-        self.assertIn("3d", line)
+        self.assertIn("3D漫剧", line)
         self.assertNotIn("默认", line)
+
+    def test_old_enum_keys_are_translated_to_the_new_labels(self):
+        """★ 老项目存的 live_action/3d 要翻成中文说法。
+
+        字段已是自由文本，不翻的话 medium_rule 把 "3d" 当没见过的词
+        丢给默认 —— 项目明明是 3D 漫剧，提示词里写「真人短剧」。
+        """
+        ST.save(self.pj, {"visual_medium": "3d"})
+        self.assertEqual(ST.load(self.pj)["visual_medium"], "3D漫剧")
+        self.assertIn("视频类型：3D漫剧", ST.medium_rule(self.pj))
+
+    def test_free_text_medium_goes_to_the_prompt_untouched(self):
+        """★ 填空的核心承诺：用户写什么，提示词里就是什么。
+
+        不归并、不翻译 —— 替他改一个字都是替他做决定。
+        """
+        ST.save(self.pj, {"visual_medium": "水墨定格动画"})
+        self.assertIn("视频类型：水墨定格动画", ST.medium_rule(self.pj))
 
     def test_defaults_are_returned_for_never_saved_fields(self):
         v = ST.load(self.pj)

@@ -25,9 +25,9 @@ class SchemaBlockTests(unittest.TestCase):
     def test_it_lists_the_enum_values(self):
         s = ST.schema_block()
         self.assertIn("`preserve`=严格保持原文", s)
-        # 用户要的是「真人短剧 / 3D漫剧 / 二维动画 / 混合形式」这套说法，
-        # 页面和提示词共用同一份词（见 settings.MEDIUM_ZH）
-        self.assertIn("`live_action`=真人短剧", s)
+        # 「拍成什么形式」改成填空后四个常用说法仍要给抽取模型 ——
+        # 不给的话用户写「拍成3D漫剧」，模型只能自造一个词存进去
+        self.assertIn("真人短剧 / 3D漫剧 / 二维动画 / 混合形式", s)
 
     def test_readonly_fields_are_not_offered(self):
         """★ 抽出来也没处放 —— 列出来只会让模型去填它。"""
@@ -54,9 +54,19 @@ class SanitizeTests(unittest.TestCase):
     """**不信任模型的输出。** 这些值直接改变生产结果。"""
 
     def test_a_bad_enum_value_is_dropped_with_a_reason(self):
-        ok, dropped = ST.sanitize({"visual_medium": "漫画"})
+        ok, dropped = ST.sanitize({"costume_asset_mode": "随便"})
         self.assertEqual(ok, {})
         self.assertIn("不在允许的取值里", dropped[0])
+
+    def test_free_text_medium_is_accepted(self):
+        """★ 「拍成什么形式」是填空：水墨动画、黏土定格也该存得进去。
+
+        以前是枚举，模型抽出的「漫画」会被悄悄丢掉 —— 页面上
+        显示的和实际跑的不是一回事。填空之后用户说了算。
+        """
+        ok, dropped = ST.sanitize({"visual_medium": "水墨动画"})
+        self.assertEqual(ok, {"visual_medium": "水墨动画"})
+        self.assertEqual(dropped, [])
 
     def test_readonly_fields_cannot_be_written(self):
         """★ 静默接受的话，页面显示的和实际跑的就不是一回事。"""

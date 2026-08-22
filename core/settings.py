@@ -64,11 +64,17 @@ FIELDS: list = [
      "default": "optimize_pacing", "source": "settings", "group": "授权",
      "why": "skill 第 0 章：**不得在下游自行扩大改编权限**。"
             "定紧了节奏可能拖沓，定松了模型会改人物关系和结局。"},
-    {"key": "visual_medium", "label": "拍成什么形式", "type": "enum",
-     "options": ["live_action", "3d", "2d", "mixed"],
-     "zh": {"live_action": "真人短剧", "3d": "3D漫剧", "2d": "二维动画",
-            "mixed": "混合形式"},
-     "default": "live_action", "source": "settings", "group": "项目"},
+    # 填空 + 下拉：像视觉风格一样。以前是四选一的枚举，用户要填的
+    # 形式（水墨动画、黏土定格…）根本不在选项里；媒介是制作决策，
+    # 用户自己的说法就是标准答案，不该被四个选项框死。
+    # 种子就是原枚举的四个中文说法 —— 页面、MEDIUM_ZH、老值翻译共用一套词。
+    {"key": "visual_medium", "label": "拍成什么形式", "type": "text",
+     "hint": "真人短剧 / 3D漫剧 / 二维动画 / 混合形式…",
+     "default": "真人短剧", "source": "settings", "group": "项目",
+     "suggest": True,
+     "seeds": ["真人短剧", "3D漫剧", "二维动画", "混合形式"],
+     "why": "自由填写。常用：真人短剧 / 3D漫剧 / 二维动画 / 混合形式；"
+            "用户写了别的（水墨动画、黏土定格…）照抄原话，不要归并到这四个里。"},
     {"key": "visual_style", "label": "视觉风格", "type": "text",
      "hint": "电影写实 / 都市情感 / 末日废土 / 古装写实…",
      "source": "settings", "group": "项目",
@@ -593,6 +599,14 @@ PLACEHOLDERS = tuple(placeholder_of(f["key"]) for f in FIELDS)
 # 所以旧的两个「出得少」的档位一律翻成有序独立锚点（一张一格，最省容量
 # 又能覆盖完整推进），「整套都出」翻成有序多张 Sheet。
 _RENAMED_VALUES = {
+    # 2026-08-22 「拍成什么形式」从枚举改成填空：老项目存的枚举 key
+    # 翻成中文说法。**不翻的后果很静默**：字段已是自由文本，"3d" 会被
+    # medium_rule 当成没见过的词丢给默认 —— 项目明明是 3D 漫剧，
+    # 提示词里却写「视频类型：真人短剧」。
+    "visual_medium": {
+        "live_action": "真人短剧", "3d": "3D漫剧",
+        "2d": "二维动画", "mixed": "混合形式",
+    },
     "storyboard_materialization_policy": {
         "anchor_only": "ordered_kf_anchors",
         "selected_kf": "ordered_kf_anchors",
@@ -804,7 +818,11 @@ def medium_rule(pj: Project) -> str:
     多写的每一句都是我们在猜他想要什么，猜错了他还得回来改我们的措辞。
     """
     v = load(pj)
-    return f"视频类型：{MEDIUM_ZH.get(v.get('visual_medium') or 'live_action', '真人短剧')}"
+    raw = str(v.get("visual_medium") or "").strip()
+    # 2026-08-22 起是自由文本：用户写什么发什么（「视频类型：水墨定格动画」
+    # 也是一句合法的媒介声明）。load() 已把老枚举 key 翻成中文，
+    # MEDIUM_ZH.get 再兜一道 —— 防哪条路绕过翻译直接读到存量值。
+    return f"视频类型：{MEDIUM_ZH.get(raw) or raw or '真人短剧'}"
 
 
 def plan_lengths(vals: dict) -> dict:
