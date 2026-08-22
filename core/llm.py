@@ -386,7 +386,9 @@ def _truncated(body: str, n: int, reason: str = "", err=None) -> "LLMError":
                "是 JSON 写坏了。\n" if (reason or "").lower() == "stop" else
                "结束原因服务商没给，但内容已经收全了 —— 是格式坏了，不是被切断。\n")
             + "**按上面报的那个位置改那一处就行**，不要去找少掉的括号，"
-            "也**不要删减任何字段或条目** —— 内容是对的，坏的只是格式。\n"
+            "也**不要删减任何字段或条目** —— 内容是对的，坏的只是格式；"
+            "字段值里的大段正文（提示词正文这类）同样原样保留，"
+            "不许缩写删节。\n"
             "提醒：正文里要出现双引号必须写成 \\\"，换行必须写成 \\n。")
     head = (f"上一次的输出没有形成完整的 JSON（收到 {n} 字，括号始终没有闭合，"
             f"停在「…{tail}」）。")
@@ -396,13 +398,15 @@ def _truncated(body: str, n: int, reason: str = "", err=None) -> "LLMError":
             "所以这不是长度问题，是 JSON 本身写坏了（多半少了收尾的括号，"
             "或者多了个逗号）。\n"
             "请把**同样的内容**重新输出一遍，重点检查括号配对和结尾。"
-            "**不要删减任何字段或条目** —— 内容是对的，坏的只是格式。")
+            "**不要删减任何字段或条目** —— 内容是对的，坏的只是格式；"
+            "字段值里的大段正文同样原样保留，不许缩写删节。")
     return LLMError(
         head + "服务商没给结束原因，多半是传输在中途被切断了 —— "
         "不是你写错了什么。\n"
         "请把**同样的内容**原样再输出一遍。"
         "**不要压缩、不要删减字段或条目**：内容没有问题，"
-        "为了绕开一次传输抖动而把产出改少，代价比重发一次大得多。")
+        "为了绕开一次传输抖动而把产出改少，代价比重发一次大得多 —— "
+        "字段值里的大段正文（如提示词正文）缩水同样算把产出改少。")
 
 
 def _first_json(inner: str, log: Optional[Callable] = None,
@@ -1169,7 +1173,8 @@ class LLM:
                   on_usage=None, on_partial=None,
                   validator: Optional[Callable[[Any], list]] = None,
                   on_soft: Optional[Callable[[list], None]] = None,
-                  transport_retries: int = 2) -> Any:
+                  transport_retries: int = 2,
+                  content_check: Optional[Callable[[Any], list]] = None) -> Any:
         """要求 JSON 输出。两种重试，**budget 分开、做的事不一样**：
 
             json_retries       模型答得不合格 → 把哪里不对反馈给它，再答一次
@@ -1178,6 +1183,13 @@ class LLM:
         分开是因为这两件事的修法相反。答得不合格要告诉它哪里错了；
         而链路没走通时附一句「上次输出的问题」是错的 —— 上次压根没有输出，
         那句话会让它以为自己写坏了，然后真的去改内容。
+
+        content_check 是第三种不合格：**字段都在、值是空壳**（实跑：
+        storyboard_prompt 287 个字、十节只剩一节，schema 校验全放行、
+        静默落盘）。它和缺必需字段走同一条反馈重试路，返回缺口列表，
+        空列表 = 通过。不加降级阶梯 —— 那是审核拒收的机制，前提是
+        「内容必须牺牲一些才能过」；这里恰恰一节都不许牺牲，
+        「降级」等于把删减制度化。
 
         输出撞长度上限**仍然不重试**：同样的内容装不进同一个上限，白花钱。
 
@@ -1229,6 +1241,13 @@ class LLM:
                     # 照着假原因去重试，三次全废，而真正要改的在上游。
                     why = refused_because(data, missing)
                     raise LLMError(f"输出缺少必需字段: {missing}" + why)
+                if content_check:
+                    # 缺口列表就是给模型的重试方向：说清「应写 4 行映射
+                    # 只出现 1 行」，它才知道往哪补；只说「内容不完整」
+                    # 它多半原样再交一遍。
+                    gaps = content_check(data)
+                    if gaps:
+                        raise LLMError("输出内容不完整：" + "；".join(gaps[:5]))
                 problems = validator(data) if validator else []
                 if problems and on_soft:
                     # **业务规则不拦，只记。**

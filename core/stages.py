@@ -1301,7 +1301,8 @@ def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
                   segs: list, done_ids: set, llm: LLM, build_user: Callable,
                   params: dict, required: list, log: Callable, episode: str,
                   cancel: Optional[Callable], seg_concurrency: int,
-                  on_item: Optional[Callable] = None) -> tuple:
+                  on_item: Optional[Callable] = None,
+                  content_check: Optional[Callable[[Any], list]] = None) -> tuple:
     """按段跑一个环节：一段一次调用、每段存盘、失败只影响那一段、天然可续跑。
 
     环节7 和环节8 共用这一套。为什么能按段拆：段与段之间没有数据依赖 ——
@@ -1337,6 +1338,7 @@ def run_segmented(pj: Project, *, stage_id: str, out_name: str, key: str,
                 out = llm.json_call(
                     system=system_prompt(pj, params), user=build_user(seg),
                     required=required,
+                    content_check=content_check,
                     log=lambda m, _s=sid: log(f"    {_s}: {m}"), cancel=cancel,
                     on_usage=_usage_of(pj, stage_id, episode, sid),
                     on_partial=keep_partial(pj, stage_id, episode, sid, llm=llm))
@@ -1499,6 +1501,51 @@ def run_s7_incremental(pj: Project, llm: LLM, params: dict, data: dict,
     return result
 
 
+# 环节8 两份正文的字数下限。实跑：storyboard_prompt 只有 287 个字、
+# 十节只剩「一、输出结构」一节、Image 映射一行没有 —— 格式合法，schema
+# 校验全放行，静默落盘，出图按残段跑。下限放得宽是有意的：这道闸拦的
+# 是「数量级错了」，不是「写得简练」—— 完整十节再短也是千字级。
+_S8_SB_MIN_CHARS = 500
+_S8_VD_MIN_CHARS = 300
+_IMAGE_LINE_RE = re.compile(r"[Ii]mage\s*\d+\s*[=＝:：]")
+
+
+def s8_prompt_gaps(item: dict) -> list:
+    """环节8 单段产物的内容完整性缺口。空列表 = 通过。
+
+    字段存在≠内容完整 —— 这正是「十节只剩一节」能静默溜过的缝。
+    查三样**写死在模型自己产出里的事实**，不查绑定表：绑定里混着
+    「本段故事板」这类幽灵引用时模型少写反而是对的，拿绑定当期望
+    会把正确行为判成不合格，三次重试全废。
+
+    不设降级阶梯（审核改写那套）：那边是「必须牺牲一些才能过」，
+    这边一节都不许牺牲，降级等于把删减制度化。
+    """
+    gaps = []
+    item = item or {}
+    sb = str(item.get("storyboard_prompt") or "")
+    vd = str(item.get("video_prompt") or "")
+    if len(sb) < _S8_SB_MIN_CHARS:
+        gaps.append(f"storyboard_prompt 只有 {len(sb)} 字（完整十节结构通常"
+                    f"千字级），疑似被删减，请按模板的十节完整重写")
+    if len(vd) < _S8_VD_MIN_CHARS:
+        gaps.append(f"video_prompt 只有 {len(vd)} 字（完整七节结构通常"
+                    f"数百字起），疑似被删减，请按模板的结构完整重写")
+    declared = len([r for r in (item.get("reference_order") or [])
+                    if isinstance(r, dict) and str(r.get("asset_id") or "").strip()])
+    n_lines = len(_IMAGE_LINE_RE.findall(sb))
+    if declared and n_lines < declared:
+        gaps.append(f"参考图映射应写 {declared} 行 `Image N = …`，"
+                    f"正文只出现 {n_lines} 行")
+    return gaps
+
+
+def _s8_content_check(data) -> list:
+    """json_call 的 content_check 包装：从返回结构里取出这一段的产物。"""
+    items = (data or {}).get("compiled") or []
+    return s8_prompt_gaps(items[0]) if items else []
+
+
 def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
                        log: Callable = print, episode: str = "",
                        cancel: Optional[Callable] = None,
@@ -1550,6 +1597,7 @@ def run_s8_incremental(pj: Project, llm: LLM, params: dict, data: dict,
         done_ids=s8_done_segments(pj, episode), llm=llm, build_user=build_user,
         params=params,
         required=["compiled[]", "compiled[].storyboard_prompt", "compiled[].video_prompt"],
+        content_check=_s8_content_check,
         log=log, episode=episode, cancel=cancel, seg_concurrency=seg_concurrency,
         on_item=on_item)
     build_tasks(pj, params)
