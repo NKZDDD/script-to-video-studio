@@ -313,6 +313,9 @@ def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
     seg_n, seg_why = (_eps.seg_target(pj, episode, params)
                       if is_per_episode(stage_id) and episode else (0, ""))
     out = dict(_st.mapping(pj, params, {}))     # 设置项先铺底
+    # 画面文字规则和 system_prompt() 那份是同一个来源 —— 业务模板
+    # （环节8 的两条「画面文字」条款）也按设置生成口径，不让模型自由发挥。
+    out["SUBTITLE_RULE"] = _st.subtitle_rule(pj)
     # 总时长/集数/每集时长三个量互相决定，合成一段发给环节1 ——
     # 关键是那句「集数是算出来的，不是数剧本里有几章」。
     # 放业务模板这一份而不是 _common：只有环节1 用得上，
@@ -1324,12 +1327,17 @@ def s7_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Call
 
 def s8_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Callable:
     """环节8 单段提示词的构造器。真跑和预览共用。"""
+    from . import settings as _st
     tone = ((data.get("s1_global") or {}).get("visual_tone") or {})
     states = {s["id"]: s for s in (data.get("s3_states") or {}).get("segment_states", [])}
     binds = {b["id"]: b for b in (data.get("s6_binding") or {}).get("bindings", [])}
     shots = {s["id"]: s for s in (data.get("s7_shots") or {}).get("shots", [])}
     assets = (data.get("s4_assets") or {}).get("assets", [])
     tpl = load_prompt("s8_compile", pj)
+    # 画面文字规则进这一环节是修过的坑：模板原来只说「禁止画面文字」没给口径，
+    # 模型自己措辞时写成无差别禁令，把设定里允许的剧情文字（招牌、屏幕、
+    # 弹幕）也禁了 —— 字静默消失，和当年 `_common` 第 10 条写死散文是同一个坑。
+    subtitle_rule = _st.subtitle_rule(pj)
 
     def build_user(seg: dict) -> str:
         sid = seg["id"]
@@ -1354,7 +1362,7 @@ def s8_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Call
                 if other_id:
                     used.add(other_id)
         seg_assets = [a for a in assets if a["asset_id"] in used] or assets
-        return render(tpl, {
+        user = render(tpl, {
             "EPISODE": episode,
             "DURATION": params.get("duration", 15),
             "TONE": jd({"compressed": tone.get("compressed", ""),
@@ -1364,7 +1372,16 @@ def s8_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Call
             "ASSETS": jd(seg_assets),
             "BINDINGS": jd(binding),
             "SHOTS": jd(shots.get(sid, {})),
-        }) + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
+            "SUBTITLE_RULE": subtitle_rule,
+        })
+        # 模板可能被全局/本剧改写，改写版里没有 {{SUBTITLE_RULE}} 这一格的
+        # 话规则就静默丢了（{{MEDIUM_RULE}} 那次的教训）。认特征串兜底。
+        if "剧情本身要求的文字" not in user:
+            user += (f"\n\n【画面文字规则】（输出限制/禁止内容里的画面文字条款"
+                     f"必须逐字转述这一段 —— 剧情本身要求的文字一律允许，"
+                     f"禁的只有字幕、水印、UI 面板和不属于剧情的叠加文字）\n"
+                     + subtitle_rule)
+        return user + f"\n\n【只编译这一段】{sid}，compiled 数组只放这一段。"
 
     return build_user
 
@@ -1596,6 +1613,7 @@ def _split_refs(rows, amap: dict, aprompts: dict) -> tuple:
         keep.append({"image_n": n, "asset_id": aid,
                      "file_ref": asset_output_rel(amap[aid]) if aid in amap else ""})
     return keep, no_image
+
 
 
 def _build_tasks(pj: Project, params: dict) -> dict:
