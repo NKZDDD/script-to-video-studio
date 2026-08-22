@@ -271,6 +271,9 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     S.reset_claims()
     LLM_GATE.configure(llm_concurrency or max(1, ep_concurrency, seg_concurrency))
     LLM_GATE.reset_peak()
+    # 本趟的起点。条件补跑用它区分新旧失败记录（core/relay.py）：
+    # 这一刻之前的记录是上一趟的旧账，不拦本趟的补跑。
+    epoch = time.strftime("%Y-%m-%d %H:%M:%S")
     steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver,
                  only_episodes=only_episodes, produce_episodes=produce_episodes)
     job.total = len(steps)
@@ -658,6 +661,23 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 llm_done.set()         # ← 放泵进最终清空轮（收摊）
                 for f in pump_futs:
                     f.result()
+            # 条件补跑：泵的最终清空轮给每条没做成的**一次性**重试 —— 但
+            # 「条件不具备」的判定发生在派单那一刻，别的泵之后才落盘的
+            # 产物它看不见。这里把「再点一次开始」的那次全盘重扫自动化
+            # （core/relay.py sweep_redo）：产物没有、输入已落盘、不是本趟
+            # 真报过错的，按生产顺序自动重派 —— 前一个泵补出来的文件，
+            # 后一个泵同一轮立刻接着用，不用人再点「开始」。
+            if prod and not stop_now():
+                todo_of = lambda s: _produce_todo(pj, s["task_key"], s.get("only"))
+                _relay.sweep_redo(pj, prod, relay, run_step=run_produce_chunk,
+                                  todo_of=todo_of, epoch=epoch,
+                                  should_stop=stop_now,
+                                  log=lambda s, m: job.log(s["label"], m))
+                # 补跑之后的步骤终态以磁盘为准重算 —— run_pump 写终态时
+                # 补跑还没发生，两个方向都可能骗人（详见函数注释）。
+                _relay.reconcile_produce_steps(job, failed, prod,
+                                               todo_of=todo_of,
+                                               should_stop=stop_now)
         # 复核清单、拼接这些非出图步骤照旧串行在最后
         for s in tail:
             if s["kind"] == "produce":

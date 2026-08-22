@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
@@ -192,6 +193,9 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     job.total = len(steps)
     for s in steps:
         job.set_item(s["label"], state="pending")
+    # 本趟的起点。条件补跑用它区分新旧失败记录（core/relay.py）：
+    # 这一刻之前的记录是上一趟的旧账，不拦本趟的补跑。
+    epoch = time.strftime("%Y-%m-%d %H:%M:%S")
 
     st_lock = threading.Lock()
     bad_eps: set = set()
@@ -282,7 +286,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     # 立刻派出去撞空。所以只建对象，登记挪到出图出片真正开始那一刻。
     relay = _relay.Relay(pj)
 
-    def do_produce(s: dict) -> str:
+    def do_produce(s: dict, pick: Optional[list] = None) -> str:
         key = s["label"]
         if halt(s):
             return "aborted"
@@ -291,8 +295,11 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         if only:
             tasks = [t for t in tasks
                      if not t.get("episode") or t["episode"] in only]
-        todo = [t for t in tasks
-                if not probe.have_output(pj.p(*t["output"].split("/")))]
+        # pick 是条件补跑（sweep_redo）直接给定的这一轮清单 —— 它已经按
+        # 「输入齐了、没真报过错」筛过；平时（pick 为空）按磁盘算待办。
+        todo = pick if pick is not None else [
+            t for t in tasks
+            if not probe.have_output(pj.p(*t["output"].split("/")))]
         if not todo:
             job.set_item(key, state="skipped",
                          msg="没有要做的（都做过了，或前置还没产出任务）")
@@ -514,6 +521,23 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                     relay.declare(_s["batch"],
                                   pj.tasks().get(_s["task_key"]) or [])
                 _produce_all(prod, do_produce, job)
+                # 条件补跑：就绪即派只在**派单那一刻**检测一次 —— 一条任务
+                # 那会儿输入没齐、被标成「条件不具备」，之后上游补完了，
+                # 它不会自己复活，得等人再点一次「开始」。这里把那次重扫
+                # 自动化（core/relay.py sweep_redo）：产物没有、输入已落盘、
+                # 不是本趟真报过错的，按生产顺序自动重派 —— 前一步补出来
+                # 的文件，后一步同一轮立刻接着用。
+                stop = lambda: bool(job.aborted or job.cancelled)
+                todo_of = lambda s: _produce_todo(pj, s["task_key"], s.get("only"))
+                _relay.sweep_redo(pj, prod, relay, run_step=do_produce,
+                                  todo_of=todo_of, epoch=epoch,
+                                  should_stop=stop,
+                                  log=lambda s, m: job.log(s["label"], m))
+                # 补跑之后的步骤终态以磁盘为准重算 —— 中间那轮只知道自己
+                # 那一轮的事，两个方向都可能骗人（详见函数注释）。
+                _relay.reconcile_produce_steps(job, failed, prod,
+                                               todo_of=todo_of,
+                                               should_stop=stop)
             continue                       # 其余几步已经在上面那一把里跑了
         if s["kind"] == "llm":
             do_llm(s)
