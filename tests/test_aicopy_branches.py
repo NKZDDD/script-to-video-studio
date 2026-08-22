@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""小裴 3.3.53 分支形状。
+"""小裴统一视频接口（2026-08-19）的请求形状。
 
-每个断言都对着「视频插件接口文档-3.3.53」的示例写 —— 这些字段发错**多半不报错**，
-只是参考图被静默忽略，所以只能靠测试锁住。
+所有模型同一套字段：单首帧走顶层 input_reference，首尾帧/多参考/参考视频
+音频走 extra.reference_*，画幅走 extra.aspect_ratio。发错**多半不报错**，
+只是参考图被静默忽略 —— 所以只能靠测试锁住。
+
+按模型族保留的知识（时长上限、参考上限、模式限制）也一并锁住。
 """
 import unittest
 
@@ -11,8 +14,9 @@ from core.providers.base import VideoTask
 from core.providers.aicopy import AicopyProvider, branch_of
 
 P = AicopyProvider()
-U = ["https://cdn/1.jpg", "https://cdn/2.jpg"]
-D = ["data:image/jpeg;base64,AAA", "data:image/jpeg;base64,BBB"]
+U = ["https://cdn/1.jpg", "https://cdn/2.jpg", "https://cdn/3.jpg"]
+V = ["https://cdn/motion.mp4"]
+A = ["https://cdn/voice.mp3"]
 
 
 def body(**kw):
@@ -20,126 +24,132 @@ def body(**kw):
     return P.build_video_body(task)
 
 
-class BranchTests(unittest.TestCase):
+class UnifiedShapeTests(unittest.TestCase):
+    """★ 统一接口：一套字段走所有模型，选模型不再选协议。"""
+
+    def test_every_model_uses_the_same_two_paths(self):
+        for m in ("sd2.0-720满血-不卡脸（按秒）", "开源h3-720p", "grok-imagine-1.0-video",
+                  "火山官方2.5-480p", "veo视频生成", "sd-720满血-933（按秒）",
+                  "sd-720fast-ad渠道16x9", "omni-fast-视频生成（无水印）"):
+            path, _, qpath = body(prompt="x", model=m, refs=[U[0]])
+            self.assertEqual((path, qpath), ("/v1/videos", "/v1/videos/{id}"), m)
+
+    def test_single_ref_goes_to_top_level_input_reference(self):
+        _, b, _ = body(prompt="x", model="sd2.0-720满血-不卡脸（按秒）", refs=[U[0]])
+        self.assertEqual(b["input_reference"], {"url": U[0]})     # 顶层、对象、url 键
+        self.assertNotIn("reference_images", b.get("extra", {}))
+
+    def test_first_and_last_frame_use_roles(self):
+        _, b, _ = body(prompt="x", model="开源h3-720p", refs=U[:2],
+                       extra={"first_last": True})
+        self.assertEqual(b["extra"]["reference_images"],
+                         [{"url": U[0], "role": "first_frame"},
+                          {"url": U[1], "role": "last_frame"}])
+
+    def test_multi_refs_use_reference_image_role(self):
+        _, b, _ = body(prompt="x", model="sd-2.5-720p不卡脸(按秒)", refs=U)
+        self.assertEqual(b["extra"]["reference_images"],
+                         [{"url": u, "role": "reference_image"} for u in U])
+
+    def test_two_refs_without_the_flag_are_just_multi_refs(self):
+        """没打首尾帧标记的 2 张图走多参考，不许被当成首尾帧。"""
+        _, b, _ = body(prompt="x", model="sd2.0-720满血-不卡脸（按秒）", refs=U[:2])
+        self.assertEqual([r["role"] for r in b["extra"]["reference_images"]],
+                         ["reference_image", "reference_image"])
+
+    def test_videos_and_audios_go_to_extra(self):
+        _, b, _ = body(prompt="x", model="sd2.0-720满血-不卡脸（按秒）", refs=U,
+                       extra={"videos": V, "audios": A})
+        self.assertEqual(b["extra"]["reference_videos"], [{"url": V[0]}])
+        self.assertEqual(b["extra"]["reference_audios"], [{"url": A[0]}])
+
+    def test_ratio_goes_to_extra_aspect_ratio(self):
+        _, b, _ = body(prompt="x", model="sd2.0-720满血-不卡脸（按秒）",
+                       ratio="16:9")
+        self.assertEqual(b["extra"]["aspect_ratio"], "16:9")
+        self.assertNotIn("aspect_ratio", b)                      # 不在顶层
+
+    def test_ad_models_lock_ratio_in_their_name(self):
+        """ad 渠道画幅锁在模型名（…16x9/…9x16），再传 aspect_ratio 是递矛盾。"""
+        _, b, _ = body(prompt="x", model="sd2.0-480fast-ad渠道16x9", refs=U)
+        self.assertNotIn("aspect_ratio", b.get("extra", {}))
+
+    def test_text_to_video_has_no_reference_fields(self):
+        _, b, _ = body(prompt="x", model="sd2.0-720满血-不卡脸（按秒）")
+        self.assertNotIn("input_reference", b)
+        self.assertNotIn("reference_images", b.get("extra", {}))
+
+
+class FamilyKnowledgeTests(unittest.TestCase):
+    """网关换协议也带不走的上游限制 —— 时长夹取、参考上限、模式限制。"""
+
     def test_branch_lookup(self):
         self.assertEqual(branch_of("grok-imagine-1.0-video"), "grok10")
-        self.assertEqual(branch_of("grok-1.5-多参接口"), "grok15")
         self.assertEqual(branch_of("开源h3-720p"), "h3")
         self.assertEqual(branch_of("火山官方2.5-480p"), "volc")
         self.assertEqual(branch_of("sd-720满血-900（不售后）"), "sd900")
-        # 认不出来的退到最通用的 metadata 形状，而不是崩掉
+        # 认不出来的退到最通用的族（时长按 4-15 夹），而不是崩掉
         self.assertEqual(branch_of("某个没见过的新模型"), "sd2full")
 
-    def test_grok10_sends_duration_three_times(self):
-        _, b, _ = body(prompt="x", model="grok-imagine-1.0-video", duration=6, refs=D)
-        self.assertEqual(b["duration"], 6)
-        self.assertEqual(b["video_length"], 6)
-        self.assertEqual(b["video_config"]["video_length"], 6)
-        self.assertEqual(b["reference_images"], D)          # 字符串数组
+    def test_durations_are_clamped_per_family(self):
+        cases = [
+            ("grok-imagine-1.0-video", 7, 6),          # 只有 6/10 档，就近吸附
+            ("grok-1.5-多参接口", 12, 10),              # 6/10/15 档，就近吸附
+            ("veo视频生成", 7, 6),                       # 4/6/8 档（7 与 6/8 平手取小）
+            ("omni-fast-视频生成（无水印）", 15, 10),    # 固定 10
+            ("sd2.0-480fast-ad渠道16x9", 8, 15),        # 固定 15
+            ("sd-720满血-不卡脸（按次）", 8, 15),        # 按次轮换固定 15
+            ("开源h3-720p", 4, 5),                       # h3 最低 5
+            ("sd-2.5-720p不卡脸(按秒)", 29, 29),        # sd-2.5 到 29
+            ("sd-2.5-轮换渠道（按秒）", 25, 25),        # 2.5 轮换按秒到 29
+            ("sd-2.5-轮换渠道（按次）", 25, 15),        # 按次封顶 15
+            ("火山官方2.5-480p", 20, 20),                # 火山 2.5 到 30
+            ("火山官方2.0-480p-mini", 20, 15),           # 火山 2.0 封顶 15
+            ("sd2.0-720满血-不卡脸（按秒）", 29, 15),   # sd2.0 封顶 15
+        ]
+        for model, ask, want in cases:
+            # 带一张图：火山官方没有文生模式，不带参考图会先被模式限制拦下
+            _, b, _ = body(prompt="x", model=model, duration=ask, refs=[U[0]])
+            self.assertEqual(b["seconds"], want, model)
 
-    def test_grok15_object_array_and_string_seconds(self):
-        _, b, _ = body(prompt="x", model="grok-1.5-多参接口", duration=10, ratio="16:9", refs=D)
-        self.assertEqual(b["seconds"], "10")
-        self.assertIsInstance(b["seconds"], str)
-        self.assertEqual(b["size"], "1280x720")
-        self.assertEqual(b["reference_images"], [{"url": D[0]}, {"url": D[1]}])
+    def test_unknown_models_fall_back_to_4_to_15(self):
+        _, b, _ = body(prompt="x", model="某个没见过的新模型", duration=29)
+        self.assertEqual(b["seconds"], 15)
 
-    def test_horse_first_frame_omits_ratio(self):
-        """首帧模式传 parameters.ratio 会让画幅不跟首帧（文档 #3）。"""
-        _, b, _ = body(prompt="x", model="happyhorse-1.1-i2v-720p", refs=[D[0]])
-        self.assertNotIn("ratio", b["parameters"])
-        self.assertEqual(b["image_url"], D[0])
-        _, b2, _ = body(prompt="x", model="happyhorse-1.1-r2v-720p", refs=D)
-        self.assertIn("ratio", b2["parameters"])            # 多参考才有
-
-    def test_h3_uses_generations_path_and_roles(self):
-        path, b, qpath = body(prompt="x", model="开源h3-720p", refs=U,
-                              extra={"first_last": True})
-        self.assertEqual(path, "/v1/video/generations")     # 不是 /v1/videos/generations
-        self.assertEqual(qpath, "/v1/video/generations/{id}")
-        self.assertEqual(b["fps"], 24)
-        self.assertEqual([r["role"] for r in b["reference_images"]],
-                         ["first_frame", "last_frame"])
-
-    def test_volcano_never_sends_ratio_on_frames(self):
-        """首帧/首尾帧带 ratio 火山会回 InvalidParameter.TaskTypeConstraint。"""
-        _, b, _ = body(prompt="x", model="火山官方2.5-480p", refs=U, extra={"first_last": True})
-        self.assertNotIn("ratio", b)
-        self.assertEqual([c.get("role") for c in b["content"][1:]],
-                         ["first_frame", "last_frame"])
-        _, b2, _ = body(prompt="x", model="火山官方2.5-720p",
-                        refs=U + ["https://cdn/3.jpg"])
-        self.assertEqual(b2["ratio"], "9:16")               # 多参考才发
+    def test_ref_caps_differ_by_family(self):
+        many = [f"https://cdn/{i}.jpg" for i in range(35)]
+        _, b25, _ = body(prompt="x", model="sd-2.5-720p不卡脸(按秒)", refs=many)
+        self.assertEqual(len(b25["extra"]["reference_images"]), 30)   # sd-2.5 吃 30
+        _, b2, _ = body(prompt="x", model="sd2.0-720满血-不卡脸（按秒）", refs=many)
+        self.assertEqual(len(b2["extra"]["reference_images"]), 9)     # sd2.0 吃 9
+        _, bg, _ = body(prompt="x", model="grok-imagine-1.0-video", refs=many)
+        self.assertEqual(len(bg["extra"]["reference_images"]), 7)     # grok 吃 7
 
     def test_volcano_refuses_text_to_video(self):
         with self.assertRaises(ApiError):
             body(prompt="x", model="火山官方2.5-480p", refs=[])
 
-    def test_sd25_allows_29s_and_no_resolution(self):
-        _, b, _ = body(prompt="x", model="sd-2.5-720p不卡脸(按秒)", duration=29, refs=U)
-        self.assertEqual(b["duration"], 29)
-        self.assertNotIn("resolution", b)
-        self.assertEqual(b["images"], U)
-
-    def test_sd2full_metadata_shape(self):
-        _, b, _ = body(prompt="x", model="sd2.0-720满血-不卡脸（按秒）", refs=U,
-                       extra={"first_last": True})
-        self.assertEqual(b["metadata"]["enableSound"], "on")   # 字符串不是布尔
-        self.assertIsInstance(b["metadata"]["enableSound"], str)
-        self.assertEqual(b["metadata"]["modeType"], "frames2video")
-
-    def test_ad_nested_input_media(self):
-        _, b, _ = body(prompt="x", model="sd2.0-720满血-ad渠道16x9", refs=U)
-        self.assertEqual(b["seconds"], "15")
-        self.assertEqual(b["size"], "1280x720")
-        self.assertEqual([m["type"] for m in b["input"]["media"]],
-                         ["reference_image", "reference_image"])
-
-    def test_dual_endpoint_switches_path(self):
-        p1, b1, _ = body(prompt="x", model="sd-720满血-933（按秒）", refs=[U[0]])
-        self.assertEqual(p1, "/v1/videos")
-        self.assertEqual(b1["input_reference"], {"image_url": U[0]})   # 对象不是字符串
-        p2, b2, _ = body(prompt="x", model="sd-720满血-933（按秒）", refs=U)
-        self.assertEqual(p2, "/v1/video/generations")
-        self.assertEqual(b2["image_references"], U)
-
-    def test_kling_omni_uses_images_key_and_n(self):
-        """文档 #14 末尾特意点名：这支多图字段是 images，不是 image_references。"""
-        _, b, _ = body(prompt="x", model="可灵-3.0-omni（不卡脸）惊喜渠道", refs=U)
-        self.assertEqual(b["images"], U)
-        self.assertNotIn("image_references", b)
-        self.assertEqual(b["n"], 1)
+    def test_sd900_needs_refs(self):
+        with self.assertRaises(ApiError):
+            body(prompt="x", model="sd-720满血-900（不售后）", refs=[])
 
     def test_happyhorse_surprise_rejects_multi(self):
         with self.assertRaises(ApiError):
             body(prompt="x", model="快乐马1.1（不卡脸）惊喜渠道", refs=U)
 
-    def test_sd900_string_duration_and_object_refs(self):
-        _, b, _ = body(prompt="x", model="sd-720满血-900（不售后）", refs=U)
-        self.assertEqual(b["duration"], "15")
-        self.assertIsInstance(b["duration"], str)
-        self.assertEqual(b["reference_images"], [{"url": U[0]}, {"url": U[1]}])
 
-    def test_rotate_25_allows_29s(self):
-        _, b, _ = body(prompt="x", model="sd-2.5-轮换渠道（按秒）", duration=25, refs=U,
-                       extra={"first_last": True})
-        self.assertEqual(b["seconds"], "25")
-        self.assertEqual(b["first_frame_url"], U[0])
-        self.assertEqual(b["last_frame_url"], U[1])
-        _, b2, _ = body(prompt="x", model="sd-720满血-不卡脸（按次）", duration=8)
-        self.assertEqual(b2["seconds"], "15")              # 按次固定 15
+class RefFormTests(unittest.TestCase):
+    """统一接口的参考素材全要公网链接 —— GROK/Horse 旧例外已取消。"""
 
-    def test_ref_form_differs_by_branch(self):
-        """GROK/Horse 吃 Data URL，其余要公网 URL —— 声明反了参考图会被悄悄丢掉。"""
-        self.assertFalse(P.needs_url("grok-imagine-1.0-video", "video"))
-        self.assertTrue(P.accepts_url("grok-imagine-1.0-video", "video") is False)
-        self.assertTrue(P.needs_url("sd-2.5-720p不卡脸(按秒)", "video"))
-        self.assertTrue(P.accepts_url("sd-2.5-720p不卡脸(按秒)", "video"))
+    def test_all_video_models_need_public_urls(self):
+        for m in ("grok-imagine-1.0-video", "happyhorse-1.1-r2v-720p",
+                  "sd2.0-720满血-不卡脸（按秒）", "veo视频生成"):
+            self.assertTrue(P.needs_url(m, "video"), m)
+            self.assertTrue(P.accepts_url(m, "video"), m)
 
-    def test_veo_snaps_duration(self):
-        _, b, _ = body(prompt="x", model="veo视频生成", duration=7)
-        self.assertIn(b["duration"], (6, 8))
-        self.assertTrue(b["generate_audio"])
+    def test_image_still_only_takes_bare_base64(self):
+        self.assertFalse(P.needs_url("", "image"))
+        self.assertFalse(P.accepts_url("", "image"))
 
 
 if __name__ == "__main__":

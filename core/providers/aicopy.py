@@ -8,7 +8,8 @@
 - 图片：`POST /v1/images/generations`（JSON）。参考图放 `image` 字段，
   **要裸 base64，不带 `data:` 前缀**（这点和别家都不一样）。
   返回 b64_json 或 url。
-- 视频：`POST /v1/videos` 提交 + `GET /v1/videos/{id}` 轮询。
+- 视频：统一接口（2026-08-19）—— `POST /v1/videos` 提交 +
+  `GET /v1/videos/{id}` 轮询，所有模型同一套字段，网关按模型自动转换。
 """
 
 from __future__ import annotations
@@ -30,45 +31,50 @@ IMAGE_MODELS = [
     "GPT本地版-通道3", "GPT本地版1k-通道3", "GPT本地版2k-通道3", "GPT本地版4k-通道3",
 ]
 # ---------------------------------------------------------------------------
-# 视频分支（对齐「视频插件接口文档 3.3.53」，2026-08-15）
+# 视频分支（对齐「用户侧统一视频接口」文档，2026-08-19）
 #
-# ⚠ 这家的视频**不是一套协议**：16 个分支的请求体形状互不相同，选错了字段
-# 多半不报错，只是参考图被静默忽略 —— 图照出、人不对。所以模型名要能反查到
-# 分支，由 _branch_of() 负责；每个分支一个 body 构造函数。
+# 网关升级成了统一入口：**所有模型同一套协议** —— POST /v1/videos 提交 +
+# GET /v1/videos/{id} 轮询，参考素材、时长、画幅由网关按模型自动转换。
+# 3.3.53 那套 16 个分支的请求体形状（metadata{} / content 块 / input.media /
+# 双端点 / first_frame_url…）全部退役 —— 那些形状发错**多半不报错**，
+# 只是参考图被静默忽略，现在由网关统一兜住，客户端只管一套字段：
 #
-# 3.3.25 → 3.3.53 的坑：「卡蒸」全改成了「**卡脸**」，且 sd2-*（全系按秒）、
-# 火山官方sd2-*、grok-*-支持16s、*最低渠道 这几批模型名整批下线。
+#   单首帧 → 顶层 input_reference
+#   首尾帧 → extra.reference_images 带 first_frame / last_frame 角色
+#   多参考 → extra.reference_images 带 reference_image 角色
+#   参考视频/音频 → extra.reference_videos / reference_audios
+#   画幅 → extra.aspect_ratio
+#
+# 仍按模型族保留的知识只剩两类（网关换协议也带不走的上游限制）：
+#   · 时长上限/固定值 —— 客户端先夹住，免得白跑一趟 400
+#   · 模式限制 —— 火山官方没有文生、900 只吃多参考、快乐马只要单图
+#
+# 参考素材统一要公网 HTTP(S) 链接（GROK / Horse 旧分支吃 Data URL 的例外
+# 取消了 —— 统一入口不再收 data URI，本机图得先传对象存储）。
+# 模型族表（branch_of）保留：认不出新模型时按最通用的族夹时长。
 # ---------------------------------------------------------------------------
 
-# #1 GROK1.0：duration + video_length + video_config 三处时长要一致，图是 data URL
+# 模型族 —— 名字还是控制台那些公开模型名，族只用来夹时长/限模式
 GROK10_MODELS = ["grok-imagine-1.0-video", "grok-1.0-官转接口", "grok-1.0-备用接口"]
-# #2 GROK1.5：seconds 字符串 + size；reference_images 是对象数组 [{url: data-url}]
 GROK15_MODELS = ["grok-imagine-video-1.5-preview", "grok-1.5-官转接口",
                  "grok-1.5-备用接口", "grok-1.5-多参接口"]
-# #3 Horse 官方：参数在 parameters{} 里，图是 data URL，模式由变体名锁定
 HORSE_MODELS = ["happyhorse-1.1-t2v-720p", "happyhorse-1.1-t2v-1080p",
                 "happyhorse-1.1-i2v-720p", "happyhorse-1.1-i2v-1080p",
                 "happyhorse-1.1-r2v-720p", "happyhorse-1.1-r2v-1080p"]
-# #4 Minimax-h3：走 /v1/video/generations，fps 固定 24，图带 role
 H3_MODELS = ["开源h3-480p", "开源h3-720p", "开源h3-1080p", "开源h3-2k"]
-# #5 火山官方：content 块数组；没有文生模式；首帧/首尾禁传 ratio
 VOLC_MODELS = ["火山官方2.5-480p", "火山官方2.5-720p",
                "火山官方2.0-480p-mini", "火山官方2.0-720p-mini"]
-# #6 sd-2.5 不卡脸：4-29 秒，裸 URL 数组，不发 resolution
 SD25_MODELS = ["sd-2.5-480p不卡脸(按秒)", "sd-2.5-720p不卡脸(按秒)",
                "sd-2.5-480p不卡脸(按秒)-备用", "sd-2.5-720p不卡脸(按秒)-备用"]
-# #7 sd2.0 全系列不卡脸：比例和模式塞在 metadata 里
 SD2FULL_MODELS = ["sd2.0-720mini-不卡脸（按秒）", "sd2.0-720fast-不卡脸（按秒）",
                   "sd2.0-720满血-不卡脸（按秒）", "sd2.0-720满血（按次）不卡脸",
                   "sd2.0-720fast（按次）不卡脸", "sd2.0-1080mini-不卡脸（按秒）",
                   "sd2.0-1080fast-不卡脸（按秒）", "sd2.0-1080满血-不卡脸（按秒）"]
-# #8 ad 渠道：嵌套 input{prompt, media:[{type,url}]}，固定 15 秒
 AD_MODELS = ["sd2.0-480fast-ad渠道16x9", "sd2.0-480fast-ad渠道9x16",
              "sd2.0-480满血-ad渠道16x9", "sd2.0-480满血-ad渠道9x16",
              "sd2.0-720fast-ad渠道16x9", "sd2.0-720fast-ad渠道9x16",
              "sd2.0-720满血-ad渠道16x9", "sd2.0-720满血-ad渠道9x16",
              "sd2.0-1080满血-ad渠道16x9", "sd2.0-1080满血-ad渠道9x16"]
-# #9 #12 #13 #14 双端点：无图/单图 → /v1/videos(input_reference)；多图 → /v1/video/generations
 DUAL_MODELS = ["sd-480满血-933（按次）", "sd-720满血-933（按次）",
                "sd-480满血-933（按秒）", "sd-720满血-933（按秒）",
                "sd-2.0-480满血（卡脸）惊喜渠道", "sd-2.0-480fast（卡脸）惊喜渠道",
@@ -76,28 +82,19 @@ DUAL_MODELS = ["sd-480满血-933（按次）", "sd-720满血-933（按次）",
                "sd-2.0-1080满血（卡脸）惊喜渠道",
                "sd-2.0-720满血（不卡脸）惊喜渠道", "sd-2.0-480满血（不卡脸）惊喜渠道",
                "快乐马1.1（不卡脸）惊喜渠道", "可灵-3.0-omni（不卡脸）惊喜渠道"]
-DUAL_NEEDS_N = ("快乐马1.1（不卡脸）惊喜渠道", "可灵-3.0-omni（不卡脸）惊喜渠道")
-DUAL_IMAGES_KEY = ("可灵-3.0-omni（不卡脸）惊喜渠道",)      # 多图字段叫 images 不是 image_references
-DUAL_SINGLE_ONLY = ("快乐马1.1（不卡脸）惊喜渠道",)         # 只支持文生/单首帧
-# #10 轮换渠道：first_frame_url / reference_image_urls 那套专用字段
+DUAL_SINGLE_ONLY = ("快乐马1.1（不卡脸）惊喜渠道",)         # 上游只支持文生/单首帧
 ROTATE_MODELS = ["sd-720fast-不卡脸（按次）", "sd-720满血-较慢（按次）",
                  "sd-720满血-不卡脸（按次）", "sd-2.5-轮换渠道（按次）",
                  "sd-720fast（按秒）", "sd-720满血（按秒）", "sd-2.5-轮换渠道（按秒）"]
 ROTATE_FIXED15 = ("sd-720fast-不卡脸（按次）", "sd-720满血-较慢（按次）", "sd-720满血-不卡脸（按次）")
-# #11 只支持多参考图，duration 是字符串 "15"
-SD900_MODELS = ["sd-720满血-900（不售后）"]
-# #15 omni：固定 10 秒、720p
+SD900_MODELS = ["sd-720满血-900（不售后）"]                 # 上游只支持多参考
 OMNI_MODELS = ["omni-fast-视频生成（无水印）", "omni-fast-视频生成（带水印）",
                "omni-fast-视频编辑（无水印）", "omni-fast-视频编辑（带水印）"]
-# #16 veo
 VEO_MODELS = ["veo视频生成"]
 
 VIDEO_MODELS = (GROK10_MODELS + GROK15_MODELS + HORSE_MODELS + H3_MODELS + VOLC_MODELS
                 + SD25_MODELS + SD2FULL_MODELS + AD_MODELS + DUAL_MODELS + ROTATE_MODELS
                 + SD900_MODELS + OMNI_MODELS + VEO_MODELS)
-
-# 这两支的参考图必须是 Data URL（文档「字段速查」那节），其余分支收公网 URL
-DATA_URL_BRANCHES = ("grok10", "grok15", "horse")
 
 _BRANCH_TABLE = [
     ("grok10", GROK10_MODELS), ("grok15", GROK15_MODELS), ("horse", HORSE_MODELS),
@@ -107,17 +104,64 @@ _BRANCH_TABLE = [
     ("veo", VEO_MODELS),
 ]
 
-GROK_SIZES = {"16:9": "1280x720", "9:16": "720x1280", "3:2": "1080x720"}
-AD_SIZES = {"16x9": "1280x720", "9x16": "720x1280"}
-
 
 def branch_of(model: str) -> str:
-    """模型名 → 分支 id。认不出来的按 sd2full（最通用的那套 metadata 形状）走。"""
+    """模型名 → 族 id。认不出来的按 sd2full（最通用的时长规则）走。"""
     m = (model or "").strip()
     for name, models in _BRANCH_TABLE:
         if m in models:
             return name
     return "sd2full"
+
+
+def _seconds_for(model: str, sec: int) -> int:
+    """按族把时长夹进上游认的范围 —— 上游的限制换网关也带不走。
+
+    固定值的（ad 15 / omni 10 / 按次轮换 15）直接给死值；离散档的
+    （grok 6/10、grok1.5 6/10/15、veo 4/6/8）就近吸附，别让上游替我们挑。
+    """
+    br = branch_of(model)
+    if br == "grok10":
+        return min((6, 10), key=lambda d: abs(d - sec))
+    if br == "grok15":
+        return min((6, 10, 15), key=lambda d: abs(d - sec))
+    if br == "veo":
+        return min((4, 6, 8), key=lambda d: abs(d - sec))
+    if br == "omni":
+        return 10
+    if br == "ad":
+        return 15
+    if model in ROTATE_FIXED15:
+        return 15
+    if br == "h3":
+        return max(5, min(15, sec))
+    if br == "sd25":
+        return max(4, min(29, sec))
+    if br == "volc":
+        return max(4, min(30 if "2.5" in model else 15, sec))
+    if br == "rotate":
+        return max(4, min(29 if ("按秒" in model and "2.5" in model) else 15, sec))
+    return max(4, min(15, sec))                     # sd2full / dual / sd900 / 没见过的新模型
+
+
+def _ref_caps(model: str) -> tuple:
+    """各族参考素材上限 (图, 视频, 音频)。超上限的部分**不发**，别让上游拒整个任务。"""
+    br = branch_of(model)
+    if br == "sd25":
+        return 30, 10, 10
+    if br == "volc":
+        return (30, 10, 10) if "2.5" in model else (9, 3, 3)
+    if br == "rotate":
+        return (30, 10, 10) if "2.5" in model else (9, 3, 3)
+    if br == "grok10" or br == "grok15":
+        return 7, 0, 0
+    if br == "veo":
+        return 2, 0, 0
+    if br == "omni":
+        return 5, 2, 0
+    if br == "sd900":
+        return 9, 0, 0
+    return 9, 3, 3                                   # horse / h3 / sd2full / ad / dual / 新模型
 
 
 def _bare_b64(ref: str) -> str:
@@ -133,15 +177,15 @@ class AicopyProvider(Provider):
 
     def accepts_url(self, model: str = "", media: str = "image") -> bool:
         # 图片接口把参考图内联进 image 字段、只认裸 base64，给链接它读不了。
-        # 视频里 GROK / Horse 官方两支同样是内联 Data URL（文档「字段速查」），
-        # 给公网链接会被原样发出去 —— 上游读不到，参考图等于没给。
+        # 视频统一接口的参考素材全是公网 HTTP(S) —— data URI 也不收了
+        #（GROK/Horse 旧分支的例外随 3.3.53 一起退役）。
         if media == "image":
             return False
-        return branch_of(model) not in DATA_URL_BRANCHES
+        return True
 
     def needs_url(self, model: str = "", media: str = "video") -> bool:
-        # 除 GROK/Horse 外的视频分支都要公网 URL（本机图得先传对象存储）
-        return media == "video" and branch_of(model) not in DATA_URL_BRANCHES
+        # 统一接口所有视频模型都要公网 URL（本机图得先传对象存储）
+        return media == "video"
 
     def capabilities(self) -> dict:
         return {
@@ -170,15 +214,15 @@ class AicopyProvider(Provider):
                 "default_duration": 10,
                 "resolutions": [""],
                 "max_refs": 30,
-                "ref_mode": "data_uri",
-                "notes": "⚠ **这家的视频不是一套协议**：文档 3.3.53 有 16 个分支，请求体形状"
-                         "互不相同（metadata / content 块 / input.media / 双端点 / video_config…），"
-                         "本类按模型名自动分派，选模型即选协议。"
-                         "分辨率和模式常由**模型名锁定**（如 happyhorse 的 t2v/i2v/r2v、"
-                         "ad渠道的 16x9/9x16），别指望用参数覆盖。"
-                         "GROK 和 Horse 官方两支只吃 Data URL，其余分支要公网 URL —— "
-                         "本类已按分支声明，解析器会给对形式。"
-                         "3.3.53 起「卡蒸」全部改成「**卡脸**」，模型名照抄旧文档会 503。",
+                "ref_mode": "url",
+                "notes": "统一视频接口（2026-08-19）：所有模型同一套 /v1/videos，"
+                         "参考素材、画幅由网关按模型自动转换 —— 选模型不再选协议。"
+                         "时长上限按模型族自动夹（sd-2.5 系到 29 秒，ad 渠道固定 15，"
+                         "omni 固定 10，grok 只有 6/10 档）。"
+                         "⚠ 参考素材全部要**公网链接**（GROK/Horse 旧例外已取消），"
+                         "本机图得先配对象存储。"
+                         "分辨率和模式常由模型名锁定（happyhorse 的 t2v/i2v/r2v、"
+                         "ad渠道的 16x9/9x16），别指望用参数覆盖。",
             },
             "notes": "接了很多线路，主要当 image-2 的备份来用。",
         }
@@ -225,199 +269,65 @@ class AicopyProvider(Provider):
 
     # ---------------------------------------------------------------- video
     def build_video_body(self, task: VideoTask) -> tuple:
-        """按模型所属分支拼 body。返回 (创建路径, body, 轮询路径)。
+        """统一接口的 body（文档 2026-08-19）。返回 (创建路径, body, 轮询路径)。
 
-        16 个分支的形状互不相同，选错**多半不报错**、只是参考图被忽略 ——
-        所以这里按 branch_of() 分派，别想着用一套通用形状糊过去。
+        所有模型一套形状；模型族的差别只剩时长夹取、参考上限和模式限制
+        （见 _seconds_for / _ref_caps）—— 那些是上游的限制，网关替不了。
         """
         model = task.model or "sd2.0-720满血-不卡脸（按秒）"
         br = branch_of(model)
         prompt = task.prompt or ""
         ratio = task.ratio or "9:16"
-        sec = int(task.duration or 10)
         refs = list(task.refs or [])
         vids = [v for v in (task.extra.get("video_refs") or task.extra.get("videos") or []) if v]
         auds = [a for a in (task.extra.get("audio_refs") or task.extra.get("audios") or []) if a]
         # 模式：靠图片张数推断（studio 没有独立的"模式"概念）
         first_last = len(refs) == 2 and bool(task.extra.get("first_last"))
-        vpath = "/v1/videos"
 
-        if br == "grok10":
-            sec = min((6, 10), key=lambda d: abs(d - sec))
-            body = {"model": model, "prompt": prompt, "duration": sec, "video_length": sec,
-                    "aspect_ratio": ratio, "resolution": "720p",
-                    "video_config": {"video_length": sec, "aspect_ratio": ratio,
-                                     "resolution": "720p", "preset": "normal"}}
-            if len(refs) == 1:
-                body["image"] = refs[0]                 # 单张走 image
-            elif refs:
-                body["reference_images"] = refs[:7]     # 多张走字符串数组
-        elif br == "grok15":
-            sec = min((6, 10, 15), key=lambda d: abs(d - sec))
-            body = {"model": model, "prompt": prompt, "seconds": str(sec),
-                    "size": GROK_SIZES.get(ratio, "720x1280")}
-            if refs:
-                body["reference_images"] = [{"url": r} for r in refs[:7]]   # 对象数组
-        elif br == "horse":
-            params = {"duration": max(4, min(15, sec)),
-                      "resolution": "1080P" if "1080p" in model else "720P",
-                      "watermark": False}
-            body = {"model": model, "prompt": prompt, "parameters": params}
-            if "-i2v-" in model and refs:
-                body["image_url"] = refs[0]             # 首帧模式禁传 parameters.ratio
-            elif "-r2v-" in model and refs:
-                body["reference_images"] = refs[:9]
-                params["ratio"] = ratio
-            else:
-                params["ratio"] = ratio
-        elif br == "h3":
-            vpath = "/v1/video/generations"
-            body = {"model": model, "prompt": prompt, "aspect_ratio": ratio,
-                    "duration": max(5, min(15, sec)), "fps": 24}
-            if first_last:
-                body["reference_images"] = [{"url": refs[0], "role": "first_frame"},
-                                            {"url": refs[1], "role": "last_frame"}]
-            elif len(refs) == 1:
-                body["reference_images"] = [{"url": refs[0], "role": "first_frame"}]
-            elif refs:
-                body["reference_images"] = [{"url": r, "role": "reference_image"} for r in refs[:9]]
-                if vids:
-                    body["reference_videos"] = [{"url": v} for v in vids[:3]]
-                if auds:
-                    body["reference_audios"] = [{"url": a} for a in auds[:3]]
-        elif br == "volc":
-            if not refs:
-                raise ApiError(
-                    "火山官方分支没有文生视频模式（文档 #5），至少要 1 张参考图。"
-                    "纯文生请把这活排给 sd-2.5 / sd2.0 全系列的单位。",
-                    status=0, kind="task_fatal")
-            big = "2.5" in model
-            content = [{"type": "text", "text": prompt}]
-            if first_last:
-                content += [{"type": "image_url", "image_url": {"url": refs[0]}, "role": "first_frame"},
-                            {"type": "image_url", "image_url": {"url": refs[1]}, "role": "last_frame"}]
-            elif len(refs) == 1:
-                content.append({"type": "image_url", "image_url": {"url": refs[0]}, "role": "first_frame"})
-            else:
-                for r in refs[:30 if big else 9]:
-                    content.append({"type": "image_url", "image_url": {"url": r}, "role": "reference_image"})
-                for v in vids[:10 if big else 3]:
-                    content.append({"type": "video_url", "video_url": {"url": v}, "role": "reference_video"})
-                for a in auds[:10 if big else 3]:
-                    content.append({"type": "audio_url", "audio_url": {"url": a}, "role": "reference_audio"})
-            body = {"model": model, "content": content, "generate_audio": True,
-                    "duration": max(4, min(30 if big else 15, sec)),
-                    "watermark": False, "resolution": "480p" if "480" in model else "720p"}
-            if len(refs) > 2 or (refs and not first_last and len(refs) > 1):
-                # 只有多参考才发 ratio；首帧/首尾发了会 InvalidParameter.TaskTypeConstraint
-                body["ratio"] = ratio
-        elif br == "sd25":
-            body = {"model": model, "prompt": prompt,
-                    "duration": max(4, min(29, sec)), "aspect_ratio": ratio}
-            if refs:
-                body["images"] = refs[:30]
-            if vids:
-                body["videos"] = vids[:10]
-            if auds:
-                body["audios"] = auds[:10]
-        elif br == "ad":
-            media = ([{"type": "reference_image", "url": r} for r in refs[:9]]
-                     + [{"type": "reference_video", "url": v} for v in vids[:3]]
-                     + [{"type": "reference_audio", "url": a} for a in auds[:3]])
-            size = next((v for k, v in AD_SIZES.items() if k in model), "1280x720")
-            body = {"model": model, "prompt": prompt, "seconds": "15", "size": size,
-                    "input": {"prompt": prompt}}
-            if media:
-                body["input"]["media"] = media
-        elif br == "dual":
-            multi = len(refs) > 1
-            if multi and model in DUAL_SINGLE_ONLY:
-                raise ApiError(
-                    f"{model} 只支持文生和单首帧（文档 #13），给了 {len(refs)} 张图。"
-                    f"多参考请排给 933 或 sd-2.0 惊喜渠道的单位。",
-                    status=0, kind="task_fatal")
-            res = "1080p" if "1080" in model else ("480p" if "480" in model else "720p")
-            if not multi:
-                body = {"model": model, "prompt": prompt, "seconds": max(4, min(15, sec)),
-                        "size": res, "aspect_ratio": ratio}
-                if refs:
-                    body["input_reference"] = {"image_url": refs[0]}    # 必须是对象
-            else:
-                vpath = "/v1/video/generations"
-                body = {"model": model, "prompt": prompt, "duration": max(4, min(15, sec)),
-                        "resolution": res, "aspect_ratio": ratio}
-                body["images" if model in DUAL_IMAGES_KEY else "image_references"] = refs[:9]
-                if vids:
-                    body["video_references"] = vids[:3]
-                if auds:
-                    body["audio_references"] = auds[:3]
-            if model in DUAL_NEEDS_N:
-                body["n"] = 1
-        elif br == "rotate":
-            big = "2.5" in model
-            if model in ROTATE_FIXED15:
-                sec = 15
-            else:
-                sec = max(4, min(29 if "按秒" in model and big else 15, sec))
-            body = {"model": model, "prompt": prompt, "aspect_ratio": ratio,
-                    "seconds": str(sec), "resolution": "720p"}
-            if first_last:
-                body["first_frame_url"], body["last_frame_url"] = refs[0], refs[1]
-            elif len(refs) == 1:
-                body["first_frame_url"] = refs[0]
-            elif refs:
-                body["reference_image_urls"] = refs[:30 if big else 9]
-            if vids:
-                body["reference_videos"] = vids[:10 if big else 3]
-            if auds:
-                body["reference_audios"] = auds[:10 if big else 3]
-        elif br == "sd900":
-            if not refs:
-                raise ApiError("sd-720满血-900（不售后）只支持多参考图（文档 #11），至少要 1 张。",
-                               status=0, kind="task_fatal")
-            body = {"model": model, "prompt": prompt, "duration": "15",   # 字符串
-                    "aspect_ratio": ratio, "resolution": "720p",
-                    "reference_images": [{"url": r} for r in refs[:9]]}
-        elif br == "omni":
-            body = {"model": model, "prompt": prompt, "aspect_ratio": ratio, "seconds": "10"}
-            if "编辑" in model:
-                if vids:
-                    body["video_url" if len(vids) == 1 else "videos"] = (
-                        vids[0] if len(vids) == 1 else vids[:2])
-            elif first_last:
-                body["first_image_url"], body["last_image_url"] = refs[0], refs[1]
-            elif len(refs) == 1:
-                body["first_image_url"] = refs[0]
-            elif refs:
-                body["images"] = refs[:5]
-        elif br == "veo":
-            body = {"model": model, "prompt": prompt, "aspect_ratio": ratio,
-                    "resolution": "720p", "generate_audio": True,
-                    "duration": min((4, 6, 8), key=lambda d: abs(d - sec))}
-            if refs:
-                body["image_urls"] = refs[:2]
-        else:                                          # sd2full（#7）
-            meta = {"ratio": ratio, "enableSound": "on"}
-            if refs:
-                meta["modeType"] = "frames2video" if first_last else "image2video"
-            else:
-                meta["modeType"] = "text2video"
-            body = {"model": model, "prompt": prompt,
-                    "duration": max(4, min(15, sec)), "metadata": meta}
-            if refs:
-                body["images"] = refs[:9]
-            if vids:
-                body["videos"] = vids[:3]
-            if auds:
-                body["audios"] = auds[:3]
-        return vpath, body, vpath + "/{id}"
+        # 上游的模式限制 —— 换协议也带不走，提前说清，让优先级链换别家
+        if br == "volc" and not refs:
+            raise ApiError(
+                "火山官方没有文生视频模式，至少要 1 张参考图。"
+                "纯文生请把这活排给 sd-2.5 / sd2.0 全系列的单位。",
+                status=0, kind="task_fatal")
+        if br == "sd900" and not refs:
+            raise ApiError("sd-720满血-900（不售后）只支持多参考图，至少要 1 张。",
+                           status=0, kind="task_fatal")
+        if len(refs) > 1 and model in DUAL_SINGLE_ONLY:
+            raise ApiError(
+                f"{model} 只支持文生和单首帧，给了 {len(refs)} 张图。"
+                f"多参考请排给 933 或 sd-2.0 惊喜渠道的单位。",
+                status=0, kind="task_fatal")
+
+        icap, vcap, acap = _ref_caps(model)
+        body = {"model": model, "prompt": prompt,
+                "seconds": _seconds_for(model, int(task.duration or 10))}
+        extra = {}
+        # ad 渠道的画幅锁在模型名里（…16x9 / …9x16），再传 aspect_ratio 是给上游递矛盾
+        if "16x9" not in model and "9x16" not in model:
+            extra["aspect_ratio"] = ratio
+        if first_last:
+            extra["reference_images"] = [{"url": refs[0], "role": "first_frame"},
+                                         {"url": refs[1], "role": "last_frame"}]
+        elif len(refs) == 1:
+            body["input_reference"] = {"url": refs[0]}     # 单首帧走顶层字段
+        elif refs:
+            extra["reference_images"] = [{"url": r, "role": "reference_image"}
+                                         for r in refs[:icap]]
+        if vids:
+            extra["reference_videos"] = [{"url": v} for v in vids[:vcap]]
+        if auds:
+            extra["reference_audios"] = [{"url": a} for a in auds[:acap]]
+        if extra:
+            body["extra"] = extra
+        return "/v1/videos", body, "/v1/videos/{id}"
 
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
         model = task.model or "sd2.0-720满血-不卡脸（按秒）"
         vpath, body, qpath = self.build_video_body(task)
-        log(f"小裴 {model}（{branch_of(model)} 分支）→ POST {vpath}")
+        log(f"小裴 {model}（{branch_of(model)} 族）→ POST {vpath}")
         data = self.session.request("POST", vpath, json_body=body,
                                     retries=2, timeout=300)
         url = extract_video_url(data)
@@ -425,8 +335,6 @@ class AicopyProvider(Provider):
         if not url:
             if not task_id:
                 raise ApiError("提交没返回视频地址也没返回 task_id")
-            # 走 /v1/video/generations 创建的必须按同一路径查（文档 404 那条：
-            # 多参考是 /v1/video/generations，不是 /v1/videos/generations）
             url = self.session.poll(qpath, task_id, picker=extract_video_url,
                                     interval=poll_interval, timeout=poll_timeout,
                                     content_path_tpl="/v1/videos/{id}/content",
