@@ -1888,7 +1888,7 @@ function renderGen(summary) {
                   : `${s.done}/${s.total}`}</td>
       <td><select class="p-sel" data-cap="${cap}" style="min-width:150px">${
             providerOptions(cap, pick.provider)}</select></td>
-      <td><select class="m-sel" style="min-width:150px"></select></td>
+      <td class="mtd"></td>
       <td class="pbox"></td>
       <td><input class="c-in" type="number" value="${(BOOT.config.defaults||{}).concurrency||3}" min="1" max="16"></td>
       <td><button class="btn sm" data-run="${k}"${dis}>开始</button>
@@ -1896,8 +1896,12 @@ function renderGen(summary) {
   }).join('');
   const d = BOOT.config.defaults || {};
   $$('#genRows tr').forEach(tr => {
-    const sel = tr.querySelector('.p-sel'), msel = tr.querySelector('.m-sel');
+    const sel = tr.querySelector('.p-sel');
     const pbox = tr.querySelector('.pbox'), kind = tr.dataset.k;
+    // 模型框是**自由输入 + 候选**（datalist），不是纯下拉：大多数家照旧从
+    // 候选里选；「智」这种模型按账号分配数字 ID 的家，静态列表给不了，
+    // 得直接手填。换服务商时整个框重建（见 fill），别复用旧节点。
+    let msel;
     // 尺寸/比例/时长的候选来自「这家自己声明支持的值」，换服务商就跟着变 ——
     // 各家支持的不一样，给全集合只会让人选到一个这家不认的值然后吃 400。
     const fillParams = block => {
@@ -1925,9 +1929,14 @@ function renderGen(summary) {
       // 而不是这家自己的 default_model。换成别家了链上那个型号就不适用了，
       // 退回这家的默认 —— 硬套会选到一个这家不认的型号然后吃 400。
       const want = sel.value === tr.dataset.chainProv ? tr.dataset.chainModel : '';
-      const cur = (block.models || []).includes(want) ? want : block.default_model;
-      msel.innerHTML = (block.models || []).map(m =>
-        `<option${m === cur ? ' selected' : ''}>${esc(m)}</option>`).join('');
+      const cur = (block.models || []).includes(want) ? want
+                                                       : (block.default_model || '');
+      tr.querySelector('.mtd').innerHTML =
+        `<input class="m-sel" list="ml_${kind}" value="${esc(cur || '')}"
+                placeholder="模型" style="min-width:150px">`
+        + `<datalist id="ml_${kind}">${(block.models || []).map(m =>
+            `<option value="${esc(m)}">`).join('')}</datalist>`;
+      msel = tr.querySelector('.m-sel');
       msel.onchange = () => fillParams(block);
       fillParams(block);
     };
@@ -2625,7 +2634,8 @@ function chainRow(kind, cap, i, sel) {
         ${providerReady(c.id, cap) ? '' : ' data-nokey="1"'}>${esc(c.name)}${
         providerReady(c.id, cap) ? '' : `（未填${cap === 'video' ? '视频' : '图片'}key）`}</option>`).join('')}
     </select>
-    <select class="c-model" style="min-width:190px"></select>
+    <input class="c-model" list="cl_${kind}_${i}" placeholder="模型" style="min-width:190px">
+    <datalist id="cl_${kind}_${i}"></datalist>
     <span class="c-hint muted" style="font-size:11px"></span>
   </div>`;
 }
@@ -2649,15 +2659,19 @@ function renderChains() {
       const c = BOOT.capabilities.find(x => x.id === ps.value);
       // 没选服务商时把模型下拉藏起来 —— 留一个空框在那里看着像坏了
       if (!c) {
-        ms.innerHTML = ''; ms.style.display = 'none';
+        ms.value = ''; ms.style.display = 'none';
         hint.textContent = idx === 0 ? '（不排的话这一类跑不了）' : '';
         return;
       }
-      ms.style.display = ''; ms.disabled = false;
+      ms.style.display = '';
       const block = c[ps.dataset.cap] || {};
       const want = (saved[idx] || {}).model;
-      ms.innerHTML = (block.models || []).map(m =>
-        `<option${m === (want || block.default_model) ? ' selected' : ''}>${esc(m)}</option>`).join('');
+      // 模型框是自由输入 + 候选：大多数家照旧从候选选；「智」这种模型按
+      // 账号分配数字 ID 的家，直接手填。
+      ms.value = (block.models || []).includes(want) ? want
+                                                     : (block.default_model || '');
+      row.querySelector('datalist').innerHTML = (block.models || []).map(m =>
+        `<option value="${esc(m)}">`).join('');
       const fillHint = () => {
         const selected = effectiveBlock(c, ps.dataset.cap, ms.value);
         ms.title = selected.notes || block.notes || '';

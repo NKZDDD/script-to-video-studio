@@ -631,10 +631,15 @@ class HttpSession:
         self.base_url = (base_url or "").strip().rstrip("/")
         self.timeout = timeout
         self.proxy = (proxy or "").strip()
+        # 鉴权头的形状：绝大多数网关是 Bearer，但「智」（zhi168）用 X-API-Key。
+        # 服务商在 __init__ 里改这个属性就行，默认不动。
+        self.auth_style = "bearer"
 
     def _headers(self, multipart: bool = False) -> dict:
+        auth = ({"X-API-Key": self.api_key} if self.auth_style == "x-api-key"
+                else {"Authorization": f"Bearer {self.api_key}"})
         h = {
-            "Authorization": f"Bearer {self.api_key}",
+            **auth,
             "Accept": "application/json",
             "User-Agent": "ScriptToVideoRunner/2.0",
         }

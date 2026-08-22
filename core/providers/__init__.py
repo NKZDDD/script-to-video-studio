@@ -39,7 +39,8 @@ from .base import ImageTask, Provider, VideoTask   # noqa: F401  对外导出
 # 这里漏过 ake 和 yishou，一直没被发现，是因为 exe 里目录恰好扫得到；
 # 哪天扫不到就会一次性少四家。加一家就往这里加一行。
 _BUILTIN_ORDER = ["paisio", "lingganya", "zeroapi", "m86", "aicopy", "kunji",
-                  "octopus", "ake", "yishou", "chaomo", "xiaobalong", "hvtald"]
+                  "octopus", "ake", "yishou", "chaomo", "xiaobalong", "hvtald",
+                  "zhi"]
 
 REGISTRY: dict = {}          # id → 类
 ALIASES: dict = {}           # 别名 → id
