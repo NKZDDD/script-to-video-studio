@@ -655,10 +655,11 @@ def _fit_size(provider_cfg: dict, model: str, media: str,
 
 
 def _soften_rounds(provider_cfg: dict) -> int:
-    """改写几轮。0 = 关掉，上限 5。设置页的「被审核拒绝后改写重试」。
+    """改写总轮数。0 = 关掉。设置页的「被审核拒绝后改写重试」。
 
-    服务商配置里单独写了就按它的（某一家审得特别严时可以单独调），
-    否则用全局默认。
+    每一级先试满三轮才降下一级（soften.ATTEMPTS_PER_TIER），所以默认
+    12 = 四级阶梯 × 3。服务商配置里单独写了就按它的（某一家审得特别严
+    时可以单独调），否则用全局默认。
     """
     v = provider_cfg.get("soften_rounds")
     if v in (None, ""):

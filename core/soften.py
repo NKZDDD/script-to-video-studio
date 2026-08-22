@@ -10,10 +10,12 @@
 
 改写**不是每轮都无差别地「再安全一点」** —— 那样模型只会换词，触发审核的
 语义结构没动，几轮下来原地打转，最后要么放弃、要么把戏删了。轮数映射到
-一条**降级阶梯**（TIERS）：第 1 轮只许换措辞，第 2 轮许降视觉强度，
-第 3 轮许调镜头语言，第 4 轮起才许改事件的发生方式。人物目标、情绪结果、
-事件结果在任何一级都不许动 —— 一开始就放开的话，模型会直奔最省事的那档
-（把戏改没），那比过不了审更糟。
+一条**降级阶梯**（TIERS），**每一级先试满三轮才降下一级**（ATTEMPTS_PER_TIER）：
+第 1-3 轮只许换措辞，第 4-6 轮许降视觉强度，第 7-9 轮许调镜头语言，
+第 10 轮起才许改事件的发生方式。一被拒就立刻降级，会把「这一级的写法
+没挑对」误判成「这一级救不了」—— 审核有随机性，同一级换一种写法常常
+就过了。人物目标、情绪结果、事件结果在任何一级都不许动 —— 一开始就
+放开的话，模型会直奔最省事的那档（把戏改没），那比过不了审更糟。
 
 ## 这件事最大的风险不是改不动，是改过头
 
@@ -35,14 +37,24 @@ from typing import Callable, Optional
 from . import diagnose
 from .store import Project, write_text
 
-# 改写几轮。0 = 关掉这个功能。设置页里可以改（「被审核拒绝后改写重试」）。
+# 改写几轮（**总轮数**）。0 = 关掉这个功能。设置页里可以改
+# （「被审核拒绝后改写重试」）。
+#
+# 默认 12 = 四级阶梯 × 每级 3 轮，正好把整条阶梯走完。设小了走不到深级
+# （比如 5 轮只能走完第 1 级再进半截第 2 级），超过 12 的部分全停在
+# 最深一级换写法。
 #
 # 每一轮都接着**上一轮改完的那版**继续改，不是每次都从原文重来 ——
 # 从原文重来等于把上一轮的进展扔掉，模型多半会给出差不多的东西。
 #
 # 不设上限：填多少就跑多少。真正兜底的是验收那一关（见 `_check`）——
 # 长度和身份映射始终对着**最初的原文**比，所以轮数再多也蚕食不动。
-DEFAULT_ROUNDS = 5
+DEFAULT_ROUNDS = 12
+
+# 每一级先试满几次才降下一级。和 LLM 重试「三次一个批次」同一个道理：
+# 审核本身有随机性，同一级换一种写法可能就过了 —— 一被拒就立刻降级，
+# 会把「写法没挑对」误判成「这一级救不了」，跳级跳得太快。
+ATTEMPTS_PER_TIER = 3
 
 # 降级阶梯：被拒不怪措辞的时候，一层层往深处放权限。**顺序就是权限的大小** ——
 # 前面的层不动画面只动词，最后的层才许换事件的发生方式。模型自己挑的话
@@ -71,12 +83,15 @@ TIERS = [
 
 
 def tier_of(round_no: int) -> tuple:
-    """第几轮改写 → (级序号, 级名, 级规则)。轮数超过级数就停在最深一级。
+    """第几轮改写 → (级序号, 级名, 级规则)。
 
-    停在 deepest 继续换写法是有意义的：审核有随机性，同一级换个说法
-    可能就过了；而「越改越淡」由验收那关拦着（_check），不靠限制层级。
+    **每一级先试满 ATTEMPTS_PER_TIER 轮才降下一级**（每轮接着上一版
+    换一种写法）：第 1-3 轮表达替换、4-6 视觉降敏、7-9 镜头调整、
+    10 起事件表现方式。轮数超过阶梯总长（4 级 × 3 = 12）就停在最深一级
+    继续换写法 —— 审核有随机性，同一级换个说法可能就过了；「越改越淡」
+    由验收那关拦着（_check），不靠限制层级。
     """
-    i = max(0, min(int(round_no), len(TIERS)) - 1)
+    i = max(0, min((int(round_no) - 1) // ATTEMPTS_PER_TIER, len(TIERS) - 1))
     return i, TIERS[i][0], TIERS[i][1]
 
 # 提示词里的身份映射行 `Image 1 = C001 名称`。**改写后必须原样保留**：
@@ -203,8 +218,9 @@ def soften(prompt: str, reason: str, *, llm, pj: Project, kind: str, key: str,
     origin = origin or prompt
     # 这一轮在阶梯的哪一级 —— 策略跟着轮数走，不交给模型自己挑（见 TIERS）
     i, tier_name, tier_rule = tier_of(round_no)
+    pos = round_no - i * ATTEMPTS_PER_TIER      # 本级第几次（1 起）
     block = (f"本次改写策略（第 {i + 1} 级 · {tier_name}）：{tier_rule}"
-             + ("，再换一种写法" if round_no > len(TIERS) else ""))
+             + ("，再换一种写法" if pos > 1 else ""))
     user = render(load_prompt("_soften", pj), {
         "REJECT_REASON": reason.strip()[:1500] or "（服务商没说具体原因）",
         "PROMPT": prompt,
@@ -286,6 +302,10 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
                        log: Callable = print):
     """`gen(prompt)` 出图/出片；被审核拦下就改写提示词重来。
 
+    **每一级先试满三轮才降下一级**（ATTEMPTS_PER_TIER）：被拒不等于
+    这一级救不了，可能只是这一版的写法没挑对 —— 同一级接着上一版换一种
+    写法再试。三轮全被拒才降到更深的一级。
+
     **每一轮接着上一轮改完的那版继续改**（`used`），不是每次都从原文重来 ——
     从原文重来等于把上一轮的进展扔掉，模型多半给回差不多的东西，
     白花一轮。而验收始终对着最初的 `prompt`（见 `_check`）。
@@ -324,8 +344,10 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
             # 审了，按审核拒收处理（is_content_rejection 不认这个码，
             # 这里显式放它进改写）。话要说清，不然人以为是网络问题。
             log(f"  {'上游拒收（已重发过一次仍被拒），按审核拒收处理' if upstream else '被审核拒了'}：{str(exc)[:200]}")
-            _, tier_name, _ = tier_of(attempt)
-            log(f"  交给分析引擎优化提示词（第 {attempt}/{rounds} 轮 · {tier_name}）"
+            i, tier_name, _ = tier_of(attempt)
+            pos = attempt - i * ATTEMPTS_PER_TIER
+            log(f"  交给分析引擎优化提示词（第 {attempt}/{rounds} 轮 · "
+                f"{tier_name}，本级第 {pos} 次）"
                 + ("" if attempt == 1 else "，接着上一版继续"))
             new = soften(used, str(exc), llm=llm, pj=pj, kind=kind, key=key,
                          round_no=attempt, log=log, origin=prompt)

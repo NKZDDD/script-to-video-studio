@@ -710,12 +710,12 @@ const RUN_FIELDS = [
   ['llm_segments','分析·段并发','number'],
   ['llm_concurrency','分析·总上限','number'],
   ['max_retry','技术重试上限','number'],
-  ['soften_rounds','被审核拒绝后改写重试（0=关）','number'],
+  ['soften_rounds','被审核拒绝后改写重试（总轮数·每级3轮·0=关）','number'],
 ];
 // 这几项**没填过时也要显示出默认值**。留空的后果很实在：保存时
 // `+""` 是 0，于是用户只是点了一下「保存」，改写重试就被悄悄关掉了。
 const RUN_DEFAULTS = {concurrency: 3, llm_episodes: 4, llm_segments: 4,
-                      llm_concurrency: 6, max_retry: 2, soften_rounds: 5};
+                      llm_concurrency: 6, max_retry: 2, soften_rounds: 12};
 // 「一键跑到底」面板上会写回默认值的那几项：面板 id → defaults 里的键。
 // 只写回**跑法**（并发、尺寸、比例、秒数）。**范围和两个勾选框不写回** ——
 // 记住「分析这几集=EP01」或者「包含出图出片=关」的话，下次点「开始/继续」

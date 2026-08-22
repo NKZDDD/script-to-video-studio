@@ -280,12 +280,33 @@ class RunTests(unittest.TestCase):
         self.assertIn("渗开。", sent[1], "第二轮要拿第一轮改完的那版去改")
         self.assertIn("渗开。。", sent[2], "第三轮要拿第二轮那版")
 
+    def test_a_tier_gets_three_tries_before_descending(self):
+        """★ 每级先试满三次才降下一级 —— 8 轮应该是 3+3+2，
+        不是 1 级 1 轮地跳。"""
+        import re
+        sent = []
+
+        class R:
+            n = 0
+
+            def chat(inner, system, user, **kw):             # noqa: N805
+                sent.append(user)
+                inner.n += 1
+                return ORIG.replace("大量涌出", f"渗开{'。' * inner.n}")
+
+        with self.assertRaises(RuntimeError):
+            self._run(99, llm=R(), rounds=8)
+        names = [re.search(r"第 \d+ 级 · (.+?)）：", s).group(1) for s in sent]
+        self.assertEqual(names,
+                         ["表达替换"] * 3 + ["视觉降敏"] * 3 + ["镜头调整"] * 2)
+
 
 class RoundsTests(unittest.TestCase):
     """轮数：可以从页面填，0 关掉。"""
 
-    def test_the_default_is_five(self):
-        self.assertEqual(soften.DEFAULT_ROUNDS, 5)
+    def test_the_default_covers_the_whole_ladder(self):
+        """★ 默认 12 = 四级 × 每级 3 次，正好把阶梯走完。"""
+        self.assertEqual(soften.DEFAULT_ROUNDS, 12)
 
     def test_whatever_you_type_is_what_you_get(self):
         """★ 不设上限：防「越改越淡」靠的是验收那一关，不是限制次数。"""
@@ -322,10 +343,10 @@ class RoundsTests(unittest.TestCase):
     def test_the_page_offers_the_input(self):
         self.assertIn("'soften_rounds'", self._html())
 
-    def test_the_input_shows_five_when_nothing_is_saved_yet(self):
+    def test_the_input_shows_the_default_when_nothing_is_saved_yet(self):
         """★ 留空的代价：保存时 `+""` 是 0 —— 点一下保存就悄悄关掉了。"""
         html = self._html()
-        self.assertIn("soften_rounds: 5", html)
+        self.assertIn("soften_rounds: 12", html)
         self.assertIn("RUN_DEFAULTS[k]", html)
 
     def test_the_global_default_reaches_the_worker(self):
@@ -389,14 +410,16 @@ class TierTests(unittest.TestCase):
         return sent[0]
 
     def test_the_ladder_is_expression_visual_camera_event(self):
-        """★ 顺序就是权限大小 —— 一开始就放开，模型会直奔把戏改没那档。"""
-        names = [soften.tier_of(n)[1] for n in (1, 2, 3, 4)]
+        """★ 顺序就是权限大小 —— 一开始就放开，模型会直奔把戏改没那档。
+        每级先试满三次才降级（ATTEMPTS_PER_TIER=3）。"""
+        names = [soften.tier_of(n)[1] for n in range(1, 13)]
         self.assertEqual(names,
-                         ["表达替换", "视觉降敏", "镜头调整", "事件表现方式调整"])
+                         ["表达替换"] * 3 + ["视觉降敏"] * 3
+                         + ["镜头调整"] * 3 + ["事件表现方式调整"] * 3)
 
     def test_beyond_the_ladder_it_stays_on_the_deepest_tier(self):
         """轮数多给的是「同一级再换种写法」的机会，不是更深的权限。"""
-        for n in (5, 8, 20):
+        for n in (13, 14, 20):
             self.assertEqual(soften.tier_of(n)[1], "事件表现方式调整")
 
     def test_round_one_only_allows_rewording(self):
@@ -406,9 +429,20 @@ class TierTests(unittest.TestCase):
         self.assertIn("保持原样", sent)
 
     def test_each_round_sends_its_own_tier(self):
-        self.assertIn("视觉降敏", self._sent(2))
-        self.assertIn("镜头调整", self._sent(3))
-        self.assertIn("事件表现方式", self._sent(4))
+        self.assertIn("表达替换", self._sent(2))
+        self.assertIn("视觉降敏", self._sent(4))
+        self.assertIn("镜头调整", self._sent(7))
+        self.assertIn("事件表现方式", self._sent(10))
+
+    def test_within_a_tier_it_asks_for_another_wording(self):
+        """★ 同一级的第 2、3 次要明说「再换一种写法」—— 审核有随机性，
+        一被拒就降级会把「写法没挑对」误判成「这一级救不了」。"""
+        self.assertNotIn("再换一种写法", self._sent(1))
+        self.assertIn("再换一种写法", self._sent(2))
+        self.assertIn("再换一种写法", self._sent(3))
+        self.assertNotIn("再换一种写法", self._sent(4), "新一级的第一次是全新策略")
+        self.assertIn("再换一种写法", self._sent(13),
+                      "超出阶梯的部分停在最深一级继续换写法")
 
     def test_the_tier_survives_a_customised_template(self):
         """★ 自定义模板丢了 {{TIER_RULE}} 占位符，策略不能静默消失。
@@ -421,15 +455,15 @@ class TierTests(unittest.TestCase):
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "_soften.md"), "w", encoding="utf-8") as f:
             f.write("服务商拒了：{{REJECT_REASON}}\n\n改一改：\n{{PROMPT}}")
-        sent = self._sent(2)
+        sent = self._sent(4)
         self.assertIn("视觉降敏", sent, "策略得拼进消息里，不能靠占位符运气")
 
     def test_the_tier_name_is_recorded_on_disk_and_panel(self):
         """★ 降到哪一级必须看得见 —— 降得深不深，人工复核的力度不一样。"""
         soften.soften(ORIG, "content policy: graphic violence", llm=Chat(GOOD),
-                      pj=self.pj, kind="video", key="K1", round_no=3,
+                      pj=self.pj, kind="video", key="K1", round_no=7,
                       log=lambda *a: None)
-        body = open(self.pj.p("03_提示词", "自动改写", "K1_第3版.txt"),
+        body = open(self.pj.p("03_提示词", "自动改写", "K1_第7版.txt"),
                     encoding="utf-8").read()
         self.assertIn("镜头调整", body)
         rows = [d for d in diagnose.load(self.pj.root)
