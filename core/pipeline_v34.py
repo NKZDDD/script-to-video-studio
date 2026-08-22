@@ -140,13 +140,26 @@ def _llm_done(pj, stage_id: str, episode: str) -> bool:
 
     逐段环节要按段算：跑了 8 段还剩 4 段时产物文件是存在的，但没做完。
     只看文件在不在会把剩下 4 段永远漏掉。
+
+    第八/九环节同理 —— 它们按场分批：断在中间时产物文件也在，
+    剩下那几场不补就永远漏掉（和逐段环节是同一个坑）。
+    例外：产物一条都归不上场（老项目 / 模型没按模板的编号格式写）时
+    按整集已做完算 —— 归不上就永远「没做完」，每点一次「继续」
+    都重跑整集。部分归得上的才按场判。
     """
     tpl, _, _ = V.LLM_SPEC[stage_id]
     if V.scope_of(stage_id) == "segment":
         segs = {s["seg_id"] for s in R.segments_of(pj, episode)}
         return bool(segs) and segs <= R.done_segments(pj, stage_id, episode)
     ep = "" if V.scope_of(stage_id) == "series" else episode
-    return bool(pj.stage_data(tpl, ep))
+    data = pj.stage_data(tpl, ep)
+    if not data:
+        return False
+    if stage_id in ("n8", "n9") and ep and R._scenes_of(pj, ep):
+        done, todo = (R.n8_scene_split(pj, ep) if stage_id == "n8"
+                      else R.n9_scene_split(pj, ep))
+        return not todo or not done
+    return True
 
 
 def _mark_stopped(job: Job, rest: list) -> None:

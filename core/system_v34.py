@@ -257,10 +257,14 @@ COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
                        # 总时长 / 集数 / 每集时长三个量互相决定，合成的那一段。
                        # 只有环节1 用得上，但白名单是全局的。
                        "LENGTH_PLAN",
-                       # 分批跑的两个：这一批做什么范围、前面几批做过什么。
+                       # 分批跑的四个：这一批做什么范围、前面几批做过什么。
                        # 没分批时也有值（「一次处理全剧」/「这是第一次排」），
                        # 所以任何模板用它们都不会渲染成空。
                        "BATCH_SCOPE", "DONE_SCENES",
+                       # 第八/九环节按场次（时窗）分批用的两个「上一批末尾」。
+                       # 同样有默认值（见 run_v34.mapping），预览和不分批的
+                       # 场合不会渲染成空占位符。
+                       "PREV_CVS", "LAST_SHOT",
                        ) + _setting_placeholders()
 
 

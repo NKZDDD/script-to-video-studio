@@ -88,6 +88,16 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         "BATCH_SCOPE": "**一次处理全剧。** 所有集都在这一次里排完。",
         "DONE_SCENES": "（这是第一次排，前面没有已排好的集）",
     }
+    # 第八/九环节分批用的两个「上一批末尾」也要有默认值：预览、
+    # 老项目退回一次整集跑的场合，模板里的占位符不能原样发出去。
+    # 分批跑时这两段由 run_n8_batched / run_n9_batched 用 extra 覆盖。
+    if stage_id == "n8":
+        m["BATCH_SCOPE"] = "（这一集的场次一次做完，不分批。）"
+        m["PREV_CVS"] = "（这是第一批，前面没有已写好的场次。）"
+    if stage_id == "n9":
+        m["BATCH_SCOPE"] = ("（这一集一次做完：镜头和时间计划铺满全集，"
+                            "不按时窗分批。）")
+        m["LAST_SHOT"] = "（这是第一批，前面没有镜头。）"
     # 项目基础信息：50 多个字段，模板里写了 {{X}} 才收到。
     # 放在产物之前合并，让产物占位符能覆盖同名的（实际上不重名，
     # 但顺序写死比"应该不会撞"可靠）。
@@ -118,6 +128,10 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
     if stage_id == "n4b":
         data = dict(data, n4_assets=_n4b_worklist(
             pj, data.get("n4_assets") or {}, extra.pop("_n4b_batch", None)))
+    # 环节8/9 按场次分批：导演设计和 CVS 只发本批那几场的。
+    # 同样走「下划线开关」而不是直接覆盖占位符 —— 这样按用途的裁剪
+    # （PRODUCT_NEEDS）照常生效，分批只负责「按场切」这一层。
+    scene_batch = extra.pop("_scene_batch", None)
     # 逐段环节：整集级的镜头表/状态表/空间主表按 ID 链裁到这一段。
     # 算一次给所有产物用 —— 每份各算一次会把 n8/n9/n10 各读三遍。
     ctx = _seg_context(pj, episode, segment,
@@ -129,6 +143,8 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
         #   按用途 这个环节真正要哪几部分（PRODUCT_NEEDS）
         if V.scope_of(stage_id) != "series":
             obj = _narrow_episode(out_name, obj, episode)
+        if scene_batch and out_name in ("n7_directing", "n8_cvs"):
+            obj = _narrow_scenes(out_name, obj, scene_batch)
         if segment:
             obj = _narrow(out_name, obj, segment)
             # 按段号直接裁不到的那几份（整集的镜头表、状态表、空间主表），
@@ -214,6 +230,436 @@ def _narrow_episode(out_name: str, obj: dict, episode: str) -> dict:
             out["beats"] = [b for b in beats
                             if isinstance(b, dict) and b.get("scene_id") in ids]
     return out
+
+
+# ---------------------------------------------------------------- 按场分批
+#
+# 第八、九环节是整集一次调用的，一集的场次多了输入和输出一起超 ——
+# 实跑撞的就是这个：第八环节整集的走位全量发，第九环节 19+ 镜的大 JSON
+# 在中转上随机断流，三次 LLM_SCHEMA_FAIL。所以这两个环节按场次切批：
+#   第八环节  每批 1~2 场，输出这场的 CVS/VT，输入带上一场末尾的 CVS 原文
+#   第九环节  按预估 SEG 时窗装箱（一批约一个窗的秒数），批间续传末镜
+#             原文和时间轴终点，合并时程序加时间偏移
+# 场不跨批：一场的走位和 CVS 要整场看得见，劈成两半两边都接不上。
+
+def _scenes_of(pj: Project, episode: str) -> list:
+    """这一集有哪些场（第三环节排的顺序就是故事顺序）。"""
+    rows = [s for s in (pj.stage_data("n3_narrative", "") or {}).get("scenes") or []
+            if isinstance(s, dict) and s.get("scene_id")
+            and s.get("episode") == episode]
+    return [str(s["scene_id"]) for s in rows]
+
+
+def _cvs_scene(cvs: dict) -> Optional[str]:
+    """一条 CVS 属于哪一场。先看 scene_id，没有就从 CVS 编号里挖
+    （模板的编号格式就是 CVS_{集}_SC01_01，SC 号天然在编号里）。
+
+    scene_id 不是必需字段，模型经常只按必填的写 —— 只认字段的话
+    老产物全部归不上场，分批的续跑就废了（每场都当没做过）。
+    """
+    sid = str((cvs or {}).get("scene_id") or "").strip()
+    if sid:
+        return sid
+    m = re.search(r"(SC\d+)", str((cvs or {}).get("cvs_id") or ""))
+    return m.group(1) if m else None
+
+
+def _cvs_scene_map(pj: Project, episode: str) -> dict:
+    """{cvs_id: scene_id}，第九环节给镜头归场用（沿 source_cvs 对回去）。"""
+    return {str(c.get("cvs_id")): _cvs_scene(c)
+            for c in (pj.stage_data("n8_cvs", episode) or {}).get("cvs") or []
+            if isinstance(c, dict) and c.get("cvs_id")}
+
+
+def _narrow_scenes(out_name: str, obj: dict, scenes: set) -> dict:
+    """把整集的产物裁成只剩这几场（第八/九环节分批发输入用）。
+
+    和 _narrow_episode 同一个原则：只裁**明确按场标了号**的数组，
+    一条都对不上就整份发 —— 裁错的后果是模型看不到本批真正要用的
+    走位/状态，然后自己编一个，而这不报错。
+    """
+    if not scenes or not isinstance(obj, dict):
+        return obj
+    if out_name == "n7_directing":
+        pre = {f"{s}-" for s in scenes}
+        out = dict(obj)
+        rows = obj.get("scene_directing")
+        if isinstance(rows, list):
+            mine = [r for r in rows
+                    if isinstance(r, dict) and r.get("scene_id") in scenes]
+            if mine or any(isinstance(r, dict) and r.get("scene_id") for r in rows):
+                out["scene_directing"] = mine
+        for key in ("beat_directing", "blocking", "performance_intent",
+                    "blocked_by_physics"):
+            rows = obj.get(key)
+            if not isinstance(rows, list):
+                continue
+            mine = [r for r in rows if isinstance(r, dict)
+                    and any(str(r.get("beat_id") or "").startswith(p) for p in pre)]
+            if mine or any(isinstance(r, dict) and r.get("beat_id") for r in rows):
+                out[key] = mine
+        return out
+    if out_name == "n8_cvs":
+        rows = [c for c in (obj.get("cvs") or []) if isinstance(c, dict)]
+        if not rows:
+            return obj
+        mine = [c for c in rows if _cvs_scene(c) in scenes]
+        # 一条都归不上场（老产物连编号里都没写 SC 号）就不裁
+        if not mine and not any(_cvs_scene(c) for c in rows):
+            return obj
+        ids = {str(c.get("cvs_id") or "") for c in mine}
+        out = dict(obj, cvs=mine)
+        vt = obj.get("vt")
+        if isinstance(vt, list):
+            # 跨场的 VT 两头的场任一在本批就带上 —— 第九环节设计
+            # 本批第一镜时得知道从上一场是怎么过渡过来的
+            out["vt"] = [v for v in vt if isinstance(v, dict)
+                         and (str(v.get("source_cvs") or "") in ids
+                              or str(v.get("target_cvs") or "") in ids)]
+        return out
+    return obj
+
+
+def _scene_hit(scene: str, have) -> bool:
+    """场次号带不带集号前缀（EP01-SC01 / SC01）都算同一场。
+
+    n3 并发之后场次号带集号前缀，而模型在 CVS 编号里经常只写裸的 SC 号 ——
+    只认全名的话那一场永远算「没做过」，续跑会把它再做一遍，
+    做完两份混在一起，还是不报错。
+    """
+    if scene in have:
+        return True
+    bare = scene.rsplit("-", 1)[-1]
+    # 只比最后一段是安全的：have 全来自本集的产物，SC 号在本集内唯一
+    return any(str(h).rsplit("-", 1)[-1] == bare for h in have)
+
+
+def n8_scene_split(pj: Project, episode: str) -> tuple:
+    """第八环节分批的进度：哪几场已有 CVS、哪几场还没有。
+
+    依据是已存产物里能归到场的 CVS —— 一场至少要有一条才算做过。
+    批是整批成的：一批里两场要么都在产物里，要么都不在，
+    不存在「半场」状态。
+
+    **一条都归不上场的产物不在此列**（老项目、或模型没按模板的
+    CVS_{集}_{场}_{序} 编号）：那种当整集已做完，调用方负责回退 ——
+    归不上就永远「没做完」，每点一次「继续」都重跑整集。
+    """
+    scenes = _scenes_of(pj, episode)
+    have = {_cvs_scene(c) for c in
+            (pj.stage_data("n8_cvs", episode) or {}).get("cvs") or []
+            if isinstance(c, dict)}
+    have = {h for h in have if h}
+    done = [s for s in scenes if _scene_hit(s, have)]
+    return done, [s for s in scenes if s not in done]
+
+
+def n9_scene_split(pj: Project, episode: str) -> tuple:
+    """第九环节分批的进度：哪几场已有镜头、哪几场还没有。
+
+    镜头的 scene_id 不是必需字段，模型经常不写 —— 沿 source_cvs 对回
+    CVS 归场（_cvs_scene_map 就是干这个的）。两头都没有的镜头归不上场，
+    归不上就当没做过：宁可重排，不能悄悄漏掉。
+
+    **一条都归不上的产物例外**（老项目、编号全对不上）：那种当整集
+    已做完，由调用方回退 —— 否则每点一次「继续」都重排整集。
+    """
+    scenes = _scenes_of(pj, episode)
+    cvs_map = _cvs_scene_map(pj, episode)
+    have = set()
+    for s in (pj.stage_data("n9_shots", episode) or {}).get("shots") or []:
+        if not isinstance(s, dict):
+            continue
+        sc = str(s.get("scene_id") or "").strip() \
+            or cvs_map.get(str(s.get("source_cvs") or ""))
+        if sc:
+            have.add(sc)
+    done = [s for s in scenes if _scene_hit(s, have)]
+    return done, [s for s in scenes if s not in done]
+
+
+def _beats_per_scene(pj: Project) -> dict:
+    """{场次: 拍数}。估每场占多少秒用的 —— 拍多的场戏多，时长份额也该大。
+    估错只影响切批的位置，不影响时间轴本身（时间轴以每批实际排出的 end 为准）。"""
+    out: dict = {}
+    for b in (pj.stage_data("n3_narrative", "") or {}).get("beats") or []:
+        if isinstance(b, dict) and b.get("scene_id"):
+            sid = str(b["scene_id"])
+            out[sid] = out.get(sid, 0) + 1
+    return out
+
+
+def _n8_batches(pj: Project, todo: list) -> list:
+    """第八环节切批：普通的两场一批，拍了六拍以上的大场单独一批。
+
+    一场的走位和 CVS 要整场看得见，劈成两半两边都接不上 —— 所以
+    批的边界只能落在场的边界上，批内场数是唯一的调节旋钮。
+    """
+    beats = _beats_per_scene(pj)
+    batches, cur = [], []
+    for s in todo:
+        big = beats.get(s, 0) >= 6
+        if cur and (len(cur) >= 2 or big or beats.get(cur[0], 0) >= 6):
+            batches.append(cur)
+            cur = []
+        cur.append(s)
+    if cur:
+        batches.append(cur)
+    return batches
+
+
+def _n9_windows(pj: Project, episode: str, params: dict, todo: list) -> list:
+    """第九环节切批：按预估时窗装箱，一批约一个 SEG 容器的秒数。
+
+    每场多少秒这一步之前没人知道（时长正是第九环节排的），只能按拍数
+    分摊本集总时长来估。一批装满一个窗口就收 —— 一批的镜头数自然落在
+    5~12 镜那档，正是中转一次吐得稳的量。
+    老项目没存本集秒数的，估不了窗口，按两场一批兜底（输出仍有界）。
+    """
+    dur = _ep_seconds(pj, episode, params)
+    clip = int(params.get("duration") or 15) or 15
+    if dur <= 0:
+        return [(todo[i:i + 2], 0.0) for i in range(0, len(todo), 2)]
+    beats = _beats_per_scene(pj)
+    weights = [max(1, beats.get(s, 0)) for s in todo]
+    total_w = sum(weights) or 1
+    batches, cur, cum = [], [], 0.0
+    for s, w in zip(todo, weights):
+        if cur and (len(cur) >= 3 or cum >= clip):
+            batches.append((cur, cum))
+            cur, cum = [], 0.0
+        cur.append(s)
+        cum += dur * w / total_w
+    if cur:
+        batches.append((cur, cum))
+    return batches
+
+
+def merge_cvs(previous: dict, fresh: dict, episode: str,
+              keep_refs=frozenset()) -> dict:
+    """第八环节分批合并。**必须合并，不能覆盖** —— 和 n3/n4b 同一个道理：
+    这一批只写了自己那几场，直接存盘会把前面几批全冲掉，且不报错。
+
+    两个改号动作都在这里，不指望模型自觉：
+      · 撞了已有编号、又不是同一场的 CVS 改成带场次号的唯一编号。
+        模型不按 CVS_{集}_{场}_{序} 写、批批从 01 重编的话，按编号合并
+        会把前几批的 CVS 挤掉 —— 越跑越少。
+      · VT 编号接着已有条数往下编。模板里 VT 就是全集递增的，
+        每批都从 01 编起必然撞号；VT 编号没人引用，改了不影响别的。
+
+    `keep_refs` 里的编号**引用**不改 —— 那是上一批末尾 CVS 的真实编号
+    （PREV_CVS 里给过模型），跨场 VT 的 source_cvs 指的是它。
+    模型重启编号时这个号也会撞上本批的新行，行本身照改（保唯一），
+    指向旧行的引用保住（保接得上）。
+    """
+    previous, fresh = previous or {}, fresh or {}
+    prev_scene = {str(c.get("cvs_id") or ""): _cvs_scene(c)
+                  for c in previous.get("cvs") or [] if isinstance(c, dict)}
+    rename: dict = {}
+    cvs_rows = []
+    for c in fresh.get("cvs") or []:
+        if not isinstance(c, dict) or not c.get("cvs_id"):
+            continue
+        cid = str(c["cvs_id"])
+        old_sc, new_sc = prev_scene.get(cid), _cvs_scene(c)
+        # 撞号且明确不是同一场的才改号；同一场的照旧覆盖（重跑语义）
+        if cid in prev_scene and old_sc and new_sc and old_sc != new_sc:
+            rename[cid] = f"{cid}_{new_sc}"
+            c = dict(c, cvs_id=rename[cid])
+        cvs_rows.append(c)
+    if rename:
+        for t in fresh.get("vt") or []:
+            if not isinstance(t, dict):
+                continue
+            for k in ("source_cvs", "target_cvs"):
+                v = str(t.get(k) or "")
+                if v in rename and v not in keep_refs:
+                    t[k] = rename[v]
+    n0 = len([t for t in previous.get("vt") or [] if isinstance(t, dict)])
+    for i, t in enumerate(fresh.get("vt") or [], 1):
+        if isinstance(t, dict):
+            t["vt_id"] = f"VT_{episode}_{n0 + i:03d}"
+    merged = dict(previous)
+    for key, id_field in (("cvs", "cvs_id"), ("vt", "vt_id")):
+        rows = [r for r in merged.get(key) or [] if isinstance(r, dict)]
+        pos = {str(r.get(id_field) or ""): i for i, r in enumerate(rows)
+               if r.get(id_field)}
+        for r in (cvs_rows if key == "cvs" else fresh.get("vt") or []):
+            if not isinstance(r, dict) or not r.get(id_field):
+                continue
+            rid = str(r[id_field])
+            if rid in pos:
+                rows[pos[rid]] = r          # 同场重跑：覆盖旧的那一条
+            else:
+                pos[rid] = len(rows)
+                rows.append(r)
+        merged[key] = rows
+    # camera_free_check 是一句话，按行累加 —— 后一批盖掉前一批
+    # 等于把前面几批的确认丢了
+    old = str(previous.get("camera_free_check") or "").strip()
+    new = str(fresh.get("camera_free_check") or "").strip()
+    lines = [x for x in old.split("\n") if x.strip()]
+    if new and new not in lines:
+        lines.append(new)
+    if lines:
+        merged["camera_free_check"] = "\n".join(lines)
+    return merged
+
+
+def _renumber_batch_shots(fresh: dict, episode: str, first_shot: int,
+                          first_tr: int, protect=frozenset()) -> None:
+    """把这一批的镜头/转场编号改成全局续号，批内引用同步改。
+
+    模型每批都从 001 编起（提示词里说了接着编也拦不住），直接按编号合并
+    会把前几批的镜头挤掉 —— 和 n3 并发时各集都从 SC01 编起是同一个坑，
+    解法也一样：程序保证不撞，不靠模型自觉。
+
+    引用（from_shot / to_shot / shot_id / outgoing_transition_id）里指向
+    本批镜头的跟着改；指向上一批的（LAST_SHOT 里给过它真实编号）原样
+    保留 —— 那是已经落盘的编号，改了反而接不上。
+
+    `protect` 里的编号在转场的 from_shot / to_shot 里**不改** —— 那是
+    上一批最后一镜的真实编号（LAST_SHOT 里给过模型），跨批转场的
+    from_shot 指的是它。模型重启编号时这个号也会撞上本批的旧号，
+    行本身照改（保唯一），指向旧行的引用保住（保接得上）——
+    和 merge_cvs 的 keep_refs 同一个道理。
+
+    timing_plan 的 shot_id **不受 protect 保护**：撞上保护号的时间行
+    几乎总是本批自己的（模型给上一批最后一镜重写时间行的情况，
+    merge_shots 的「只收本批镜头」过滤已经按 mine 集拦了）。
+    在这里保护它反而会让本批那一镜**静默丢掉时间行** ——
+    时间线上少一行不报错，比转场接错更难发现。
+    """
+    shot_map, tr_map = {}, {}
+    for s in fresh.get("shots") or []:
+        if not isinstance(s, dict) or not s.get("shot_id"):
+            continue
+        old = str(s["shot_id"])
+        new = f"SH_{episode}_{first_shot + len(shot_map):03d}"
+        shot_map[old] = new
+        s["shot_id"] = new
+    for t in fresh.get("transitions") or []:
+        if not isinstance(t, dict) or not t.get("transition_id"):
+            continue
+        old = str(t["transition_id"])
+        new = f"TR_{episode}_{first_tr + len(tr_map):03d}"
+        tr_map[old] = new
+        t["transition_id"] = new
+    for t in fresh.get("transitions") or []:
+        if not isinstance(t, dict):
+            continue
+        for k in ("from_shot", "to_shot"):
+            v = str(t.get(k) or "")
+            if v in shot_map and v not in protect:
+                t[k] = shot_map[v]
+    for r in fresh.get("timing_plan") or []:
+        if not isinstance(r, dict):
+            continue
+        v = str(r.get("shot_id") or "")
+        if v in shot_map:
+            r["shot_id"] = shot_map[v]
+        v = str(r.get("outgoing_transition_id") or "")
+        if v in tr_map:
+            r["outgoing_transition_id"] = tr_map[v]
+
+
+def _shift_batch_timing(fresh: dict, offset: float,
+                        log: Optional[Callable] = None) -> None:
+    """把这一批的时间计划整体往后挪 offset 秒。
+
+    每批的 timing_plan 都从 0 铺起 —— 让模型续绝对时间轴等于让它做
+    45.2 + 2.4 这类算术，不可靠；加法由程序做。模型没听、自己从
+    offset 接着铺的也认得出来（那一批的首镜 start ≈ offset），不挪。
+
+    只挪 start / end / transition_time_range 这三个**绝对量**。
+    dialogue_start 这类写在镜内的字段（模板示例里 0.3~2.0 落在
+    0~2.4 的镜头里）是相对量，挪了反而错。
+    """
+    if offset <= 0:
+        return
+    rows = [r for r in fresh.get("timing_plan") or []
+            if isinstance(r, dict) and isinstance(r.get("start"), (int, float))]
+    if not rows:
+        return
+    first = min(float(r["start"]) for r in rows)
+    if abs(first - offset) <= 1.0:
+        if log:
+            log(f"  这一批自己从第 {first:g} 秒接着铺了，不再加偏移")
+        return
+    for r in fresh.get("timing_plan") or []:
+        if not isinstance(r, dict):
+            continue
+        for k in ("start", "end"):
+            if isinstance(r.get(k), (int, float)):
+                r[k] = float(r[k]) + offset
+        tr = r.get("transition_time_range")
+        if isinstance(tr, list) and len(tr) == 2 \
+                and all(isinstance(x, (int, float)) for x in tr):
+            r["transition_time_range"] = [tr[0] + offset, tr[1] + offset]
+
+
+def merge_shots(previous: dict, fresh: dict) -> dict:
+    """第九环节分批合并。编号在合并前已改成全局续号，按 id 合并即可。
+
+    timing_plan 只收**本批镜头**的行 —— 模型偶尔会把上一批最后一镜的
+    时间行也重写一份（想给那条接上跨批转场），那份行的时间坐标是它
+    自己批里的，盖上去会把已落盘的那行改坏。
+    """
+    previous, fresh = previous or {}, fresh or {}
+    mine = {str(s.get("shot_id") or "") for s in fresh.get("shots") or []
+            if isinstance(s, dict)}
+    merged = dict(previous)
+    for key, id_field in (("shots", "shot_id"),
+                          ("transitions", "transition_id"),
+                          ("timing_plan", "shot_id")):
+        rows = [r for r in merged.get(key) or [] if isinstance(r, dict)]
+        pos = {str(r.get(id_field) or ""): i for i, r in enumerate(rows)
+               if r.get(id_field)}
+        for r in fresh.get(key) or []:
+            if not isinstance(r, dict) or not r.get(id_field):
+                continue
+            if key == "timing_plan" and str(r.get("shot_id") or "") not in mine:
+                continue
+            rid = str(r[id_field])
+            if rid in pos:
+                rows[pos[rid]] = r
+            else:
+                pos[rid] = len(rows)
+                rows.append(r)
+        merged[key] = rows
+    # 两段说明按行累加：每批各有各的理由，后批盖掉前批 = 丢依据
+    for key in ("shot_count_rationale", "transition_summary"):
+        old = str(previous.get(key) or "").strip()
+        new = str(fresh.get(key) or "").strip()
+        lines = [x for x in old.split("\n") if x.strip()]
+        if new and new not in lines:
+            lines.append(new)
+        if lines:
+            merged[key] = "\n".join(lines)
+    return merged
+
+
+def _last_cvs_of(out: dict) -> Optional[dict]:
+    """已合并产物里最后一条 CVS —— 下一批的 PREV_CVS 用。"""
+    rows = [c for c in (out or {}).get("cvs") or [] if isinstance(c, dict)]
+    return rows[-1] if rows else None
+
+
+def _last_shot_of(out: dict) -> Optional[dict]:
+    """时间轴上排到最后的那一镜。按 timing_plan 的 end 找（不假设顺序），
+    对不上就退回 shots 的最后一条。"""
+    shots = {str(s.get("shot_id") or ""): s
+             for s in (out or {}).get("shots") or [] if isinstance(s, dict)}
+    best = None
+    for r in (out or {}).get("timing_plan") or []:
+        if isinstance(r, dict) and isinstance(r.get("end"), (int, float)) \
+                and str(r.get("shot_id") or "") in shots:
+            if best is None or float(r["end"]) >= best[0]:
+                best = (float(r["end"]), shots[str(r["shot_id"])], r)
+    if best:
+        return best[1]
+    tail = [s for s in (out or {}).get("shots") or [] if isinstance(s, dict)]
+    return tail[-1] if tail else None
 
 
 # 逐段产物里，哪个数组按段索引、用哪个键认段号。
@@ -1029,6 +1475,198 @@ def run_n4b_batched(pj: Project, *, llm, params: dict, log: Callable = print,
     return out
 
 
+def _n8_scope(batch: list, total: int, has_prev: bool) -> str:
+    """第八环节这一批的范围说明（模板顶上那行引言）。"""
+    names = "、".join(batch)
+    head = (f"**这一次只写 {names} 这 {len(batch)} 场的 CVS 和 VT。**"
+            f"全集共 {total} 场，其余各场另有批次，不要替它们写 —— "
+            f"输出里只能有这几场的内容。")
+    if not has_prev:
+        return head
+    return head + (
+        " 跨场 VT 归后一批：从上一批末尾那条 CVS 接进你这一批第一条 CVS 的"
+        "那条 VT 由你写（source_cvs 用【上一批末尾的 CVS】里那条的编号，"
+        "target_cvs 是你自己新写的）；你这一批最后一场到再下一场的那条 VT"
+        "不归你写（下一批会写）。批内场与场之间的 VT 照常写。")
+
+
+def _n9_scope(batch: list, total: int, episode: str, offset: float,
+              est: float, first_shot: int, first_tr: int) -> str:
+    """第九环节这一批的范围说明。分批时它**覆盖**模板第〇/五章的
+    「铺满全集」口径 —— 不写清楚的话模型会试着把全集塞进这一批。"""
+    names = "、".join(batch)
+    head = (f"**这一次只给 {names} 这 {len(batch)} 场设计镜头、转场和时间计划。**"
+            f"全集共 {total} 场，其余各场另有批次，不要替它们排。")
+    tail = ("上面第〇、五章说的「铺满本集总时长」在分批时按这一条执行："
+            f"你只铺你这几场，**timing_plan 从 0 秒开始**，铺到这几场演完为止")
+    if est > 0:
+        tail += f"（按拍数估约 {est:g} 秒，只是参考，以这几场演完为准）"
+    tail += "。合并时程序会自动把你的时间轴接到前面的批次后面。\n"
+    if offset > 0:
+        tail += (f"前面的批次已经把时间轴铺到第 {offset:g} 秒；"
+                 f"从上一批最后一镜切进你第一镜的那条转场**归你写**"
+                 f"（from_shot 用【上一批最后一镜】里那条的编号，"
+                 f"它的时间算进你第一镜的 transition_time_range）。\n")
+    tail += (f"镜头编号从 SH_{episode}_{first_shot:03d} 接着编，"
+             f"转场编号从 TR_{episode}_{first_tr:03d} 接着编。")
+    return head + "\n" + tail
+
+
+def _prev_cvs_block(out: dict) -> str:
+    """第八环节分批的【上一批末尾的 CVS】。第一批时是一句说明。"""
+    last = _last_cvs_of(out)
+    if not last:
+        return "（这是第一批，前面没有已写好的场次。）"
+    return ("上一批最后一条 CVS 的原文。你这一批第一条 VT 的 source_cvs "
+            "用它的编号，第一条 CVS 的 entry_condition 要接得住它的 "
+            "exit_condition：\n" + jd(last))
+
+
+def _last_shot_block(out: dict, offset: float) -> str:
+    """第九环节分批的【上一批最后一镜】。第一批时是一句说明。"""
+    shot = _last_shot_of(out)
+    if not shot:
+        return "（这是第一批，前面没有镜头。）"
+    timing = next((r for r in (out or {}).get("timing_plan") or []
+                   if isinstance(r, dict)
+                   and str(r.get("shot_id") or "") == str(shot.get("shot_id"))),
+                  None)
+    parts = [f"上一批最后一镜的原文（时间轴已铺到第 {offset:g} 秒；你第一镜要"
+             f"接得住它的 exit_action，从它切进来的转场归你写）：\n" + jd(shot)]
+    if timing:
+        parts.append("它的时间计划行：\n" + jd(timing))
+    return "\n\n".join(parts)
+
+
+def run_n8_batched(pj: Project, *, llm, params: dict, episode: str,
+                   log: Callable = print,
+                   cancel: Optional[Callable] = None) -> dict:
+    """第八环节按场分批，每批存盘。
+
+    整集一次的问题是**两头一起超**：输入里整集的走位全量发出去，
+    输出里整集的 CVS/VT 一次吐回来 —— 场次多的集两头都顶到上限。
+    按场切批之后每批只看自己那几场的走位、只写自己那几场的 CVS，
+    跨场的 VT 归后一批写（它要写的终点 CVS 就在自己这批里）。
+
+    每批跑完就存盘：断在第二批，第一批是留下的，
+    再点一次只补没写的那几场。
+    """
+    scenes = _scenes_of(pj, episode)
+    out = pj.stage_data("n8_cvs", episode) or {}
+    done, todo = n8_scene_split(pj, episode)
+    if out and not done:
+        # 产物在但一条都归不上场（老项目 / 模型没按模板的编号格式写）：
+        # 当整集已做完 —— 归不上就永远「没做完」，每点一次「继续」
+        # 都重跑整集，白烧钱。部分归得上的才按场判。
+        log("  产物里的 CVS 一条都归不上场（编号里没写场号），"
+            "按整集已做完跳过（不调模型、不花钱）")
+        diagnose.clear(pj.root, "stage:n8", episode)
+        return out
+    if done:
+        log(f"  {len(done)} 场已有 CVS，这次不重写：{'、'.join(done)}")
+    if not todo:
+        log("  所有场的 CVS 都写好了，直接跳过（不调模型、不花钱）")
+        diagnose.clear(pj.root, "stage:n8", episode)
+        return out
+    batches = _n8_batches(pj, todo)
+    log(f"  按场分批：这次写 {len(todo)} 场，分 {len(batches)} 批"
+        f"（{' / '.join('、'.join(b) for b in batches)}）")
+    for i, batch in enumerate(batches, 1):
+        if cancel and cancel():
+            raise LLMCancelled(
+                f"{episode} 第八环节已按取消停下，写好的都存了盘；"
+                f"再点一次「开始」只补没写的那几场。")
+        fresh = _one_call(
+            pj, "n8", llm=llm, params=params, episode=episode,
+            label=f"[{i}/{len(batches)}] ",
+            extra={"_scene_batch": set(batch),
+                   "BATCH_SCOPE": _n8_scope(batch, len(scenes),
+                                            _last_cvs_of(out) is not None),
+                   "PREV_CVS": _prev_cvs_block(out)},
+            log=log, cancel=cancel)
+        # **必须合并，不能覆盖**：这一批只写了自己那几场。
+        # keep_refs = 上一批末尾 CVS 的真实编号（PREV_CVS 里给过模型）：
+        # 模型重启编号撞上它时，指向**旧行**的那条跨场 VT 引用不能被改走。
+        last = _last_cvs_of(out)
+        out = merge_cvs(out, fresh, episode,
+                        keep_refs={str(last.get("cvs_id"))} if last else set())
+        pj.save_stage("n8_cvs", out, episode)
+        log(f"  第 {i}/{len(batches)} 批（{('、'.join(batch))}）写好，"
+            f"累计 {len(out.get('cvs') or [])} 条 CVS、"
+            f"{len(out.get('vt') or [])} 条 VT")
+    diagnose.clear(pj.root, "stage:n8", episode)
+    return out
+
+
+def run_n9_batched(pj: Project, *, llm, params: dict, episode: str,
+                   log: Callable = print,
+                   cancel: Optional[Callable] = None) -> dict:
+    """第九环节按时窗分批，每批存盘。
+
+    这一环是全链路里**单次输出最大**的一步：一镜 20 多个字段，
+    一集 20~40 镜的大 JSON 在中转上随机断流（实跑三次 LLM_SCHEMA_FAIL
+    都是它）。按预估时窗切批，一批约一个 SEG 容器的秒数、5~12 镜 ——
+    一次吐得稳的量。批间续传末镜原文和时间轴终点：每批的 timing_plan
+    从 0 铺起，合并时程序加偏移接上；跨批转场归后一批。
+
+    每批跑完就存盘：断在第二批，第一批是留下的，
+    再点一次只补没排的那几场。
+    """
+    scenes = _scenes_of(pj, episode)
+    out = pj.stage_data("n9_shots", episode) or {}
+    done, todo = n9_scene_split(pj, episode)
+    if out and not done:
+        # 同第八环节：一条都归不上场的产物当整集已做完，不重排。
+        log("  产物里的镜头一条都归不上场（scene_id 和 source_cvs "
+            "都对不上场号），按整集已做完跳过（不调模型、不花钱）")
+        diagnose.clear(pj.root, "stage:n9", episode)
+        return out
+    if done:
+        log(f"  {len(done)} 场已有镜头，这次不重排：{'、'.join(done)}")
+    if not todo:
+        log("  所有场的镜头都排好了，直接跳过（不调模型、不花钱）")
+        diagnose.clear(pj.root, "stage:n9", episode)
+        return out
+    batches = _n9_windows(pj, episode, params, todo)
+    log(f"  按时窗分批：这次排 {len(todo)} 场，分 {len(batches)} 批"
+        f"（{' / '.join('、'.join(b) for b, _ in batches)}）")
+    for i, (batch, est) in enumerate(batches, 1):
+        if cancel and cancel():
+            raise LLMCancelled(
+                f"{episode} 第九环节已按取消停下，排好的都存了盘；"
+                f"再点一次「开始」只补没排的那几场。")
+        offset = _plan_seconds(out)
+        n_shots = len([s for s in out.get("shots") or [] if isinstance(s, dict)])
+        n_tr = len([t for t in out.get("transitions") or []
+                    if isinstance(t, dict)])
+        prev_shot = _last_shot_of(out)
+        fresh = _one_call(
+            pj, "n9", llm=llm, params=params, episode=episode,
+            label=f"[{i}/{len(batches)}] ",
+            extra={"_scene_batch": set(batch),
+                   "BATCH_SCOPE": _n9_scope(batch, len(scenes), episode,
+                                            offset, est, n_shots + 1, n_tr + 1),
+                   "LAST_SHOT": _last_shot_block(out, offset)},
+            log=log, cancel=cancel)
+        # protect = 上一批最后一镜的真实编号（LAST_SHOT 里给过模型）：
+        # 模型重启编号撞上它时，指向**旧行**的跨批转场引用不能被改走。
+        _renumber_batch_shots(
+            fresh, episode, n_shots + 1, n_tr + 1,
+            protect={str(prev_shot.get("shot_id"))} if prev_shot else set())
+        _shift_batch_timing(fresh, offset, log)
+        out = merge_shots(out, fresh)
+        # 在「合并到目前」的这一份上查时间线：批内跳秒、批间接不上
+        # 都在这里拦。拦住时这一批不落盘 —— 再点一次只重排这一批
+        check_timeline(pj, "n9", out, params, episode, log)
+        pj.save_stage("n9_shots", out, episode)
+        log(f"  第 {i}/{len(batches)} 批（{('、'.join(batch))}）排好，"
+            f"累计 {len(out.get('shots') or [])} 镜、时间轴铺到 "
+            f"{_plan_seconds(out):g} 秒")
+    check_runtime(pj, "n9", out, params, episode, log)
+    diagnose.clear(pj.root, "stage:n9", episode)
+    return out
+
+
 def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
               episode: str = "", log: Callable = print,
               cancel: Optional[Callable] = None,
@@ -1053,6 +1691,13 @@ def run_stage(pj: Project, stage_id: str, *, llm, params: dict,
                               concurrency=concurrency)
     if stage_id == "n4b":
         return run_n4b_batched(pj, llm=llm, params=params, log=log, cancel=cancel)
+    # 第八/九环节场次多时按场/时窗分批（整集一次两头都容易超）。
+    # 一场（或没切出场次）的集没有分批的意义，走下面的单次路径。
+    if stage_id in ("n8", "n9") and episode \
+            and len(_scenes_of(pj, episode)) > 1:
+        runner = run_n8_batched if stage_id == "n8" else run_n9_batched
+        return runner(pj, llm=llm, params=params, episode=episode,
+                      log=log, cancel=cancel)
 
     out = _one_call(pj, stage_id, llm=llm, params=params, episode=episode,
                     log=log, cancel=cancel)
