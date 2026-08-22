@@ -519,6 +519,60 @@ def check_image_map(prompt: str, want_refs: list, who: str = "",
     return "", note
 
 
+def _check_video_ref_map(prompt: str, task: dict, spine: list,
+                         aux: list, refs: list) -> None:
+    """视频提示词里声明的 `Image N = ID`，每一个都要真的有图会上传。
+
+    出片这一层原来只查一个方向（骨架多张、映射少了 → 提醒）。反方向
+    —— 映射比上传多 —— 一个字不说，而那正是装配层悄悄挑掉补图之后
+    的长相。两条路对不上时**硬停**，和出图那边的 check_image_map 同一条
+    口径：已经确定是错的，出片只会浪费钱。
+
+    认得出「会上传」的依据有三样：
+      · 补图的 asset_id（reference_images 里的，精确匹配）
+      · 骨架 Sheet：提示词里写 `SBPKG_段号_SHEET_X`，文件基名是
+        `项目码_段号_SHEET_X` —— 前缀不同、尾巴相同，按 sheet_id 认
+        （一个段内 sheet_id 唯一）
+      · no_image_refs 里按 skill 判了不出图的那几张 —— 编号占位是
+        设计如此（同出图那边 check_image_map 的口径）
+    """
+    mapped = _IMAGE_MAP.findall(prompt or "")
+    if not mapped:
+        return                      # V6.1 不写映射；没有映射归上面那道提醒管
+    sent_aux = {str(r.get("asset_id") or "") for r in aux or []}
+    skipped = {str(r.get("asset_id") or "")
+               for r in (task.get("no_image_refs") or [])
+               if isinstance(r, dict)}
+    stems = {os.path.splitext(os.path.basename(s))[0] for s in spine or []}
+    sheet_ids = [str(s.get("sheet_id") or "")
+                 for s in (task.get("storyboard_refs") or [])]
+
+    def _sent(aid: str) -> bool:
+        if aid in sent_aux or aid in skipped:
+            return True
+        if any(stem == aid or (len(aid) > 6 and stem.endswith(aid))
+               or aid.endswith(stem) for stem in stems if stem):
+            return True
+        return any(sid and len(sid) >= 5 and aid.endswith(sid)
+                   for sid in sheet_ids)
+
+    ghost = [f"Image {n} = {aid}" for n, aid in mapped if not _sent(aid)]
+    if not ghost:
+        return
+    raise RuntimeError(
+        f"{task.get('key') or '这一段'} 的视频提示词声明的参考图没有全部上传："
+        f"{len(mapped)} 个编号里有 {len(ghost)} 个指不到任何会上传的图 —— "
+        f"{'、'.join(ghost[:6])}{'…' if len(ghost) > 6 else ''}。"
+        f"这一段实际只会传 {len(refs)} 张。"
+        f"多半是第十三环节把装配层会挑掉的东西写进了 reference_order"
+        f"（资产表里认不出的 ID、故事板没有的 Sheet），"
+        f"也可能是故事板那一环这一段没出够张数。"
+        f"模型收到的图比声明少，编号从缺的那张起整体错位 —— "
+        f"片子出来看着正常，参考全是错的，所以这里停下。"
+        f"去重跑第十三环节这一段（reference_order 只写真实存在的图），"
+        f"缺故事板就先把这一段的 Sheet 数补对。")
+
+
 def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
                 provider_cfg: dict, model: str, media: str):
     """出完东西量一下真实尺寸，比例不对就挂一条提醒。
@@ -821,6 +875,16 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         # V6.1 的老字段照旧认（那条路径一直是对的）
         if task.get("aux_reference"):
             refs.append(to_ref(task["aux_reference"], log))
+        # ---- 声明的映射 ↔ 实际要上传的清单，两头对账 ----
+        #
+        # 用户实遇（成片跑完了才发现）：提示词里 Image 1..5 映射了 5 张，
+        # 实际只传了 1 张 —— 装配层把资产表认不出的补图 ID 悄悄挑掉了
+        # （run_v34 装配视频任务时按 amap 过滤 reference_order），而上面
+        # 那道「骨架多张、映射少了」的提醒只查一个方向，反方向一个字不说。
+        # 后果不是报错：模型收到的图比声明少，编号从缺的那张开始整体
+        # 错位，每条描述都套到别的图上 —— 片子出来看着正常，参考全是错的。
+        # V6.1 不受影响：它的视频提示词不写 `Image N = 英文ID` 映射。
+        _check_video_ref_map(prompt, task, spine, aux, refs)
         log(f"{_who_line(provider_cfg, model)}　{p.get('duration', 15)}s {want} "
             f"故事板骨架×{len(spine)} 补图×{len(refs) - len(spine)} "
             f"参考图共×{len(refs)}")

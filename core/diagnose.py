@@ -121,6 +121,21 @@ CATALOG = {
         "resume": "改完重跑对应环节，再出这几段的片。已经出好的段不重做。",
         "resumable": True, "scope": "stage", "level": "error",
     },
+    "VIDEO_REF_DECLARED_NOT_SENT": {
+        "title": "视频提示词声明的参考图没有全部上传",
+        "why": "装配任务那一层只把资产表认得出的补图放进任务，认不出的"
+               "悄悄丢了；第十三环节写了故事板没有的 Sheet 时也一样。"
+               "提示词里的编号却还占着位 —— 模型收到的图比声明少，"
+               "从缺口往后每条描述都套到错的图上。"
+               "**片子出来不报错，参考全是错的**，只能靠肉眼在成片里发现"
+               "（实跑撞过：映射 5 张、实际只传 1 张）。",
+        "where": "「产物」页 n13_video.json 这一段的 reference_order，"
+                 "和 n12_storyboard.json 里这一段实际的 Sheet 数",
+        "fix": ["重跑第十三环节这一段 —— reference_order 只写真实存在的图",
+                "缺的是资产图就先把资产补出来，再重出这一段的片"],
+        "resume": "补完重出这一段的片。已经出好的段不重做。",
+        "resumable": True, "scope": "task", "level": "error",
+    },
     "RUNTIME_SQUEEZED": {
         "title": "这一集排出来的时长比该有的短（东西照常做出来了）",
         "why": "第九环节排的镜头时间加起来，比第一环节按剧情定的本集时长短不少。"
@@ -803,6 +818,9 @@ _PATTERNS = [
     # 要排在 REF_MISSING 之前：文案里也有「参考图」，但这条是「图找到了、
     # 没说清是谁」，改法完全不同（补映射，不是去出图）。
     ("REF_MAP_INCOMPLETE", r"REFERENCE_MAPPING_BLOCKED|身份映射不完整"),
+    # 视频出片层的对账：提示词声明了 N 张、实际只传得出 M 张。
+    # 也要排在 REF_MISSING 之前 —— 文案里同样有「参考图」。
+    ("VIDEO_REF_DECLARED_NOT_SENT", r"声明的参考图没有全部上传"),
     ("REF_MISSING", r"参考图文件不存在|固定故事板不存在|no such file|filenotfound"),
     # 这两条要排在 PREREQ_MISSING 前面：它们的文案里也带「请先跑」，
     # 但给的指引更具体（去哪个下拉框选集），别被通用的前置缺失兜走
@@ -825,6 +843,10 @@ _PATTERNS = [
     # 「有 N 段没做成」是聚合结论，真正的原因在带段号的那条记录里。
     # 排在前面：它的文案里也带「失败」，会被后面的规则抢走。
     ("SEG_PARTIAL", r"段分镜失败|段编译失败|段没做成"),
+    # check_timeline 抛的措辞。实跑（17环节06）这条报成「没见过的错误」——
+    # 它明明有专门的卡片（重跑第九环节、首尾相接），报 UNKNOWN 等于把
+    # 指引埋了，人只能干瞪眼读原文。
+    ("SHOT_TIMELINE_BROKEN", r"时间线接不上"),
     # 截断要排在 SCHEMA_FAIL 前面：它的表现也是 JSON 不完整，但修法完全不同
     # 两种截断都归这一条：模型到上限（带 length/max_tokens）和
     # 中转站切断（没有任何标记，只能靠「JSON 没闭合」认出来）。

@@ -430,3 +430,101 @@ class S5RefillTests(unittest.TestCase):
                               "episode": "EP01"},
                              log=lambda *a: None, episode="EP01")
         self.assertEqual(len(llm.calls), 2, "只补一轮，不许递归")
+
+
+# ------------------------------------------------- ⑥ 视频参考图两头对账
+class VideoRefMapTests(unittest.TestCase):
+    """提示词声明 N 张、实际只传得出 M 张 → 硬停，不许静默错位。"""
+
+    def _task(self, **kw):
+        task = {"key": "EP01-SEG01",
+                "storyboard_refs": [
+                    {"order": 1, "sheet_id": "SHEET_A",
+                     "file_ref": "04_故事板/T_EP01-SEG01_SHEET_A.png"},
+                    {"order": 2, "sheet_id": "SHEET_B",
+                     "file_ref": "04_故事板/T_EP01-SEG01_SHEET_B.png"}],
+                "no_image_refs": [], "reference_images": []}
+        task.update(kw)
+        return task
+
+    def _spine(self, task):
+        return [s["file_ref"] for s in task["storyboard_refs"]]
+
+    def test_all_declared_refs_present_passes(self):
+        prompt = ("Image 1 = SBPKG_EP01-SEG01_SHEET_A 本段第 1 张\n"
+                  "Image 2 = SBPKG_EP01-SEG01_SHEET_B 本段第 2 张\n"
+                  "Image 3 = LK002 当前造型")
+        task = self._task(reference_images=[{"image_n": 3, "asset_id": "LK002",
+                                             "file_ref": "x/LK002.png"}])
+        produce._check_video_ref_map(prompt, task, self._spine(task),
+                                     task["reference_images"], refs=3 * ["x"])
+
+    def test_declared_but_never_uploaded_stops(self):
+        """★ 用户实遇的长相：映射 5 张、装配层只认得出 1 张补图。"""
+        prompt = ("Image 1 = SBPKG_EP01-SEG01_SHEET_A\n"
+                  "Image 2 = LK002\nImage 3 = XX999\nImage 4 = YY888\n"
+                  "Image 5 = ZZ777")
+        task = self._task(reference_images=[{"image_n": 2, "asset_id": "LK002",
+                                             "file_ref": "x/LK002.png"}])
+        with self.assertRaises(RuntimeError) as cm:
+            produce._check_video_ref_map(prompt, task, self._spine(task),
+                                         task["reference_images"], refs=["x"])
+        msg = str(cm.exception)
+        self.assertIn("声明的参考图没有全部上传", msg)
+        self.assertIn("XX999", msg)
+        self.assertNotIn("LK002", msg, "认得出的补图不是问题，别误报")
+
+    def test_sheets_are_matched_by_sheet_id(self):
+        """★ 骨架在提示词里叫 SBPKG_段号_SHEET_X、文件叫 项目码_段号_SHEET_X
+        —— 前缀不同尾巴相同，按 sheet_id 认，不许误报。"""
+        prompt = ("Image 1 = SBPKG_EP01-SEG01_SHEET_A\n"
+                  "Image 2 = SBPKG_EP01-SEG01_SHEET_B")
+        task = self._task()
+        produce._check_video_ref_map(prompt, task, self._spine(task), [],
+                                     refs=2 * ["x"])
+
+    def test_a_declared_sheet_beyond_the_real_ones_stops(self):
+        """第十三环节写了故事板没有的第 3 张 —— 编号从那里开始全错位。"""
+        prompt = ("Image 1 = SBPKG_EP01-SEG01_SHEET_A\n"
+                  "Image 2 = SBPKG_EP01-SEG01_SHEET_B\n"
+                  "Image 3 = SBPKG_EP01-SEG01_SHEET_C")
+        task = self._task()
+        with self.assertRaises(RuntimeError) as cm:
+            produce._check_video_ref_map(prompt, task, self._spine(task), [],
+                                         refs=2 * ["x"])
+        self.assertIn("SHEET_C", str(cm.exception))
+
+    def test_no_image_refs_keep_their_slot(self):
+        """判了不出图的按 skill 占着编号 —— 这是约定，不是缺图。"""
+        prompt = ("Image 1 = SBPKG_EP01-SEG01_SHEET_A\n"
+                  "Image 2 = CST002 日常便装")
+        task = self._task(no_image_refs=[{"image_n": 2, "asset_id": "CST002",
+                                          "decision": "logical_only"}])
+        produce._check_video_ref_map(prompt, task, self._spine(task), [],
+                                     refs=["x"])
+
+    def test_a_v61_prompt_without_mappings_is_untouched(self):
+        """V6.1 的视频提示词不写英文 ID 映射 —— 一个字不许拦。"""
+        produce._check_video_ref_map("Image 1 = 当前段固定故事板\n正文",
+                                     self._task(), ["04_故事板/a.png"], [], ["x"])
+
+
+# ------------------------------------------------------- ⑦ 时间线报错认得出来
+class TimelineDiagnoseTests(unittest.TestCase):
+
+    def test_the_timeline_message_is_recognised(self):
+        """★ 实跑（17环节06）报成 UNKNOWN：明明有专门的卡片却没人认。"""
+        from core import diagnose
+        raw = ("EP01 第九环节排的时间线接不上（1 处）：\n"
+               "  · SH_EP01_030 的结束时间 210 秒早于开始时间 228 秒")
+        self.assertEqual(diagnose.code_of(raw), "SHOT_TIMELINE_BROKEN")
+
+    def test_the_video_ref_gap_message_is_recognised(self):
+        from core import diagnose
+        raw = ("EP01-SEG01 的视频提示词声明的参考图没有全部上传："
+               "5 个编号里有 4 个指不到任何会上传的图")
+        self.assertEqual(diagnose.code_of(raw), "VIDEO_REF_DECLARED_NOT_SENT")
+
+
+if __name__ == "__main__":
+    unittest.main()
