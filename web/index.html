@@ -146,6 +146,9 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
   background:var(--panel2)}
 .steps .s.full{border-color:var(--ok);color:var(--ok)}
 .steps .s.none{border-color:var(--dim);color:var(--dim)}
+.tkfold{cursor:pointer;user-select:none}
+.tkfold:hover .s{border-color:var(--fg)}
+.tk-arrow{display:inline-block;width:12px;color:var(--dim)}
 </style>
 </head>
 <body>
@@ -2839,6 +2842,10 @@ $('#ppSeg').onchange = () => ppShow().catch(() => {});
 // 以前只能看当前 job 的明细，而 job 是内存态：服务一重启就没了，
 // 想知道上次那张图是哪家出的、用的什么提示词、花了多少，只能自己翻文件夹。
 let TK = null;
+// 组级展开/收起：组 key → true=展开。收起时只留「资产图（环节5b）165/196」
+// 那一行汇总，几十上百条的明细点标题才铺开 —— 196 条全铺开的话，
+// 想看下面那一组得滚很久。筛选/刷新会重画，状态放这儿不丢。
+let TKFold = {};
 async function renderTasks(fresh) {
   if (!PROJ) return;
   const box = $('#tkBody');
@@ -2858,13 +2865,28 @@ async function renderTasks(fresh) {
   box.innerHTML = TK.groups.map(g => {
     const rows = g.rows.filter(r => !bad || (!r.done));
     if (!rows.length && bad) return '';
+    const open = !!TKFold[g.key];
     return `<div style="margin-bottom:14px">
-      <div class="steps"><div class="s ${g.done >= g.total && g.total ? 'full' : g.done ? '' : 'none'}">
+      <div class="steps tkfold" data-gkey="${esc(g.key)}" title="点击${open ? '收起' : '展开'}">
+      <div class="s ${g.done >= g.total && g.total ? 'full' : g.done ? '' : 'none'}">
+        <span class="tk-arrow">${open ? '▾' : '▸'}</span>
         ${esc(g.label)}（${esc(g.stage)}） ${g.done}/${g.total}
         ${g.failed ? ` · <b style="color:#c0392b">${g.failed} 项没做成</b>` : ''}</div></div>
+      <div class="grp${open ? '' : ' hide'}">
       ${rows.map(r => taskRow(r, g.key)).join('') || '<p class="muted">（这一类没有待办）</p>'}
+      </div>
     </div>`;
   }).join('');
+  document.querySelectorAll('#tkBody .tkfold').forEach(el => {
+    el.onclick = () => {
+      const k = el.dataset.gkey;
+      TKFold[k] = !TKFold[k];
+      el.parentElement.querySelector('.grp')
+        .classList.toggle('hide', !TKFold[k]);
+      el.querySelector('.tk-arrow').textContent = TKFold[k] ? '▾' : '▸';
+      el.title = TKFold[k] ? '点击收起' : '点击展开';
+    };
+  });
   document.querySelectorAll('#tkBody .segrow > .hd').forEach(el => {
     el.onclick = () => el.parentElement.querySelector('.bd').classList.toggle('hide');
   });
