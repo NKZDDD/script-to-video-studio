@@ -247,18 +247,56 @@ _JSON_HINTS = (
 )
 
 
+def _loads_lenient(inner: str, log: Optional[Callable] = None) -> Any:
+    """先按标准 JSON 解析；字符串里有裸换行/控制字符时放宽 strict 再试一次。
+
+    模型在长正文里直接敲回车是高频事件 —— 它不知道 JSON 字符串里的控制
+    字符必须转义。这种输出**内容完全正确**，只是格式犯了规：以前整段判成
+    解析失败、烧掉重试，而重试回来的多半还是带裸换行（模型不知道错在哪，
+    反馈里那句提示也不一定救得回来）。这里直接救下：strict=False 只放宽
+    「字符串里的控制字符」这一条，引号、括号、逗号的错误照样报 ——
+    真·格式错误一个都藏不住，后面的 schema 校验也照跑。
+    """
+    try:
+        return json.loads(inner)
+    except json.JSONDecodeError as strict_err:
+        try:
+            obj = json.loads(inner, strict=False)
+        except json.JSONDecodeError:
+            raise strict_err        # 宽松也救不了 → 是别的问题，按原报错走
+        if log:
+            log("⚠️ JSON 字符串里有未转义的换行/控制字符，已按宽松模式解析"
+                "（内容不受影响，模型只是忘了把换行写成 \\n）")
+        return obj
+
+
+def _raw_decode_lenient(inner: str) -> tuple:
+    """raw_decode 版的 `_loads_lenient`，返回 (obj, end)。成功是 strict 还是
+    宽松模式救回来的，调用方用「strict 先单独试一次」自己分辨。"""
+    try:
+        return json.JSONDecoder().raw_decode(inner)
+    except json.JSONDecodeError as strict_err:
+        try:
+            return json.JSONDecoder(strict=False).raw_decode(inner)
+        except json.JSONDecodeError:
+            raise strict_err
+
+
 def _decode_err(body: str):
     """让 json 从第一个 `{` / `[` 试着解一次，只为拿它的报错。成功就返回 None。
 
     用在「括号配不平」那条路上：配不平可能是真写到一半，也可能是引号错位
     把扫描器带偏了。前者 json 会停在末尾，后者会停在中间 —— 有了它的报错
     才分得清，而分不清就只能说「没闭合」，那句话在后一种情况下是错的。
+
+    用 strict=False：字符串里的裸换行在 strict 模式下会挡在前面，报错
+    指向换行处 —— 而真正的结构问题（如果有）在它后面，被挡住看不见了。
     """
     i = min([p for p in (body.find("{"), body.find("[")) if p >= 0] or [-1])
     if i < 0:
         return None
     try:
-        json.JSONDecoder().raw_decode(body[i:])
+        json.JSONDecoder(strict=False).raw_decode(body[i:])
     except json.JSONDecodeError as exc:
         # 位置要换算回整段的坐标，不然「第 N 个字符」指的是别处
         exc.pos = int(getattr(exc, "pos", 0) or 0) + i
@@ -375,7 +413,7 @@ def _first_json(inner: str, log: Optional[Callable] = None,
     别把「写到一半」当成「多写了一点」，那两件事的修法完全相反。
     """
     try:
-        obj, end = json.JSONDecoder().raw_decode(inner)
+        obj, end = _raw_decode_lenient(inner)
     except json.JSONDecodeError as exc:
         # 把解析器的原话带上。丢掉它的话只能说「没闭合」——
         # 而那句话在括号其实是配平的时候是错的，会把人和模型都带偏。
@@ -410,7 +448,7 @@ def extract_json(text: str, log: Optional[Callable] = None,
     if fenced:
         inner = fenced.group(1).strip()
         try:
-            return json.loads(inner)
+            return _loads_lenient(inner, log)
         except json.JSONDecodeError:
             return _first_json(inner, log, reason)   # 里面会带上解析器原话
     # 开了围栏却没闭合 = 写到一半断了
@@ -420,7 +458,7 @@ def extract_json(text: str, log: Optional[Callable] = None,
         blk = _balanced(body, "{", "}")
         if blk is not None:
             try:
-                return json.loads(blk)
+                return _loads_lenient(blk, log)
             except json.JSONDecodeError as exc:
                 # 括号配平了但内容坏了（多个引号、裸换行、尾逗号）。
                 # 以前这里直接把 JSONDecodeError 抛出去 —— 那句英文报错
@@ -435,7 +473,7 @@ def extract_json(text: str, log: Optional[Callable] = None,
     blk = _balanced(body, "[", "]")
     if blk is not None:
         try:
-            return json.loads(blk)
+            return _loads_lenient(blk, log)
         except json.JSONDecodeError as exc:
             raise _truncated(blk, len(blk), reason, exc)
     # 把模型实际回了什么带上。只说「没找到 JSON」等于什么都没说 ——

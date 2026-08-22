@@ -261,6 +261,26 @@ def _keep(pj: Project, kind: str, key: str, round_no: int, old: str, new: str,
                    "事件本身没被换掉才算改对"]))
 
 
+def _gen_with_upstream_retry(gen: Callable, log: Callable) -> Callable:
+    """包一层：`upstream_rejected` 先原样重发一次，复现才往外抛。
+
+    upstream_rejected 是上游的拒收 —— 里面既有「内容真被审了」（重发
+    还是拒），也有「上游抖了一下」（重发就过）。两种在错误码上看不出
+    区别，而一次裸重发的代价比一轮降级改写小得多：改写会把措辞/画面
+    强度永久降一档，抖动那类却什么都不用动。所以先试便宜的。
+    """
+    def wrapped(p):
+        try:
+            return gen(p)
+        except Exception as exc:                            # noqa: BLE001
+            if getattr(exc, "err_code", "") != "upstream_rejected":
+                raise
+            log("  upstream_rejected（上游拒收）：先原样重发一次，"
+                "复现再交给改写")
+            return gen(p)
+    return wrapped
+
+
 def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
                        kind: str, key: str, rounds: int = DEFAULT_ROUNDS,
                        log: Callable = print):
@@ -273,11 +293,12 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
     返回 gen 的结果。改写不成、或者不是审核问题，一律照常把原异常抛出去。
     """
     rounds = clamp_rounds(rounds)
+    g = _gen_with_upstream_retry(gen, log)
     used = prompt
     reasons = []                    # 每一轮服务商说的话 —— 用来看是不是同一个坎
     for attempt in range(1, rounds + 2):
         try:
-            return gen(used)
+            return g(used)
         except Exception as exc:                            # noqa: BLE001
             # 把这一轮实际发出去的提示词交给判定：报错里回显了它的话要先剔掉
             if attempt > rounds:
@@ -288,7 +309,8 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
                 _gave_up(exc, attempt - 1, attempt - 1, rounds, reasons,
                          "没有可用的分析引擎，这一条没做自动改写", log)
                 raise
-            if not is_content_rejection(exc, used):
+            upstream = getattr(exc, "err_code", "") == "upstream_rejected"
+            if not is_content_rejection(exc, used) and not upstream:
                 # **这一条以前完全看不见。** 不是审核问题就一轮都不改 ——
                 # 对的（改措辞治不了网络错误），但如果判错了（服务商这一次
                 # 回的是一句笼统的「任务失败」，没有判词），看起来就是
@@ -298,7 +320,10 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
                          f"服务商这次说的是：{str(exc)[:200]}", log)
                 raise
             reasons.append(str(exc))
-            log(f"  被审核拒了：{str(exc)[:200]}")
+            # upstream_rejected 裸重试过一次还复现 —— 多半真是内容被上游
+            # 审了，按审核拒收处理（is_content_rejection 不认这个码，
+            # 这里显式放它进改写）。话要说清，不然人以为是网络问题。
+            log(f"  {'上游拒收（已重发过一次仍被拒），按审核拒收处理' if upstream else '被审核拒了'}：{str(exc)[:200]}")
             _, tier_name, _ = tier_of(attempt)
             log(f"  交给分析引擎优化提示词（第 {attempt}/{rounds} 轮 · {tier_name}）"
                 + ("" if attempt == 1 else "，接着上一版继续"))

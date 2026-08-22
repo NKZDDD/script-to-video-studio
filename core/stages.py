@@ -745,7 +745,11 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
                   log: Callable = print, episode: str = "",
                   cancel: Optional[Callable] = None,
                   seg_concurrency: int = 1,
-                  force: bool = False) -> dict:
+                  force: bool = False,
+                  _refill: Optional[list] = None) -> dict:
+    # `_refill` 是环节5自检补漏用的内部参数（见 s5 分支和保存后的
+    # `_s5_missing_after_run`）：主调用跑完发现漏了几个资产，拿漏单
+    # 再调一次自己。外部调用永远不传。
     from . import episodes as _eps
     tpl_name, deps, required = _LLM_SPEC[stage_id]
     per_ep = is_per_episode(stage_id)
@@ -793,20 +797,28 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     # 环节5 只给「还没写过提示词的资产」。资产提示词全剧共用一份文件，
     # 不过滤的话 40 集会把同一个角色的提示词重写 40 遍：白花钱，还可能越写越飘。
     if stage_id == "s5":
-        a4, todo, skipped = _s5_filter(pj, data, claim=True, force=force)
-        data["s4_assets"] = a4
-        if force:
-            log(f"{episode} 明确重跑环节5：按当前 TXT 规则重新编译本集全部资产提示词")
-        if skipped:
-            log(f"{episode} 有 {len(skipped)} 个资产前面几集已经写过提示词，跳过："
-                f"{'、'.join(skipped[:8])}{'…' if len(skipped) > 8 else ''}")
-        if not a4["assets"]:
-            log(f"{episode} 没有新资产要写提示词，直接跳过（不调模型、不花钱）")
-            prev = pj.stage_data("s5_asset_prompts", episode) or {"asset_prompts": []}
-            pj.save_stage("s5_asset_prompts", prev, episode)
-            build_tasks(pj, params)
-            diagnose.clear(pj.root, "stage:s5", episode)
-            return prev
+        if _refill is not None:
+            # 补漏模式：主调用筛过了，这里直接用那份漏单 —— 不能再走
+            # _s5_filter：漏掉的资产还占着 claim（本集自己领的），filter
+            # 会把它们当成「别的集在写」而跳过，补漏就空转了。
+            a4 = dict(data.get("s4_assets") or {})
+            a4["assets"] = _refill
+            data["s4_assets"] = a4
+        else:
+            a4, todo, skipped = _s5_filter(pj, data, claim=True, force=force)
+            data["s4_assets"] = a4
+            if force:
+                log(f"{episode} 明确重跑环节5：按当前 TXT 规则重新编译本集全部资产提示词")
+            if skipped:
+                log(f"{episode} 有 {len(skipped)} 个资产前面几集已经写过提示词，跳过："
+                    f"{'、'.join(skipped[:8])}{'…' if len(skipped) > 8 else ''}")
+            if not a4["assets"]:
+                log(f"{episode} 没有新资产要写提示词，直接跳过（不调模型、不花钱）")
+                prev = pj.stage_data("s5_asset_prompts", episode) or {"asset_prompts": []}
+                pj.save_stage("s5_asset_prompts", prev, episode)
+                build_tasks(pj, params)
+                diagnose.clear(pj.root, "stage:s5", episode)
+                return prev
     # PARAMS 里绝不能带 script：它已经在 {{SCRIPT}} 里送了一份。
     # 之前没剔，等于把 8 万字的剧本发两遍 —— 环节1 的输入从 72K token 涨到
     # 141K token，一半是重复内容，钱翻倍、首字延迟翻倍，也是上次超时的主因。
@@ -878,6 +890,34 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
         fresh_s5_prompts = list(out.get("asset_prompts") or [])
         check_prompt_refs(pj, out, episode, log)
         out = merge_s5_outputs(pj.stage_data("s5_asset_prompts", episode) or {}, out)
+        # 自检补漏：领走要写的资产里还有谁没交卷 —— JSON 里没有、txt
+        # 也没有。LLM 正常返回但漏写几条时（required 只校验结构，不校验
+        # 「领走的都交回来了」），这些资产在同一趟流水线里重跑环节5 也
+        # 补不上：claim 还占着，filter 会跳过它们。于是它们永远没有图，
+        # 引用它们的故事板一直等。当场拿漏单再跑一轮。
+        # 补漏那轮（_refill 模式）里不再递归补 —— 再漏就记诊断让人来。
+        if _refill is None:
+            missing = _s5_missing_after_run(pj, out, episode)
+            if missing:
+                labels = "、".join(
+                    f"{m['asset_id']}{(' ' + m.get('name', '')) if m.get('name') else ''}"
+                    for m in missing[:8])
+                log(f"⚠️ {episode} 环节5 漏写了 {len(missing)} 个资产的提示词"
+                    f"（{labels}{'…' if len(missing) > 8 else ''}），当场补一轮")
+                refill = run_llm_stage(pj, "s5", llm, params, log=log,
+                                       episode=episode, cancel=cancel,
+                                       _refill=missing)
+                out = merge_s5_outputs(out, refill)
+                still = _s5_missing_after_run(pj, out, episode)
+                if still:
+                    diagnose.record(pj.root, diagnose.warn(
+                        "ASSET_NO_PROMPT",
+                        f"{episode} 环节5 补漏后仍有 {len(still)} 个资产没写提示词："
+                        + "、".join(str(m.get("asset_id")) for m in still[:8])
+                        + ("…" if len(still) > 8 else "")
+                        + "。两轮都没交卷，多半是模型裁剪了它们 —— 重跑这一集的"
+                          "环节5，或到「任务明细」手补这几条的提示词。",
+                        stage="stage:s5", target=episode))
     pj.save_stage(tpl_name, out, episode)
 
     if stage_id == "s1":
@@ -1002,6 +1042,29 @@ def _ran_s5(pj: Project, a: dict) -> bool:
     if not eps:
         return True
     return any(pj.stage_data("s5_asset_prompts", ep) for ep in eps)
+
+
+def _s5_missing_after_run(pj: Project, merged: dict, episode: str) -> list:
+    """环节5 保存合并后，本集还有哪些「要出的资产」连提示词的影子都没有。
+
+    判据两条同时不满足才算漏：合并后的 JSON 里没有它、提示词 txt 也不在。
+    txt 在而 JSON 没有（或反过来）不算 —— 那是历史产物形态差异，出图
+    只要有一样就能用；两个都没有才是真的漏。跨集共享的资产（别的集
+    写过 txt）也直接跳过：资产提示词全剧一份，有就是有。
+    """
+    got = {str(ap.get("asset_id") or "") for ap in merged.get("asset_prompts") or []}
+    missing = []
+    for a in (pj.stage_data("s4_assets", episode) or {}).get("assets", []):
+        if a.get("decision") == "skip":
+            continue
+        aid = str(a.get("asset_id") or "")
+        if not aid or aid in got:
+            continue
+        if os.path.isfile(pj.p("03_提示词", "资产生产提示词",
+                               f"{aid}_PROMPT.txt")):
+            continue
+        missing.append(a)
+    return missing
 
 
 def _space_master_ids(out: dict) -> dict:
@@ -1615,6 +1678,120 @@ def _split_refs(rows, amap: dict, aprompts: dict) -> tuple:
     return keep, no_image
 
 
+# 拼接 ID 里见过的连接符：`C001+C002`、`C001、C002`、`C001/C002`。
+# 全角加号和顿号是中文模型最爱用的写法。
+_JOIN_SEPS = re.compile(r"[+＋、/，,]")
+
+
+def _split_joined_refs(refs, amap: dict) -> tuple:
+    """把 `C001+C002` 这种拼接引用拆开。返回 (新列表, 拆了哪些)。
+
+    环节4/5/8 的模型有时会把「拿这两个资产合起来当参考」写成
+    `C001+C002` —— 它以为程序会懂，实际程序只认资产表里的整名：
+    拼起来的串在表里查不到，走 GHOST_REF，这一条任务出不了图。
+
+    **全部段都真实存在才拆**：`C001+XX99` 里有一段查不到，说明模型想
+    引用的东西本来就有错，硬拆只会把错误藏起来 —— 原样留着，照旧走
+    GHOST_REF 让人去看。
+
+    拆分发生时 dict 条目（故事板的 reference_order）按位置重编 image_n：
+    上传顺序、正文映射、check_image_map 三方用的是同一套号，拆完列表
+    变长，编号必须整体对齐 —— 正文映射块的同步重写由调用方做
+    （`_rewrite_prompt_map_block`）。没发生拆分时编号一律不动。
+    """
+    rows = list(refs or [])
+    if not rows:
+        return rows, []
+
+    def _rid(r):
+        return str(r.get("asset_id") if isinstance(r, dict) else r or "").strip()
+
+    if not any(_JOIN_SEPS.search(_rid(r)) for r in rows):
+        return rows, []                        # 快速路径：没有拼接 ID
+
+    out, joined, seen = [], [], set()
+    for r in rows:
+        rid = _rid(r)
+        parts = [p.strip() for p in _JOIN_SEPS.split(rid)] if rid else []
+        parts = [p for p in parts if p]
+        if len(parts) > 1 and all(p in amap for p in parts):
+            joined.append({"orig": rid, "parts": list(parts)})
+            for p in parts:
+                if p in seen:
+                    continue
+                seen.add(p)
+                out.append({"asset_id": p} if isinstance(r, dict) else p)
+        else:
+            out.append(r)
+            if rid:
+                seen.add(rid)
+    if joined and any(isinstance(r, dict) for r in out):
+        for i, r in enumerate(out, 1):
+            if isinstance(r, dict):
+                r["image_n"] = i
+    return out, joined
+
+
+_MAP_LINE = re.compile(r"^\s*[Ii]mage\s*(\d+)\s*[=＝:：]\s*([A-Za-z0-9_\-]+)")
+
+
+def _rewrite_prompt_map_block(pj: Project, prompt_rel: str, final_refs: list,
+                              amap: dict, log=None) -> bool:
+    """拆分发生后，把提示词正文的 Image 映射块按新编号重写。返回改没改。
+
+    编号是三方合同（上传顺序 / 正文映射 / check_image_map）：拆分把
+    参考列表变长了，正文里那块 `Image N = 资产ID` 必须跟着重写，不然
+    出图时映射对不上，又要被 check_image_map 拦下来。**只动映射行**，
+    正文其余部分一个字不动。写盘走 write_prompt_txt（手改过的先备份）。
+    """
+    path = pj.p(*prompt_rel.split("/"))
+    text = read_text(path)
+    if not text:
+        return False
+    lines = text.splitlines()
+    idx = [i for i, ln in enumerate(lines) if _MAP_LINE.match(ln)]
+    if not idx:
+        return False        # 正文没写映射 → 出图时 check_image_map 会按老规矩报
+    block = []
+    for i, r in enumerate(final_refs, 1):
+        aid = str(r.get("asset_id") if isinstance(r, dict) else r or "").strip()
+        if not aid:
+            continue
+        name = str((amap.get(aid) or {}).get("name") or "").strip()
+        block.append(f"Image {i} = {aid}" + (f"　{name}" if name else ""))
+    if not block:
+        return False
+    new_lines = lines[:]
+    for i in reversed(idx[1:]):               # 其余映射行删掉，中间的非映射行保留
+        del new_lines[i]
+    new_lines[idx[0]] = "\n".join(block)
+    new_text = "\n".join(new_lines) + ("\n" if text.endswith("\n") else "")
+    if new_text == text:
+        return False                          # 幂等：装配每次都会跑，别重复写
+    write_prompt_txt(pj, prompt_rel, new_text, log)
+    return True
+
+
+def _apply_joined_split(pj: Project, key: str, kind: str, joined: list,
+                       prompt_rel: str, final_refs: list, amap: dict) -> None:
+    """拼接引用拆开了：正文映射块重写 + 记一条能追溯的提醒。
+
+    拆分改的是两样东西（参考列表在装配结果里、映射块在提示词正文里），
+    都不声不响的话，人看到的提示词文件和环节8 的原始产物对不上，
+    又没有任何线索指向「这里被程序改过」。
+    """
+    bits = [f"{j['orig']} → {'、'.join(j['parts'])}" for j in joined]
+    rewrote = _rewrite_prompt_map_block(pj, prompt_rel, final_refs, amap)
+    diagnose.record(pj.root, diagnose.warn(
+        "REF_SPLIT",
+        f"{key} 的参考图里有 {len(joined)} 个拼接写法的引用，已自动拆成"
+        "独立资产：" + "；".join(bits)
+        + ("；提示词正文里的 Image 映射块已按拆分后的顺序重写。"
+           if rewrote else "；提示词正文没找到映射块（或无需改动），"
+                           "出图时若报映射对不上，去任务明细里看这一条。"),
+        stage=kind, target=key,
+        extra_fix=[f"提示词文件：{prompt_rel}"]))
+
 
 def _build_tasks(pj: Project, params: dict) -> dict:
     from . import episodes as _eps
@@ -1661,6 +1838,14 @@ def _build_tasks(pj: Project, params: dict) -> dict:
         refs = _ordered_asset_refs([legacy_parent], a.get("reference_assets") or [],
                                    ap.get("reference_assets") or [],
                                    exclude=a["asset_id"])
+        # `C001+C002` 这种拼接引用在这里拆开（全部段真实存在才拆），
+        # 提示词正文的映射块跟着重写 —— 参考列表和正文必须一起动，
+        # 只拆一边等于把 GHOST_REF 换成映射错位。
+        refs, joined = _split_joined_refs(refs, amap)
+        if joined:
+            _apply_joined_split(pj, a["asset_id"], "asset", joined,
+                               f"03_提示词/资产生产提示词/{ap.get('filename') or a['asset_id'] + '_PROMPT.txt'}",
+                               refs, amap)
         bad = [str(r) for r in refs if r not in amap]
         if bad:
             ghost[a["asset_id"]] = bad
@@ -1708,6 +1893,12 @@ def _build_tasks(pj: Project, params: dict) -> dict:
             seg = sid.split("-")[-1]
             b = bindings.get(sid, {})
             refs = c.get("reference_order") or b.get("reference_images") or []
+            # 拼接 ID（`C001+C002`）拆开 + 正文映射块同步重写，同资产那边。
+            refs, joined = _split_joined_refs(refs, amap)
+            if joined:
+                _apply_joined_split(pj, sid, "storyboard", joined,
+                                   f"03_提示词/故事板提示词/{sid}_STORYBOARD_PROMPT.txt",
+                                   refs, amap)
             # 环节8 有时会把「本段故事板」自己写进参考图顺序 —— 那是环节10 视频的
             # 约定（视频以故事板为参考），串到故事板这一步就成了自己参考自己。
             # 这种 id 在资产表里找不到，file_ref 只能是空。留着不删（删了数量就

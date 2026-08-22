@@ -423,6 +423,30 @@ def _whose(who: str, ref: str) -> str:
             + "，不是被它引用的那张图。")
 
 
+def _auto_fix_image_map(prompt: str, want_refs: list) -> tuple:
+    """正文里 Image 映射写错时，以上传列表为准直接改过来。返回 (改后的正文, 改了哪些)。
+
+    能确定唯一正确答案的才改：正文写了 `Image n = X`、而第 n 张实际
+    要传的是 aid —— 那一行就改成 `Image n = aid`。X 原本指着谁、为什么
+    写错，都不用管：出图模型只认编号，编号和第几张对上就对了。
+
+    **缺编号不补、多写的编号不删** —— 那两种没有唯一正确答案：
+    补行补在哪个位置、措辞怎么写没有标准；多写的里面混着「不出图但
+    正文保留编号」的约定（no_image_refs），删错一个比留着更糟。
+    这两种留给 `check_image_map` 照旧报错拦下。
+    """
+    want = [(r.get("image_n") or i + 1, str(r.get("asset_id") or ""))
+            for i, r in enumerate(want_refs or [])]
+    fixes = []
+    for n, aid in want:
+        m = re.search(rf"[Ii]mage\s*{n}\s*[=＝:：]\s*([A-Za-z0-9_\-]+)",
+                      prompt or "")
+        if m and m.group(1) != aid:
+            prompt = prompt[:m.start(1)] + aid + prompt[m.end(1):]
+            fixes.append(f"Image {n} 由 {m.group(1)} 纠正为 {aid}")
+    return prompt, fixes
+
+
 def check_image_map(prompt: str, want_refs: list, who: str = "",
                     ref: str = "", no_image: list = None) -> tuple:
     """核对提示词里的 Image 编号和程序实际上传顺序是否一致。
@@ -650,6 +674,18 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
         # 两道校验顺序不能反：编号对不上时六字段校验会因为找不到槽位而漏报，
         # 报「身份映射不全」也会盖住真正的问题（编号错位）。
         who, ref = task["key"], task.get("prompt_ref") or ""
+        # 先把能自动纠正的编号错位改掉（以上传列表为准），再校验。
+        # 改过的要说出来并且入账 —— 不然排查的人对着提示词文件找错位，
+        # 而实际出图用的正文和文件已经不一样了。
+        prompt, map_fixes = _auto_fix_image_map(prompt, want_refs)
+        if map_fixes:
+            msg = (f"{who} 的提示词里参考图编号错位，已按实际上传顺序自动纠正："
+                   + "；".join(map_fixes)
+                   + f"。出图用的是纠正后的正文；文件本体没动，重跑会再纠一遍。")
+            log(f"⚠️ {msg}")
+            diagnose.record(pj.root, diagnose.warn(
+                "IMAGE_MAP_AUTOFIX", msg, stage=kind, target=task["key"],
+                extra_fix=[f"提示词文件在：{ref}（文件里仍是错位的写法）"]))
         for bad_map, map_warn in (check_image_map(prompt, want_refs, who, ref,
                                                   task.get("no_image_refs")),
                                   check_identity_map(prompt, want_refs, who, ref)):
