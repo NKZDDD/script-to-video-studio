@@ -254,6 +254,9 @@ COMMON_PLACEHOLDERS = ("PARAMS", "EPISODE", "SEGMENT", "DURATION", "SCRIPT",
                        "IMAGE_SIZE", "SEG_COUNT", "CAPABILITY", "REF_LIMIT",
                        "EPISODE_DURATION", "SEGMENTS_TARGET", "SEGMENTS_WHY",
                        "NARRATION_RULE", "MEDIUM_RULE",
+                       # 画面文字口径（n4b 收尾句按它转述）：和 NARRATION_RULE
+                       # 同款 —— 整段按取值生成的规则，不是几个孤立值。
+                       "SUBTITLE_RULE",
                        # 总时长 / 集数 / 每集时长三个量互相决定，合成的那一段。
                        # 只有环节1 用得上，但白名单是全局的。
                        "LENGTH_PLAN",

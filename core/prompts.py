@@ -31,7 +31,12 @@ REQUIRED_VARS = {
     "s3_states": ["EPISODE", "SEGMENTS"],
     "s4_assets": ["EPISODE", "GLOBAL", "SEGMENTS", "STATES", "KNOWN_ASSETS",
                   "KNOWN_SPACES"],
-    "s5_asset_prompts": ["EPISODE", "TONE", "ASSETS", "ASSET_CATALOG"],
+    "s5_asset_prompts": ["EPISODE", "TONE", "ASSETS", "ASSET_CATALOG",
+                         # 风格原词直发：视觉基调是环节1 转述的，转述丢词
+                         # （实跑：2.5D 被归并成「3D漫剧电影感」）时靠这一格兜回来。
+                         "MEDIUM_RULE",
+                         # 收尾句的画面文字口径（见下方 n4b 注释）。
+                         "SUBTITLE_RULE"],
     "s6_binding": ["EPISODE", "SEGMENTS", "STATES", "ASSETS"],
     "s7_shots": ["EPISODE", "SEGMENTS", "STATES", "BINDINGS"],
     "s8_compile": ["EPISODE", "SEGMENTS", "STATES", "ASSETS", "BINDINGS", "SHOTS"],
@@ -53,6 +58,10 @@ REQUIRED_VARS = {
     # 措辞一条无差别禁令，把设定里允许的剧情文字（招牌、屏幕、弹幕）
     # 也禁掉 —— 字静默消失，不报错。
     "s8_compile": ["SUBTITLE_RULE"],
+    # 资产提示词的收尾句同一条病（实跑 N001：末尾写死「画面内不得出现
+    # 任何文字、字母、数字、标注、水印」—— 药瓶标签、招牌直接被抹空白）。
+    # 两个体系的资产提示词环节都挂上。
+    "n4b_asset_prompts": ["SUBTITLE_RULE", "MEDIUM_RULE"],
 }
 
 # 占位符 → 它承载的是哪一组设置。用来把「缺了 {{X}}」翻译成人话
@@ -63,7 +72,7 @@ REQUIRED_VARS = {
 VAR_GROUPS = {
     "SUBTITLE_RULE": "字幕（画面里要不要字幕、字幕语言）",
     "NARRATION_RULE": "旁白 / 画外音（有没有、什么形式、谁的声音、要不要动嘴）",
-    "MEDIUM_RULE": "拍成真人还是 3D（视觉媒介与风格）",
+    "MEDIUM_RULE": "拍成什么形式 + 视觉风格（真人/3D/二维等媒介和美术样貌，两个原词都在这一条里）",
     "PARAMS": "生产参数（单段秒数、画幅、图片尺寸）",
     "SCRIPT": "剧本正文",
     # 下面这些是**上一环节的产物**。删了同样不报错，只是那一环节收不到
@@ -80,6 +89,7 @@ VAR_GROUPS = {
     "BINDINGS": "环节6 的资产-段落绑定",
     "SHOTS": "环节7 的镜头表",
     "TONE": "这部剧的整体调性",
+    "TRUTH": "第一环节的故事真相（电影级：故事事实、视觉基调都在里面）",
 }
 
 
@@ -94,14 +104,20 @@ def required_vars(name: str) -> list:
     V6.1 的是上面那张手写表（历史原因，占位符和依赖不是一一对应）。
     V3.4 的**从环节图推导**：依赖了哪份产物，模板里就必须用对应的占位符 ——
     再手抄一份表，迟早和依赖表对不上，然后校验就成了摆设。
+
+    手写表在 V3.4 这边只用来**追加依赖之外的必需项**（如 MEDIUM_RULE：
+    它不是任何环节的产物，是设置生成的规则行，依赖表里没有它）。
+    追加而不是整条覆盖 —— 覆盖的话，登记一个规则就把依赖表抄死了，
+    正是这张表当初要消灭的东西。
     """
-    if name in REQUIRED_VARS:
-        return REQUIRED_VARS[name]
     from . import system_v34 as V34
+    derived = []
     for sid, (tpl, deps, _req) in V34.LLM_SPEC.items():
         if tpl == name:
-            return [V34.placeholder_of(d) for d in deps]
-    return []
+            derived = [V34.placeholder_of(d) for d in deps]
+            break
+    extra = [v for v in REQUIRED_VARS.get(name, []) if v not in derived]
+    return derived + extra
 
 
 def _systems() -> list:

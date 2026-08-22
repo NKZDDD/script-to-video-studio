@@ -211,11 +211,14 @@ class TemplateRegistryTests(unittest.TestCase):
         """★ V3.4 的必需占位符从环节依赖推导，不再手抄一张表。
 
         手抄的表迟早和依赖表对不上，然后这道校验就成了摆设。
+        手写表在这边只许**追加依赖之外的必需项**（设置生成的规则行，
+        如 MEDIUM_RULE —— 它不是任何环节的产物，依赖表里没有）。
         """
         from core import prompts as P, system_v34 as V34
         for sid, (tpl, deps, _req) in V34.LLM_SPEC.items():
             want = [V34.placeholder_of(d) for d in deps]
-            self.assertEqual(P.required_vars(tpl), want, tpl)
+            extra = [v for v in P.REQUIRED_VARS.get(tpl, []) if v not in want]
+            self.assertEqual(P.required_vars(tpl), want + extra, tpl)
 
     def test_builtin_templates_all_pass_their_own_check(self):
         """★ 内置模板拿自己去验自己，必须全过。

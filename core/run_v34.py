@@ -106,6 +106,9 @@ def mapping(pj: Project, stage_id: str, params: dict, data: dict,
     # 丢占位符进去的话，没旁白的项目会看到「本项目：否　声音属于：」这种
     # 半截句子，模型读到空标签会自己去填。
     m["NARRATION_RULE"] = _st.narration_rule(pj)
+    # 字幕/画面文字规则同款（n4b 的收尾句要按这个口径转述 —— 实跑 N001
+    # 写死了「画面内不得出现任何文字」，把道具上的字一起抹了）。
+    m["SUBTITLE_RULE"] = _st.subtitle_rule(pj)
     # 「拍成真人还是 3D」也要按取值生成整句规则。两套体系共用 _common，
     # 只接一边的话，另一边渲染出来是原样的 {{MEDIUM_RULE}} ——
     # 模型会把它当成一个要填的空位。
@@ -1029,6 +1032,14 @@ def build_user(pj: Project, stage_id: str, params: dict,
     data = deps_data(pj, stage_id, episode)
     text = render(load_prompt(tpl_name, pj),
                   mapping(pj, stage_id, params, data, episode, segment, extra))
+    # 模板可能被全局/本剧改写，改写版丢了 {{SUBTITLE_RULE}} 这一格的话
+    # 收尾句口径就静默丢了（{{MEDIUM_RULE}} 那次的教训）。认特征串兜底，
+    # 只在资产提示词环节补 —— 别的环节没有画面文字条款。
+    if stage_id == "n4b" and "剧情本身要求的文字" not in text:
+        from . import settings as _st
+        text += ("\n\n【画面文字规则】（收尾句里的画面文字条款必须逐字转述这一段"
+                 "—— 剧情本身要求的文字一律允许，禁的只有字幕、水印、UI 面板"
+                 "和不属于剧情的叠加文字）\n" + _st.subtitle_rule(pj))
     if segment:
         text += (f"\n\n【只做这一段】{segment}，"
                  f"输出数组里只放这一段，不要带上别的段。")

@@ -316,6 +316,10 @@ def _mapping(pj: Project, stage_id: str, params: dict, data: dict,
     # 画面文字规则和 system_prompt() 那份是同一个来源 —— 业务模板
     # （环节8 的两条「画面文字」条款）也按设置生成口径，不让模型自由发挥。
     out["SUBTITLE_RULE"] = _st.subtitle_rule(pj)
+    # 「视频类型 + 视觉风格」同理：环节5 的模板直接引用原词（资产提示词的
+    # 风格词从这儿来），防第一环节的视觉基调转述时丢词 —— 实跑把
+    # 「2.5D动漫风格」归并成了「3D漫剧电影感」，全剧资产图没有一个 2.5D。
+    out["MEDIUM_RULE"] = _st.medium_rule(pj)
     # 总时长/集数/每集时长三个量互相决定，合成一段发给环节1 ——
     # 关键是那句「集数是算出来的，不是数剧本里有几章」。
     # 放业务模板这一份而不是 _common：只有环节1 用得上，
@@ -830,6 +834,13 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     system = system_prompt(pj, params)
     user = render(stage_prompt(stage_id, tpl_name, pj),
                   _mapping(pj, stage_id, params, data, episode, script))
+    # 模板可能被全局/本剧改写，改写版丢了 {{SUBTITLE_RULE}} 这一格的话
+    # 收尾句口径就静默丢了（{{MEDIUM_RULE}} 那次的教训）。认特征串兜底，
+    # 只在资产提示词环节补 —— 别的环节没有画面文字条款。
+    if stage_id == "s5" and "剧情本身要求的文字" not in user:
+        user += (f"\n\n【画面文字规则】（收尾句里的画面文字条款必须逐字转述这一段"
+                 f"—— 剧情本身要求的文字一律允许，禁的只有字幕、水印、UI 面板"
+                 f"和不属于剧情的叠加文字）\n" + _st.subtitle_rule(pj))
     tag = f"{episode} " if episode else "全剧 "
     log(f"{tag}提示词 {len(user)} 字，调用 {llm.model}")
     def _usage(u, _st=stage_id, _ep=episode):
