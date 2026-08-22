@@ -135,10 +135,12 @@ class H3LineTests(unittest.TestCase):
         self.assertEqual(b["reference_images"], [{"url": U[0]}])
 
     def test_seconds_clamped_to_4_15(self):
+        # 网关实际只收字符串（文档说数字也行是假的，实跑 400 过）——
+        # 所以这里断言的就是 str。
         self.assertEqual(body(prompt="x", model="minimax_h3-768p",
-                              duration=99)["seconds"], 15)
+                              duration=99)["seconds"], "15")
         self.assertEqual(body(prompt="x", model="minimax_h3-768p",
-                              duration=0)["seconds"], 5)   # 不传=5 秒但照计费
+                              duration=0)["seconds"], "5")   # 不传=5 秒但照计费
 
     def test_h3_models_are_url_only(self):
         """解析器靠这个声明把本地图先上传换成链接 —— 声明错参考图就被丢。"""

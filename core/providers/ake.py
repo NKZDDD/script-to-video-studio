@@ -180,8 +180,10 @@ class AkeProvider(Provider):
                 status=0, kind="task_fatal")
 
         body: dict = {"model": model, "prompt": task.prompt or "",
-                      # 不传 seconds 上游按 5 秒生成并计费 —— 明着传，账才算得清
-                      "seconds": max(4, min(15, int(task.duration or 5))),
+                      # 不传 seconds 上游按 5 秒生成并计费 —— 明着传，账才算得清。
+                      # 必须是**字符串**（文件头规矩①）—— 发整数，上游
+                      # Go 解 JSON 直接 400 invalid_json（实跑撞过）。
+                      "seconds": str(max(4, min(15, int(task.duration or 5)))),
                       "size": size}
 
         refs = [r for r in (task.refs or []) if str(r).startswith(("http://", "https://"))]
