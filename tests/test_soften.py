@@ -347,10 +347,11 @@ class TemplateTests(unittest.TestCase):
                        encoding="utf-8").read()
 
     def test_it_says_the_three_things_that_matter(self):
+        """★ 剧情边界是跨级不变的 —— 具体策略交给 TIER_RULE 那一格。"""
         t = self._text()
-        self.assertIn("不要改变剧情", t)
-        self.assertIn("不要改变意思", t)
-        self.assertIn("不要改变原文格式", t)
+        self.assertIn("不许删事件", t)
+        self.assertIn("不许改人物关系", t)
+        self.assertIn("{{TIER_RULE}}", t)
 
     def test_it_asks_for_a_directly_usable_prompt(self):
         self.assertIn("直接可以使用的提示词", self._text())
@@ -362,7 +363,78 @@ class TemplateTests(unittest.TestCase):
     def test_every_placeholder_is_filled(self):
         import re
         used = set(re.findall(r"\{\{(\w+)\}\}", self._text()))
-        self.assertEqual(used, {"REJECT_REASON", "PROMPT"})
+        self.assertEqual(used, {"REJECT_REASON", "PROMPT", "TIER_RULE"})
+
+
+class TierTests(unittest.TestCase):
+    """降级阶梯：轮数越深，允许动的层越深；剧情边界任何一级都不放。"""
+
+    def setUp(self):
+        self.pj = new_project()
+
+    def tearDown(self):
+        shutil.rmtree(self.pj.root, ignore_errors=True)
+
+    def _sent(self, round_no, reply=GOOD):
+        """跑一轮改写，拿到实际发给模型的消息。"""
+        sent = []
+
+        class R:
+            def chat(inner, system, user, **kw):              # noqa: N805
+                sent.append(user)
+                return reply
+        soften.soften(ORIG, "content policy: graphic violence", llm=R(),
+                      pj=self.pj, kind="video", key="K1", round_no=round_no,
+                      log=lambda *a: None)
+        return sent[0]
+
+    def test_the_ladder_is_expression_visual_camera_event(self):
+        """★ 顺序就是权限大小 —— 一开始就放开，模型会直奔把戏改没那档。"""
+        names = [soften.tier_of(n)[1] for n in (1, 2, 3, 4)]
+        self.assertEqual(names,
+                         ["表达替换", "视觉降敏", "镜头调整", "事件表现方式调整"])
+
+    def test_beyond_the_ladder_it_stays_on_the_deepest_tier(self):
+        """轮数多给的是「同一级再换种写法」的机会，不是更深的权限。"""
+        for n in (5, 8, 20):
+            self.assertEqual(soften.tier_of(n)[1], "事件表现方式调整")
+
+    def test_round_one_only_allows_rewording(self):
+        """★ 第一轮只许换措辞 —— 事件、镜头、构图必须原样。"""
+        sent = self._sent(1)
+        self.assertIn("只换表达层的措辞", sent)
+        self.assertIn("保持原样", sent)
+
+    def test_each_round_sends_its_own_tier(self):
+        self.assertIn("视觉降敏", self._sent(2))
+        self.assertIn("镜头调整", self._sent(3))
+        self.assertIn("事件表现方式", self._sent(4))
+
+    def test_the_tier_survives_a_customised_template(self):
+        """★ 自定义模板丢了 {{TIER_RULE}} 占位符，策略不能静默消失。
+
+        {{MEDIUM_RULE}} 那次的教训：占位符被删，规则跟着没影，
+        排查起来毫无线索。所以渲染完验一道，没进去就拼在最前面。
+        """
+        import os
+        d = self.pj.p("00_项目说明", "提示词模板")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "_soften.md"), "w", encoding="utf-8") as f:
+            f.write("服务商拒了：{{REJECT_REASON}}\n\n改一改：\n{{PROMPT}}")
+        sent = self._sent(2)
+        self.assertIn("视觉降敏", sent, "策略得拼进消息里，不能靠占位符运气")
+
+    def test_the_tier_name_is_recorded_on_disk_and_panel(self):
+        """★ 降到哪一级必须看得见 —— 降得深不深，人工复核的力度不一样。"""
+        soften.soften(ORIG, "content policy: graphic violence", llm=Chat(GOOD),
+                      pj=self.pj, kind="video", key="K1", round_no=3,
+                      log=lambda *a: None)
+        body = open(self.pj.p("03_提示词", "自动改写", "K1_第3版.txt"),
+                    encoding="utf-8").read()
+        self.assertIn("镜头调整", body)
+        rows = [d for d in diagnose.load(self.pj.root)
+                if d["code"] == "PROMPT_SOFTENED"]
+        self.assertIn("镜头调整", rows[0]["raw"])
 
 
 class WiringTests(unittest.TestCase):

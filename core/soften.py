@@ -6,8 +6,14 @@
 没有画面**，成片直接缺一块，前面十几个环节全白跑。
 
 人工的做法就是把那段提示词改一改再发。这里把它自动化：拿服务商的原话
-（它通常会说踩了哪一类）连同提示词一起给分析引擎，让它**只改呈现方式，
-不改剧情**，然后重发。
+（它通常会说踩了哪一类）连同提示词一起给分析引擎改一版再重发。
+
+改写**不是每轮都无差别地「再安全一点」** —— 那样模型只会换词，触发审核的
+语义结构没动，几轮下来原地打转，最后要么放弃、要么把戏删了。轮数映射到
+一条**降级阶梯**（TIERS）：第 1 轮只许换措辞，第 2 轮许降视觉强度，
+第 3 轮许调镜头语言，第 4 轮起才许改事件的发生方式。人物目标、情绪结果、
+事件结果在任何一级都不许动 —— 一开始就放开的话，模型会直奔最省事的那档
+（把戏改没），那比过不了审更糟。
 
 ## 这件事最大的风险不是改不动，是改过头
 
@@ -37,6 +43,41 @@ from .store import Project, write_text
 # 不设上限：填多少就跑多少。真正兜底的是验收那一关（见 `_check`）——
 # 长度和身份映射始终对着**最初的原文**比，所以轮数再多也蚕食不动。
 DEFAULT_ROUNDS = 5
+
+# 降级阶梯：被拒不怪措辞的时候，一层层往深处放权限。**顺序就是权限的大小** ——
+# 前面的层不动画面只动词，最后的层才许换事件的发生方式。模型自己挑的话
+# 永远挑最深那档（最省事也最容易过审），所以由轮数决定，不由它挑。
+#
+# 每一级的例子都取自真实场景（刀伤、血、攻击），不是抽象原则 ——
+# 模型对着例子才知道分寸在哪。
+TIERS = [
+    ("表达替换",
+     "只换表达层的措辞：把高危的具体描写换成客观陈述"
+     "（例：「血从指缝间大量涌出」→「双手有明显失血痕迹，体力迅速流失」）。"
+     "事件、动作、镜头、景别、构图全部保持原样。"),
+    ("视觉降敏",
+     "结果保留，过程弱化：伤害与冲突的结果都在，但过程细节不再直接展示，"
+     "痛苦特写改成状态呈现（例：「刀刃没入腹部」→「受到重击后蜷缩，"
+     "捂住腹部的动作谨慎而虚弱」）。事件与因果不变。"),
+    ("镜头调整",
+     "调整镜头语言绕开违规画面：特写改中近景或全景，直接展示改为姿态与"
+     "环境暗示（例：伤口特写 → 人物强撑的表情与周围人惊愕反应的同框中景）。"
+     "事件、人物目标、结果全部保留。"),
+    ("事件表现方式调整",
+     "保留人物目标、情绪结果和事件结果，只改这件事的发生方式"
+     "（例：「持刀刺向腹部」→「突然发动攻击，对方躲避过程中受伤，"
+     "现场陷入混乱」）。不许删事件、不许改人物关系、不许改故事走向。"),
+]
+
+
+def tier_of(round_no: int) -> tuple:
+    """第几轮改写 → (级序号, 级名, 级规则)。轮数超过级数就停在最深一级。
+
+    停在 deepest 继续换写法是有意义的：审核有随机性，同一级换个说法
+    可能就过了；而「越改越淡」由验收那关拦着（_check），不靠限制层级。
+    """
+    i = max(0, min(int(round_no), len(TIERS)) - 1)
+    return i, TIERS[i][0], TIERS[i][1]
 
 # 提示词里的身份映射行 `Image 1 = C001 名称`。**改写后必须原样保留**：
 # 少一行或者编号变了，出图那边会把另一个角色的脸套上去，而这不报错。
@@ -160,10 +201,20 @@ def soften(prompt: str, reason: str, *, llm, pj: Project, kind: str, key: str,
     """
     from .stages import load_prompt, render
     origin = origin or prompt
+    # 这一轮在阶梯的哪一级 —— 策略跟着轮数走，不交给模型自己挑（见 TIERS）
+    i, tier_name, tier_rule = tier_of(round_no)
+    block = (f"本次改写策略（第 {i + 1} 级 · {tier_name}）：{tier_rule}"
+             + ("，再换一种写法" if round_no > len(TIERS) else ""))
     user = render(load_prompt("_soften", pj), {
         "REJECT_REASON": reason.strip()[:1500] or "（服务商没说具体原因）",
         "PROMPT": prompt,
+        "TIER_RULE": block,
     })
+    # 模板可以被全局/本剧改写。改写版里没有 {{TIER_RULE}} 这一格的话，
+    # 策略就**静默丢了**（{{MEDIUM_RULE}} 那次的教训：占位符被删，
+    # 规则跟着没影，排查起来毫无线索）。验一道，没进去就拼在最前面。
+    if "本次改写策略" not in user:
+        user = block + "\n\n" + user
     try:
         new = _unfence(llm.chat(
             "你是提示词编辑。只输出提示词正文本身。", user,
@@ -177,34 +228,37 @@ def soften(prompt: str, reason: str, *, llm, pj: Project, kind: str, key: str,
         # 那比这一条失败严重得多，因为失败看得见。
         log(f"    ⚠️ 改写结果不能用：{bad}。按原来的错误处理，请人工改这一条")
         return ""
-    _keep(pj, kind, key, round_no, prompt, new, reason, log)
+    _keep(pj, kind, key, round_no, prompt, new, reason, log, tier_name)
     return new
 
 
 def _keep(pj: Project, kind: str, key: str, round_no: int, old: str, new: str,
-          reason: str, log: Callable) -> None:
+          reason: str, log: Callable, tier_name: str = "") -> None:
     """把改写过程落盘，并在失败清单里留一条提醒。
 
     **自动改过的提示词必须看得见。** 不留痕的话，成片里某一场戏
     和剧本对不上时，没有任何线索指向「这段被自动改写过」。
     """
     path = pj.p("03_提示词", "自动改写", f"{key}_第{round_no}版.txt")
-    head = (f"{kind}　{key}　第 {round_no} 次改写\n"
+    head = (f"{kind}　{key}　第 {round_no} 次改写"
+            + (f"（{tier_name}）" if tier_name else "") + "\n"
             f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"服务商拒绝的原话：{reason.strip()[:500]}\n"
             f"字数：{len(old)} → {len(new)}\n"
             + "=" * 60 + "\n【改写后 · 实际发出去的】\n" + new
             + "\n" + "=" * 60 + "\n【原文】\n" + old + "\n")
     write_text(path, head)
-    log(f"    提示词已改写（第 {round_no} 版），原文和改动记在 {path}")
+    log(f"    提示词已改写（第 {round_no} 版 · {tier_name}），"
+        f"原文和改动记在 {path}")
     diagnose.record(pj.root, diagnose.warn(
         "PROMPT_SOFTENED",
-        f"{key} 的提示词被审核拒了，已自动改写第 {round_no} 版后重发。"
-        f"服务商原话：{reason.strip()[:200]}",
+        f"{key} 的提示词被审核拒了，已自动改写第 {round_no} 版"
+        f"（{tier_name}）后重发。服务商原话：{reason.strip()[:200]}",
         stage=kind, target=key,
         extra_fix=[f"改写前后的全文都在：{path}",
                    "对照一遍：该有的动作、人物、结果还在不在 —— "
-                   "自动改写只允许换呈现方式，但这一条值得你自己看一眼"]))
+                   "降级到「事件表现方式调整」那一级时尤其要看，"
+                   "事件本身没被换掉才算改对"]))
 
 
 def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
@@ -245,7 +299,8 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
                 raise
             reasons.append(str(exc))
             log(f"  被审核拒了：{str(exc)[:200]}")
-            log(f"  交给分析引擎优化提示词（第 {attempt}/{rounds} 轮）"
+            _, tier_name, _ = tier_of(attempt)
+            log(f"  交给分析引擎优化提示词（第 {attempt}/{rounds} 轮 · {tier_name}）"
                 + ("" if attempt == 1 else "，接着上一版继续"))
             new = soften(used, str(exc), llm=llm, pj=pj, kind=kind, key=key,
                          round_no=attempt, log=log, origin=prompt)
@@ -291,6 +346,11 @@ def _gave_up(exc: Exception, done: int, tried: int, rounds: int, reasons: list,
     """
     lines = [f"自动改写停在第 {done} 轮（设置里给了 {rounds} 轮，"
              f"这次用掉 {tried} 轮）：{why}"]
+    if done >= 1:
+        _, name, _ = tier_of(done)
+        lines.append(f"最后一轮已经按「{name}」这一级降级改过还是被拒 —— "
+                     "措辞、画面强度、镜头能动的都动过了，"
+                     "再往深改就要碰剧情了，那必须人来决定。")
     if _same_wall(reasons):
         lines.append("每一轮被拒的理由**一模一样** —— 改措辞没有触动它，"
                      "这多半不是措辞问题而是题材（儿童形象、真实人物、"
