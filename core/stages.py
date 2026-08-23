@@ -979,13 +979,101 @@ def run_llm_stage(pj: Project, stage_id: str, llm: LLM, params: dict,
     # s5 额外把提示词正文落成 txt，便于人工查看与执行器读取
     if stage_id == "s5":
         # 只写本次新生成的那些；旧提示词虽然合并进 JSON，但不该被无意义地重写。
+        names = asset_names(pj, episode)
         for ap in fresh_s5_prompts:
             fn = ap.get("filename") or f"{ap['asset_id']}_PROMPT.txt"
-            write_prompt_txt(pj, f"03_提示词/资产生产提示词/{fn}",
-                             ap.get("prompt", ""), log)
+            # **缺的身份映射在这里补。** 模板要求写 `Image N = <ID> <名称>`，
+            # 而模型经常写成自己的说法（「父资产C001的identity_anchors
+            # 原样复述：…」）——信息全在，只是不是那个写法，于是出图前
+            # 那道检查报「没说哪张是谁」，整条停下。
+            # 顺序是确定的：reference_assets 的第 i 个就是 Image i。
+            text, added = with_image_map(ap.get("prompt", ""),
+                                         ap.get("reference_assets") or [], names)
+            if added and log:
+                log(f"  {ap.get('asset_id')} 补了身份映射 Image "
+                    + "、".join(str(x) for x in added)
+                    + "（模型写了参考图却没写这几行，程序按上传顺序补的）")
+            write_prompt_txt(pj, f"03_提示词/资产生产提示词/{fn}", text, log)
     if stage_id in ("s5", "s8"):
         build_tasks(pj, params)
     diagnose.clear(pj.root, f"stage:{stage_id}", episode)
+    return out
+
+
+# 正文里已经写了身份的那几种说法。**只认这几种，认不出就不接** ——
+# 编一段身份描述比不接严重得多（模型会照着编的那段画）。
+#
+# 实遇的写法（同一次运行里三种都出现过）：
+#   父资产C001的identity_anchors原样复述：19岁东方少女，影视明星级高颜值…
+#   参考资产S005的身份绑定：城市高层整洁闲置公寓，浅色墙面…
+#   继承S005公寓环境资产；表现林溪从玄关惊讶…
+_IDENT_LINE = re.compile(
+    r"^[^\n]{0,12}?(?:父资产|参考资产|资产)\s*([A-Z]{1,6}\d{2,4})[^\n]{0,20}?"
+    r"(?:的\s*)?(?:identity_anchors|身份绑定|身份|原样复述)[^\n]*[:：]\s*(.+)$",
+    re.M)
+
+# 提示词里已有的 `Image N = ...` 行。和 produce 那边同一个正则，不另写一份。
+def _image_map(text: str) -> dict:
+    """`{编号: 那一行写的 ID}`。"""
+    from .produce import _IMAGE_MAP
+    return {int(n): a for n, a in _IMAGE_MAP.findall(text or "")}
+
+
+def identity_notes(prompt: str) -> dict:
+    """正文里各资产的身份描述：`{资产ID: 那一句}`。认不出来的不收。"""
+    out = {}
+    for aid, desc in _IDENT_LINE.findall(prompt or ""):
+        d = desc.strip()
+        if d and aid not in out:
+            out[aid] = d[:220]          # 接一句就够，整段搬过去会把行撑爆
+    return out
+
+
+def with_image_map(prompt: str, refs: list, names: dict) -> tuple:
+    """把缺的 `Image N = <ID> <名称>` 补进提示词。返回 (新正文, 补了哪几号)。
+
+    `refs` 是 `reference_assets` —— **它的顺序就是上传顺序**，所以第 i 个
+    就是 Image i。`names` 是 `{资产ID: 名称}`。
+
+    三条规矩，每一条都对应一种「补了比不补更糟」：
+
+      ① **只补缺的号。** 已经写了 `Image 2 = X` 的号一律不动 ——
+         就算 X 和实际上传的对不上，那是**真冲突**，补一行进去会变成同一个
+         编号两行指两个 ID，比不补更糟。那种交给出图前的硬停报。
+      ② **接上正文里已有的身份描述。** 只写裸 ID 的话第一道检查过了、
+         第二道（「有参考图没说清它是谁」）照旧拦 —— 症状换个名字而已。
+         认不出身份描述就只写 ID + 名称，让第二道说话：**宁可它停，
+         也不要我编一段身份描述**。
+      ③ **补在最前面、单独一块。** 不去猜模型的排版、不插进它的段落中间。
+    """
+    have = _image_map(prompt)
+    want = [(i, str(a).strip()) for i, a in enumerate(refs or [], 1)
+            if str(a or "").strip()]
+    miss = [(n, aid) for n, aid in want if n not in have]
+    if not miss:
+        return prompt, []
+    notes = identity_notes(prompt)
+    lines = []
+    for n, aid in miss:
+        nm = (names.get(aid) or "").strip()
+        line = f"Image {n} = {aid}{(' ' + nm) if nm else ''}"
+        who = notes.get(aid)
+        if who:
+            line += f"\n  是谁/是什么 + 画面可见内容：{who}"
+        lines.append(line)
+    head = ("【参考图身份映射】（程序按 reference_assets 的顺序补的，"
+            "顺序就是实际上传顺序）\n")
+    return head + "\n".join(lines) + "\n\n" + prompt, [n for n, _ in miss]
+
+
+def asset_names(pj: Project, episode: str = "") -> dict:
+    """`{资产ID: 名称}`。名字只写 ID 的话模型对不上（模板 92 行就这么说的）。"""
+    out = {}
+    for ep in ([episode] if episode else (_eps.ids(pj) or [""])):
+        for a in (pj.stage_data("s4_assets", ep) or {}).get("assets") or []:
+            aid = str(a.get("asset_id") or "").strip()
+            if aid and aid not in out:
+                out[aid] = str(a.get("name") or "").strip()
     return out
 
 

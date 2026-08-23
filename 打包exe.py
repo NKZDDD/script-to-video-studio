@@ -69,15 +69,36 @@ def _stamp(sid: str) -> None:
 
 # 可选依赖 → 缺了会少什么能力。打包时逐个检查并如实报告，
 # 别让人拿到一个「拼不了片」的 exe 还不知道为什么。
+# **这几个缺一个就别打。** 不是「可选增强」——缺了是功能没了，
+# 而且没了不会报错，只会在用到的那一刻失败，报一句 exe 用户照不了的话。
+#
+# 实测踩过：一份 81MB 的包里没有 pypdf、也没有 fitz 兜底 ——
+# 传 PDF 剧本直接失败，报「未安装 pypdf，可 pip install pypdf」。
+# 而当时自检是绿的（它只查服务商数、模板数、页面字符数）。
+REQUIRED = {
+    "pypdf": "读 PDF 剧本 —— 缺了传 PDF 直接失败，"
+             "而报错写的是「pip install pypdf」，exe 用户照不了",
+    "PIL": "参考图压缩 —— 缺了不报错，改成原样转 base64，"
+           "请求体大几倍，更容易撞网关体积上限（踩过）",
+    "imageio_ffmpeg": "拼接成片的兜底 ffmpeg —— 目标机器装了系统 ffmpeg "
+                      "也行，但不能赌它装了",
+    "boto3": "参考图上传到对象存储 —— 只收公网链接的模型（HVTALD、"
+             "seedance 那几条）缺了它一条都出不了",
+}
+
+# 这几个缺了只是少一点体验，不挡功能。
 OPTIONAL = {
-    "boto3": "参考图上传到对象存储（只收公网链接的模型会用不了）",
-    "PIL": "参考图压缩（不压直接转 base64，请求体会很大）",
-    "pypdf": "读 PDF 剧本（docx / txt 不受影响）",
-    "imageio_ffmpeg": "环节12 拼接成片（目标机装了系统 ffmpeg 也行）",
     "psutil": "CPU / 内存占用统计和并发建议（缺了页面上显示「占用未知」）",
 }
+
 # 这些包 PyInstaller 有时扫不出来（运行时才 import 的），显式点名
 HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg", "psutil"]
+
+# 打完之后要**在 exe 里**确认这几个模块真的能 import。
+#
+# 「打包机器上装了」和「进了包」是两件事：PyInstaller 扫不到的运行时
+# import 会被漏掉，而漏掉不报错。所以必须让 exe 自己回答。
+MUST_IMPORT = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore"]
 
 
 def check_page() -> bool:
@@ -168,6 +189,28 @@ def selfcheck(exe: str) -> bool:
                   "以及新加的内置有没有写进 _BUILTIN_ORDER")
             ok = False
 
+        # 2. 功能模块：**「打包机器上装了」和「进了包」是两件事。**
+        #    PyInstaller 扫不到的运行时 import 会被漏掉，而漏掉不报错 ——
+        #    只在用到的那一刻失败（一份包里没有 pypdf，传 PDF 直接失败，
+        #    而当时自检是绿的）。所以让 exe 自己 import 一次。
+        try:
+            mods = json.loads(get("/api/modules?names="
+                                  + ",".join(MUST_IMPORT)))["modules"]
+        except Exception as exc:                         # noqa: BLE001
+            print(f"  ✗ 问不到模块清单（{exc}）—— 这个包连自检都做不了")
+            return False
+        gone = [m for m in MUST_IMPORT if not mods.get(m)]
+        print(f"  {'✓' if not gone else '✗'} 功能模块 "
+              f"{len(MUST_IMPORT) - len(gone)}/{len(MUST_IMPORT)}"
+              + (f"　缺：{', '.join(gone)}" if gone else ""))
+        if gone:
+            print("     → 这几个缺了不会报错，只在用到的那一刻失败："
+                  "pypdf=传 PDF 读不了、PIL=参考图不压缩容易撞体积上限、"
+                  "imageio_ffmpeg=目标机没装 ffmpeg 就拼不了成片、"
+                  "boto3/botocore=只收公网链接的模型一条都出不了。")
+            print("     → 先确认这台机器 pip 装了它们，再看 HIDDEN 里有没有点名。")
+            ok = False
+
         st = json.loads(get("/api/providers/status"))
         for w in st.get("warnings", []):
             print(f"  ⚠ {w.get('id')}：{'；'.join(w.get('problems', []))}")
@@ -237,18 +280,29 @@ def main() -> int:
           f"{'64 位' if sys.maxsize > 2 ** 32 else '32 位'}"
           f"　→ 打出来的 exe 也是这个位数\n")
 
+    # **必须有的：缺了直接停。** 不给 y/N ——
+    # 那个 y/N 就是上次打出一个读不了 PDF 的包的原因。
+    lack = [(m, w) for m, w in REQUIRED.items()
+            if not importlib.util.find_spec(m)]
+    print("必须有的依赖：")
+    for mod, what in REQUIRED.items():
+        ok = importlib.util.find_spec(mod) is not None
+        print(f"  {'✓' if ok else '✗'} {mod:<16}{what}")
+    if lack:
+        print(f"\n打不了：这台机器上缺 {'、'.join(m for m, _ in lack)}。")
+        print(f"  pip install {' '.join(m for m, _ in lack)}")
+        print("  这几个不是可选增强 —— 缺了打出来的包会在用到的那一刻失败，"
+              "而且自检是绿的（踩过一次）。")
+        return 1
+
     have, miss = [], []
     for mod, what in OPTIONAL.items():
         (have if importlib.util.find_spec(mod) else miss).append((mod, what))
-    print("可选依赖：")
+    print("\n可选的（缺了只是少一点体验）：")
     for mod, what in have:
         print(f"  ✓ {mod:<16}{what}")
     for mod, what in miss:
-        print(f"  ✗ {mod:<16}{what}　← exe 里会缺这个能力")
-    if miss:
-        print(f"\n  想补齐：pip install {' '.join(m for m, _ in miss)}")
-        if input("  现在就这样打包？(y/N) ").strip().lower() != "y":
-            return 1
+        print(f"  ✗ {mod:<16}{what}")
     print()
     if not check_page():
         return 1

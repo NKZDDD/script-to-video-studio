@@ -978,6 +978,29 @@ def api_get(path: str, q: dict) -> dict:
         pj = Project(q["root"][0])
         return explorer.view(pj, (q.get("episode") or [""])[0])
 
+    if path == "/api/modules":
+        """这几个功能模块在这个包里吗。**打包自检用的，也给人自查。**
+
+        「打包机器上装了」和「进了包」是两件事：PyInstaller 扫不到的
+        运行时 import 会被漏掉，而漏掉**不报错** —— 只在用到的那一刻失败。
+        实测踩过：一份包里没有 pypdf，传 PDF 直接失败，而打包自检是绿的
+        （它只查服务商数、模板数、页面字符数）。
+
+        只回「能不能 import」，不回路径也不执行任何东西。
+        """
+        import importlib
+        want = [x for x in (q.get("names", [""])[0] or "").split(",") if x.strip()]
+        want = want or ["pypdf", "PIL.Image", "imageio_ffmpeg",
+                        "boto3", "botocore", "psutil"]
+        out = {}
+        for name in want:
+            try:
+                importlib.import_module(name.strip())
+                out[name.strip()] = True
+            except Exception:                            # noqa: BLE001
+                out[name.strip()] = False
+        return {"modules": out}
+
     if path == "/api/files":
         pj = Project(q["root"][0])
         sub = q.get("sub", [""])[0]
