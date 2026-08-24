@@ -263,6 +263,13 @@ def _from_json(no: int, r: dict) -> dict:
             "segs_per_episode": r.get("segs_per_episode")
             if isinstance(r.get("segs_per_episode"), dict)
             else int(r.get("segs_per_episode") or 0),
+            # 项目参数：**材料给程序的，不是程序给材料的限制。**
+            # 用户原话（2026-08-25）：「项目参数也写进契约但是是他给你的
+            # 不能做任何的限制」。所以这里只收下来 —— 不夹范围、不改值、
+            # 不因为和页面上填的不一样就拦。夹一下的代价很具体：
+            # 它按剧情定的 20 秒被夹成 15 秒，而提示词还是按 20 秒写的。
+            "params": r.get("params") if isinstance(r.get("params"), dict)
+            else {},
         })
     if kind and kind not in ("image", "video"):
         # **认不出来的 kind 不许当图片。** 猜成图片的话，一条视频会被
@@ -549,9 +556,20 @@ _ASSET_DIRS = (
 
 
 def out_path(u: dict) -> str:
-    """这一条的产物落在哪（相对项目根）。"""
+    """这一条的产物落在哪（相对项目根）。
+
+    **kind 说了是视频就落分段视频目录，不看 key 长什么样。**
+    契约要求视频的 key 是 `EP01-SEG01`（拼接按这个前缀挑本集分段），
+    而那个形状里没有 `VIDEO` 家族前缀 —— 光按前缀猜的话，
+    每一段视频都会落进 `02_固定资产/其它资产/`。
+    表现出来是：出片全成功、任务全绿，而拼接在 `05_分段视频` 里
+    一个文件都找不到，报「这一集没有分段」。契约里怎么说的、
+    实际就得落哪，这两件事对不上是这里最贵的错。
+    """
     stem = u["stem"]
     up = stem.upper()
+    if u.get("kind") == "video":
+        return f"05_分段视频/{u['filename']}"
     for key, folder in _DIRS:
         if key in up:
             return f"{folder}/{u['filename']}"
@@ -595,12 +613,19 @@ def task_key(u: dict) -> str:
 
 
 def build(units: list, size: str = "", ratio: str = "",
-          duration: int = 15) -> dict:
+          duration: int = 15, system: str = "") -> dict:
     """units → tasks.json 的形状 + 要落盘的提示词 txt。
 
     参考图的 `file_ref` 指向**产出它的那一条**的落点 —— 引用链闭合是前提，
     所以这里能直接算出来，不用等出图时再解析。
     """
+    # 材料申报的参数**盖过项目参数** —— 它是照剧情定的，页面上那几个是给
+    # LLM 路径用的默认值。反过来（项目参数盖材料）的失败样子很难看：
+    # 提示词按 20 秒写的，派出去的活是 15 秒，片子和提示词对不上而不报错。
+    p = manifest_of(units).get("params") or {}
+    size = str(p.get("image_size") or "") or size
+    ratio = str(p.get("ratio") or "") or ratio
+    duration = int(p.get("seg_duration") or 0) or duration
     units = units_of(units)        # 申报头不是任务，混进去就是一条永远做不完的活
     where = {u["stem"]: out_path(u) for u in units if u["stem"]}
     assets, storyboards, videos, texts = [], [], [], {}
@@ -646,8 +671,13 @@ def build(units: list, size: str = "", ratio: str = "",
         else:
             t["params"] = {"size": u["ratio"] or size or "9:16"}
             (storyboards if rel.startswith("04_故事板") else assets).append(t)
-    return {"skipped": skipped,
-            "tasks": {"system": "material", "asset_tasks": assets,
+    return {"skipped": skipped, "params": {"image_size": size, "ratio": ratio,
+                                          "seg_duration": duration},
+            # 体系写真值。原来写死 "material"，虽然眼下没人读这个字段
+            # （页面挑体系只认 /api/project 给的 meta 值），
+            # 但写一个两套都不认的值，第一个来读它的人就会挑错。
+            "tasks": {"system": system or "material",
+                      "from_material": True, "asset_tasks": assets,
                       "scstate_tasks": [], "storyboard_tasks": storyboards,
                       "video_tasks": videos},
             "prompts": texts}

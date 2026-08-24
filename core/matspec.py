@@ -46,14 +46,75 @@ NEEDS = {
     ],
 }
 
-# 每一类落哪个目录 —— 和 LLM 路径完全一致（core/run_v34._rel 那四个）。
-DIRS = {
-    "资产（人物/场景/道具/服饰/载具/生物/群体/特效）":
-        "02_固定资产/<家族目录>/  提示词 → 03_提示词/资产生产提示词/",
-    "场景状态图": "03b_场景状态图/  提示词 → 03_提示词/场景状态提示词/",
-    "故事板": "04_故事板/  提示词 → 03_提示词/故事板提示词/",
-    "分段视频": "05_分段视频/  提示词 → 03_提示词/视频提示词/",
+# 每一类落哪个目录 —— **按体系分两份**。用户原话（2026-08-25）：
+# 「需要按照项目体系来给两份契约」。同一份发给两套的代价很具体：
+# 通用十二环节压根没有场景状态图这一步，契约里写着它，codex 就会产一批
+# 这套体系用不上的东西 —— 而且它占着参考图的名额。
+_ASSET_LINE = ("02_固定资产/<家族目录>/  提示词 → 03_提示词/资产生产提示词/")
+_SB_LINE = "04_故事板/  提示词 → 03_提示词/故事板提示词/"
+_VIDEO_LINE = "05_分段视频/  提示词 → 03_提示词/视频提示词/"
+_SCSTATE_LINE = "03b_场景状态图/  提示词 → 03_提示词/场景状态提示词/"
+
+# 家族前缀 → 落哪个子目录。**和 matimport.out_path 是同一张表**，
+# 所以契约说的落点就是实际落点。
+_FAMILIES_V34 = [
+    ("CHAR / PH", "人物身份资产"), ("LOOK / LK", "人物造型资产"),
+    ("CT", "连续状态资产"), ("COST", "服饰资产"), ("LOC", "场景资产"),
+    ("PROP", "道具资产"), ("VEH", "载具资产"), ("CRE", "生物资产"),
+    ("GRP", "群体资产"), ("VFX", "特效资产"),
+    ("SBSHEET / SBPKG", "04_故事板"), ("SCSTATE / SCST", "03b_场景状态图"),
+]
+# 通用十二环节自己跑 LLM 时只建六个资产目录（core/stages._CAT_DIR）——
+# 这六个和下面这六个家族一一对上，所以导入的落点和它自己跑出来的一致。
+# 造型/服饰/载具/特效那几类它没有，别让 codex 产。
+_FAMILIES_V61 = [
+    ("CHAR / PH", "人物身份资产"), ("LOC", "场景资产"), ("PROP", "道具资产"),
+    ("CT", "连续状态资产"), ("GRP", "群体资产"), ("CRE", "生物资产"),
+    ("SBSHEET / SBPKG", "04_故事板"),
+]
+
+SYSTEMS = {
+    "v34": {
+        "label": "电影级十七章",
+        "dirs": {"资产（人物/造型/连续状态/服饰/场景/道具/载具/生物/群体/特效）":
+                 _ASSET_LINE,
+                 "场景状态图": _SCSTATE_LINE,
+                 "故事板": _SB_LINE,
+                 "分段视频": _VIDEO_LINE},
+        "families": _FAMILIES_V34,
+        "note": "这套体系有场景状态图（同一个场景在不同剧情时刻的状态）。",
+    },
+    "v61": {
+        "label": "通用十二环节",
+        "dirs": {"资产（人物/场景/道具/连续状态/群体/生物）": _ASSET_LINE,
+                 "故事板": _SB_LINE,
+                 "分段视频": _VIDEO_LINE},
+        "families": _FAMILIES_V61,
+        "note": "**这套体系没有场景状态图**，也没有造型 / 服饰 / 载具 / 特效"
+                "这几类资产 —— 别产，产了这套体系用不上，"
+                "而它还占着参考图的名额。",
+    },
 }
+
+# 老调用还在用 DIRS 的话给它电影级那份 —— 但新代码走 SYSTEMS。
+DIRS = SYSTEMS["v34"]["dirs"]
+
+# 项目参数：**由材料自己申报，程序不拿它当限制**。用户原话（2026-08-25）：
+# 「项目参数也写进契约但是是他给你的不能做任何的限制」。
+# 和申报头同一个原则：查「你有没有兑现你自己说的」，
+# 不是「你符不符合我设的」。所以这些字段程序只读、只显示、只当默认值用 ——
+# 和页面上的项目参数不一样也照导，不夹、不改、不拦。
+PARAMS = [
+    ("episodes", "总集数"),
+    ("episode_seconds", "每集多少秒"),
+    ("segs_per_episode", "每集几段（可以给一个数，也可以给 {\"EP01\": 4} 这种）"),
+    ("seg_duration", "单段几秒（每条视频也能各自写 duration，那个更优先）"),
+    ("ratio", "画幅，比如 9:16"),
+    ("image_size", "出图尺寸，比如 9:16 或 1024x1536"),
+    ("pacing", "剧情节奏速度"),
+    ("subtitle", "要不要字幕（画面里本来就该有的字不算字幕）"),
+    ("note", "别的想说的，自由写"),
+]
 
 # 验收会跑哪几条 —— 写进契约，让它**产之前**就知道会被怎么查。
 AUDIT = [
@@ -108,6 +169,9 @@ def jsonl_schema() -> str:
         "kind": "manifest",
         "total": 3, "image": 2, "video": 1,
         "episodes": 1, "segs_per_episode": {"EP01": 1},
+        "params": {"episode_seconds": 60, "seg_duration": 15,
+                   "ratio": "9:16", "image_size": "9:16",
+                   "pacing": "中速", "subtitle": True},
     }
     sb = {
         "kind": "image",
@@ -153,12 +217,18 @@ def jsonl_schema() -> str:
                         for r in (man, sb, img, vid))
 
 
-def render(limits: Optional[dict] = None, project_name: str = "") -> str:
-    """生成契约正文（md）。"""
+def render(limits: Optional[dict] = None, project_name: str = "",
+           system: str = "v34") -> str:
+    """生成契约正文（md）。**按体系出两份** —— 两套的活不一样多。"""
+    sysm = SYSTEMS.get(system) or SYSTEMS["v34"]
     L = []
     a = L.append
     a("# 生产材料契约"
-      + (f"｜{project_name}" if project_name else ""))
+      + (f"｜{project_name}" if project_name else "")
+      + f"｜{sysm['label']}")
+    a("")
+    a(f"**这一份是给「{sysm['label']}」用的。** 两套体系的活不一样多，"
+      "别拿另一套的契约去产 —— " + sysm["note"])
     a("")
     a("这份是**程序要吃的结构**，从代码现算出来的（`core/matspec.py`）——"
       "所以它和实际要求永远是同一份东西，不会飘。")
@@ -192,6 +262,21 @@ def render(limits: Optional[dict] = None, project_name: str = "") -> str:
       "申报 84、实际 84、但本该 88 —— 这个查不出来，那是你自己的判断，"
       "程序无从知道。")
     a("")
+    a("## 项目参数：由你申报，程序不拿它当限制")
+    a("")
+    a("申报头里带一个 `params`，把这部剧的生产参数写进去：")
+    a("")
+    for k, why in PARAMS:
+        a(f"- `{k}` —— {why}")
+    a("")
+    a("**这些是你给程序的，不是程序给你的限制。** 和页面上填的项目参数"
+      "不一样也照导 —— 不夹、不改、不拦。程序只做三件事：显示出来给人看、"
+      "当没写 `duration` / `ratio` 那几条的默认值、以及拿 `segs_per_episode` "
+      "和实物对账。")
+    a("")
+    a("所以集数、每集多少秒、每集切几段，是**你按剧情定的**。"
+      "程序无从判断 21 集对不对 —— 它只能查你有没有兑现自己申报的数。")
+    a("")
     a("## 字段：每一类各要什么")
     a("")
     for kind, rows in NEEDS.items():
@@ -223,10 +308,19 @@ def render(limits: Optional[dict] = None, project_name: str = "") -> str:
     a("")
     a("## 落点（和程序自己跑 LLM 时完全一致）")
     a("")
-    for what, where in DIRS.items():
+    for what, where in sysm["dirs"].items():
         a(f"- **{what}** → `{where}`")
     a("")
-    a("你只要给 `filename`，落哪个目录由程序按 key 里的家族算。")
+    a("**视频不看 key 的前缀** —— `kind: \"video\"` 就落 `05_分段视频/`。"
+      "契约要求视频的 key 是 `EP01-SEG01`（拼接按这个前缀挑本集分段），"
+      "那个形状里本来就没有家族前缀。")
+    a("")
+    a("图片按 key 里的家族前缀算落点。你只要给 `filename`。"
+      "**这套体系认这些前缀**（不在表里的会落到人物身份资产，"
+      "所以别用表外的前缀）：")
+    a("")
+    for fam, where in sysm["families"]:
+        a(f"- `{fam}` → `{where}`")
     a("")
     a("## 会被怎么验收")
     a("")

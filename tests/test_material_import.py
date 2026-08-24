@@ -499,3 +499,160 @@ class ContractComplianceTests(unittest.TestCase):
         for word in ("key 全局唯一", "filename 全局唯一", "和申报头对得上",
                      "视频必须有骨架", "kind 只认三个值"):
             self.assertIn(word, txt, f"契约里没写「{word}」")
+
+
+class PerSystemContractTests(unittest.TestCase):
+    """契约按体系出两份（用户：「需要按照项目体系来给两份契约」）。
+
+    同一份发给两套的代价很具体：通用十二环节压根没有场景状态图这一步，
+    契约里写着它，codex 就会产一批这套体系用不上的东西 ——
+    而且它还占着参考图的名额。
+    """
+
+    def test_the_general_system_has_no_scene_state(self):
+        from core import matspec as S
+        v61 = S.render({"image": 6}, "剧", "v61")
+        self.assertNotIn("03b_场景状态图", v61)
+        self.assertNotIn("场景状态提示词", v61)
+        self.assertIn("没有场景状态图", v61)
+
+    def test_the_general_system_has_only_its_six_asset_families(self):
+        """★ 通用版自己只建六个资产目录（stages._CAT_DIR）——
+        造型/服饰/载具/特效那几类产了它用不上。"""
+        from core import matspec as S
+        v61 = S.render({"image": 6}, "剧", "v61")
+        for gone in ("人物造型资产", "服饰资产", "载具资产", "特效资产"):
+            self.assertNotIn(gone, v61, f"通用版契约里不该有 {gone}")
+        for keep in ("人物身份资产", "场景资产", "道具资产",
+                     "连续状态资产", "群体资产", "生物资产"):
+            self.assertIn(keep, v61)
+
+    def test_the_family_table_matches_where_things_actually_land(self):
+        """★ 契约说的落点必须就是实际落点 —— 说一套落一套是最贵的那种错。"""
+        from core import matspec as S
+        for sid in ("v34", "v61"):
+            for fam, where in S.SYSTEMS[sid]["families"]:
+                key = "PRJ__" + fam.split(" / ")[0] + "_001_R01"
+                u = {"stem": key, "canonical_id": key, "kind": "image",
+                     "filename": key + ".png", "episode": "", "seg": ""}
+                got = M.out_path(u)
+                self.assertIn(where.split("/")[-1], got,
+                              f"{sid} 契约说 {fam} → {where}，实际落 {got}")
+
+    def test_the_cinematic_contract_keeps_scene_state(self):
+        from core import matspec as S
+        self.assertIn("03b_场景状态图", S.render({"image": 6}, "剧", "v34"))
+
+    def test_an_unknown_system_falls_back_instead_of_crashing(self):
+        from core import matspec as S
+        self.assertIn("生产材料契约", S.render(None, "", "什么鬼"))
+
+
+class DeclaredParamsTests(unittest.TestCase):
+    """项目参数由材料申报，**程序不拿它当限制**。
+
+    用户原话（2026-08-25）：「项目参数也写进契约但是是他给你的
+    不能做任何的限制」。和申报头同一个原则：查「你有没有兑现你自己说的」，
+    不是「你符不符合我设的」。
+    """
+
+    def _mat(self, params):
+        rows = [{"kind": "manifest", "total": 1, "params": params},
+                {"kind": "video", "key": "EP01-SEG01", "episode": "EP01",
+                 "seg": "SEG01", "filename": "v.mp4", "prompt": "正文",
+                 "storyboard_refs": [{"image_n": 1, "key": "A__SB01"}]}]
+        return M.parse("\n".join(json.dumps(r, ensure_ascii=False)
+                                 for r in rows))
+
+    def test_the_material_wins_over_the_project_settings(self):
+        """★ 反过来的失败样子很难看：提示词按 20 秒写的，派出去的活是 15 秒，
+        片子和提示词对不上而不报错。"""
+        us = self._mat({"ratio": "4:5", "seg_duration": 20})
+        got = M.build(us, ratio="9:16", duration=15)
+        self.assertEqual(got["tasks"]["video_tasks"][0]["params"],
+                         {"duration": 20, "ratio": "4:5"})
+
+    def test_a_mismatch_is_not_an_error(self):
+        """★ 不夹、不改、不拦 —— 它按剧情定的数不是给我们改的。"""
+        us = self._mat({"seg_duration": 20})
+        codes = [i["code"] for i in M.audit(us)]
+        self.assertNotIn("MANIFEST_MISMATCH", codes)
+
+    def test_a_per_unit_value_still_wins_over_the_manifest(self):
+        """每条自己写了 duration 的，比申报头更近 —— 那是这一段的实际长度。"""
+        rows = [{"kind": "manifest", "total": 1,
+                 "params": {"seg_duration": 20}},
+                {"kind": "video", "key": "EP01-SEG01", "episode": "EP01",
+                 "seg": "SEG01", "filename": "v.mp4", "prompt": "正文",
+                 "duration": 8,
+                 "storyboard_refs": [{"image_n": 1, "key": "A__SB01"}]}]
+        us = M.parse("\n".join(json.dumps(r, ensure_ascii=False)
+                               for r in rows))
+        self.assertEqual(M.build(us)["tasks"]["video_tasks"][0]
+                         ["params"]["duration"], 8)
+
+    def test_no_manifest_params_falls_back_to_the_project(self):
+        us = self._mat({})
+        got = M.build(us, ratio="16:9", duration=12)
+        self.assertEqual(got["tasks"]["video_tasks"][0]["params"],
+                         {"duration": 12, "ratio": "16:9"})
+
+    def test_what_was_actually_used_is_reported(self):
+        """★ 盖过项目参数可以，但不能悄悄地盖 ——
+        否则「我明明设了 15 秒」这类问题永远查不到源头。"""
+        got = M.build(self._mat({"seg_duration": 20}), duration=15)
+        self.assertEqual(got["params"]["seg_duration"], 20)
+
+    def test_the_contract_says_it_does_not_constrain(self):
+        from core import matspec as S
+        txt = S.render(None, "", "v34")
+        self.assertIn("不拿它当限制", txt)
+        self.assertIn("不夹、不改、不拦", txt)
+
+    def test_the_system_is_written_into_tasks(self):
+        """写死 "material" 的话，第一个来读这个字段的人就会挑错体系。"""
+        got = M.build(self._mat({}), system="v61")
+        self.assertEqual(got["tasks"]["system"], "v61")
+        self.assertTrue(got["tasks"]["from_material"])
+
+
+class VideoLandsInTheVideoFolderTests(unittest.TestCase):
+    """★ 契约要求视频的 key 是 `EP01-SEG01`（拼接按这个前缀挑本集分段），
+    而那个形状里没有 `VIDEO` 家族前缀。
+
+    光按前缀猜的话每段视频都落进 `02_固定资产/其它资产/` —— 出片全成功、
+    任务全绿，而拼接在 `05_分段视频` 里一个文件都找不到，
+    报「这一集没有分段」。契约说的落点和实际落点对不上，是这里最贵的错。
+    """
+
+    def _vid(self, key, fn="v.mp4"):
+        return {"no": 1, "stem": key, "canonical_id": key, "kind": "video",
+                "filename": fn, "episode": "EP01", "seg": "SEG01"}
+
+    def test_the_contract_shaped_key_still_lands_in_05(self):
+        self.assertEqual(M.out_path(self._vid("EP01-SEG01")),
+                         "05_分段视频/v.mp4")
+
+    def test_the_long_canonical_key_also_lands_in_05(self):
+        self.assertEqual(
+            M.out_path(self._vid("PRJ__VIDEO_EP01_SEG01_R01",
+                                 "PRJ__VIDEO_EP01_SEG01_R01.mp4")),
+            "05_分段视频/PRJ__VIDEO_EP01_SEG01_R01.mp4")
+
+    def test_its_prompt_follows_it(self):
+        u = self._vid("EP01-SEG01")
+        self.assertEqual(M.prompt_path(u, M.out_path(u)),
+                         "03_提示词/视频提示词/EP01-SEG01_PROMPT.txt")
+
+    def test_end_to_end_from_the_contract_shape(self):
+        rows = [{"kind": "image", "key": "A__SBSHEET_EP01_SEG01_A_R01",
+                 "filename": "sb.png", "prompt": "板"},
+                {"kind": "video", "key": "EP01-SEG01", "episode": "EP01",
+                 "seg": "SEG01", "filename": "v.mp4", "prompt": "片",
+                 "storyboard_refs": [{"image_n": 1,
+                                      "key": "A__SBSHEET_EP01_SEG01_A_R01"}]}]
+        us = M.parse("\n".join(json.dumps(r, ensure_ascii=False)
+                               for r in rows))
+        v = M.build(us)["tasks"]["video_tasks"][0]
+        self.assertTrue(v["output"].startswith("05_分段视频/"), v["output"])
+        self.assertTrue(v["prompt_ref"].startswith("03_提示词/视频提示词/"))

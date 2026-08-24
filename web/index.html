@@ -1779,6 +1779,11 @@ function matRender(r, imported) {
          '<b style="color:#c00">和实际的 ' + s.total + ' 条对不上</b>'}</span>`
          : `<br><span class="muted">材料没有申报头 —— 查不出「少产了」：
             该 84 条只给 80 条时，剩下的内部完全自洽，没有一处会说话。</span>`}
+       ${imported && r.used_params ? `<br><span class="muted">实际派出去用的参数：
+         ${esc(r.used_params.ratio || '未定')} · 单段 ${
+         r.used_params.seg_duration} 秒 · 出图 ${esc(r.used_params.image_size || '未定')}
+         ${(r.declared || {}).params ? '（<b>材料自己申报的，盖过了项目参数</b>）'
+           : '（材料没申报，用的是项目参数）'}</span>` : ''}
        ${imported && r.skipped && r.skipped.length ? `<br><b style="color:#c00">有 ${
          r.skipped.length} 条没建任务</b>：${esc(r.skipped.slice(0, 5).map(
            x => '第 ' + x.no + ' 条 ' + x.why).join('；'))}` : ''}
@@ -1823,9 +1828,11 @@ $('#matSpec').onclick = async () => {
                             provider_sel: chainSel()});
   if (r.error) return alert(r.error);
   $('#matOut').innerHTML =
-    `<div class="alert"><b>契约已生成</b>${
+    `<div class="alert"><b>契约已生成</b>（<b>${esc(r.system_label || '')}</b>）${
       r.saved ? `，存到 <code>${esc(r.saved)}</code>` : '（没开项目，只显示不存盘）'}
       —— 把它整份给 codex，让它照着产。
+      <br><span class="muted">两套体系各一份，别拿另一套的去产 ——
+        通用十二环节没有场景状态图，也没有造型/服饰/载具/特效这几类资产。</span>
       <br><span class="muted">上限是按你当前配的首选那一家算的：出图 ${
         (r.limits || {}).image || '未知'} 张 / 出片 ${
         (r.limits || {}).video || '未知'} 张。换了服务商记得重新导一份。</span>

@@ -1233,20 +1233,29 @@ def api_post(path: str, body: dict) -> dict:
         params = params_of(cfg, pj, with_script=False)
         built = _mat.build(units, size=params.get("image_size", ""),
                            ratio=params.get("ratio", ""),
-                           duration=int(params.get("duration") or 15))
+                           duration=int(params.get("duration") or 15),
+                           system=system_of(pj))
         from core.produce import write_prompt_txt
         for rel, txt in built["prompts"].items():
             write_prompt_txt(pj, rel, txt)
         pj.save_tasks(built["tasks"])
+        real = _mat.units_of(units)      # 申报头不是一条活，别数进去
         pj.log_event({"stage": "material_import", "result": "ok",
-                      "units": len(units),
+                      "units": len(real),
                       "prompts": len(built["prompts"]),
                       "issues": len(issues)})
         n = {k: len(v) for k, v in built["tasks"].items() if isinstance(v, list)}
         sk = built.get("skipped") or []
+        decl = _mat.manifest_of(units)
+        # 材料申报的参数**盖过了项目参数** —— 那是用户定的规矩
+        #（「项目参数也写进契约但是是他给你的不能做任何的限制」）。
+        # 但不能悄悄地盖：实际用的是哪几个值要报出来，否则「我明明设了 15 秒」
+        # 这类问题永远查不到源头。
+        used = built.get("params") or {}
         return {"ok": True, "counts": n, "issues": issues, "skipped": sk,
+                "declared": decl, "used_params": used,
                 "prompts": len(built["prompts"]),
-                "msg": f"导入了 {len(units)} 条，落了 {len(built['prompts'])} 份提示词。"
+                "msg": f"导入了 {len(real)} 条，落了 {len(built['prompts'])} 份提示词。"
                        + (f"**有 {len(sk)} 条没建任务**（"
                           + "；".join(f"第 {s['no']:03d} 条 {s['why']}"
                                      for s in sk[:5])
@@ -1271,17 +1280,29 @@ def api_post(path: str, body: dict) -> dict:
         except Exception:                                   # noqa: BLE001
             pass                    # 没开项目也能导，只是写不进项目里
         limits = _material_limits(cfg, body.get("provider_sel") or {})
+        # **按体系出两份** —— 开着项目就按它的体系，没开项目按这个包默认建的
+        # 那一套。给错的代价很具体：通用十二环节没有场景状态图这一步，
+        # 契约里写着它，codex 就会产一批用不上的东西，还占参考图名额。
+        sid = (system_of(pj) if pj else "") or _new_system(body.get("system"))
         text = _spec.render(limits, (pj.meta() or {}).get("project_name", "")
-                            if pj else "")
+                            if pj else "", sid)
         saved = ""
         if pj and body.get("save"):
-            rel = "00_生产材料/生产材料契约.md"
+            # 文件名带体系 —— 两份并存时看得出哪份是哪套的
+            # 用 matspec 里那个短名（电影级十七章 / 通用十二环节）——
+            # system_label 带着版本号（「电影级十七章（V6.1）」），
+            # 进文件名会随版本号变，同一份契约在磁盘上换名字。
+            lab = (_spec.SYSTEMS.get(sid) or {}).get("label") or sid
+            rel = f"00_生产材料/生产材料契约_{lab}.md"
             dst = pj.p(*rel.split("/"))
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             from core.store import write_text
             write_text(dst, text)
             saved = rel
-        return {"ok": True, "text": text, "limits": limits, "saved": saved}
+        return {"ok": True, "text": text, "limits": limits, "saved": saved,
+                "system": sid,
+                "system_label": (_spec.SYSTEMS.get(sid) or {}).get("label")
+                or system_label(sid)}
 
     if path == "/api/material/scan":
         """扫项目里约定的那个目录，找生产材料 md。
