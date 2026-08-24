@@ -347,6 +347,26 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     </div>
   </div>
   <div class="card">
+    <h2>导入生产材料 <span class="tag">一份 md 顶掉全部 LLM 环节</span></h2>
+    <p class="muted" style="margin-top:0">
+      材料是一次想完整部剧产出的，形状是一条条【生产序号】：目标 + 文件名 +
+      参考图映射 + 完整提示词。出图出片要的四样它全给齐了，所以
+      <b>导进来就能直接出图出片</b>，27 个文字环节整个跳过。<br>
+      放到项目里的 <code>00_生产材料/</code> 就能在下面点到；或者直接选文件。
+      <b>先预览验收</b>——导进去之后那些错就变成任务了。
+    </p>
+    <div class="row">
+      <button class="btn ghost sm" id="matSpec">导出契约（给 codex）</button>
+      <button class="btn ghost sm" id="matScan">扫 00_生产材料/</button>
+      <select id="matPick" style="width:auto;min-width:220px"></select>
+      <input type="file" id="matFile" accept=".md,.markdown,.txt"
+             style="font-size:12px">
+      <button class="btn ghost sm" id="matPreview">预览 + 验收</button>
+      <button class="btn sm" id="matImport" disabled>导入</button>
+    </div>
+    <div id="matOut" style="margin-top:10px"></div>
+  </div>
+  <div class="card">
     <!-- 标题跟着项目的体系走。写死「十二环节」的后果：跑十七章的项目时
          标题是错的，而下面列的又是十七章的环节 —— 自相矛盾。 -->
     <h2 id="stagesTitle">环节 <span class="tag" id="stagesTag"></span></h2>
@@ -1716,6 +1736,150 @@ async function saveRunParams() {
   const m = BOOT.projects.find(p => p.root === PROJ);
   if (m) m.params = Object.assign({}, m.params || {}, params);
 }
+
+// ---------- 导入生产材料
+//
+// 材料是一次想完整部剧产出的（234 条【生产序号】= 150 张图 + 84 段视频），
+// 出图出片要的四样它全给齐了：落哪、发什么、传哪几张、什么尺寸。
+// 所以这条路能整个跳过 27 个 LLM 环节 —— 没有网络往返、没有超时、没有截断。
+//
+// **先预览再导**：导进去之后那些错已经变成任务了，那时候改要连带清任务。
+let MAT = null;                        // 这次选中的材料（rel 或 text）
+
+async function matBody() {
+  const b = {project_root: PROJ};
+  if (MAT && MAT.text !== undefined) b.text = MAT.text;
+  else if (MAT && MAT.rel) b.rel = MAT.rel;
+  else throw new Error('先选一份材料');
+  b.provider_sel = chainSel();
+  return b;
+}
+// 参考图上限取的是**首选那一家**声明的 max_refs —— 用户点名要
+// 「参考图小于等于目标模型上限」，而那个数是服务商自己声明的。
+function chainSel() {
+  const ch = BOOT.config.chains || {};
+  return {asset: (ch.asset || [])[0] || null, video: (ch.video || [])[0] || null};
+}
+function matRender(r, imported) {
+  const s = r.summary || {}, iss = r.issues || [];
+  const err = iss.filter(x => x.level === 'error');
+  const box = $('#matOut');
+  const lim = r.limits || {};
+  box.innerHTML =
+    `<div class="alert ${imported ? '' : 'warn'}">
+       <b>${imported ? '已导入' : '预览'}</b>：${s.total} 条
+       （${s.image} 张图 + ${s.video} 段视频）·
+       ${(s.episodes || []).length} 集 · 参考图最多 ${s.refs_max} 张
+       ${lim.image || lim.video ? `<span class="muted">（目标模型上限：出图 ${
+         lim.image || '未知'} 张 / 出片 ${lim.video || '未知'} 张）</span>` : ''}
+       ${r.declared && r.declared.total ? `<br><span class="muted">材料自己申报 ${
+         r.declared.total} 条（图 ${r.declared.image} · 片 ${r.declared.video} · ${
+         r.declared.episodes} 集）—— ${
+         r.declared.total === s.total ? '对得上' :
+         '<b style="color:#c00">和实际的 ' + s.total + ' 条对不上</b>'}</span>`
+         : `<br><span class="muted">材料没有申报头 —— 查不出「少产了」：
+            该 84 条只给 80 条时，剩下的内部完全自洽，没有一处会说话。</span>`}
+       ${imported && r.skipped && r.skipped.length ? `<br><b style="color:#c00">有 ${
+         r.skipped.length} 条没建任务</b>：${esc(r.skipped.slice(0, 5).map(
+           x => '第 ' + x.no + ' 条 ' + x.why).join('；'))}` : ''}
+       ${imported && r.counts ? `<br>任务：资产 ${r.counts.asset_tasks} ·
+         故事板 ${r.counts.storyboard_tasks} · 视频 ${r.counts.video_tasks} ·
+         提示词 ${r.prompts} 份` : ''}
+     </div>`
+    + (err.length
+       ? `<div class="alert err"><b>${err.length} 条要先处理</b>
+            —— 导进去它们就变成任务了：
+          <ul style="margin:6px 0 0 18px;line-height:1.8">${
+            err.slice(0, 12).map(x => '<li>' + esc(x.msg) + '</li>').join('')}${
+            err.length > 12 ? `<li class="muted">…还有 ${err.length - 12} 条</li>` : ''}
+          </ul>${r.reproduce ? `
+          <div style="margin-top:8px">
+            <button id="matRepro" class="mini">复制「要重产的清单」</button>
+            <span class="muted">${r.reproduce_saved
+              ? '已存到 <code>' + esc(r.reproduce_saved) + '</code>'
+              : ''} —— 丢给 codex 让它<b>只补这几条</b>，
+              补出来的替换回原材料里再导一次（JSONL 一行一条，换掉对应的行；
+              程序一次只读一个材料文件，不会把两份合起来）。</span>
+            <details style="margin-top:6px"><summary class="muted">看一眼</summary>
+              <pre class="log" style="max-height:300px">${esc(r.reproduce)}</pre>
+            </details></div>` : ''}
+          </div>`
+       : `<div class="alert"><b>验收通过</b>：引用链闭合、编号连续、
+            张数没超上限、每集段号连续。</div>`);
+  $('#matImport').disabled = !!imported;
+  const rp = $('#matRepro');
+  if (rp) rp.onclick = () => {
+    navigator.clipboard.writeText(r.reproduce).then(
+      () => { rp.textContent = '已复制'; },
+      () => alert('复制不了，展开「看一眼」自己选'));
+  };
+  return err.length;
+}
+// 导出契约。**方向是「我告诉它要什么」，不是「我去猜它产了什么」** ——
+// 猜排版的代价已经付过：全角等号、分节、`---`，每一处猜错都是静默的。
+$('#matSpec').onclick = async () => {
+  const r = await api.post('/api/material/spec',
+                           {project_root: PROJ, save: !!PROJ,
+                            provider_sel: chainSel()});
+  if (r.error) return alert(r.error);
+  $('#matOut').innerHTML =
+    `<div class="alert"><b>契约已生成</b>${
+      r.saved ? `，存到 <code>${esc(r.saved)}</code>` : '（没开项目，只显示不存盘）'}
+      —— 把它整份给 codex，让它照着产。
+      <br><span class="muted">上限是按你当前配的首选那一家算的：出图 ${
+        (r.limits || {}).image || '未知'} 张 / 出片 ${
+        (r.limits || {}).video || '未知'} 张。换了服务商记得重新导一份。</span>
+      <details style="margin-top:6px"><summary class="muted">看一眼内容</summary>
+        <pre class="log" style="max-height:340px">${esc(r.text)}</pre></details>
+    </div>`;
+};
+$('#matScan').onclick = async () => {
+  if (!PROJ) return alert('先打开项目');
+  const r = await api.post('/api/material/scan', {project_root: PROJ});
+  const sel = $('#matPick');
+  sel.innerHTML = (r.files || []).map(f =>
+    `<option value="${esc(f.rel)}">${esc(f.name)}　${
+      Math.round(f.size / 1024)} KB　${esc(f.at)}</option>`).join('')
+    || '<option value="">（这个目录里没有 md）</option>';
+  if (!(r.files || []).length)
+    $('#matOut').innerHTML = `<div class="alert warn">${esc(r.dir)} 里没有 md ——
+      把材料放进去再点一次，或者直接用右边那个选文件。</div>`;
+  else MAT = {rel: sel.value};
+};
+$('#matPick').onchange = e => { MAT = {rel: e.target.value}; };
+$('#matFile').onchange = async e => {
+  const f = (e.target.files || [])[0];
+  if (!f) return;
+  MAT = {text: await f.text()};
+  $('#matOut').innerHTML = `<div class="alert warn">选了 ${esc(f.name)}（${
+    Math.round(f.size / 1024)} KB）—— 点「预览 + 验收」。</div>`;
+};
+$('#matPreview').onclick = async () => {
+  if (!PROJ) return alert('先打开项目');
+  $('#matOut').innerHTML = '<div class="alert warn">分割 + 验收中…</div>';
+  try {
+    const r = await api.post('/api/material/preview', await matBody());
+    if (r.error) throw new Error(r.error);
+    matRender(r, false);
+  } catch (e) { $('#matOut').innerHTML = `<div class="alert err">${esc(String(e))}</div>`; }
+};
+$('#matImport').onclick = async () => {
+  const b = await matBody();
+  let r = await api.post('/api/material/import', b);
+  if (r.error) return $('#matOut').innerHTML = `<div class="alert err">${esc(r.error)}</div>`;
+  if (!r.ok) {
+    // 有些 error 是「换一家就好」（比如张数超上限），不该逼人先去改材料
+    matRender({summary: {}, issues: r.issues, limits: {},
+               reproduce: r.reproduce, reproduce_saved: r.reproduce_saved},
+              false);
+    if (!confirm(r.msg + '\n\n还是要导入吗？（一般应该先按上面的提示处理）')) return;
+    r = await api.post('/api/material/import', {...b, force: true});
+    if (r.error) return $('#matOut').innerHTML = `<div class="alert err">${esc(r.error)}</div>`;
+  }
+  matRender(r, true);
+  log('#flowLog', r.msg);
+  renderTasks(true).catch(() => {});
+};
 
 // ---------- 环节
 // 这个项目用哪套生产体系。建项目时定，之后不改 —— 两套的产物文件名、

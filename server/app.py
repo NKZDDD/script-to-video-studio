@@ -356,6 +356,42 @@ def _build_account_key(provider_id: str, payload: dict, saved: str) -> str:
     return "\n".join(lines)
 
 
+def _read_material(body: dict) -> str:
+    """材料正文：直接给 text、或者给项目内的相对路径、或者绝对路径。"""
+    txt = body.get("text")
+    if txt:
+        return str(txt)
+    rel = str(body.get("rel") or "").strip()
+    root = str(body.get("project_root") or "")
+    path = (os.path.join(root, *rel.split("/")) if rel and root
+            else str(body.get("path") or ""))
+    if not path or not os.path.isfile(path):
+        raise ValueError(f"读不到材料文件：{path or '（没给路径也没给正文）'}")
+    from core.store import read_text
+    return read_text(path)
+
+
+def _material_limits(cfg: dict, sel: dict) -> dict:
+    """出图 / 出片各自的目标模型一次能吃几张参考图。
+
+    **取的是首选那一家的 `max_refs`** —— 用户点名要「参考图小于等于目标模型
+    上限」，而那个上限是服务商声明的，不是我们猜的。取不到就返回 0（不查）。
+    """
+    caps = {c["id"]: c for c in list_capabilities()}
+    out = {}
+    for kind, media in (("asset", "image"), ("video", "video")):
+        try:
+            chain = resolve_chain(cfg, kind, (sel or {}).get(kind))
+        except Exception:                                   # noqa: BLE001
+            continue
+        first = (chain or [{}])[0]
+        blk = (caps.get(first.get("provider")) or {}).get(media) or {}
+        n = int(blk.get("max_refs") or 0)
+        if n:
+            out[media] = n
+    return out
+
+
 def _key_fields(provider_id: str) -> tuple:
     """这一家的 Key 分几把各自填。取不到就当不分 —— 照旧一个框。"""
     try:
@@ -1130,6 +1166,141 @@ def api_post(path: str, body: dict) -> dict:
                         force=bool(body.get("force")),
                         pj=Project(root) if root else None,
                         scope=body.get("scope", "global"))
+
+    if path == "/api/material/preview":
+        """把一份「全剧生产材料」md 分割 + 验收，**不写任何东西**。
+
+        用户先看 234 条对不对、验收有没有红条，再决定导不导 ——
+        导进去之后才发现错，那些错已经变成任务了。
+        """
+        from core import matimport as _mat
+        text = _read_material(body)
+        raw = _mat.parse(text)
+        limits = _material_limits(cfg, body.get("provider_sel") or {})
+        issues = _mat.audit(raw, limits)
+        # 申报头不是一条要生产的活 —— 列进表里会多出一行没有产物的东西
+        units = _mat.units_of(raw)
+        return {"ok": True, "summary": _mat.summary(raw),
+                "limits": limits, "issues": issues,
+                "declared": _mat.manifest_of(raw),
+                "reproduce": (_mat.reproduce_request(raw, issues)
+                              if any(i["level"] == "error" for i in issues)
+                              else ""),
+                "units": [{k: u[k] for k in
+                           ("no", "filename", "kind", "goal", "episode", "seg",
+                            "ratio", "seconds", "missing")}
+                          | {"refs": len(u["refs"]),
+                             "prompt_chars": len(u["prompt"]),
+                             "output": _mat.out_path(u)}
+                          for u in units]}
+
+    if path == "/api/material/import":
+        """验收通过就落 tasks.json 和提示词 txt。**有 error 就不导。**
+
+        `force` 能压过去，但要过一道确认 —— 有些 error 是「换一家就好」，
+        不该逼人先去改材料。
+        """
+        from core import matimport as _mat
+        pj = proj_of(body)
+        text = _read_material(body)
+        units = _mat.parse(text)
+        limits = _material_limits(cfg, body.get("provider_sel") or {})
+        issues = _mat.audit(units, limits)
+        bad = [i for i in issues if i["level"] == "error"]
+        if bad and not body.get("force"):
+            # **先把不合格的点告知清楚**，并且给一份能直接丢给 codex 的清单 ——
+            # 用户原话（2026-08-25）：「我觉得可以先告知不合格的点」。
+            # 整份不导仍然成立；这份清单是为了不用重产整份 234 条。
+            saved = ""
+            try:
+                rel = "00_生产材料/要重产的清单.md"
+                dst = pj.p(*rel.split("/"))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                from core.store import write_text
+                write_text(dst, _mat.reproduce_request(units, issues))
+                saved = rel
+            except Exception:                               # noqa: BLE001
+                pass                # 写不进去也要把 issues 返回，别因为落盘失败丢了结论
+            return {"ok": False, "issues": issues,
+                    "reproduce": _mat.reproduce_request(units, issues),
+                    "reproduce_saved": saved,
+                    "msg": f"验收有 {len(bad)} 条不合契约，**整份没有导入**。"
+                           f"导进去之后它们会变成任务，那时候错的东西已经在跑了。"
+                           + (f"要重产的清单已经写到 {saved} —— "
+                              f"丢给 codex 让它只补这几条，"
+                              f"补出来的替换回原材料里再导一次"
+                              f"（程序一次只读一个材料文件）。" if saved else "")}
+        params = params_of(cfg, pj, with_script=False)
+        built = _mat.build(units, size=params.get("image_size", ""),
+                           ratio=params.get("ratio", ""),
+                           duration=int(params.get("duration") or 15))
+        from core.produce import write_prompt_txt
+        for rel, txt in built["prompts"].items():
+            write_prompt_txt(pj, rel, txt)
+        pj.save_tasks(built["tasks"])
+        pj.log_event({"stage": "material_import", "result": "ok",
+                      "units": len(units),
+                      "prompts": len(built["prompts"]),
+                      "issues": len(issues)})
+        n = {k: len(v) for k, v in built["tasks"].items() if isinstance(v, list)}
+        sk = built.get("skipped") or []
+        return {"ok": True, "counts": n, "issues": issues, "skipped": sk,
+                "prompts": len(built["prompts"]),
+                "msg": f"导入了 {len(units)} 条，落了 {len(built['prompts'])} 份提示词。"
+                       + (f"**有 {len(sk)} 条没建任务**（"
+                          + "；".join(f"第 {s['no']:03d} 条 {s['why']}"
+                                     for s in sk[:5])
+                          + ("…" if len(sk) > 5 else "") + "）。" if sk else "")
+                       + f"现在可以直接去「生产」页出图出片 —— 就绪即派照旧，"
+                       f"引用的参考图一出来，用它的那一条自己会开跑。"}
+
+    if path == "/api/material/spec":
+        """导出「生产材料契约」——**我要吃什么结构**，给 codex 照着产。
+
+        用户原话：「不应该是我去解析 codex 生产的结果，应该是我告诉他
+        我要什么样的结构」。对。反过来做要猜排版，而猜错都是静默的。
+
+        契约从代码现算（`core/matspec`）：字段清单来自 produce 实际读的字段、
+        落点来自 matimport 实际的路径、上限来自服务商声明的 max_refs ——
+        所以规范和程序永远是同一份东西，不会飘。
+        """
+        from core import matspec as _spec
+        pj = None
+        try:
+            pj = proj_of(body)
+        except Exception:                                   # noqa: BLE001
+            pass                    # 没开项目也能导，只是写不进项目里
+        limits = _material_limits(cfg, body.get("provider_sel") or {})
+        text = _spec.render(limits, (pj.meta() or {}).get("project_name", "")
+                            if pj else "")
+        saved = ""
+        if pj and body.get("save"):
+            rel = "00_生产材料/生产材料契约.md"
+            dst = pj.p(*rel.split("/"))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            from core.store import write_text
+            write_text(dst, text)
+            saved = rel
+        return {"ok": True, "text": text, "limits": limits, "saved": saved}
+
+    if path == "/api/material/scan":
+        """扫项目里约定的那个目录，找生产材料 md。
+
+        约定放在 `00_生产材料/`：放进去点一下就能导，不用每次翻文件对话框。
+        """
+        pj = proj_of(body)
+        d = pj.p("00_生产材料")
+        out = []
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if f.lower().endswith((".md", ".txt", ".markdown")):
+                    full = os.path.join(d, f)
+                    out.append({"name": f, "rel": pj.rel(full),
+                                "size": os.path.getsize(full),
+                                "at": time.strftime(
+                                    "%Y-%m-%d %H:%M",
+                                    time.localtime(os.path.getmtime(full)))})
+        return {"ok": True, "dir": pj.rel(d), "files": out}
 
     if path == "/api/prompts/upgrade":
         """把缺失的必需占位符补回这份改写里 —— **只提议，不保存。**
