@@ -1305,22 +1305,33 @@ def api_post(path: str, body: dict) -> dict:
                 or system_label(sid)}
 
     if path == "/api/material/scan":
-        """扫项目里约定的那个目录，找生产材料 md。
+        """扫项目里约定的那个目录，找生产材料（JSONL 或 md）。
+
+        **这个口原来一有文件就崩**：用了 `time.strftime` 而模块级没导 `time`，
+        于是空目录返回正常、放了材料反而 NameError → 页面只看到一个
+        「500」。空目录是唯一被走通过的路径，所以一直没人发现。
+        
 
         约定放在 `00_生产材料/`：放进去点一下就能导，不用每次翻文件对话框。
         """
+        import time as _time     # 模块级没导 time —— 这个口一有文件就 NameError
         pj = proj_of(body)
         d = pj.p("00_生产材料")
         out = []
         if os.path.isdir(d):
             for f in sorted(os.listdir(d)):
-                if f.lower().endswith((".md", ".txt", ".markdown")):
+                # **契约推荐的是 JSONL，扫描必须认它。** 不认的话，
+                # codex 照契约交了 `生产材料.jsonl`，用户点扫描得到
+                # 「这个目录里没有 md」—— 文件就在眼前，而程序说没有。
+                if f.lower().endswith((".jsonl", ".json", ".md", ".txt",
+                                       ".markdown")):
                     full = os.path.join(d, f)
                     out.append({"name": f, "rel": pj.rel(full),
                                 "size": os.path.getsize(full),
-                                "at": time.strftime(
+                                "at": _time.strftime(
                                     "%Y-%m-%d %H:%M",
-                                    time.localtime(os.path.getmtime(full)))})
+                                    _time.localtime(
+                                        os.path.getmtime(full)))})
         return {"ok": True, "dir": pj.rel(d), "files": out}
 
     if path == "/api/prompts/upgrade":

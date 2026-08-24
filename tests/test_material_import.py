@@ -15,6 +15,7 @@
 所以 27 个 LLM 环节可以整个跳过。
 """
 import json
+import os
 import unittest
 
 from core import matimport as M
@@ -656,3 +657,84 @@ class VideoLandsInTheVideoFolderTests(unittest.TestCase):
         v = M.build(us)["tasks"]["video_tasks"][0]
         self.assertTrue(v["output"].startswith("05_分段视频/"), v["output"])
         self.assertTrue(v["prompt_ref"].startswith("03_提示词/视频提示词/"))
+
+
+class DeliveryTests(unittest.TestCase):
+    """材料怎么交进来。
+
+    用户原话（2026-08-25）：「应该也不用，实际上生产完丢进去 exe 来解析后
+    就会到指定文件夹了」—— 对，codex 不需要知道项目在哪。
+    契约只说「交一个 jsonl」，落盘和分发是程序的事。
+    """
+
+    def test_the_contract_says_only_one_file_comes_back(self):
+        from core import matspec as S
+        txt = S.render({"image": 6}, "剧", "v34")
+        self.assertIn("生产材料.jsonl", txt)
+        self.assertIn("不用建任何目录", txt)
+
+    def test_the_contract_carries_no_machine_path(self):
+        """★ 契约是要发出去的东西，别把本机路径写进去 ——
+        换台机器就是错的，而它长得像对的。"""
+        from core import matspec as S
+        txt = S.render({"image": 6}, "剧", "v34")
+        for bad in ("C:\\", "D:\\", "/Users/", "/home/"):
+            self.assertNotIn(bad, txt)
+
+    def test_the_scan_finds_what_the_contract_asks_for(self):
+        """★ 契约推荐 JSONL，扫描口只认 md 的话 —— codex 照契约交了
+        `生产材料.jsonl`，用户点扫描得到「这个目录里没有 md」。
+        文件就在眼前，而程序说没有。"""
+        import inspect
+        from server import app as A
+        src = inspect.getsource(A.api_post)
+        i = src.index('/api/material/scan')
+        blk = src[i:i + 900]
+        self.assertIn(".jsonl", blk)
+
+
+class ScanTests(unittest.TestCase):
+    """约定目录扫描。**原来一有文件就崩** —— 用了 `time.strftime` 而
+    app.py 模块级没导 `time`：空目录返回正常、放了材料反而 NameError，
+    页面只看到一个「500」。空目录是唯一被走通过的路径，所以一直没人发现。
+    """
+
+    def _proj(self, files: dict):
+        import tempfile
+        from core.store import Project
+        root = tempfile.mkdtemp()
+        pj = Project(root); pj.init_dirs()
+        pj.save_meta({"project_name": "扫描", "system": "v34"})
+        d = pj.p("00_生产材料")
+        os.makedirs(d, exist_ok=True)
+        for name, body in files.items():
+            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                f.write(body)
+        return root
+
+    def test_a_folder_with_a_file_does_not_crash(self):
+        from server import app as A
+        root = self._proj({"生产材料.jsonl":
+                           '{"kind":"image","key":"A","filename":"a.png",'
+                           '"prompt":"p"}'})
+        r = A.api_post("/api/material/scan", {"project_root": root})
+        self.assertEqual([f["name"] for f in r["files"]], ["生产材料.jsonl"])
+        self.assertTrue(r["files"][0]["at"])
+
+    def test_the_scanned_file_actually_imports(self):
+        """★ 扫到了还得能导 —— 扫描给的 rel 要是 _read_material 认的形状。"""
+        from server import app as A
+        root = self._proj({"生产材料.jsonl":
+                           '{"kind":"image","key":"A__C001",'
+                           '"filename":"c.png","prompt":"正文"}'})
+        r = A.api_post("/api/material/scan", {"project_root": root})
+        got = A.api_post("/api/material/import",
+                         {"project_root": root, "rel": r["files"][0]["rel"]})
+        self.assertTrue(got["ok"], got)
+        self.assertEqual(got["counts"]["asset_tasks"], 1)
+
+    def test_md_still_shows_up(self):
+        from server import app as A
+        root = self._proj({"老材料.md": "### 【生产序号 1】\n"})
+        r = A.api_post("/api/material/scan", {"project_root": root})
+        self.assertEqual([f["name"] for f in r["files"]], ["老材料.md"])

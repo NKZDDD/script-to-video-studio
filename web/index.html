@@ -1847,10 +1847,11 @@ $('#matScan').onclick = async () => {
   sel.innerHTML = (r.files || []).map(f =>
     `<option value="${esc(f.rel)}">${esc(f.name)}　${
       Math.round(f.size / 1024)} KB　${esc(f.at)}</option>`).join('')
-    || '<option value="">（这个目录里没有 md）</option>';
+    || '<option value="">（这个目录里没有材料文件）</option>';
   if (!(r.files || []).length)
-    $('#matOut').innerHTML = `<div class="alert warn">${esc(r.dir)} 里没有 md ——
-      把材料放进去再点一次，或者直接用右边那个选文件。</div>`;
+    $('#matOut').innerHTML = `<div class="alert warn">${esc(r.dir)} 里没有材料文件
+      —— 契约要求的是 <code>生产材料.jsonl</code>，把它放进这个目录再点一次，
+      或者直接用右边那个选文件。</div>`;
   else MAT = {rel: sel.value};
 };
 $('#matPick').onchange = e => { MAT = {rel: e.target.value}; };
