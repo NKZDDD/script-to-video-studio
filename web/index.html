@@ -51,6 +51,22 @@ nav button{background:none;border:1px solid transparent;color:var(--dim);padding
 nav button.on{background:var(--panel2);color:var(--fg);border-color:var(--line)}
 main{padding:20px;max-width:1400px;margin:0 auto}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+/* 主入口卡片：现在的主路是「材料导入 → 只跑生产」，它得一眼看见，
+   不能埋在一键跑到底和环节表下面。 */
+.card.hero{border:2px solid var(--accent);box-shadow:0 0 0 3px rgba(74,158,255,.10)}
+.card.hero>h2{font-size:16px}
+.card.hero>h2::before{content:"▶";color:var(--accent);font-size:13px}
+.card.hero .tag{color:var(--accent)}
+/* 建项目时选体系：**建完不能改**，选错整个项目作废。所以不做成一个
+   混在九个输入框里的下拉，做成两个能看清区别的大按钮。 */
+.pick{display:flex;gap:12px;flex-wrap:wrap}
+.pick label{flex:1 1 260px;display:block;border:2px solid var(--line);border-radius:10px;
+  padding:12px 14px;cursor:pointer;background:var(--panel2);color:var(--fg);margin:0;font-size:13px}
+.pick label:hover{border-color:var(--accent)}
+.pick input{margin-right:8px}
+.pick label.on{border-color:var(--accent);background:rgba(74,158,255,.10)}
+.pick b{display:block;font-size:15px;margin-bottom:4px}
+.pick span{color:var(--dim);font-size:12px;line-height:1.5}
 .card h2{font-size:14px;margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:8px}
 .card h2 .tag{font-size:11px;color:var(--dim);font-weight:400}
 .grid{display:grid;gap:12px}
@@ -174,6 +190,18 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 
 <!-- ============ 项目 ============ -->
 <section id="t-proj">
+  <!-- **体系放最上面，做成两个能看清区别的大按钮。**
+       原来它是「单个项目 · 粘贴正文」卡里的一个下拉，而**批量建剧压根没有
+       这个选择** —— 它偷偷读那个下拉的值。于是在综合包里批量建 20 部剧，
+       用的是另一张卡上一个你没看过的下拉，而**体系建完不能改**，
+       整批建错就是整批作废。现在一个地方选，两条路都用它。 -->
+  <div class="card hero">
+    <h2>建项目前先选生产体系
+      <span class="tag">建完不能改 —— 两条建剧路径都用这里选的</span></h2>
+    <div class="pick" id="sysPick"></div>
+    <select id="spSystem" class="hide"></select>
+    <div class="muted" style="margin-top:8px" id="spSystemNote"></div>
+  </div>
   <div class="card">
     <h2>项目列表 <span class="tag" id="projDir"></span></h2>
     <table><thead><tr><th>名称</th><th>编号</th><th>体系</th><th>集</th><th>更新</th>
@@ -192,6 +220,11 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <div><label>项目编号前缀</label><input id="npCode" value="PROJ"
         title="批量建剧时自动编号 PROJ-001 / PROJ-002 …"></div>
       <div><label>集数</label><input id="npEp" value="EP01"></div>
+      <!-- 这一批建成哪套体系，就写在按钮旁边。原来这张卡上一个字都没有，
+           而它用的是另一张卡里的下拉 —— 整批建错就是整批作废。 -->
+      <div><label>生产体系 <span class="muted">在本页最上面选</span></label>
+        <div id="npSystemEcho" class="muted"
+             style="padding:7px 0;font-size:13px">—</div></div>
     </div>
     <div class="row" style="margin-top:10px">
       <button class="btn" id="npCreate" disabled>创建项目</button>
@@ -205,13 +238,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <div><label>目录名</label><input id="spName" placeholder="XYQY-002_新剧"></div>
       <div><label>项目编号</label><input id="spCode" value="PROJ-001"></div>
       <div><label>集数</label><input id="spEp" value="EP01"></div>
-      <!-- 新建只给电影级十七章。通用十二环节的代码没删，老项目照常打开、
-           照常跑完，但不再拿它开新剧 —— 两套并列摆着只会让人建错，
-           建完还改不了。名字以 SYSTEM_LABELS 为准，别在这里另写。 -->
-      <div><label>生产体系 <span class="muted">建完不能改</span></label>
-        <select id="spSystem"></select></div>
+      <!-- 体系不在这里选了 —— 挪到本页最上面，两条建剧路径共用一个。
+           两张卡各有一个选择的话，人只会看见自己正在填的那一张。 -->
+      <div><label>生产体系 <span class="muted">在本页最上面选</span></label>
+        <div id="spSystemEcho" class="muted"
+             style="padding:7px 0;font-size:13px">—</div></div>
     </div>
-    <div class="muted" style="margin-top:6px" id="spSystemNote"></div>
     <div style="margin-top:10px"><textarea id="spScript" placeholder="粘贴剧本全文…"></textarea></div>
     <div class="row" style="margin-top:10px"><button class="btn ghost" id="spCreate">创建</button></div>
   </div>
@@ -219,6 +251,35 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 
 <!-- ============ 流程 ============ -->
 <section id="t-flow" class="hide">
+  <!-- **主入口，放最上面。** 现在的主路是「材料导入 → 只跑生产」：
+       LLM 那 27 个环节交给 codex，程序只出图出片。埋在一键跑到底和环节表
+       下面的话，人会先去点那个 —— 而材料模式下那条路会一步步失败。 -->
+  <div class="card hero">
+    <h2>① 导入生产材料 <span class="tag">codex 产一份 jsonl，顶掉全部 LLM 环节</span></h2>
+    <p class="muted" style="margin-top:0">
+      材料是一次想完整部剧产出的，一行一条：编号 + 文件名 + 有序参考图 +
+      完整提示词。出图出片要的四样它全给齐了，所以
+      <b>导进来就能直接出图出片</b>，全部文字环节整个跳过。
+    </p>
+    <ol class="muted" style="margin:0 0 10px 18px;line-height:1.9">
+      <li><b>导出契约</b> → 整份给 codex（契约按项目体系走，两套不一样）</li>
+      <li>它产出的 <code>生产材料.jsonl</code> 放进项目的
+          <code>00_生产材料/</code>，或者直接用右边选文件</li>
+      <li><b>先预览验收</b>——导进去之后那些错就变成任务了</li>
+      <li>导完去下面「一键跑到底」勾上<b>「只跑生产」</b>
+          （别去「生产」页点三次，那样拿不到跨类接力）</li>
+    </ol>
+    <div class="row">
+      <button class="btn" id="matSpec">① 导出契约（给 codex）</button>
+      <button class="btn ghost sm" id="matScan">扫 00_生产材料/</button>
+      <select id="matPick" style="width:auto;min-width:220px"></select>
+      <input type="file" id="matFile" accept=".jsonl,.json,.md,.markdown,.txt"
+             style="font-size:12px">
+      <button class="btn ghost sm" id="matPreview">② 预览 + 验收</button>
+      <button class="btn" id="matImport" disabled>③ 导入</button>
+    </div>
+    <div id="matOut" style="margin-top:10px"></div>
+  </div>
   <div class="card" id="epCard">
     <h2>这部剧有几集 <span class="tag">环节1 判断集边界，之后每集单独跑</span></h2>
     <div id="epBox" class="muted">还没跑环节1</div>
@@ -351,26 +412,6 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <button class="btn" id="saveBrief">保存基础信息</button>
       <span class="muted" id="briefHint"></span>
     </div>
-  </div>
-  <div class="card">
-    <h2>导入生产材料 <span class="tag">一份 md 顶掉全部 LLM 环节</span></h2>
-    <p class="muted" style="margin-top:0">
-      材料是一次想完整部剧产出的，形状是一条条【生产序号】：目标 + 文件名 +
-      参考图映射 + 完整提示词。出图出片要的四样它全给齐了，所以
-      <b>导进来就能直接出图出片</b>，27 个文字环节整个跳过。<br>
-      放到项目里的 <code>00_生产材料/</code> 就能在下面点到；或者直接选文件。
-      <b>先预览验收</b>——导进去之后那些错就变成任务了。
-    </p>
-    <div class="row">
-      <button class="btn ghost sm" id="matSpec">导出契约（给 codex）</button>
-      <button class="btn ghost sm" id="matScan">扫 00_生产材料/</button>
-      <select id="matPick" style="width:auto;min-width:220px"></select>
-      <input type="file" id="matFile" accept=".md,.markdown,.txt"
-             style="font-size:12px">
-      <button class="btn ghost sm" id="matPreview">预览 + 验收</button>
-      <button class="btn sm" id="matImport" disabled>导入</button>
-    </div>
-    <div id="matOut" style="margin-top:10px"></div>
   </div>
   <div class="card">
     <!-- 标题跟着项目的体系走。写死「十二环节」的后果：跑十七章的项目时
@@ -1968,10 +2009,49 @@ function fillSystemPicker() {
   sel.innerHTML = ok.map(([id, s], i) =>
     `<option value="${esc(id)}"${i === 0 ? ' selected' : ''}>${esc(s.name)}</option>`)
     .join('');
+  // 醒目的大按钮：**体系建完不能改**，选错整个项目作废，所以不做成一个
+  // 混在别的输入框里的下拉。隐藏的 select 留着当唯一真相源 ——
+  // 建项目的三处（单个 / 批量 / 契约导出）都读它，改成读 DOM 单选会多出
+  // 三个各自解析的地方，而它们迟早会不一致。
+  // 变量名别叫 pick：页面里另有一个同名的局部变量（服务商链的选择），
+  // 而有测试是按那个变量的声明文本定位过去的 —— 撞名会让它指到这里来。
+  // 注释里也不能出现那段声明文本，否则同样会被先撞上（刚踩过）。
+  const sysBox = $('#sysPick');
+  if (sysBox) {
+    sysBox.innerHTML = ok.map(([id, s], i) => {
+      const n = (s.stages || []).filter(x => x.kind === 'llm').length;
+      return `<label class="${i === 0 ? 'on' : ''}" data-sys="${esc(id)}">
+        <input type="radio" name="sysPick" value="${esc(id)}"${
+          i === 0 ? ' checked' : ''}>
+        <b>${esc(s.name)}</b>
+        <span>${n} 个文字环节${s.note ? '　·　' + esc(s.note) : ''}</span></label>`;
+    }).join('');
+    sysBox.querySelectorAll('input[name=sysPick]').forEach(r => {
+      r.onchange = () => {
+        sel.value = r.value;
+        sysBox.querySelectorAll('label').forEach(l =>
+          l.classList.toggle('on', l.dataset.sys === r.value));
+        systemNote(); echoSystem();
+      };
+    });
+  }
   const note = $('#spSystemNote');
   if (note && ok.length === 1)
     note.textContent = `这一版只建「${ok[0][1].name}」的项目；`
       + '另一套体系建的老项目照常打开、照常跑完。';
+  else systemNote();
+  echoSystem();
+}
+// 两张建剧卡上各回显一遍「这一批会建成哪套」——
+// 选择在页面顶上，填表的人眼睛在卡里，不回显就等于没选择。
+function echoSystem() {
+  const v = ($('#spSystem') || {}).value || '';
+  const s = (BOOT.systems || {})[v] || {};
+  const txt = s.name ? `${s.name}　（建完不能改）` : '（还没选）';
+  ['#spSystemEcho', '#npSystemEcho'].forEach(id => {
+    const el = $(id);
+    if (el) el.textContent = txt;
+  });
 }
 
 function sysName() {
@@ -3649,7 +3729,7 @@ function systemNote() {
     + '　建完不能改 —— 两套的产物文件名、环节表、任务结构都不一样，'
     + '中途换等于把已有产物全作废。';
 }
-$('#spSystem').onchange = systemNote;
+$('#spSystem').onchange = () => { systemNote(); echoSystem(); };
 
 $('#spCreate').onclick = async () => {
   const name = $('#spName').value.trim();
