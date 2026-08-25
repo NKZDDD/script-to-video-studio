@@ -1823,8 +1823,15 @@ function matRender(r, imported) {
 // 导出契约。**方向是「我告诉它要什么」，不是「我去猜它产了什么」** ——
 // 猜排版的代价已经付过：全角等号、分节、`---`，每一处猜错都是静默的。
 $('#matSpec').onclick = async () => {
+  // 没开项目时也要给对的那一份 —— **综合包里两套体系都能建项目**，
+  // 后端回落的是 NEW_SYSTEM（电影级），于是你在页面上选着「通用十二环节」
+  // 却导出一份电影级的契约：里面写着场景状态图和造型/服饰/载具/特效，
+  // codex 照它产一批这套体系用不上的东西，而且还占参考图名额。
+  // 单体系包里回落永远对（build_info.only() 就是那个包的体系），
+  // 所以这个坑只在综合包里出现。
   const r = await api.post('/api/material/spec',
                            {project_root: PROJ, save: !!PROJ,
+                            system: PROJ ? '' : defaultSystem(),
                             provider_sel: chainSel()});
   if (r.error) return alert(r.error);
   $('#matOut').innerHTML =

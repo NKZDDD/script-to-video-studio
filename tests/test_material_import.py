@@ -738,3 +738,49 @@ class ScanTests(unittest.TestCase):
         root = self._proj({"老材料.md": "### 【生产序号 1】\n"})
         r = A.api_post("/api/material/scan", {"project_root": root})
         self.assertEqual([f["name"] for f in r["files"]], ["老材料.md"])
+
+
+class CombinedPackageTests(unittest.TestCase):
+    """综合包（不给 --system 打的那个）里，两套体系都能建项目 ——
+    所以契约还是两份，跟的是**项目**的体系，不是 exe。
+
+    两套体系的代码本来就始终都打进包里（`打包exe.py` 的注释说清了：
+    真裁掉另一套，拿错包打开老项目会把产物全判成「还没做」，重跑花第二份钱）。
+    单体系包限制的只是「新建项目能选哪套」。
+    """
+
+    def test_the_contract_follows_the_project_not_the_exe(self):
+        """★ 同一个包、两个项目，各拿到自己那一份。"""
+        import tempfile
+        from core.store import Project
+        from server import app as A
+        got = {}
+        for sid in ("v34", "v61"):
+            root = tempfile.mkdtemp()
+            pj = Project(root); pj.init_dirs()
+            pj.save_meta({"project_name": "剧", "system": sid})
+            r = A.api_post("/api/material/spec",
+                           {"project_root": root, "save": True})
+            got[sid] = r
+            self.assertEqual(r["system"], sid)
+        self.assertIn("03b_场景状态图", got["v34"]["text"])
+        self.assertNotIn("03b_场景状态图", got["v61"]["text"])
+        self.assertNotEqual(got["v34"]["saved"], got["v61"]["saved"])
+
+    def test_without_a_project_the_page_choice_decides(self):
+        """★ 没开项目时后端回落 NEW_SYSTEM（电影级）——
+        综合包里你选着「通用十二环节」却会导出电影级那份，
+        里面写着场景状态图和造型/服饰/载具/特效。
+        单体系包里回落永远对，所以这个坑只在综合包里出现。
+        """
+        from server import app as A
+        r = A.api_post("/api/material/spec", {"system": "v61"})
+        self.assertEqual(r["system"], "v61")
+        self.assertNotIn("03b_场景状态图", r["text"])
+
+    def test_the_page_sends_its_choice(self):
+        """★ 后端支持了不算完 —— 页面不发这个值，支持了也用不上。"""
+        from core.store import read_text
+        html = read_text("web/index.html")
+        i = html.index("/api/material/spec")
+        self.assertIn("defaultSystem()", html[i:i + 400])
