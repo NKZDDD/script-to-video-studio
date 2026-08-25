@@ -784,3 +784,111 @@ class CombinedPackageTests(unittest.TestCase):
         html = read_text("web/index.html")
         i = html.index("/api/material/spec")
         self.assertIn("defaultSystem()", html[i:i + 400])
+
+
+class TwoSchemasTests(unittest.TestCase):
+    """材料的字段和任务的字段是**两套**，名字不一样，不能混着写。
+
+    codex 拿到契约后实测指出的：示例用顶层 `filename` / `size` / `duration` /
+    `ratio`，而字段说明写的是 `output` / `params.size` / `params.duration`；
+    示例参考图用 `key`，说明又写 `asset_id`。它的原话：
+    「可能生成『语法正确、程序不认』的文件」。
+
+    根因：`NEEDS` 是从 `produce` 的 `task.get` 现算的 —— 那是**导入之后**任务
+    的形状，被当成「每一类各要什么」写进了契约。
+    """
+
+    def _schema(self):
+        from core import matspec as S
+        return json.loads(S.json_schema())
+
+    def _branch(self, sch, kind):
+        got = [o for o in sch["oneOf"]
+               if o["properties"]["kind"].get("const") == kind]
+        self.assertEqual(len(got), 1, f"{kind} 的分支不唯一")
+        return got[0]
+
+    def test_the_material_table_never_mentions_task_field_names(self):
+        """★ 这四个名字只属于任务那一套，出现在「你要写的字段」里就是歧义。"""
+        from core import matspec as S
+        written = {f for rows in S.MATERIAL_FIELDS.values()
+                   for f, _n, _w in rows} | {f for f, _n, _w in S.REF_FIELDS}
+        for task_only in ("output", "prompt_ref", "params.size",
+                          "params.duration", "asset_id"):
+            self.assertNotIn(task_only, written)
+
+    def test_the_contract_says_which_section_is_authoritative(self):
+        from core import matspec as S
+        txt = S.render({"image": 6}, "剧", "v34")
+        self.assertLess(txt.index("## 你要写的字段"),
+                        txt.index("## 程序会把它变成什么"))
+        self.assertIn("不是让你写的", txt)
+
+    def test_every_documented_field_is_actually_read(self):
+        """★ 文档里写的字段，解析器必须真的认 —— 这是「契约从代码生成」
+        的全部意义。写了个解析器不读的字段，codex 填了也没用，而且不报错。"""
+        from core import matspec as S
+        probe = {
+            "kind": "image", "key": "A__C001", "filename": "c.png",
+            "prompt": "正文", "size": "9:16", "name": "名",
+            "family": "CHAR",
+            "reference_images": [{"image_n": 1, "key": "A__C002",
+                                  "who": "谁", "controls": "甲",
+                                  "not_controls": "乙", "scope": "丙"}],
+        }
+        u = M.units_of(M.parse(json.dumps(probe, ensure_ascii=False)))[0]
+        self.assertEqual(u["stem"], "A__C001")
+        self.assertEqual(u["filename"], "c.png")
+        self.assertEqual(u["prompt"], "正文")
+        self.assertEqual(u["ratio"], "9:16")
+        self.assertEqual(u["goal"], "名")
+        self.assertEqual(u["refs"], [(1, "A__C002")])
+
+    def test_asset_id_is_still_accepted_as_an_alias(self):
+        """契约说 `asset_id` 是 `key` 的同义写法 —— 说了就得认。"""
+        row = {"kind": "image", "key": "A", "filename": "a.png",
+               "prompt": "p",
+               "reference_images": [{"image_n": 1, "asset_id": "B"}]}
+        u = M.units_of(M.parse(json.dumps(row, ensure_ascii=False)))[0]
+        self.assertEqual(u["refs"], [(1, "B")])
+
+    def test_ratio_is_accepted_where_size_is_documented(self):
+        for name in ("size", "ratio"):
+            row = {"kind": "image", "key": "A", "filename": "a.png",
+                   "prompt": "p", name: "4:5"}
+            u = M.units_of(M.parse(json.dumps(row, ensure_ascii=False)))[0]
+            self.assertEqual(u["ratio"], "4:5", name)
+
+    def test_the_schema_branches_are_discriminated_by_kind(self):
+        """★ 三个分支都用 enum 的话，一条 image 也满足 manifest 分支
+        （它只要求 kind），oneOf 匹配到两个 → 校验器判不合法。"""
+        sch = self._schema()
+        for kind in ("manifest", "image", "video"):
+            self.assertEqual(
+                self._branch(sch, kind)["properties"]["kind"], {"const": kind})
+
+    def test_the_sample_validates_against_the_schema(self):
+        """★ 样例、schema、解析器三样必须自洽 —— 它们是同一张表算出来的。"""
+        from core import matspec as S
+        sch = self._schema()
+        for ln in S.jsonl_schema().splitlines():
+            row = json.loads(ln)
+            br = self._branch(sch, row["kind"])
+            for need in br["required"]:
+                self.assertIn(need, row, f"{row['kind']} 样例缺必填 {need}")
+            for got in row:
+                self.assertIn(got, br["properties"],
+                              f"{row['kind']} 样例的 {got} 不在 schema 里")
+
+    def test_the_required_video_fields_match_what_the_parser_demands(self):
+        """★ schema 说必填的，解析器缺了要真的报缺 —— 否则「校验通过、导入报错」。"""
+        sch = self._schema()
+        base = {"kind": "video", "key": "EP01-SEG01", "episode": "EP01",
+                "seg": "SEG01", "filename": "v.mp4", "prompt": "p",
+                "storyboard_refs": [{"image_n": 1, "key": "A"}]}
+        for need in self._branch(sch, "video")["required"]:
+            if need == "kind":
+                continue
+            row = {k: v for k, v in base.items() if k != need}
+            u = M.units_of(M.parse(json.dumps(row, ensure_ascii=False)))[0]
+            self.assertTrue(u["missing"], f"缺 {need} 却没报缺")

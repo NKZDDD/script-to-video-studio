@@ -23,28 +23,105 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-# produce 实际读每条任务的哪几个字段（core/produce.py 里 task.get 的全集）。
-# 这张表是**契约的依据**，不是装饰：少一个字段那一类活就跑不起来。
-NEEDS = {
+# ====================================================================
+# 这里有**两套字段**，而且名字不一样。混着写就是 codex 实测撞上的那个歧义：
+#
+#   MATERIAL_FIELDS —— 你（codex）要写进 jsonl 的字段。导入**之前**的形状。
+#   TASK_FIELDS     —— 程序把它变成任务之后的字段。导入**之后**的形状。
+#
+# 举三个真会写错的：材料写 `filename`，任务里叫 `output`（路径由程序算）；
+# 材料的参考图用 `key`，任务里转成 `asset_id` + `file_ref`；
+# 材料写顶层 `size` / `duration`，任务里进 `params.size` / `params.duration`。
+#
+# 上一版把 TASK_FIELDS 当成「每一类各要什么」写进契约，于是示例（材料形状）
+# 和字段说明（任务形状）对不上 —— codex 原话：「可能生成『语法正确、程序
+# 不认』的文件」。对。所以这两套现在分两节写，任务那一节明说是给你对号的。
+# ====================================================================
+
+# 你要写的字段。**这张表是权威**：每一项都由 `matimport._from_json` 实际读，
+# 有测试逐条验证「文档里写的字段解析器真的认」。
+MATERIAL_FIELDS = {
     "image": [
-        ("key", "这一条的唯一编号。用完整 Canonical ID，和别处引用它时一字不差"),
-        ("prompt_ref", "提示词文件的相对路径（程序落盘，你只要给正文）"),
-        ("reference_images", "有序参考图：image_n 从 1 连续排，asset_id 指向"
-                             "**本材料里另一条的 key**"),
-        ("output", "产物落在哪（程序按家族算，你只要给文件名）"),
-        ("params.size", "画幅或像素，比如 9:16 / 1024x1536"),
+        ("kind", True, '固定写 `"image"`。认不出的值**不建任务**，'
+                       '不会被猜成图片'),
+        ("key", True, "这一条的唯一编号，全局唯一。别处引用它时一字不差。"
+                      "落哪个目录按它的家族前缀算"),
+        ("filename", True, "产物文件名（带后缀）。**只给文件名，不要给路径** ——"
+                           "目录由程序按家族算"),
+        ("prompt", True, "完整可投喂的提示词正文。程序落成 txt，出图时读它"),
+        ("size", False, "画幅或像素，比如 `9:16` / `1024x1536`。"
+                        "写 `ratio` 也认。不写就用申报头里的 `image_size`"),
+        ("reference_images", False, "有序参考图，见下面「参考图怎么写」"),
+        ("name", False, "人看的名字，比如「林溪身份根」。写 `goal` 也认"),
+        ("family", False, "家族标记。程序不读它（落点看 `key` 的前缀），"
+                          "写着方便你自己核对"),
     ],
     "video": [
-        ("key", "必须是 `EP01-SEG01` 这个形状 —— **拼接按这个前缀挑本集分段**"),
-        ("prompt_ref", "同上"),
-        ("storyboard_refs", "本段的**有序故事板骨架**。视频那一层读这个字段，"
-                            "缺了报「缺故事板」直接不出片"),
-        ("reference_images", "骨架之后的补图，编号接着排"),
-        ("output", "产物落在哪"),
-        ("params.duration", "秒数"),
-        ("params.ratio", "画幅"),
+        ("kind", True, '固定写 `"video"`'),
+        ("key", True, "**必须是 `EP01-SEG01` 这个形状** —— 拼接按这个前缀"
+                      "挑本集分段"),
+        # **不是必填**：解析器会从 `EP01-SEG01` 这个 key 里认出来。
+        # 标成必填的话，schema 会拒掉一份程序其实认的材料 ——
+        # 「校验不通过、程序却认」和反过来一样糟，都是文档和代码对不上。
+        ("episode", False, "`EP01`。不写会从 `key` / `filename` 里认，"
+                           "认不出才报缺 —— 所以 key 用规定的形状就不用写它"),
+        ("seg", False, "`SEG01`。同上"),
+        ("filename", True, "产物文件名（带后缀）。视频一律落 `05_分段视频/`，"
+                           "不看 key 的前缀"),
+        ("prompt", True, "完整可投喂的提示词正文"),
+        ("storyboard_refs", True, "本段的**有序故事板骨架**。空的 → "
+                                  "报「缺故事板」直接不出片"),
+        ("reference_images", False, "骨架之后的补图，编号接着排"),
+        ("duration", False, "秒数。不写就用申报头里的 `seg_duration`"),
+        ("ratio", False, "画幅。不写就用申报头里的 `ratio`"),
+    ],
+    "manifest": [
+        ("kind", True, '固定写 `"manifest"`，放在第一行'),
+        ("total", False, "这一份里一共几条（不含申报头自己）"),
+        ("image", False, "其中图片几条"),
+        ("video", False, "其中视频几条"),
+        ("episodes", False, "共几集"),
+        ("segs_per_episode", False, '每集几段。一个数，或者 `{"EP01": 4}`'),
+        ("params", False, "项目参数，见「项目参数」那一节"),
     ],
 }
+
+# 参考图元素的字段（`reference_images` / `storyboard_refs` 里每一项）。
+REF_FIELDS = [
+    ("image_n", True, "**实际上传顺序**，从 1 连续排。跳号或重号会被拦"),
+    ("key", True, "指向本材料里另一条的 `key`。写 `asset_id` 也认（同义）"),
+    ("who", False, "这张图是谁 / 是什么。**提示词正文里也要写一遍** ——"
+                   "出图前第二道检查查的是这个"),
+    ("controls", False, "它有权控制什么"),
+    ("not_controls", False, "它无权控制什么"),
+    ("scope", False, "适用范围"),
+    ("role", False, "骨架里的角色，比如 `ENTRY`"),
+]
+
+# 程序把材料变成任务之后的字段（`core/produce.py` 里 `task.get` 的全集）。
+# **这一节是给你对号用的，不是让你写的。** 名字和上面那张表故意不一样：
+# `output` 是程序按家族算出来的路径，`asset_id` 是程序从 `key` 转的。
+TASK_FIELDS = {
+    "image": [
+        ("key", "照抄材料的 `key`"),
+        ("prompt_ref", "程序落的提示词 txt 路径 —— 你只要给 `prompt` 正文"),
+        ("reference_images[].asset_id", "从材料参考图的 `key` 转来"),
+        ("reference_images[].file_ref", "程序算出的那张图的落点"),
+        ("output", "程序按 `key` 的家族 + 你给的 `filename` 算出来的路径"),
+        ("params.size", "从材料的 `size` / `ratio` 或申报头来"),
+    ],
+    "video": [
+        ("key", "照抄材料的 `key`（`EP01-SEG01`）"),
+        ("prompt_ref", "同上"),
+        ("storyboard_refs[]", "从材料的 `storyboard_refs` 转来，带上算好的落点"),
+        ("output", "一律 `05_分段视频/<filename>`"),
+        ("params.duration", "从材料的 `duration` 或申报头的 `seg_duration` 来"),
+        ("params.ratio", "从材料的 `ratio` 或申报头来"),
+    ],
+}
+
+# 老名字还有人用的话指到任务那套 —— 但契约正文已经分开写了。
+NEEDS = TASK_FIELDS
 
 # 每一类落哪个目录 —— **按体系分两份**。用户原话（2026-08-25）：
 # 「需要按照项目体系来给两份契约」。同一份发给两套的代价很具体：
@@ -158,6 +235,57 @@ def limits_note(limits: Optional[dict]) -> str:
     return "**本项目当前的上限：" + "；".join(bits) + "**（按你配的首选那一家算的）"
 
 
+_TYPES = {
+    "kind": {"type": "string", "enum": ["image", "video", "manifest"]},
+    "image_n": {"type": "integer", "minimum": 1},
+    "duration": {"type": "number"},
+    "total": {"type": "integer"}, "image": {"type": "integer"},
+    "video": {"type": "integer"}, "episodes": {"type": "integer"},
+    "segs_per_episode": {"type": ["integer", "object"]},
+    "params": {"type": "object"},
+    "reference_images": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+    "storyboard_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+}
+
+
+def _prop(name: str) -> dict:
+    return _TYPES.get(name) or {"type": "string"}
+
+
+def json_schema() -> str:
+    """一行一条的 JSON Schema。**从 MATERIAL_FIELDS 现算**，不手写。
+
+    codex 实测后要的就是这个（原话：「最稳妥的做法是提供实际的
+    core/matspec.py、JSON Schema，或者一份已经成功导入的完整 JSONL 样例」）。
+    手写一份的话，改了字段表忘了改 schema，就又回到「文档和程序对不上」——
+    而那正是它这次撞上的问题。
+    """
+    def one(kind):
+        # `kind` 用 const 而不是 enum —— **三个分支都写 enum 的话，
+        # 一条 image 也满足 manifest 分支**（它只要求 kind，额外字段又不禁），
+        # 于是 oneOf 匹配到两个，校验器判不合法。const 才能把分支分开。
+        rows = MATERIAL_FIELDS[kind]
+        props = {f: _prop(f) for f, _n, _w in rows}
+        props["kind"] = {"const": kind}
+        return {
+            "type": "object",
+            "properties": props,
+            "required": [f for f, n, _w in rows if n],
+        }
+    sch = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "生产材料的一行",
+        "oneOf": [one("manifest"), one("image"), one("video")],
+        "$defs": {"ref": {
+            "type": "object",
+            "properties": {f: _prop(f) for f, _n, _w in REF_FIELDS},
+            "required": ["image_n"],
+            "anyOf": [{"required": ["key"]}, {"required": ["asset_id"]}],
+        }},
+    }
+    return json.dumps(sch, ensure_ascii=False, indent=2)
+
+
 def jsonl_schema() -> str:
     """推荐格式：一行一条 JSON。
 
@@ -264,6 +392,10 @@ def render(limits: Optional[dict] = None, project_name: str = "",
       "每一处猜错都是静默的（比如张数数成两倍，然后「超上限」全员误报）。"
       "JSONL 没有这些歧义，错在哪一行、哪个字段都能指出来。")
     a("")
+    a("下面这四行是**一份完全合格的最小材料** —— 原样导入 0 条问题，"
+      "有测试盯着这件事（示例自己不合格的话，照它产出来的也不会合格）。"
+      "拿它当形状的唯一权威：")
+    a("")
     a("```jsonl")
     a(jsonl_schema())
     a("```")
@@ -296,14 +428,46 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("所以集数、每集多少秒、每集切几段，是**你按剧情定的**。"
       "程序无从判断 21 集对不对 —— 它只能查你有没有兑现自己申报的数。")
     a("")
-    a("## 字段：每一类各要什么")
+    a("## 你要写的字段")
     a("")
-    for kind, rows in NEEDS.items():
-        a(f"### {'图片' if kind == 'image' else '视频'}")
+    a("**这一节是权威。** 每一项都由导入器实际读，有测试逐条验证"
+      "「文档里写的字段解析器真的认」。")
+    a("")
+    _LAB = {"image": "图片", "video": "视频", "manifest": "申报头（第一行）"}
+    for kind, rows in MATERIAL_FIELDS.items():
+        a(f"### {_LAB[kind]}")
+        a("")
+        for f, need, why in rows:
+            a(f"- `{f}`{'（必填）' if need else ''} —— {why}")
+        a("")
+    a("### 参考图元素（`reference_images` / `storyboard_refs` 里每一项）")
+    a("")
+    for f, need, why in REF_FIELDS:
+        a(f"- `{f}`{'（必填）' if need else ''} —— {why}")
+    a("")
+    a("表外的字段程序不读，写了也不会报错 —— 但别拿它当功能用。")
+    a("")
+    a("### 机器可校验的 JSON Schema")
+    a("")
+    a("```json")
+    a(json_schema())
+    a("```")
+    a("")
+    a("## 程序会把它变成什么（给你对号用的，不是让你写的）")
+    a("")
+    a("导入之后每条会变成一个任务，**字段名和上面那张表不一样** ——"
+      "这是两套 schema，别照着这一节写材料：")
+    a("")
+    for kind, rows in TASK_FIELDS.items():
+        a(f"### {_LAB[kind]}任务")
         a("")
         for f, why in rows:
             a(f"- `{f}` —— {why}")
         a("")
+    a("最容易写错的三个：材料写 `filename`，任务里叫 `output`（路径由程序算）；"
+      "材料的参考图用 `key`，任务里转成 `asset_id` + `file_ref`；"
+      "材料写顶层 `size` / `duration`，任务里进 `params.size` / `params.duration`。")
+    a("")
     a("## 参考图怎么写")
     a("")
     a("`image_n` **就是实际上传顺序**：第 1 个元素就是 Image 1。"
