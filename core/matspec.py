@@ -158,6 +158,11 @@ _FAMILIES_V61 = [
 SYSTEMS = {
     "v34": {
         "label": "电影级十七章",
+        # 中间产物的文件名按体系写。两套的环节号和产物名完全不同
+        # （n1..n14 / s1..s12），写错的代价不是报错 —— 是 codex 拿着一份
+        # 「看起来很具体」的说明去核对，发现对不上，然后不知道该信哪句。
+        "stage_count": 17,
+        "midfiles": "`n1_truth.json`、`n9_shots.json`、`n10_segs.json` 之类",
         "dirs": {"资产（人物/造型/连续状态/服饰/场景/道具/载具/生物/群体/特效）":
                  _ASSET_LINE,
                  "场景状态图": _SCSTATE_LINE,
@@ -168,6 +173,8 @@ SYSTEMS = {
     },
     "v61": {
         "label": "通用十二环节",
+        "stage_count": 12,
+        "midfiles": "`s1_global.json`、`s2_segments.json`、`s8_compile.json` 之类",
         "dirs": {"资产（人物/场景/道具/连续状态/群体/生物）": _ASSET_LINE,
                  "故事板": _SB_LINE,
                  "分段视频": _VIDEO_LINE},
@@ -551,9 +558,10 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("")
     a("## 不需要的东西")
     a("")
-    a("程序原来那 27 个环节的中间产物（`n1_truth.json`、`n9_shots.json`、"
-      "`n10_segs.json` 之类）**一份都不用给**。它们是「程序一步步问模型」"
-      "时的中间结果；你一次想完整部剧，那些中间形态不存在。")
+    a(f"程序原来那 {sysm.get('stage_count', '')} 个环节的中间产物"
+      f"（{sysm.get('midfiles', '')}）**一份都不用给**。"
+      f"它们是「程序一步步问模型」时的中间结果；"
+      f"你一次想完整部剧，那些中间形态不存在。")
     a("")
     a("## 程序查不了的，靠你保证")
     a("")
