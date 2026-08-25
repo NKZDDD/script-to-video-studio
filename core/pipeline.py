@@ -49,7 +49,8 @@ PRODUCE = [("s5b", "asset_tasks", "asset"),
 
 def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
          only_episodes: Optional[list] = None,
-         produce_episodes: Optional[list] = None) -> list:
+         produce_episodes: Optional[list] = None,
+         include_llm: bool = True) -> list:
     """算出要做哪些步骤（含已完成的，执行时再跳过）。
 
     顺序是有讲究的：
@@ -58,9 +59,14 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
       资产图放到所有集的环节5 之后 —— 资产库全剧共享，一次出齐才不会重复出图；
       故事板、视频等资产图；
       拼接放最后，按集各出一个成片。
+
+    `include_llm=False` 是「只跑生产」：材料导入模式下没有那十二个环节的
+    中间产物，跑 LLM 步只会一步步失败。而生产这几步要的东西 tasks.json
+    里全有 —— 走这条路径才能拿到 relay 的就绪即派和 sweep_redo 的条件补跑，
+    那两样以前只有「一键跑到底」有。
     """
-    steps = [{"kind": "llm", "stage": "s1", "episode": "",
-              "label": "环节1 整剧全局解析（含切集）"}]
+    steps = ([{"kind": "llm", "stage": "s1", "episode": "",
+               "label": "环节1 整剧全局解析（含切集）"}] if include_llm else [])
     # 环节1 永远吃整部剧本 —— 人物长相、视觉基调、伏笔、集边界都得看全篇才准。
     # only_episodes 只限制「往下逐集加工哪几集」，不影响全局解析的范围。
     eps = _eps.ids(pj)
@@ -75,7 +81,7 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
                 f"「分析这几集」填的 {'、'.join(sorted(want))} 在这个项目里都不存在 —— "
                 f"没有 {sorted(want)[0]} 这一集。当前切出了 {len(have)} 集："
                 f"{have[0]} … {have[-1]}。把那个框清空 = 全部集。")
-    for ep in eps:
+    for ep in (eps if include_llm else []):
         for sid in PER_EP:
             st = next(s for s in S.STAGES if s["id"] == sid)
             steps.append({"kind": "llm", "stage": sid, "episode": ep,
@@ -255,7 +261,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         only_episodes: Optional[list] = None,
         produce_episodes: Optional[list] = None,
         ep_concurrency: int = 1, seg_concurrency: int = 1,
-        llm_concurrency: int = 0) -> dict:
+        llm_concurrency: int = 0, include_llm: bool = True) -> dict:
     """跑完整条流水线。job 用来向前端汇报进度，每一步是一个 item。
 
     llm_factory() → LLM 实例（延迟构造，密钥错就在第一步暴露）
@@ -275,7 +281,8 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     # 这一刻之前的记录是上一趟的旧账，不拦本趟的补跑。
     epoch = time.strftime("%Y-%m-%d %H:%M:%S")
     steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver,
-                 only_episodes=only_episodes, produce_episodes=produce_episodes)
+                 only_episodes=only_episodes, produce_episodes=produce_episodes,
+                 include_llm=include_llm)
     job.total = len(steps)
     for s in steps:
         job.set_item(s["label"], state="pending")
@@ -704,10 +711,12 @@ def start(job: Job, pj, **kw) -> None:
 
 def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
             only_episodes: Optional[list] = None,
-            produce_episodes: Optional[list] = None) -> dict:
+            produce_episodes: Optional[list] = None,
+            include_llm: bool = True) -> dict:
     """不跑，只说清「这一次会做什么、跳过什么」。点之前先看一眼，别花冤枉钱。"""
     steps = plan(pj, include_produce=include_produce, include_deliver=include_deliver,
-                 only_episodes=only_episodes, produce_episodes=produce_episodes)
+                 only_episodes=only_episodes, produce_episodes=produce_episodes,
+                 include_llm=include_llm)
     todo, skip = [], []
     for s in steps:
         if s["kind"] == "llm":

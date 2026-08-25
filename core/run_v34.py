@@ -2717,10 +2717,20 @@ def build_tasks(pj: Project, params: dict) -> dict:
             seg = vp.get("seg_id")
             if not seg:
                 continue
+            # **不许在这儿先按 amap 挑一遍。** 视频是四类里唯一带这个前置
+            # 过滤的（故事板那条直接进 split_refs），而 split_refs 的设计
+            # 意图恰恰相反 ——「认不出的 ID 留在列表里、file_ref 留空，
+            # 不要悄悄删掉；删了数量看着是对的，反而看不出少了一张」。
+            #
+            # 用户实遇：提示词里 Image 1..5 映射了 5 张，实际只传了 1 张。
+            # 挑掉的那几张既不进 no_image_refs 也不落失败记录，
+            # 于是片子出得来、任务标成功，参考图是错的而没有一处会说话。
+            # 现在照故事板那条路走：留在列表里，file_ref 空着，
+            # 由出片前 _check_video_ref_map 硬停并报清楚缺哪张。
             vd_refs, vd_no_img = split_refs(
                 pj, amap,
                 [r for r in (vp.get("reference_order") or [])
-                 if isinstance(r, dict) and r.get("asset_id") in amap],
+                 if isinstance(r, dict) and str(r.get("asset_id") or "").strip()],
                 prompts=prompts)
             vd_tasks.append({
                 "key": seg, "episode": ep, "segment": seg,

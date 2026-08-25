@@ -1537,6 +1537,13 @@ def s8_user_builder(pj: Project, params: dict, data: dict, episode: str) -> Call
             "BINDINGS": jd(binding),
             "SHOTS": jd(shots.get(sid, {})),
             "SUBTITLE_RULE": subtitle_rule,
+            # 视频补图从一个变成一组之后，模型得知道能装几张 ——
+            # 不告诉它就会按剧情需要引 5、6 张，到出片才撞上限，
+            # 而**被截掉的正是排在后面的那几张**（服务商从后往前截）。
+            # 取的是**视频那家**的上限：s8 编的是视频提示词，
+            # 拿出图那家的数会差一倍（实遇过出图 9 张、视频 30 张）。
+            "REF_LIMIT": params.get("ref_limit_video")
+            or params.get("ref_limit") or "未知（按最小充分集挑，够用就停）",
         })
         # 模板可能被全局/本剧改写，改写版里没有 {{SUBTITLE_RULE}} 这一格的
         # 话规则就静默丢了（{{MEDIUM_RULE}} 那次的教训）。认特征串兜底。
@@ -2072,13 +2079,37 @@ def _build_tasks(pj: Project, params: dict) -> dict:
                 "params": {"size": params.get("image_size", "1024x1536")},
                 "output": sb_out,
             })
-            aux = c.get("aux_reference_asset_id") or ""
-            if aux and aux not in amap:
-                ghost.setdefault(sid, []).append(f"{aux}（视频的补充参考图）")
+            # 视频补图：**一组，不是一个**。原来只读 `aux_reference_asset_id`
+            # （单个 ID）—— 一段里经常有好几项故事板给不了的权威，
+            # 只能挑一个的话剩下的全靠模型编，而它不会报错。
+            # 老产物只有单个字段，照旧认（不然重跑一遍才能出片）。
+            vd_rows = [r for r in (c.get("video_reference_order") or [])
+                       if isinstance(r, dict)
+                       and str(r.get("asset_id") or "").strip()]
+            if not vd_rows and (c.get("aux_reference_asset_id") or ""):
+                vd_rows = [{"image_n": 2,
+                            "asset_id": c["aux_reference_asset_id"]}]
+            vd_refs = []
+            for i, r in enumerate(vd_rows, 2):
+                rid = str(r["asset_id"]).strip()
+                if rid not in amap:
+                    ghost.setdefault(sid, []).append(f"{rid}（视频的补充参考图）")
+                # **认不出的留在列表里、file_ref 留空** —— 和 v34 的
+                # split_refs 同一条口径。删掉的话数量看着是对的，
+                # 反而看不出少了一张，而出片前那道对账会报清楚缺哪张。
+                vd_refs.append({
+                    "image_n": int(r.get("image_n") or i),
+                    "asset_id": rid,
+                    "file_ref": (asset_output_rel(amap[rid])
+                                 if rid in amap else "")})
+            aux = str((vd_rows[0]["asset_id"] if vd_rows else "")).strip()
             vd_tasks.append({
                 "key": sid, "episode": ep,
                 "prompt_ref": f"03_提示词/视频提示词/{sid}_VIDEO_PROMPT.txt",
                 "storyboard_ref": sb_out,
+                "reference_images": vd_refs,
+                # 老字段留着：产物页和排错工具按它显示视频的辅助参考图。
+                # 只留第一张 —— 它本来就是「一个」的语义，别塞多张进去。
                 "aux_reference": asset_output_rel(amap[aux]) if aux in amap else None,
                 "params": {"duration": params.get("duration", 15),
                            "ratio": params.get("ratio", "9:16")},

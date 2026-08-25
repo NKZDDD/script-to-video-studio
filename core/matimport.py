@@ -410,6 +410,19 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
                                f"画面用错参考，任务照样标成功。"
                                f"要么减到 {cap} 张以内，要么换一家吃得下的。"})
 
+    # 骨架只有一张：V6.2 第 19 章要求覆盖完整关键时间推进。
+    # **只提醒不拦** —— 已经产出来的材料是一段一张（84 张故事板 : 84 段视频），
+    # 判 error 就是把它们全变成死路；而死路比漏检更糟。
+    for u in units:
+        if u["kind"] == "video" and len(u.get("spine") or []) == 1:
+            out.append({"level": "warn", "code": "VIDEO_SPINE_SINGLE",
+                        "msg": f"第 {u['no']:03d} 条（{u['filename']}）"
+                               f"只有 1 张故事板骨架 —— 一张只能说明某个瞬间，"
+                               f"模型不知道这一段先发生什么后发生什么，"
+                               f"**会把后段的画面当前段用而不报错**，"
+                               f"出来的片子时间顺序是乱的。"
+                               f"要覆盖完整关键时间推进的全部有序 Sheet"})
+
     # 段号连续：缺一段 = 成片短一截，而拼接不会说话
     byep: dict = {}
     for u in units:

@@ -29,8 +29,14 @@ from .executor import LLM_GATE, Job, run_chain
 
 
 def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
-         only_episodes: Optional[list] = None) -> list:
+         only_episodes: Optional[list] = None,
+         include_llm: bool = True) -> list:
     """算出要做哪些步骤（含已完成的，执行时再跳过）。
+
+    `include_llm=False` 是「只跑生产」：材料导入模式下没有那 27 个环节的
+    中间产物，跑 LLM 步只会一步步失败。而生产这几步要的东西 tasks.json
+    里全有 —— 所以这条路径能完整拿到 relay 的就绪即派和 sweep_redo 的
+    条件补跑，那两样以前只有「一键跑到底」有。
 
     顺序是有讲究的：
       n1 先跑，它切完集才知道有几集；
@@ -41,13 +47,17 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
       场景状态图 → 故事板 → 视频，每一步都拿上一步当参考图；
       交付放最后。
     """
-    steps = [{"kind": "freeze", "stage": "n0", "episode": "", "label": _label("n0")}]
+    # 只跑生产时连 n0（冻结设置）也不做 —— 它是分析那一段的准备，
+    # 而材料导入模式压根没有分析这一段。
+    steps = ([{"kind": "freeze", "stage": "n0", "episode": "",
+               "label": _label("n0")}] if include_llm else [])
     # 全剧级环节**从环节表推导**，不写死。
     # 写死的代价踩过：把 n3..n6 改成全剧级之后，它们既不在写死的头部里、
     # 也不在逐集列表里 —— 整段直接从计划里消失，跑起来是「第7环节失败」，
     # 报错指向下游，看不出上游根本没跑。
     for s in V.STAGES:
-        if s["kind"] == "llm" and V.scope_of(s["id"]) == "series":
+        if (include_llm and s["kind"] == "llm"
+                and V.scope_of(s["id"]) == "series"):
             steps.append({"kind": "llm", "stage": s["id"], "episode": "",
                           "label": _label(s["id"])})
 
@@ -61,9 +71,10 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
                 f"当前切出了 {len(have)} 集：{have[0]} … {have[-1]}。"
                 f"把那个框清空 = 全部集。")
 
-    per_ep = [s["id"] for s in V.STAGES
-              if s["kind"] == "llm" and V.scope_of(s["id"]) in ("episode", "segment")
-              and s["id"] != "n14"]
+    per_ep = ([s["id"] for s in V.STAGES
+               if s["kind"] == "llm"
+               and V.scope_of(s["id"]) in ("episode", "segment")
+               and s["id"] != "n14"] if include_llm else [])
     for ep in eps:
         for sid in per_ep:
             steps.append({
@@ -83,7 +94,7 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
                           "label": _label(sid) + _scope_tag(eps, pj)})
 
     if include_deliver:
-        for ep in eps:
+        for ep in (eps if include_llm else []):
             steps.append({"kind": "llm", "stage": "n14", "episode": ep,
                           "soft": True, "label": _label("n14", ep)})
         for sid in ("d1", "d2"):
@@ -181,7 +192,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         include_produce: bool = True, include_deliver: bool = True,
         only_episodes: Optional[list] = None,
         ep_concurrency: int = 4, seg_concurrency: int = 4,
-        llm_concurrency: int = 0) -> None:
+        llm_concurrency: int = 0, include_llm: bool = True) -> None:
     # **必须配。** 这一行以前只有 pipeline.py（通用级）有，这边一直没接 ——
     # 于是电影级的分析并发永远是 LlmGate 的构造默认值 4，
     # 页面上「分析·总上限」填 200 也没用，状态栏一直显示「分析 3/4」。
@@ -189,7 +200,8 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     LLM_GATE.configure(llm_concurrency or max(1, ep_concurrency, seg_concurrency))
     LLM_GATE.reset_peak()
     steps = plan(pj, include_produce=include_produce,
-                 include_deliver=include_deliver, only_episodes=only_episodes)
+                 include_deliver=include_deliver, only_episodes=only_episodes,
+                 include_llm=include_llm)
     job.total = len(steps)
     for s in steps:
         job.set_item(s["label"], state="pending")
@@ -575,14 +587,16 @@ def start(job: Job, pj, **kw) -> None:
 
 
 def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
-            only_episodes: Optional[list] = None) -> dict:
+            only_episodes: Optional[list] = None,
+            include_llm: bool = True) -> dict:
     """不跑，只说清「这一次会做什么、跳过什么」。点之前先看一眼，别花冤枉钱。
 
     逐段环节的待办按**段**算而不是按环节算：一集十几段时，
     「还要跑 1 个环节」和「还要跑 13 次调用」差着一个数量级。
     """
     steps = plan(pj, include_produce=include_produce,
-                 include_deliver=include_deliver, only_episodes=only_episodes)
+                 include_deliver=include_deliver, only_episodes=only_episodes,
+                 include_llm=include_llm)
     todo, skip, calls = [], [], 0
     for s in steps:
         if s["kind"] == "freeze":

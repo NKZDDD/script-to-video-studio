@@ -247,6 +247,12 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
         <select id="autoDur"></select></label>
       <label style="margin:0"><input id="autoProduce" type="checkbox" checked> 包含出图出片</label>
       <label style="margin:0"><input id="autoDeliver" type="checkbox" checked> 包含复核+拼接</label>
+      <!-- 「只跑生产」：材料导入模式下 LLM 环节的中间产物压根不存在，跑分析
+           只会一步步失败；而出图出片要的东西 tasks.json 里全有。走一键跑到底
+           这条路径才拿得到就绪即派 + 条件补跑（「生产」页单点一类拿不到跨类的
+           「前一步补出来的文件后一步立刻用」）。 -->
+      <label style="margin:0" title="材料导入模式用这个：跳过全部 LLM 环节，只按 tasks.json 出图出片。就绪即派 + 条件补跑照旧">
+        <input id="autoNoLlm" type="checkbox"> <b>只跑生产</b>（跳过分析环节）</label>
       <label style="margin:0" title="留空=全部集。环节1 永远读整部剧本；这里限制的是逐集分析（环节2-8）">
         分析这几集 <input id="autoOnly" list="epList" placeholder="留空=全部集，如 EP01"
           style="width:190px"></label>
@@ -1210,8 +1216,12 @@ function autoBody() {
           llm_episodes: +$('#autoEpConc').value,
           llm_segments: +$('#autoSegConc').value,
           llm_concurrency: +$('#autoLlmConc').value,
+          include_llm: !$('#autoNoLlm').checked,
           include_produce: $('#autoProduce').checked,
-          include_deliver: $('#autoDeliver').checked,
+          // 只跑生产时连带把交付关掉 —— 复核（n14）本身是个 LLM 环节，
+          // 拼接要的是成片，成片这一趟才刚开始出。
+          include_deliver: $('#autoDeliver').checked
+                           && !$('#autoNoLlm').checked,
           only_episodes: only.length ? only : null,
           produce_episodes: prod.length ? prod : null,
           // 面板为准；**面板为空就回落「设置 → 默认参数」** ——
@@ -1219,6 +1229,18 @@ function autoBody() {
           // 而这三个下拉在链没配好（能力表拿不到候选）时真的会是空的。
           params_override: runParams()};
 }
+// 「只跑生产」勾上时，「包含出图出片」必须也勾着 —— 两个都不勾的话
+// 计划里一步都不剩，跑起来是「完成」，而什么都没做。
+$('#autoNoLlm').onchange = e => {
+  if (e.target.checked) {
+    $('#autoProduce').checked = true;
+    $('#autoProduce').disabled = true;
+    $('#autoDeliver').disabled = true;
+  } else {
+    $('#autoProduce').disabled = false;
+    $('#autoDeliver').disabled = false;
+  }
+};
 // 「只测第一集」：两个范围一起设。分开填容易只填一个 ——
 // 只填分析范围会漏掉出图出片，只填出图范围会白跑 40 集的文字。
 $('#autoOnlyEp1').onclick = () => {

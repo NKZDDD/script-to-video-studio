@@ -873,8 +873,14 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             f = str(r.get("url") or r.get("file_ref") or "")
             if f:
                 refs.append(to_ref(f, log))
-        # V6.1 的老字段照旧认（那条路径一直是对的）
-        if task.get("aux_reference"):
+        # V6.1 的老字段照旧认 —— **但只在没有 reference_images 的时候。**
+        #
+        # 通用版的视频补图从「一个」改成「一组」之后，两个字段都会有值：
+        # `reference_images` 是整组，`aux_reference` 是其中第一张（留着给
+        # 产物页和排错工具显示）。两个都传的话第一张补图**被上传两次** ——
+        # 而 image_n 是按上传顺序算的，于是它后面每一张的编号整体错位，
+        # 提示词里每条描述都套到别的图上。**画面出得来，参考全是错的。**
+        if task.get("aux_reference") and not aux:
             refs.append(to_ref(task["aux_reference"], log))
         # ---- 声明的映射 ↔ 实际要上传的清单，两头对账 ----
         #

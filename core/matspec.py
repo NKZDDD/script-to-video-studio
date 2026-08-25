@@ -69,8 +69,13 @@ MATERIAL_FIELDS = {
         ("filename", True, "产物文件名（带后缀）。视频一律落 `05_分段视频/`，"
                            "不看 key 的前缀"),
         ("prompt", True, "完整可投喂的提示词正文"),
-        ("storyboard_refs", True, "本段的**有序故事板骨架**。空的 → "
-                                  "报「缺故事板」直接不出片"),
+        ("storyboard_refs", True, "本段的**有序故事板骨架**，"
+                                  "要覆盖这一段**完整的关键时间推进** —— "
+                                  "把本段全部有序 Sheet 按 `image_n` 都给上，"
+                                  "**不许退化成一张起始图**。"
+                                  "空的 → 报「缺故事板」直接不出片；"
+                                  "只有一张 → 验收提醒（模型不知道这一段先"
+                                  "发生什么后发生什么，会把后段当前段用）"),
         ("reference_images", False, "骨架之后的补图，编号接着排"),
         ("duration", False, "秒数。不写就用申报头里的 `seg_duration`"),
         ("ratio", False, "画幅。不写就用申报头里的 `ratio`"),
@@ -217,6 +222,10 @@ AUDIT = [
                        "引用链、编号、段号全绿，没有任何一处会说话"),
     ("视频必须有骨架", "每条视频要有 `storyboard_refs`。空的 → "
                        "视频那一层报「缺故事板」直接不出片"),
+    ("骨架不许只有一张", "一段视频只给一张骨架 → **提醒**（不拦）。"
+                         "一张只能说明某个瞬间，模型收到它之后不知道这一段"
+                         "先发生什么后发生什么 —— 会把后段的画面当前段用，"
+                         "**不报错**，出来的片子时间顺序是乱的"),
     ("kind 只认三个值", "`image` / `video` / `manifest`。认不出的**不建任务** —— "
                         "猜成图片的话，一条视频会被当资产图出掉，"
                         "任务标成功，成片里少一段而没人报错"),
@@ -295,22 +304,26 @@ def jsonl_schema() -> str:
     """
     man = {
         "kind": "manifest",
-        "total": 3, "image": 2, "video": 1,
+        "total": 4, "image": 3, "video": 1,
         "episodes": 1, "segs_per_episode": {"EP01": 1},
         "params": {"episode_seconds": 60, "seg_duration": 15,
                    "ratio": "9:16", "image_size": "9:16",
                    "pacing": "中速", "subtitle": True},
     }
-    sb = {
-        "kind": "image",
-        "key": "PRJ_X__SBSHEET_EP01_SEG01_A_R01",
-        "family": "SBSHEET",
-        "name": "EP01-SEG01 故事板 A",
-        "filename": "PRJ_X__SBSHEET_EP01_SEG01_A_R01.png",
-        "size": "9:16",
-        "reference_images": [],
-        "prompt": "（完整可投喂提示词正文，一个字都不要省）",
-    }
+    def _sheet(letter, what):
+        return {
+            "kind": "image",
+            "key": f"PRJ_X__SBSHEET_EP01_SEG01_{letter}_R01",
+            "family": "SBSHEET",
+            "name": f"EP01-SEG01 故事板 {letter}（{what}）",
+            "filename": f"PRJ_X__SBSHEET_EP01_SEG01_{letter}_R01.png",
+            "size": "9:16",
+            "reference_images": [],
+            "prompt": "（完整可投喂提示词正文，一个字都不要省）",
+        }
+    # **两张，不是一张。** 样例给一张的话，codex 照样例的形状产就是一张，
+    # 而那正是「视频只有一个参考图」的来处 —— 样例本身在教它。
+    sb_a, sb_b = _sheet("A", "入场"), _sheet("B", "关键动作结果")
     img = {
         "kind": "image",
         "key": "PRJ_X__CHAR_001_R02",
@@ -331,9 +344,11 @@ def jsonl_schema() -> str:
         "ratio": "9:16",
         "storyboard_refs": [
             {"image_n": 1, "key": "PRJ_X__SBSHEET_EP01_SEG01_A_R01",
-             "role": "ENTRY"}],
+             "role": "ENTRY"},
+            {"image_n": 2, "key": "PRJ_X__SBSHEET_EP01_SEG01_B_R01",
+             "role": "KEY_ACTION_RESULT"}],
         "reference_images": [
-            {"image_n": 2, "key": "PRJ_X__CHAR_001_R02",
+            {"image_n": 3, "key": "PRJ_X__CHAR_001_R02",
              "who": "19岁林溪；校服脏湿、掌心烧伤",
              "controls": "身份与当前 LOOK/CT",
              "not_controls": "节奏、镜头顺序、站位",
@@ -342,7 +357,7 @@ def jsonl_schema() -> str:
     }
     import json as _j
     return chr(10).join(_j.dumps(r, ensure_ascii=False)
-                        for r in (man, sb, img, vid))
+                        for r in (man, sb_a, sb_b, img, vid))
 
 
 # 材料交到哪。**约定一个确定的名字**，别让人每次去翻文件对话框 ——
@@ -488,6 +503,25 @@ def render(limits: Optional[dict] = None, project_name: str = "",
       "第二道查每个编号后面有没有说清这张图是谁。"
       "只写编号会被第二道拦下 ——「只说这张图控制服饰」不够，"
       "它不知道是哪个人，多人场景必然张冠李戴。")
+    a("")
+    a("## 视频的参考图分两层")
+    a("")
+    a("**第一层：故事板时间骨架，必给，不可省。**"
+      "把本段全部有序 Sheet 按 `image_n` 上传 —— 它负责的是："
+      "先发生什么后发生什么、每个节拍谁施动谁受动、"
+      "关键动作阶段与稳定结果、镜头顺序与切换动机。")
+    a("")
+    a("一张做不到这些。**一张只是某个瞬间**，模型拿到它之后这一段的时间"
+      "推进全靠自己编 —— 而它不会报错，片子出得来，顺序是乱的。")
+    a("")
+    a("**第二层：补图，要证明有独有作用。** 每张都得回答"
+      "「骨架给不了的是哪一项」：主角身份跨镜头易漂、当前造型的背面/下装/"
+      "鞋履/伤势首次显露、镜头进入骨架没充分说明的新区域、"
+      "关键道具的文字或结构在骨架里不可辨、不可逆状态结果需要独立权威。")
+    a("")
+    a("**额度先给骨架，剩下的才是补图的。** 参考图上限是容量上限，"
+      "不是要装满的目标 —— 但也不是可以减到一张的许可。"
+      "骨架张数本身就超上限的话，是承载颗粒度要合并，**不许砍骨架**。")
     a("")
     a("## 落点（和程序自己跑 LLM 时完全一致）")
     a("")

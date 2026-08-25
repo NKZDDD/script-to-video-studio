@@ -18,6 +18,7 @@ from core.llm import LLM
 from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provider,
                             list_capabilities, resolve_id as resolve_provider_id)
 from core import paths
+from core import relay as _relay
 from core.store import Project, list_projects, read_json, write_json
 
 ROOT = paths.PROGRAM_DIR
@@ -1432,10 +1433,12 @@ def api_post(path: str, body: dict) -> dict:
         if system_of(pj) == "v34":
             from core import pipeline_v34
             return pipeline_v34.preview(
-                pj, include_produce=body.get("include_produce", True),
+                pj, include_llm=body.get("include_llm", True),
+                include_produce=body.get("include_produce", True),
                 include_deliver=body.get("include_deliver", True),
                 only_episodes=body.get("only_episodes"))
         return pipeline.preview(pj,
+                               include_llm=body.get("include_llm", True),
                                include_produce=body.get("include_produce", True),
                                include_deliver=body.get("include_deliver", True),
                                only_episodes=body.get("only_episodes"),
@@ -1496,6 +1499,10 @@ def api_post(path: str, body: dict) -> dict:
                                 or (cfg.get("defaults") or {}).get("concurrency", 3)),
                 max_retry=int(body.get("max_retry")
                               or (cfg.get("defaults") or {}).get("max_retry", 2)),
+                # 「只跑生产」：材料导入模式下没有那些 LLM 中间产物，跑分析步只会
+                # 一步步失败；而生产要的东西 tasks.json 里全有。走这条路径才拿得到
+                # relay 的就绪即派 + sweep_redo 的条件补跑。
+                include_llm=body.get("include_llm", True),
                 include_produce=body.get("include_produce", True),
                 include_deliver=body.get("include_deliver", True),
                 only_episodes=body.get("only_episodes"),
@@ -1517,6 +1524,7 @@ def api_post(path: str, body: dict) -> dict:
                             or (cfg.get("defaults") or {}).get("concurrency", 3)),
             max_retry=int(body.get("max_retry")
                           or (cfg.get("defaults") or {}).get("max_retry", 2)),
+            include_llm=body.get("include_llm", True),
             include_produce=body.get("include_produce", True),
             include_deliver=body.get("include_deliver", True),
             only_episodes=body.get("only_episodes"),
@@ -2019,6 +2027,11 @@ def api_post(path: str, body: dict) -> dict:
                              project_root=pj.root, project_name=os.path.basename(pj.root),
                              provider=chain[0]["provider"], model=chain[0].get("model", ""))
 
+        # 本趟的起点。条件补跑用它区分新旧失败记录：这一刻之前的是上一趟的
+        # 旧账，不该拦住本趟的补跑（core/relay._fresh_hard_errors）。
+        import time as _t0
+        epoch = _t0.strftime("%Y-%m-%d %H:%M:%S")
+
         def go():
             try:
                 # 已经出好的资产本身就解除了依赖，所以只对尚未出图的算依赖。
@@ -2031,8 +2044,30 @@ def api_post(path: str, body: dict) -> dict:
                 if waiting:
                     parent.log(kind, f"{len(pending)} 项里有 {waiting} 项要等上游资产 —— "
                                      f"参考图一齐就开跑，不等整层出完")
+                # ---- relay：**这条路径以前一个 relay 都没有** ----
+                #
+                # `deps_of` 只对资产有（asset_deps），故事板和视频在这条路上
+                # 参考图没齐也照样派出去 —— 撞成一条「失败」，而它不是失败，
+                # 是条件不具备。面板上两者长得一样，人分不出「这条要修」和
+                # 「这条在等」。一键跑到底那条路早就有 relay，这边一直没接。
+                #
+                # 登记全四类：漏了哪一类，等它产物的下游会误判成
+                # 「没人会做它」而立刻开跑。
+                relay = _relay.Relay(pj)
+                for _bk, _tk in (("p1", "asset_tasks"),
+                                 ("p2", "scstate_tasks"),
+                                 ("p3", "storyboard_tasks"),
+                                 ("p4", "video_tasks")):
+                    relay.declare(_bk, tasks.get(_tk) or [])
+                # 别的三类这一趟不跑 —— 标成「那一批已经收摊」，
+                # 否则本类会一直等一个永远不会开始的批次。
+                _mine = {"asset": "p1", "storyboard": "p3", "video": "p4"}[kind]
+                for _bk in ("p1", "p2", "p3", "p4"):
+                    if _bk != _mine:
+                        relay.finished(_bk)
                 r = run_chain(
                         pending, chain=chain, deps_of=deps.get if deps else None,
+                        ready_of=relay.ready_of(_mine),
                         # 分析引擎要传下去：被审核拒绝时靠它改写提示词重发。
                         # 「生产」页单独跑这一步走的是这条路径，漏传的话
                         # 一键跑会自动改写、单独点这一步不会 —— 而两边都不报错。
@@ -2051,7 +2086,41 @@ def api_post(path: str, body: dict) -> dict:
                     parent.set_item(f"{a['provider']}/{a['model']}", state=
                                    "failed" if a["counts"].get("failed") else "ok",
                                    msg=str(a["counts"]))
-                parent.status = "error" if r["left"] else "done"
+                # ---- 条件补跑：**这条路径以前也没有** ----
+                #
+                # 就绪即派只在派单那一刻检测一次。一条任务那会儿输入没齐、
+                # 被标成「条件不具备」，之后上游补完了（可能是另一个 job 出的图），
+                # 它不会自己复活 —— 得等人再点一次「开始」。用户原话：
+                # 「满足条件就开始干，没做出图片，满足条件继续重试」。
+                # sweep_redo 一直只在「一键跑到底」里被调用，这边现在接上。
+                step = {"produce": kind, "batch": _mine,
+                        "task_key": key_map[kind], "label": kind,
+                        "only": [ep_sel] if ep_sel else None}
+                _relay.sweep_redo(
+                    pj, [step], relay,
+                    run_step=lambda _s, pick: run_chain(
+                        pick, chain=chain,
+                        worker_of=lambda p: (
+                            S.make_video_worker(pj, p, _soften_llm)
+                            if kind == "video"
+                            else S.make_image_worker(pj, p, kind, _soften_llm)),
+                        job_of=lambda p, n: JOBS.create(
+                            kind, n, conc, project_root=pj.root,
+                            project_name=os.path.basename(pj.root),
+                            provider=p["provider"], model=p.get("model", "")),
+                        key_of=lambda t: t["key"],
+                        done_of=lambda t: probe.have_output(
+                            pj.p(*t["output"].split("/"))),
+                        max_retry=retry, log=lambda m: parent.log(kind, m)),
+                    todo_of=lambda s: [
+                        t for t in items
+                        if not probe.have_output(pj.p(*t["output"].split("/")))],
+                    epoch=epoch, should_stop=lambda: bool(parent.cancelled
+                                                          or parent.aborted),
+                    log=lambda _s, m: parent.log(kind, m))
+                left = [t for t in items
+                        if not probe.have_output(pj.p(*t["output"].split("/")))]
+                parent.status = "error" if left else "done"
             except Exception as exc:                 # noqa: BLE001
                 d = diagnose.build(exc, stage=kind, target=kind)
                 parent.log(kind, diagnose.one_line(d))

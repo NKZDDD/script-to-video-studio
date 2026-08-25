@@ -330,8 +330,11 @@ class SpecTests(unittest.TestCase):
         """
         from core import matspec as S
         raw = M.parse(S.jsonl_schema())
+        # 视频带**两张**骨架 —— 样例给一张的话，codex 照样例产就是一张，
+        # 而那正是「视频只有一个参考图」的来处（样例本身在教它）。
         self.assertEqual([u["kind"] for u in raw],
-                         ["manifest", "image", "image", "video"])
+                         ["manifest", "image", "image", "image", "video"])
+        self.assertEqual(len(M.units_of(raw)[-1]["spine"]), 2)
         for u in M.units_of(raw):
             self.assertEqual(u["missing"], [], f"契约示例自己都不合格：{u}")
         self.assertEqual(M.audit(raw, {"image": 6, "video": 7}), [],
@@ -339,7 +342,7 @@ class SpecTests(unittest.TestCase):
         built = M.build(raw)
         self.assertEqual(built["skipped"], [])
         self.assertEqual(len(built["tasks"]["video_tasks"][0]
-                             ["storyboard_refs"]), 1)
+                             ["storyboard_refs"]), 2)
 
     def test_the_spec_says_the_real_limits(self):
         from core import matspec as S
