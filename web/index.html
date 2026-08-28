@@ -88,6 +88,7 @@ th{color:var(--dim);font-weight:500;font-size:12px}
 .s-ok{color:var(--ok);border-color:var(--ok)} .s-run{color:var(--accent);border-color:var(--accent)}
 .s-fail{color:var(--err);border-color:var(--err)} .s-skip{color:var(--dim)}
 .s-pend{color:var(--dim)}
+.s-warn{color:var(--warn);border-color:var(--warn)}
 pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-height:280px;
   overflow:auto;font-size:11.5px;line-height:1.5;margin:0}
 .bar{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden}
@@ -380,6 +381,22 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     </div>
     <div id="ppBody"><p class="muted">选一个环节，点「看提示词」</p></div>
   </div>
+  <div class="card" id="sbProjCard">
+    <h2>本剧的字幕 <span class="tag">只影响这一部剧：要不要字幕、什么样式、怎么断句</span></h2>
+    <p class="muted" style="margin:0 0 8px">
+      继承关系：<b>内置 → 全局基础（设置页）→ 本剧</b>，下面的盖上面的 ——
+      和「本剧的提示词」同一条链。不填就跟着设置页走，改了设置页这部剧也跟着变。<br>
+      <b>字幕用的 LLM（Base URL / Key / 模型）和单集超时不在这里</b> ——
+      那是账号和机器的事，所有剧共用一份，在「设置 → 字幕」里配。
+    </p>
+    <div id="sbProjBox"><p class="muted">打开项目后看这里</p></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="sbProjSave">保存本剧的字幕设置</button>
+      <button class="btn ghost sm" id="sbProjReset">全部回到继承</button>
+      <span class="muted" id="sbProjHint"></span>
+    </div>
+    <div id="sbProjProblems" style="margin-top:8px"></div>
+  </div>
   <div class="card" id="ptProjCard">
     <h2>本剧的提示词 <span class="tag">只影响这一部剧：语言、题材、基础设定这类要求写在这里</span></h2>
     <div id="ptProject"></div>
@@ -575,6 +592,131 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     </p>
     <div id="chainBox"></div>
     <div class="row" style="margin-top:10px"><button class="btn" id="saveChains">保存优先级</button></div>
+  </div>
+  <div class="card">
+    <h2>字幕 <span class="tag">这里是<b>新剧的默认值</b>；某部剧要不一样，去流程页「本剧的字幕」</span></h2>
+    <p class="muted" style="margin:0 0 8px">
+      开了之后，环节12 拼完成片会多跑一步：把成片交给
+      <b>VideoCaptioner</b>（<a href="https://github.com/WEIFENG2333/VideoCaptioner"
+      target="_blank" rel="noreferrer">开源项目</a>，独立的命令行程序）——
+      它听成片的音轨识别台词、断句、用 LLM 纠错，再把字幕压回成片。<br>
+      <b>先装它</b>：<code>pip install videocaptioner</code>，装完点下面的自检。
+      默认识别引擎<b>「必剪」免费、不用填 key、不用下模型</b>；
+      只有勾了「LLM 优化」才需要填下面那三个。<br>
+      <b>字幕样式只在「烧录进画面」时生效</b> —— 软字幕长什么样是播放器决定的，
+      跟这里选哪份样式无关。所以默认是烧录：代价是整片重编码（慢一些、
+      掉一次画质、字幕不可关），换来的是字体字号边距完全按你的样式来。<br>
+      <b>这一页填的是所有剧的底子。</b> 字幕是剧维度的配置 ——
+      继承关系 <b>内置 → 全局基础（这一页）→ 本剧</b>，某部剧要换样式、
+      换断句长度、单独关掉，去<b>流程页的「本剧的字幕」</b>改，不用动这里。<br>
+      例外是下面的 <b>LLM 三项和单集超时</b>：那是账号和机器的事，
+      所有剧共用一份，剧级盖不了。<br>
+      <span class="muted">另外，和「项目基础信息 → 字幕」那个开关不是一回事：
+      那个管<b>出图出片时画面里本身要不要带字幕</b>，这里是
+      <b>成片做完之后另加一条字幕</b>。两个都开会出现两层字幕。</span>
+    </p>
+    <div class="grid g3">
+      <div><label>启用</label>
+        <label class="row" style="margin:0;gap:7px;align-items:center">
+          <input id="sbEnabled" type="checkbox" style="width:auto">
+          <span>成片做完后加字幕</span></label></div>
+      <div><label>识别引擎</label>
+        <select id="sbAsr">
+          <option value="bijian">必剪（免费，推荐）</option>
+          <option value="jianying">剪映（免费）</option>
+          <option value="faster-whisper">faster-whisper（本机跑，要下模型）</option>
+          <option value="whisper-cpp">whisper-cpp（本机跑，要下模型）</option>
+          <option value="whisper-api">Whisper API（按量收费）</option>
+        </select></div>
+      <div><label>识别语言</label>
+        <input id="sbLang" placeholder="auto" list="sbLangList">
+        <datalist id="sbLangList"><option value="auto"><option value="zh"><option value="en"><option value="ja"></datalist></div>
+      <div><label>字幕怎么加进成片</label>
+        <select id="sbMode">
+          <option value="hard">烧录进画面（样式生效；整片重编码，慢）</option>
+          <option value="soft">内封软字幕轨（快，不重编码；<b>样式不生效</b>）</option>
+        </select></div>
+      <div><label>字幕样式
+          <span class="muted">只在「烧录进画面」时生效</span></label>
+        <select id="sbStyle"><option value="">（VideoCaptioner 默认）</option></select>
+        <span class="muted" id="sbStyleNote"></span></div>
+      <div><label>LLM 优化 <span class="muted">纠错别字、顺句子</span></label>
+        <label class="row" style="margin:0;gap:7px;align-items:center">
+          <input id="sbOptimize" type="checkbox" style="width:auto">
+          <span>开（要填下面的 key）</span></label></div>
+      <div><label>翻译成另一种语言</label>
+        <label class="row" style="margin:0;gap:7px;align-items:center">
+          <input id="sbTranslate" type="checkbox" style="width:auto">
+          <span>开（做双语字幕）</span></label></div>
+    </div>
+    <div class="grid g3" id="sbTransBox" style="margin-top:8px">
+      <div><label>翻译用什么</label>
+        <select id="sbTransSvc">
+          <option value="bing">Bing（免费）</option>
+          <option value="google">Google（免费）</option>
+          <option value="llm">用下面配的 LLM（质量好，花钱）</option>
+        </select></div>
+      <div><label>翻译成</label>
+        <input id="sbTargetLang" placeholder="zh-Hans" list="sbTgtList">
+        <datalist id="sbTgtList"><option value="zh-Hans"><option value="en"><option value="ja"><option value="ko"></datalist></div>
+    </div>
+    <h3 style="margin:14px 0 6px;font-size:13px">字幕用的 LLM
+      <span class="muted">和上面「分析引擎」是两套，可以填不同的服务商 ·
+      <b>所有剧共用，剧级盖不了</b></span></h3>
+    <p class="muted" style="margin:0 0 8px">
+      这一格填的 key <b>由 VideoCaptioner 自己去调</b>，不走本程序的分析引擎。
+      分开填是因为两件事的量级差很远：整剧解析要长上下文的贵模型，
+      而字幕纠错是短句子批处理，用便宜的小模型就够，没必要为它烧同一个额度。<br>
+      填任何 <b>OpenAI 兼容</b>的接口都行 —— 上面「服务商」里那几家大多都兼容，
+      把 Base URL 和 Key 抄过来即可。
+    </p>
+    <div class="grid g3">
+      <div><label>Base URL</label>
+        <input id="sbLlmBase" placeholder="https://api.paisio.online/v1"></div>
+      <div><label>API Key</label>
+        <input id="sbLlmKey" type="password" placeholder="留空 = 不改"></div>
+      <div><label>模型</label>
+        <input id="sbLlmModel" placeholder="gpt-4o-mini"></div>
+    </div>
+    <div id="sbTweakCard" style="margin-top:12px;padding:10px;border:1px solid var(--line);border-radius:8px">
+      <div class="row" style="justify-content:space-between;align-items:baseline">
+        <b style="font-size:13px">字幕微调</b>
+        <span class="muted">不填 = 按样式走（灰字是样式里的值）</span>
+      </div>
+      <p class="muted" style="margin:6px 0 8px">
+        盖掉所选样式的某几个值，样式文件本身不动 —— 想换一部剧的观感时
+        不用另存一份样式。<b>只在「烧录进画面」时有用。</b>
+      </p>
+      <div class="grid g3" id="sbTweakBox"></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn ghost sm" id="sbTweakClear">全部清空（回到样式原值）</button>
+        <span class="muted" id="sbTweakNote"></span>
+      </div>
+    </div>
+    <details style="margin-top:10px"><summary class="muted">断句与画质（一般不用改）</summary>
+      <div class="grid g3" style="margin-top:8px">
+        <div><label>中文每行最多几个字</label>
+          <input id="sbCjk" type="number" min="6" max="40" value="18"></div>
+        <div><label>英文每行最多几个词</label>
+          <input id="sbEn" type="number" min="4" max="30" value="12"></div>
+        <div><label>压制画质 <span class="muted">只在「烧录进画面」时有用</span></label>
+          <select id="sbQuality">
+            <option value="low">低（快）</option>
+            <option value="medium">中</option>
+            <option value="high">高（慢）</option>
+          </select></div>
+        <div><label>单集超时（秒）
+            <span class="muted">识别 + 压制一起算 · <b>所有剧共用</b></span></label>
+          <input id="sbTimeout" type="number" min="300" max="21600" step="300" value="3600"></div>
+      </div>
+    </details>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="saveSubtitle">保存</button>
+      <button class="btn ghost sm" id="testSubtitle"
+              title="只查装没装、依赖齐不齐，不识别不调接口，零成本">运行自检（不花钱）</button>
+      <span class="muted" id="sbState"></span>
+    </div>
+    <div id="sbResult" style="margin-top:8px"></div>
   </div>
   <div class="card">
     <h2>参考图上传（对象存储） <span class="tag">配好之后参考图统一走链接，请求体从几 MB 缩成一行</span></h2>
@@ -939,6 +1081,7 @@ async function boot() {
   renderPaths();
   renderLimits();
   renderUpload();
+  renderSubtitle();
   renderChains();
   renderPrices();
   renderAuto();
@@ -996,6 +1139,9 @@ async function openProject(root) {
   syncProjPick();
   await refreshProject();
   renderBrief();
+  // 字幕面板和「项目基础信息」一起加载 —— 都是剧维度的，
+  // 少加载一个的表现是那张卡永远停在「打开项目后看这里」。
+  renderProjSubtitle().catch(() => {});
   $$('nav button')[1].click();
 }
 
@@ -1643,6 +1789,210 @@ function currentParams() {
 // schema 从后端来，页面不维护第二份字段表 —— 维护两份就要同步，
 // 漏一处就是「填了没生效」而且不报错。
 let BRIEF = [];
+
+// ---------- 本剧的字幕（剧维度，继承设置页）
+//
+// 每一项都是三态：**跟随全局 / 自定义**。三态不能用普通控件表示 ——
+// 用勾选框或者带默认值的下拉的话，「没设过」和「设成了和全局一样的值」
+// 长得一模一样，于是改了设置页之后，那些「其实只是当时跟全局一样」的剧
+// 不会跟着变，而人以为它们是继承的。
+// 所以每个字段前面挂一个「跟随/自定义」的开关，自定义时才显示输入控件。
+let SP = {fields: [], global: {}, own: {}, styles: [], fonts: [],
+          tweakFields: [], preset: {}};
+
+async function renderProjSubtitle() {
+  const box = $('#sbProjBox');
+  if (!box) return;
+  if (!PROJ) { box.innerHTML = '<p class="muted">打开项目后看这里</p>'; return; }
+  const r = await api.post('/api/project/subtitle', {project_root: PROJ});
+  SP = {fields: r.fields || [], global: r.global || {}, own: {...(r.own || {})},
+        styles: r.styles || [], fonts: r.fonts || [],
+        tweakFields: r.tweak_fields || [], preset: r.preset || {}};
+  SP.installed = r.installed; SP.llmReady = r.llm_ready;
+  drawProjSubtitle(r.problems || []);
+}
+
+function spShow(f, v) {
+  // 「跟随全局」那一行要写出**继承来的具体值**，不能只写「跟随全局」——
+  // 写了值人才知道不填会得到什么，不用切到设置页去看。
+  if (v === undefined || v === null || v === '') return '（空）';
+  if (typeof v === 'boolean') return v ? '是' : '否';
+  if (f.zh && f.zh[v]) return f.zh[v];
+  if (f.type === 'tweak') {
+    const n = Object.keys(v || {}).length;
+    return n ? `盖了 ${n} 项` : '（没盖）';
+  }
+  return String(v);
+}
+
+function drawProjSubtitle(problems) {
+  const box = $('#sbProjBox');
+  const groups = [];
+  SP.fields.forEach(f => {
+    const g = groups.find(x => x.name === f.group);
+    (g ? g.fields : (groups.push({name: f.group, fields: []}),
+                     groups[groups.length - 1].fields)).push(f);
+  });
+  box.innerHTML = groups.map(g => {
+    const rows = g.fields.filter(f => {
+      // when 不满足的字段不显示。判据用**生效值**（自定义了看自定义的，
+      // 没自定义看继承的）—— 只看自定义值的话，继承了「开翻译」的剧
+      // 看不到目标语言那一栏。
+      if (!f.when) return true;
+      const eff = f.when in SP.own ? SP.own[f.when] : SP.global[f.when];
+      return !!eff;
+    }).map(f => {
+      const own = f.key in SP.own;
+      const inh = spShow(f, SP.global[f.key]);
+      let ctl = '';
+      if (own) {
+        const v = SP.own[f.key];
+        if (f.type === 'bool')
+          ctl = `<select data-sp="${esc(f.key)}">
+            <option value="1"${v ? ' selected' : ''}>是</option>
+            <option value="0"${!v ? ' selected' : ''}>否</option></select>`;
+        else if (f.type === 'enum')
+          ctl = `<select data-sp="${esc(f.key)}">` + f.options.map(o =>
+            `<option value="${esc(o)}"${String(o) === String(v) ? ' selected' : ''}
+             >${esc((f.zh || {})[o] || o)}</option>`).join('') + '</select>';
+        else if (f.type === 'style')
+          ctl = `<select data-sp="${esc(f.key)}">
+            <option value=""${!v ? ' selected' : ''}>（VideoCaptioner 默认）</option>`
+            + SP.styles.map(s => `<option value="${esc(s.name)}"${
+                s.name === v ? ' selected' : ''}>${esc(s.name)}${
+                s.note ? '　' + esc(s.note) : ''}</option>`).join('')
+            + (v && !SP.styles.some(s => s.name === v)
+               ? `<option value="${esc(v)}" selected>${esc(v)}（⚠ 找不到这份样式）</option>` : '')
+            + '</select>';
+        else if (f.type === 'tweak')
+          ctl = `<button class="btn ghost sm" data-sptweak="1">编辑微调（${
+            Object.keys(v || {}).length} 项）</button>`;
+        else
+          ctl = `<input data-sp="${esc(f.key)}" type="${
+            f.type === 'int' ? 'number' : 'text'}"
+            ${f.min != null ? `min="${f.min}"` : ''} ${f.max != null ? `max="${f.max}"` : ''}
+            value="${esc(String(v ?? ''))}" placeholder="${esc(f.hint || '')}">`;
+      }
+      return `<div>
+        <label>${esc(f.label)}${f.hint ? ` <span class="muted">${esc(f.hint)}</span>` : ''}</label>
+        <label class="row" style="margin:0 0 4px;gap:6px;align-items:center">
+          <input type="checkbox" style="width:auto" data-spown="${esc(f.key)}"${
+            own ? ' checked' : ''}>
+          <span class="muted">${own ? '自定义' : `跟随全局（${esc(inh)}）`}</span>
+        </label>${ctl}</div>`;
+    }).join('');
+    return `<div style="margin-bottom:12px">
+      <div class="muted" style="font-size:12px;margin-bottom:6px">${esc(g.name)}</div>
+      <div class="grid g3">${rows}</div></div>`;
+  }).join('');
+
+  box.querySelectorAll('[data-spown]').forEach(el => {
+    el.onchange = () => {
+      const k = el.dataset.spown;
+      // 勾上「自定义」时，**初值取继承来的那个值**，不取类型默认值 ——
+      // 取默认值的话，勾一下就悄悄把设置变了（本来继承 hard，
+      // 一勾变成第一个选项），而人只是想看看能改什么。
+      if (el.checked) SP.own[k] = SP.global[k];
+      else delete SP.own[k];
+      drawProjSubtitle([]);
+    };
+  });
+  box.querySelectorAll('[data-sp]').forEach(el => {
+    el.onchange = () => {
+      const k = el.dataset.sp;
+      const f = SP.fields.find(x => x.key === k) || {};
+      const raw = el.value;
+      if (f.type === 'bool') SP.own[k] = raw === '1';
+      else if (f.type === 'int') SP.own[k] = parseInt(raw, 10);
+      else SP.own[k] = raw;
+      drawProjSubtitle([]);
+    };
+  });
+  const tw = box.querySelector('[data-sptweak]');
+  if (tw) tw.onclick = () => openProjTweak();
+  const ps = $('#sbProjProblems');
+  if (ps) ps.innerHTML = (problems || []).length
+    ? `<div class="alert err">${problems.map(esc).join('<br>')}</div>` : '';
+  const hint = $('#sbProjHint');
+  if (hint) {
+    const n = Object.keys(SP.own).length;
+    hint.textContent = SP.installed
+      ? (n ? `这部剧自定义了 ${n} 项，其余跟随设置页` : '全部跟随设置页')
+      : '⚠ 还没装 VideoCaptioner，先 pip install videocaptioner';
+  }
+}
+
+// 微调是一组值（七项），塞不进一行 —— 单独一个折叠区，
+// 复用设置页那套渲染逻辑（同一张 tweak_fields 表）。
+function openProjTweak() {
+  const cur = {...(SP.own.style_tweak || {})};
+  const rows = SP.tweakFields.map(f => {
+    const v = cur[f.key], ph = SP.preset[f.key];
+    if (f.type === 'bool')
+      return `<div><label>${esc(f.label)}</label><select data-spt="${esc(f.key)}">
+        <option value="">按样式（${ph ? '加粗' : '不加粗'}）</option>
+        <option value="1"${v === true ? ' selected' : ''}>加粗</option>
+        <option value="0"${v === false ? ' selected' : ''}>不加粗</option></select></div>`;
+    if (f.type === 'font')
+      return `<div><label>${esc(f.label)}</label>
+        <input data-spt="${esc(f.key)}" list="spFontList" value="${esc(v ?? '')}"
+               placeholder="${esc(ph ?? '')}">
+        <datalist id="spFontList">${SP.fonts.map(x =>
+          `<option value="${esc(x)}">`).join('')}</datalist></div>`;
+    if (f.type === 'color')
+      return `<div><label>${esc(f.label)}</label><div class="row" style="gap:6px;margin:0">
+        <input type="color" style="width:42px;padding:2px" value="${esc(v || ph || '#ffffff')}"
+          oninput="this.nextElementSibling.value=this.value;this.nextElementSibling.dispatchEvent(new Event('change'))">
+        <input data-spt="${esc(f.key)}" value="${esc(v ?? '')}"
+               placeholder="${esc(ph ?? '')}" style="flex:1"></div></div>`;
+    return `<div><label>${esc(f.label)}${f.hint ? ` <span class="muted">${esc(f.hint)}</span>` : ''}</label>
+      <input data-spt="${esc(f.key)}" type="number" step="${f.type === 'float' ? '0.1' : '1'}"
+        ${f.min != null ? `min="${f.min}"` : ''} ${f.max != null ? `max="${f.max}"` : ''}
+        value="${v ?? ''}" placeholder="${ph ?? ''}"></div>`;
+  }).join('');
+  const ps = $('#sbProjProblems');
+  ps.innerHTML = `<div class="card" style="margin:0">
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <b style="font-size:13px">字幕微调（本剧）</b>
+      <span class="muted">不填 = 按样式走（灰字是样式里的值）</span></div>
+    <div class="grid g3" style="margin-top:8px">${rows}</div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn sm" id="sptOk">用这些值</button>
+      <button class="btn ghost sm" id="sptClear">清空</button></div></div>`;
+  ps.querySelectorAll('[data-spt]').forEach(el => {
+    el.onchange = () => {
+      const k = el.dataset.spt;
+      const f = SP.tweakFields.find(x => x.key === k) || {};
+      const raw = el.value;
+      if (raw === '') delete cur[k];
+      else if (f.type === 'bool') cur[k] = raw === '1';
+      else if (f.type === 'int') cur[k] = parseInt(raw, 10);
+      else if (f.type === 'float') cur[k] = parseFloat(raw);
+      else cur[k] = raw;
+    };
+  });
+  $('#sptOk').onclick = () => { SP.own.style_tweak = cur; drawProjSubtitle([]); };
+  $('#sptClear').onclick = () => { SP.own.style_tweak = {}; drawProjSubtitle([]); };
+}
+
+if ($('#sbProjSave')) $('#sbProjSave').onclick = async () => {
+  // **没勾「自定义」的字段要显式送 null**，让后端把覆盖删掉。
+  // 只送勾了的话，取消勾选永远不生效 —— 页面显示「跟随全局」，
+  // 而 meta 里那个旧覆盖一直在起作用。
+  const values = {};
+  SP.fields.forEach(f => {
+    values[f.key] = (f.key in SP.own) ? SP.own[f.key] : null;
+  });
+  await api.post('/api/project/subtitle', {project_root: PROJ, values});
+  await renderProjSubtitle();
+  $('#sbProjHint').textContent = '已保存（只影响这一部剧）';
+};
+if ($('#sbProjReset')) $('#sbProjReset').onclick = async () => {
+  const values = {};
+  SP.fields.forEach(f => { values[f.key] = null; });
+  await api.post('/api/project/subtitle', {project_root: PROJ, values});
+  await renderProjSubtitle();
+};
 
 async function renderBrief() {
   const box = $('#briefBox');
@@ -2355,8 +2705,11 @@ $('#rebuildTasks').onclick = async () => {
   refreshProject();
 };
 // ---------- 全局轮询：一个 timer 拉全部 job + 闸门状态（支持多剧并行）
+// warn 必须单列一档。缺了它会落到默认的 'pend'，于是「做完了但有几集
+// 没配上字幕」在页面上长得和「还没开始」一模一样 —— 人会一直等一个
+// 已经结束的步骤。
 const PILL = s => ({ok:'ok',failed:'fail',aborted:'fail',running:'run',
-                    queued:'run',skipped:'skip'})[s] || 'pend';
+                    queued:'run',skipped:'skip',warn:'warn'})[s] || 'pend';
 let lastActive = 0;
 
 async function tick() {
@@ -3741,6 +4094,200 @@ $('#saveLimits').onclick = async () => {
   $$('#limProvBox input').forEach(i => per_provider[i.dataset.lim] = +i.value);
   await api.post('/api/config', {limits: {global: +$('#limGlobal').value, per_provider}});
   BOOT = await api.get('/api/bootstrap'); alert('已更新（对新任务生效）');
+};
+
+// ---------- 字幕（外包给 VideoCaptioner）
+// 值类型分三种，收集时要分开处理：勾选框读 checked、数字要转成 number
+// （字符串 "18" 存进 config 后，Python 那边 int() 得动，而 toml 会写成
+// 带引号的字符串 —— VideoCaptioner 读到就类型不对）。
+const SB_TEXT = {sbAsr:'asr', sbLang:'language', sbMode:'subtitle_mode',
+                 sbTransSvc:'translate_service', sbTargetLang:'target_language',
+                 sbLlmBase:'llm_api_base', sbLlmModel:'llm_model',
+                 sbQuality:'quality', sbStyle:'style'};
+const SB_BOOL = {sbEnabled:'enabled', sbOptimize:'optimize',
+                 sbTranslate:'translate'};
+const SB_NUM  = {sbCjk:'max_word_count_cjk', sbEn:'max_word_count_english',
+                 sbTimeout:'timeout'};
+// 样式候选从 VideoCaptioner 实拉，**不写死那四份** —— 用户在它那边
+// 自己加的样式也要能选到，而删掉的不该还留在下拉里。
+// 拉不到（没装）就只留「默认」一项，别把上一次的候选留在页面上骗人。
+// 微调表单的结构（有哪些字段、什么类型、范围）**由后端给**，前端只管渲染。
+// 两边各写一份的话，加一个旋钮要改两处，对不上的表现是「页面上有、存不下」。
+let SB_TWEAK = {};          // 当前填的值
+let SB_FIELDS = [];         // 字段定义
+let SB_PRESET = {};         // 所选样式的原值，当 placeholder
+
+function renderTweak() {
+  const box = $('#sbTweakBox');
+  if (!box) return;
+  box.innerHTML = SB_FIELDS.map(f => {
+    const v = SB_TWEAK[f.key];
+    const ph = SB_PRESET[f.key];
+    const hint = f.hint ? `<span class="muted">${esc(f.hint)}</span>` : '';
+    const lab = `<label>${esc(f.label)} ${hint}</label>`;
+    if (f.type === 'bool') {
+      // 三态：不填 / 开 / 关。**勾选框做不了三态** —— 用它的话
+      // 「没动过」和「明确要求不加粗」长得一样，于是没动过也会被当成
+      // 覆盖发出去，把样式里的加粗关掉。
+      return `<div>${lab}<select data-tw="${f.key}">
+        <option value="">按样式（${ph ? '加粗' : '不加粗'}）</option>
+        <option value="1"${v === true ? ' selected' : ''}>加粗</option>
+        <option value="0"${v === false ? ' selected' : ''}>不加粗</option>
+      </select></div>`;
+    }
+    if (f.type === 'color') {
+      // 颜色给取色器 + 文本框两条路：取色器直观，但它没有「不填」这个状态，
+      // 所以真正存的是文本框，取色器只往里写值。
+      return `<div>${lab}<div class="row" style="gap:6px;margin:0">
+        <input type="color" style="width:42px;padding:2px"
+               value="${esc(v || ph || '#ffffff')}"
+               oninput="this.nextElementSibling.value=this.value;this.nextElementSibling.dispatchEvent(new Event('change'))">
+        <input data-tw="${f.key}" value="${esc(v ?? '')}"
+               placeholder="${esc(ph ?? '#ffffff')}" style="flex:1">
+      </div></div>`;
+    }
+    if (f.type === 'font') {
+      return `<div>${lab}<input data-tw="${f.key}" list="sbFontList"
+        value="${esc(v ?? '')}" placeholder="${esc(ph ?? '')}">
+        <datalist id="sbFontList"></datalist></div>`;
+    }
+    const step = f.type === 'float' ? '0.1' : '1';
+    return `<div>${lab}<input data-tw="${f.key}" type="number" step="${step}"
+      ${f.min != null ? `min="${f.min}"` : ''} ${f.max != null ? `max="${f.max}"` : ''}
+      value="${v ?? ''}" placeholder="${ph ?? ''}"></div>`;
+  }).join('');
+  // 字体候选可能有几百个，一次性塞进每个 datalist 太重 —— 只填一次
+  const dl = $('#sbFontList');
+  if (dl && SB_FONTS.length) {
+    dl.innerHTML = SB_FONTS.map(f => `<option value="${esc(f)}">`).join('');
+  }
+  box.querySelectorAll('[data-tw]').forEach(el => {
+    el.onchange = () => {
+      const k = el.dataset.tw, raw = el.value;
+      const f = SB_FIELDS.find(x => x.key === k) || {};
+      if (raw === '') delete SB_TWEAK[k];
+      else if (f.type === 'bool') SB_TWEAK[k] = raw === '1';
+      else if (f.type === 'int') SB_TWEAK[k] = parseInt(raw, 10);
+      else if (f.type === 'float') SB_TWEAK[k] = parseFloat(raw);
+      else SB_TWEAK[k] = raw;
+      updateTweakNote();
+    };
+  });
+  updateTweakNote();
+}
+function updateTweakNote() {
+  const n = Object.keys(SB_TWEAK).length;
+  const note = $('#sbTweakNote');
+  if (!note) return;
+  const bad = SB_TWEAK.font_name && SB_FONTS.length
+              && !SB_FONTS.includes(SB_TWEAK.font_name);
+  // 字体名写错会**静默回落**成默认字体：片子照出、字幕照有、字体不对，
+  // 没有任何一处报错。所以在这儿当场说。
+  note.style.color = bad ? 'var(--warn)' : '';
+  note.textContent = bad
+    ? `⚠ 这台机器上没有「${SB_TWEAK.font_name}」这个字体，烧出来会变成别的字体`
+    : (n ? `已盖掉 ${n} 项` : '一项都没盖，完全按样式走');
+}
+let SB_FONTS = [];
+async function loadSubtitleStyles(want) {
+  const sel = $('#sbStyle');
+  if (!sel) return;
+  let styles = [], r = {};
+  try {
+    r = await api.post('/api/subtitle/styles', {style: want || ''});
+    styles = r.styles || [];
+    SB_FIELDS = r.fields || []; SB_FONTS = r.fonts || []; SB_PRESET = r.preset || {};
+  } catch {}
+  renderTweak();
+  sel.innerHTML = '<option value="">（VideoCaptioner 默认）</option>'
+    + styles.map(s => `<option value="${esc(s.name)}">${esc(s.name)}${
+        s.note ? '　' + esc(s.note) : ''}</option>`).join('');
+  // 存着的样式名在候选里找不到时**保留它并标出来**，不要静默改成默认 ——
+  // 那会让「样式名写错了」变成「样式莫名其妙没生效」，正是要避免的那种错。
+  if (want && !styles.some(s => s.name === want)) {
+    sel.insertAdjacentHTML('beforeend',
+      `<option value="${esc(want)}">${esc(want)}（⚠ 现在找不到这份样式）</option>`);
+  }
+  sel.value = want || '';
+  syncSubtitleBoxes();
+}
+function renderSubtitle() {
+  const s = BOOT.config.subtitle || {};
+  for (const [el, k] of Object.entries(SB_TEXT)) if ($('#'+el)) $('#'+el).value = s[k] ?? '';
+  for (const [el, k] of Object.entries(SB_BOOL)) if ($('#'+el)) $('#'+el).checked = !!s[k];
+  for (const [el, k] of Object.entries(SB_NUM))  if ($('#'+el)) $('#'+el).value = s[k] ?? '';
+  // key 回传的是「配了没」，不是原文 —— 别塞回输入框（留空 = 不改）。
+  // 上面 upload 那一段就是漏了这一步才把掩码存回去过。
+  $('#sbLlmKey').value = '';
+  $('#sbLlmKey').placeholder = s.llm_api_key_set ? '已配置，留空 = 不改' : '留空 = 不填';
+  SB_TWEAK = {...(s.style_tweak || {})};
+  loadSubtitleStyles(s.style || '').catch(() => {});
+  syncSubtitleBoxes();
+  $('#sbState').textContent = s.enabled
+    ? `已开启（识别引擎 ${s.asr || 'bijian'}）—— 建议点一次自检确认装了`
+    : '没开 —— 成片照旧出，只是不带字幕';
+}
+// 翻译那两个框只在勾了翻译时才有意义。一直显示的话，人会填了目标语言
+// 却忘了勾开关，然后奇怪为什么没有翻译 —— 而那种情况不报错。
+function syncSubtitleBoxes() {
+  $('#sbTransBox').style.display = $('#sbTranslate').checked ? '' : 'none';
+  // **软字幕 + 选了样式 = 样式不生效，而且不报错。** 这一句是补一个真踩过的
+  // 洞：用户备好四份样式，选了软字幕，出来还是播放器的默认样子，
+  // 全程没有一处说过样式被忽略了。后端也拦（config_problems），
+  // 但页面上当场就该看见，不该等到点了「开始」才知道。
+  const note = $('#sbStyleNote'); if (!note) return;
+  const soft = $('#sbMode').value !== 'hard';
+  const picked = $('#sbStyle') && $('#sbStyle').value;
+  note.style.color = (soft && picked) ? 'var(--warn)' : '';
+  note.textContent = (soft && picked)
+    ? '⚠ 现在是软字幕，这份样式不会生效（软字幕的样子由播放器决定）'
+    : (picked ? '' : '不选 = 用它自带的默认样式');
+}
+if ($('#sbMode'))  $('#sbMode').onchange  = syncSubtitleBoxes;
+if ($('#sbStyle')) $('#sbStyle').onchange = () => {
+  syncSubtitleBoxes();
+  // 换了样式，微调框的 placeholder（样式原值）要跟着换 ——
+  // 不换的话灰字还是上一份样式的数，人照着它判断「要不要改」就判错了。
+  loadSubtitleStyles($('#sbStyle').value).catch(() => {});
+};
+if ($('#sbTweakClear')) $('#sbTweakClear').onclick = () => {
+  SB_TWEAK = {}; renderTweak();
+};
+function collectSubtitle() {
+  const sb = {};
+  for (const [el, k] of Object.entries(SB_TEXT)) if ($('#'+el)) sb[k] = $('#'+el).value.trim();
+  for (const [el, k] of Object.entries(SB_BOOL)) if ($('#'+el)) sb[k] = $('#'+el).checked;
+  for (const [el, k] of Object.entries(SB_NUM))  if ($('#'+el)) {
+    const n = parseInt($('#'+el).value, 10);
+    if (!isNaN(n)) sb[k] = n;
+  }
+  const key = $('#sbLlmKey').value.trim();
+  if (key) sb.llm_api_key = key;          // 留空 = 不改
+  // 整块替换，不是合并 —— 清空某一项就是要它消失，
+  // 合并的话删掉的项会一直留在 config 里，页面显示没填、实际还在生效。
+  sb.style_tweak = {...SB_TWEAK};
+  return sb;
+}
+$('#sbTranslate').onchange = syncSubtitleBoxes;
+$('#saveSubtitle').onclick = async () => {
+  await api.post('/api/config', {subtitle: collectSubtitle()});
+  BOOT = await api.get('/api/bootstrap'); renderSubtitle();
+  $('#sbResult').innerHTML = '<div class="alert warn">已保存。'
+    + '建议点一次「运行自检」—— 没装 VideoCaptioner 的话，'
+    + '这一步会等到整条流水线跑到最后才报，前面的时间就白等了。</div>';
+};
+$('#testSubtitle').onclick = async () => {
+  $('#sbResult').innerHTML = '<div class="alert warn">自检中…（第一次可能要十几秒）</div>';
+  const r = await api.post('/api/subtitle/selftest', {subtitle: collectSubtitle()});
+  if (r.error) return $('#sbResult').innerHTML = `<div class="alert err">${esc(r.error)}</div>`;
+  const probs = (r.config_problems || []).map(p =>
+    `<div style="margin-top:4px">⚠ ${esc(p)}</div>`).join('');
+  $('#sbResult').innerHTML = `<div class="alert ${r.ok && !probs ? 'warn' : 'err'}">
+    ${r.ok ? '✅' : '⛔'} ${esc(r.msg || '')}
+    ${r.cmd ? `<div class="muted" style="margin-top:4px">调用方式：<code>${esc(r.cmd)}</code></div>` : ''}
+    ${probs}
+    ${r.doctor ? `<details style="margin-top:6px"><summary class="muted">它自己的体检报告</summary>
+      <pre class="log" style="margin-top:6px">${esc(r.doctor)}</pre></details>` : ''}</div>`;
 };
 
 // ---------- 参考图上传（对象存储）

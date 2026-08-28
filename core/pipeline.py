@@ -121,7 +121,45 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
         steps.append({"kind": "assemble", "stage": "s12", "episode": "",
                       "only": list(prod) if prod else None,
                       "label": f"环节12 拼接成片{ptag}"})
+        # 字幕整个外包给 VideoCaptioner（core/subtitle.py），加在成片上。
+        # 没开就不进计划 —— 进了再跳过的话，「先看会做什么」会列出这一步，
+        # 人以为要做字幕，跑完没有，而全程没有一处说过它是关着的。
+        if _subtitle_on(pj):
+            steps.append({"kind": "subtitle", "stage": "s13", "episode": "",
+                          "only": list(prod) if prod else None,
+                          "label": f"环节13 字幕{ptag}"})
     return steps
+
+
+def _subtitle_note(pj) -> str:
+    """预览里字幕那一行写什么。**没装 / 没填的要在开跑前就说。**"""
+    try:
+        from server.app import load_config           # noqa: PLC0415
+        from . import subtitle as _sub               # noqa: PLC0415
+        if not _sub.find_cli():
+            return "⚠ 还没装 VideoCaptioner，先 pip install videocaptioner"
+        cfg = load_config()
+        bad = _sub.config_problems(_sub.merged(cfg, pj))
+        if bad:
+            return "⚠ " + bad[0]
+        st = _sub.status(pj, cfg)
+        return (f"{st['todo']} 集要配" if st["todo"]
+                else st.get("reason") or "都配好了")
+    except Exception:                                # noqa: BLE001
+        return "交给 VideoCaptioner"
+
+
+def _subtitle_on(pj=None) -> bool:
+    """设置里开了字幕吗。见 pipeline_v34._subtitle_on 里的同一条理由。"""
+    try:
+        from server.app import load_config           # noqa: PLC0415
+        from . import subtitle as _sub               # noqa: PLC0415
+        # **按剧问，不是按全局问。** 字幕开关是剧维度的：
+        # 只看全局的话，这部剧关了字幕照样会被排进计划（或者反过来，
+        # 这部剧开了却进不了计划）—— 两种都不报错，只是做出来的东西不对。
+        return bool(_sub.merged(load_config(), pj).get("enabled"))
+    except Exception:                                # noqa: BLE001
+        return False
 
 
 def _pump(pj, s: dict, run_chunk: Callable, llm_all_done: Callable,
@@ -461,6 +499,24 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 r = S.build_review_checklist(pj, only[0] if len(only) == 1 else "")
                 job.set_item(key, state="ok", msg=f"{len(r.get('rows', []))} 段待人工验收")
 
+            # ---- 字幕（外包给 VideoCaptioner）------------------------------
+            #
+            # 失败**不判整条流水线失败**：成片在环节12 就交付了，
+            # 没字幕是少几行字，不是成片坏了。和「缺一段不许拼」不同 ——
+            # 那个是成片短一截，必须停。
+            elif s["kind"] == "subtitle":
+                job.set_item(key, state="running")
+                from server.app import load_config    # noqa: PLC0415
+                from . import subtitle as _sub        # noqa: PLC0415
+                only = s.get("only") or []
+                r = _sub.run(pj, load_config(), log=log,
+                             episode=only[0] if len(only) == 1 else "")
+                probs = r.get("problems") or []
+                for p in probs:
+                    job.log(key, p)
+                job.set_item(key, state="warn" if probs else "ok",
+                             msg=r.get("msg", ""))
+
             # ---- 拼接 ------------------------------------------------------
             else:
                 job.set_item(key, state="running")
@@ -724,6 +780,8 @@ def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
         elif s["kind"] == "produce":
             n = len(_produce_todo(pj, s["task_key"], s.get("only")))
             (todo if n else skip).append(f"{s['label']}（{n} 项）" if n else s["label"])
+        elif s["kind"] == "subtitle":
+            todo.append(f"{s['label']}（{_subtitle_note(pj)}）")
         else:
             todo.append(s["label"])
     eps = _eps.ids(pj)

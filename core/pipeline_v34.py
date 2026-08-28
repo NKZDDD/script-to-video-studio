@@ -97,11 +97,57 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
         for ep in (eps if include_llm else []):
             steps.append({"kind": "llm", "stage": "n14", "episode": ep,
                           "soft": True, "label": _label("n14", ep)})
-        for sid in ("d1", "d2"):
+        # d3（字幕）**没开就不进计划**，不是进了计划再跳过。
+        # 进计划再跳过的话，「先看会做什么」会列出一步「字幕」，
+        # 人以为要做字幕，跑完发现没有，而全程没有一处说过它是关着的。
+        deliver = ["d1", "d2"]
+        if _subtitle_on(pj):
+            deliver.append("d3")
+        for sid in deliver:
             steps.append({"kind": "deliver", "stage": sid, "episode": "",
                           "only": list(eps) if eps else None,
                           "label": _label(sid) + _scope_tag(eps, pj)})
     return steps
+
+
+def _subtitle_note(pj) -> str:
+    """预览里字幕那一行写什么。
+
+    **没装 VideoCaptioner 要在这儿就说**，不能等跑到最后一步才说 ——
+    「先看会做什么」的用处正是让人在开跑前把该装的装好、该填的填好。
+    """
+    try:
+        from server.app import load_config           # noqa: PLC0415
+        from . import subtitle as _sub               # noqa: PLC0415
+        if not _sub.find_cli():
+            return "⚠ 还没装 VideoCaptioner，先 pip install videocaptioner"
+        cfg = load_config()
+        bad = _sub.config_problems(_sub.merged(cfg, pj))
+        if bad:
+            return "⚠ " + bad[0]
+        st = _sub.status(pj, cfg)
+        return (f"{st['todo']} 集要配" if st["todo"]
+                else st.get("reason") or "都配好了")
+    except Exception:                                # noqa: BLE001
+        return "交给 VideoCaptioner"
+
+
+def _subtitle_on(pj=None) -> bool:
+    """设置里开了字幕吗。
+
+    读 config 而不是接参数：这一层的调用方有四五处（一键跑到底、单环节、
+    预览计划、续跑），一处漏传就变成「设置开了但计划里没有」——
+    而那种错不报，只是最后没有字幕。
+    """
+    try:
+        from server.app import load_config           # noqa: PLC0415
+        from . import subtitle as _sub               # noqa: PLC0415
+        # **按剧问，不是按全局问。** 字幕开关是剧维度的：
+        # 只看全局的话，这部剧关了字幕照样会被排进计划（或者反过来，
+        # 这部剧开了却进不了计划）—— 两种都不报错，只是做出来的东西不对。
+        return bool(_sub.merged(load_config(), pj).get("enabled"))
+    except Exception:                                # noqa: BLE001
+        return False
 
 
 def _host(base_url: str) -> str:
@@ -392,6 +438,20 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
                 for ep in (only or _eps.ids(pj) or [""]):
                     n += len(R.build_review_checklist(pj, ep).get("rows", []))
                 job.set_item(key, state="ok", msg=f"{n} 段待人工复核")
+            elif sid == "d3":
+                # 字幕失败**不判整条流水线失败**：成片在 d2 就已经交付了，
+                # 没字幕是少几行字，不是成片坏了。所以这里既不 append 到
+                # failed，也不 return "failed" —— 只把问题挂在这一项上。
+                from server.app import load_config    # noqa: PLC0415
+                from . import subtitle as _sub        # noqa: PLC0415
+                r = _sub.run(pj, load_config(), log,
+                             (s.get("only") or [""])[0]
+                             if len(s.get("only") or []) == 1 else "")
+                probs = r.get("problems") or []
+                for p in probs:
+                    job.log(key, p)
+                job.set_item(key, state="warn" if probs else "ok",
+                             msg=r.get("msg", ""))
             else:
                 r = R.assemble(pj, params, log,
                                (s.get("only") or [""])[0] if len(s.get("only") or []) == 1 else "")
@@ -616,6 +676,11 @@ def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
             n = len(_produce_todo(pj, s["task_key"], s.get("only")))
             (todo if n else skip).append(
                 f"{s['label']}（{n} 项）" if n else s["label"])
+        elif s["stage"] == "d3":
+            # 字幕不进 llm_calls —— 它内部可能调 LLM，但那是
+            # VideoCaptioner 的调用、它的 key、它的账。算进「至少几次
+            # 分析调用」会让那个数变成假的（人拿它估自己网关的花费）。
+            todo.append(f"{s['label']}（{_subtitle_note(pj)}）")
         else:
             todo.append(s["label"])
     return {"system": "v34", "episodes": _eps.ids(pj),
