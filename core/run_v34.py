@@ -2717,21 +2717,43 @@ def build_tasks(pj: Project, params: dict) -> dict:
             seg = vp.get("seg_id")
             if not seg:
                 continue
-            # **不许在这儿先按 amap 挑一遍。** 视频是四类里唯一带这个前置
-            # 过滤的（故事板那条直接进 split_refs），而 split_refs 的设计
-            # 意图恰恰相反 ——「认不出的 ID 留在列表里、file_ref 留空，
-            # 不要悄悄删掉；删了数量看着是对的，反而看不出少了一张」。
+            # **`reference_order` 里骨架那几张要剔掉，别的一张都不许剔。**
             #
-            # 用户实遇：提示词里 Image 1..5 映射了 5 张，实际只传了 1 张。
-            # 挑掉的那几张既不进 no_image_refs 也不落失败记录，
-            # 于是片子出得来、任务标成功，参考图是错的而没有一处会说话。
-            # 现在照故事板那条路走：留在列表里，file_ref 空着，
-            # 由出片前 _check_video_ref_map 硬停并报清楚缺哪张。
-            vd_refs, vd_no_img = split_refs(
-                pj, amap,
-                [r for r in (vp.get("reference_order") or [])
-                 if isinstance(r, dict) and str(r.get("asset_id") or "").strip()],
-                prompts=prompts)
+            # n13 的 `reference_order` 是**整条上传顺序**，骨架排在前面、补图
+            # 接着排。而骨架已经通过 `storyboard_refs` 单独交给出片那一层了 ——
+            # 两边都留着就是同一张传两次：18 张里 9 张是重的，而 `image_n`
+            # 是按上传顺序算的，于是后面每一条描述都套到别的图上。
+            # （2026-08-26 实遇：面板上「参 0/18」，一排全是「缺」。）
+            #
+            # 但**不能像原来那样按 amap 一刀切**。原来这里写的是
+            # `if asset_id in amap`，顺手把两件事一起做了：剔骨架（对）、
+            # 以及静默扔掉资产表认不出的补图（错 —— 那正是「提示词里映射了
+            # 5 张、实际只传了 1 张」的来处）。所以只按骨架剔：
+            # 认不出的补图照旧留在列表里、file_ref 空着，
+            # 由出片前 `_check_video_ref_map` 硬停并报清楚缺哪张。
+            spine_ids = {str(s.get("sheet_id") or "")
+                         for s in sb_by_seg.get(seg, [])}
+            spine_ids.discard("")
+            vd_rows, vd_dupes = [], []
+            for r in (vp.get("reference_order") or []):
+                if not isinstance(r, dict):
+                    continue
+                rid = str(r.get("asset_id") or "").strip()
+                if not rid:
+                    continue
+                # 骨架的 sheet_id 和 reference_order 里的写法可能一头长一头短
+                #（`PRJ__SBSHEET_EP01_SEG01_A_R01` vs `SBSHEET_EP01_SEG01_A_R01`），
+                # 所以两头都认后缀 —— 只比全等会漏，漏了就还是传两遍。
+                if any(rid == s or (len(rid) > 6 and s.endswith(rid))
+                       or (len(s) > 6 and rid.endswith(s)) for s in spine_ids):
+                    vd_dupes.append(rid)
+                    continue
+                vd_rows.append(r)
+            # 去掉几条不用报：`reference_order` 带着骨架是 n13 的正常输出
+            # （它给的是整条上传顺序），不是异常。数目记进任务里，
+            # 排查时看得到；**这里没有 log 可用**（build_tasks 不收 log ——
+            # 顺手调一个不存在的名字就是又一个 NameError，刚踩过）。
+            vd_refs, vd_no_img = split_refs(pj, amap, vd_rows, prompts=prompts)
             vd_tasks.append({
                 "key": seg, "episode": ep, "segment": seg,
                 "prompt_ref": _rel("video", f"{seg}_VIDEO_PROMPT.txt"),
@@ -2743,11 +2765,12 @@ def build_tasks(pj: Project, params: dict) -> dict:
                     {"order": s["order"], "sheet_id": s["sheet_id"],
                      "spine_role": s["spine_role"], "file_ref": s["output"]}
                     for s in sb_by_seg.get(seg, [])],
-                # 视频的补充参考图（首次显露覆盖用）。**先按老规矩把资产表里
-                # 认不出的挑掉**（这一处历来如此，不在这次改动范围内），
-                # 剩下的再过一遍「会不会有图」。
+                # 视频的补充参考图（首次显露覆盖用）。骨架那几张已经剔掉了，
+                # 认不出的留着、file_ref 空着 —— 见上面那段。
                 "reference_images": vd_refs,
                 "no_image_refs": vd_no_img,
+                # 剔掉了几条骨架重复 —— 排查「参考图数目对不对」时要这个数
+                "spine_deduped": len(vd_dupes),
                 "params": {"duration": params.get("duration", 15),
                            "ratio": params.get("ratio", "9:16")},
                 "output": f"05_分段视频/{code}_{seg}.mp4",

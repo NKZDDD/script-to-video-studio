@@ -903,6 +903,13 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         # 骨架第二张上。**画面出得来，用的是错的参考。**
         aux = sorted((task.get("reference_images") or []),
                      key=lambda r: r.get("image_n") or 0)
+        # **同一个文件不许传两次。** 装配那一层已经按骨架去过重，这里再兜一道：
+        # n13 的 `reference_order` 是整条上传顺序（骨架排在前面），任何一处
+        # 漏剔就会把骨架再传一遍 —— 而 `image_n` 是按上传顺序算的，
+        # 于是后面每一条描述都套到别的图上。**画面出得来，参考全是错的。**
+        # 2026-08-26 实遇：面板上「参 0/18」，9 张骨架 + 9 张重复。
+        seen = {s for s in spine if s}
+        dup = 0
         for r in aux:
             f = str(r.get("url") or r.get("file_ref") or "")
             if not f:
