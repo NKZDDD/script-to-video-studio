@@ -171,7 +171,14 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 <header>
   <h1>剧本 → AI视频 自动化生产台</h1>
   <span id="flavorTag" class="flavor all" title="这一版主打的生产体系（分体系打包的 exe 各自带标志，源码方式跑 = 全体系）"></span>
-  <span class="muted" id="projTag">未选择项目</span>
+  <!-- 项目名做成可点的切换器：切项目是最高频的动作（同时做好几部剧时尤其），
+       而它原来只有一条路 —— 回「项目」页在表格里找到那一行点「打开」。
+       列表**每次展开时重新拉**，不用页面加载那一刻的快照：
+       那个快照里没有新建的项目（拿快照当真相的坑这个项目里踩过一次）。 -->
+  <select id="projPick" class="hide" title="切换项目"
+          style="width:auto;max-width:340px"></select>
+  <span class="muted" id="projTag" style="cursor:pointer;text-decoration:underline dotted"
+        title="点一下切换项目">未选择项目</span>
   <span class="sp"></span>
   <div class="gauge" id="gauge" title="此刻正在发给服务商的请求数 / 允许的上限。同时做几部剧也共用这一个上限。">
     <span class="dot" id="gDot"></span><span id="gText">并发 0/8 · 运行 0</span>
@@ -986,10 +993,59 @@ async function openProject(root) {
   const mi = $('#matImport'); if (mi) mi.disabled = true;
 
   $('#projTag').textContent = root.split(/[\\/]/).pop();
+  syncProjPick();
   await refreshProject();
   renderBrief();
   $$('nav button')[1].click();
 }
+
+// ---------- 页头的项目切换器
+// 切项目原来只有一条路：回「项目」页，在表格里找到那一行点「打开」。
+// 同时做好几部剧时这是最高频的动作，所以页头那个项目名本身就该能点。
+function projLabel(p) {
+  const sys = ((BOOT.systems || {})[p.system] || {}).name || '';
+  const dir = p.root.split(/[\\/]/).pop();
+  return `${p.title || dir}${p.project_code ? '　' + p.project_code : ''}`
+         + `${sys ? '　· ' + sys : ''}`;
+}
+function fillProjPick() {
+  const sel = $('#projPick');
+  if (!sel) return;
+  sel.innerHTML = (BOOT.projects || []).map(p =>
+    `<option value="${esc(p.root)}"${p.root === PROJ ? ' selected' : ''}>${
+      esc(projLabel(p))}</option>`).join('')
+    || '<option value="">（还没有项目）</option>';
+}
+function syncProjPick() {
+  const sel = $('#projPick');
+  if (sel && [...sel.options].some(o => o.value === PROJ)) sel.value = PROJ;
+}
+// 点项目名 → 换成下拉并展开。**展开前重新拉一遍列表**：BOOT.projects 是
+// 页面加载那一刻的快照，刚建的项目不在里面 —— 拿快照当真相这件事，
+// 这个项目里已经因为「画错体系」踩过一次。
+$('#projTag').onclick = async () => {
+  try {
+    BOOT.projects = (await api.get('/api/projects')).projects || BOOT.projects;
+  } catch (e) { /* 拉不到就用手里这份 —— 总比点不动强 */ }
+  fillProjPick();
+  $('#projTag').classList.add('hide');
+  const sel = $('#projPick');
+  sel.classList.remove('hide');
+  sel.focus();
+  if (sel.showPicker) { try { sel.showPicker(); } catch (e) {} }
+};
+const hideProjPick = () => {
+  $('#projPick').classList.add('hide');
+  $('#projTag').classList.remove('hide');
+};
+$('#projPick').onchange = e => {
+  const root = e.target.value;
+  hideProjPick();
+  // 选的还是当前这个就什么都不做：openProject 会重拉全部面板，
+  // 白跑一趟，还会把你正在看的那一页切走。
+  if (root && root !== PROJ) openProject(root);
+};
+$('#projPick').onblur = hideProjPick;
 
 // 当前选中的集。'' = 看全剧。逐集环节按这个值跑。
 let EP = '';
