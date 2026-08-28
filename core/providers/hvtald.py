@@ -94,7 +94,13 @@ def parse_creds(api_key: str) -> dict:
                 continue
             k, _, v = part.partition("=")
             key = _ALIAS.get(k.strip().lower())
-            if key:
+            # **空值不覆盖已有值。** 账号表单里共用那几项排在前面、
+            # 账号自己那几项排在后面（后者本该赢，见 core/accounts）。
+            # 而「账号用不一样的存储」那几个框留空时也会写成 `password=`
+            # 这种空值 —— 照旧覆盖的话，**共用的密码被清成空**，
+            # 然后 WebDAV 401，而报错说的是「找不到 outs」。
+            # 留空的意思是「用共用的」，不是「清掉」。
+            if key and (v.strip() or not out.get(key)):
                 out[key] = v.strip()
 
     for key, env in _ENV.items():                # 没填的退回环境变量
@@ -287,25 +293,44 @@ class HvtaldProvider(Provider):
                 f"或者用 WebDAV 网页版翻一下 `outs` 在哪一层。",
                 status=404, kind="task_fatal")
         if r.status_code >= 400:
+            # **状态码要带上**（原来只写在文案里，程序读不到）——
+            # 上层要靠它分开「路径不存在」和「账号密码不对」，
+            # 两者的修法完全不同，指错了人会去改一个没错的地方。
             raise ApiError(f"WebDAV 列目录失败 HTTP {r.status_code}（{url}）"
-                           f"—— 401/403 多半是空间账号密码不对")
+                           f"—— 401/403 多半是空间账号密码不对",
+                           status=r.status_code)
         out = []
         try:
             root = ET.fromstring(r.content)
         except ET.ParseError as exc:
             raise ApiError(f"WebDAV 返回的不是合法 XML：{exc}")
         self_path = urlparse(url).path.rstrip("/")
-        for href in root.iter("{DAV:}href"):
-            raw = (href.text or "").strip()
+        # **按 response 逐条读，目录看 `resourcetype/collection`。**
+        #
+        # 原来只看「href 以 / 收尾」—— 那是个约定，不是规范。实测这台
+        # 服务器（fo.z988.top:901）给目录的 href **不带结尾斜杠**：
+        #   /…/5051/outs   collection=True
+        # 于是 `_is_dir` 全是 False，`_child_dirs()` **永远返回空** ——
+        # 报错里那句「这一层现有的目录：（一个都没有 —— 多半是地址或
+        # 账号密码不对）」在这台服务器上是**永远成立的假话**，
+        # 哪怕路径和密码都对。用户对着它去改地址，而地址本来是对的
+        # （实遇 2026-08-28）。
+        for resp in root.iter("{DAV:}response"):
+            href = resp.find("{DAV:}href")
+            raw = ((href.text if href is not None else "") or "").strip()
             if not raw or raw.rstrip("/").endswith(self_path):
                 continue
             name = unquote(raw.rstrip("/").rsplit("/", 1)[-1])
-            if name:
-                full = raw if raw.startswith("http") else (
-                    f"{urlparse(url).scheme}://{urlparse(url).netloc}{raw}")
-                # WebDAV 里目录的 href 以 `/` 收尾 —— 找 `outs` 要认这个。
-                self._is_dir[name] = raw.endswith("/")
-                out.append((name, full))
+            if not name:
+                continue
+            full = raw if raw.startswith("http") else (
+                f"{urlparse(url).scheme}://{urlparse(url).netloc}{raw}")
+            rt = resp.find(".//{DAV:}resourcetype")
+            is_col = (rt is not None
+                      and rt.find("{DAV:}collection") is not None)
+            # 结尾斜杠仍然认 —— 有的服务端不给 resourcetype
+            self._is_dir[name] = is_col or raw.endswith("/")
+            out.append((name, full))
         return out
 
     # ------------------------------------------------------------ 找 outs
@@ -355,6 +380,48 @@ class HvtaldProvider(Provider):
         except ApiError:
             return []
         return [n for n, d in self._is_dir.items() if d][:12]
+
+    def _level_exists(self) -> str:
+        """填的这一层怎么样：ok / auth（账号密码不对）/ missing（不存在）。
+
+        `_child_dirs` 用的是 `missing_ok=True` —— **404 也返回空列表**。
+        于是「这一层在、但底下没有子目录」和「这一层压根不存在」长得一模一样，
+        都报「一个都没有 —— 多半是地址或账号密码不对」。而两者改法完全不同：
+        前者是层级填浅/填深了，后者是路径整段写错了。
+        用户实遇（2026-08-28）：地址里多了一段 `/webdav/`，整条路径都 404，
+        而报错让他去数层级。
+        """
+        try:
+            self._list_url(self._up(0), missing_ok=False, sub="你填的这一层")
+            return "ok"
+        except ApiError as exc:
+            # 401/403 **不是**「路径不存在」—— 是账号密码不对。
+            # 报成前者的话，人会去改一个没错的地址（用户问的正是
+            # 「所以是我的路径填错了对吗」，而这一点当时答不了）。
+            if getattr(exc, "status", 0) in (401, 403):
+                return "auth"
+            return "missing"
+
+    def _ancestors(self) -> list:
+        """[(地址, 这一层在不在, 它下面有没有 outs)]，从填的这一层往上。
+
+        **只用来报错，不用来取片。** 用户否掉的是「翻着找 outs 然后就用它」
+        （会静默用上另一条线路的 outs，然后一直等一个不会出现的成片）；
+        而「告诉他 outs 其实在哪一层」是纯诊断 —— 路径写错时他要的正是这个，
+        否则只能一层一层猜。
+        """
+        depth = len([x for x in urlparse(self.creds["webdav_url"]).path.split("/")
+                     if x])
+        rows = []
+        for lv in range(0, min(depth, 8) + 1):
+            base = self._up(lv)
+            try:
+                self._list_url(base, missing_ok=False)
+            except ApiError:
+                rows.append((base, False, False))
+                continue
+            rows.append((base, True, self._probe_url(self._up(lv, "outs"))))
+        return rows
 
     def _download(self, url: str, dest: str) -> str:
         """带 basic auth 下载。**先写 .part 再改名** —— 下到一半断了不能留个够大的坏文件，
@@ -472,22 +539,49 @@ class HvtaldProvider(Provider):
         # 而哪一层有 `outs` 是查得出来的事。
         outs = self._find_outs(log)
         if not outs:
+            here = self._tried[0]
+            rows = self._ancestors()
+            hit = [b for b, ok, o in rows if ok and o]
+            where = ((f"**`outs/` 在这一层下面：{hit[0]}** —— "
+                      f"把 WebDAV 地址改成它。")
+                     if hit else
+                     "往上几层也都没有 `outs/` —— 用 WebDAV 网页版翻一下它在哪儿。")
+            tail = ("（不再自己翻目录取片：翻到另一条线路的同名 outs，"
+                    "会一直等一个永远不会出现在那儿的成片。这里只是告诉你它在哪。）")
+            state = self._level_exists()
+            if state == "auth":
+                raise ApiError(
+                    "WebDAV 拒绝了（401/403）—— **这不是路径问题，是空间的账号密码不对**。" + chr(10)
+                    + f"  {self._up(0)}" + chr(10)
+                    + "（任务投递成功不代表这一步也能过：deviceId/token 是接口的凭据，"
+                    + "WebDAV 用户名密码是另一套。）" + chr(10)
+                    + "去「设置 → HVTALD → 共用存储」核对用户名和密码；密码留空是「不改」，要换得重新填一遍。",
+                    status=401, kind="task_fatal",
+                    err_code="HVTALD_OUTS_MISSING")
+            if state == "missing":
+                # **路径整段不存在**和「路径在、只是没有 outs」是两回事，
+                # 改法完全不同（见 _level_exists）。
+                alive = [b for b, ok, _o in rows if ok]
+                raise ApiError(
+                    "WebDAV 地址填的这个路径**本身就不存在**（404）：" + chr(10)
+                    + f"  {self._up(0)}" + chr(10)
+                    + (("往上找，这几层是在的：" + chr(10)
+                        + "".join(f"  {b}" + chr(10) for b in alive[:6]))
+                       if alive else
+                       ("往上一层都不在 —— 多半是主机/端口/账号密码不对，"
+                        "或者地址里多了一段（比如 `/webdav/`）。" + chr(10)))
+                    + where + chr(10) + tail,
+                    status=404, kind="task_fatal",
+                    err_code="HVTALD_OUTS_MISSING")
             kids = self._child_dirs()
             raise ApiError(
-                f"这个地址下面没有 `outs/`：{self._tried[0]}" + chr(10)
+                f"这个地址在，但它下面没有 `outs/`：{here}" + chr(10)
                 + "成片是从 `outs/` 取的，路径不对就永远取不到。" + chr(10)
-                + "这一层现有的目录：" + (
-                    ("、".join(kids[:12]) + ("…" if len(kids) > 12 else ""))
-                    if kids else "（一个都没有 —— 多半是地址或账号密码不对）")
-                + chr(10)
-                + "去「设置 → HVTALD → 共用存储」把 WebDAV 地址改成 "
-                + "**`outs` 的上一层**"
-                + ("（看上面那几个目录名，多半要填到其中某一个里面）"
-                   if kids else "") + "。" + chr(10)
-                + "（程序不再自己翻目录找 outs：位置是固定的，翻找要么白探"
-                + "十几次，要么探到另一条线路的同名 outs，"
-                + "然后一直等一个不会出现在那儿的成片。）",
-                status=404, kind="task_fatal")
+                + "这一层现有的目录："
+                + (("、".join(kids[:12]) + ("…" if len(kids) > 12 else ""))
+                   if kids else "（一个子目录都没有）") + chr(10)
+                + where + chr(10) + tail,
+                status=404, kind="task_fatal", err_code="HVTALD_OUTS_MISSING")
         start, seen = time.time(), -1
         while time.time() - start < timeout:
             if cancel and cancel():

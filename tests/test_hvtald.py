@@ -202,9 +202,15 @@ class OutsDirTests(unittest.TestCase):
         with self.assertRaises(ApiError) as e:
             p._wait("abc123", 1, 5, log=lambda m: None)
         msg = str(e.exception)
-        self.assertIn("没有 `outs/`", msg)
-        self.assertIn("/outs", msg)
-        self.assertIn("5051", msg, "得把它填的那一层也列出来")
+        # 这个 stub 全返 404 —— 连**填的那一层本身**都不存在，走的是
+        # 「路径整段写错了」那一支（和「路径在、只是没有 outs」两回事，
+        # 改法完全不同：前者改整条地址，后者只是层级填浅/填深了）。
+        self.assertIn("本身就不存在", msg)
+        self.assertIn("5051", msg, "得把它填的那个地址原样列出来")
+        # 不管哪一支，都要说清 outs 在哪儿 / 该怎么找
+        self.assertTrue("在这一层下面" in msg or "网页版翻一下" in msg, msg)
+        self.assertEqual(e.exception.err_code, "HVTALD_OUTS_MISSING",
+                         "没有码就落到 UNKNOWN，页面显示「没见过的错误」")
 
     def test_it_is_task_fatal_not_a_retry(self):
         """★ 重试一个不存在的目录只会把同一件事重复几遍。"""
@@ -459,10 +465,16 @@ class OutsIsOneFixedLevelTests(unittest.TestCase):
         with self.assertRaises(ApiError) as e:
             p._wait("aid", 1, 1, log=lambda *a: None)
         msg = str(e.exception)
-        self.assertIn("/outs", msg)                      # 探的那个确切地址
-        self.assertIn("sd2_HVTALD_0818", msg)            # 这一层有哪些目录
-        self.assertIn("共用存储", msg)                    # 去哪改
+        # 填的那个地址要原样列出来 —— 人得看见程序探的到底是哪个 URL。
+        # （断言从写死的 `sd2_HVTALD_0818` 改成这条测试自己配的地址：
+        #   那个字符串是从另一条测试抄来的，这条用的是别的地址。）
+        self.assertIn(p._up(0).rstrip("/"), msg)
+        # 「去哪改」说得具体：直接给出该填的那个地址，或者明说
+        # 「往上几层也都没有」—— 比让人自己去数层级有用
+        self.assertTrue("把 WebDAV 地址改成它" in msg
+                        or "网页版翻一下" in msg, msg)
         self.assertEqual(e.exception.kind, TASK_FATAL)   # 路径不对，重试无意义
+        self.assertEqual(e.exception.err_code, "HVTALD_OUTS_MISSING")
 
     def test_it_caches_the_hit(self):
         """找到了就记住 —— 每轮轮询都重探一次是白花请求。"""

@@ -287,6 +287,32 @@ CATALOG = {
         "resume": "调小之后点「开始」，只会补没做完的那些",
         "resumable": True, "scope": "task", "level": "error",
     },
+    # HVTALD 取片靠 WebDAV 上的 `outs/`。路径不对时以前落到 UNKNOWN ——
+    # 页面上显示「没见过的错误」，而这件事的修法是确定的（改一个地址）。
+    # 用户实遇（2026-08-28）：报错正文写得很清楚，标题却是「没见过的错误」。
+    "HVTALD_OUTS_MISSING": {
+        "title": "WebDAV 上找不到成片目录 outs/（HVTALD）",
+        "why": "成片是这家生成完写到 WebDAV 的 `outs/` 里的，程序从那里取。"
+               "地址填的层级不对，就永远取不到 —— 而任务在它那边是**发出去了**的，"
+               "钱也算了。",
+        "where": "设置 → HVTALD → 共用存储 → WebDAV 地址",
+        "fix": ["看报错正文：它已经把「你填的那一层在不在」、"
+                "「这一层下面有哪些目录」、以及**该填哪个地址**都列出来了",
+                "按它给的那个地址改「WebDAV 地址」，再点一次自检",
+                "报错里说「往上几层也都没有 outs」的话，用 WebDAV 网页版"
+                "翻一下它在哪一层 —— 客服给的常常是线路目录，"
+                "而 outs 在项目那一层",
+                "**这条不重试也不换家**：路径不对重发一次还是取不到，"
+                "而每次都算一次钱"],
+        # 这四个键每条都要有 —— 少一个 _entry 就 KeyError，
+        # 而它只在真出这类错时才炸（刚踩过）。
+        "level": "error",
+        "scope": "这一家的全部视频任务 —— 地址是共用存储，不是单条的事",
+        "resumable": True,
+        "resume": "改完 WebDAV 地址保存，回「生产」页点「开始」，"
+                  "已经出好的不会重做；这一家在它那边已经生成的成片，"
+                  "只要还在 48 小时保存期内、actionId 对得上，会直接取回来",
+    },
     "CONTENT_REJECTED": {
         "title": "提示词被平台的内容审核挡下了",
         "why": "这段提示词里写了平台不允许的内容。只有这一条失败，其它的照常在跑。",
@@ -876,6 +902,11 @@ _PATTERNS = [
 # 措辞会变、会翻译、会本地化；码是给程序看的。
 # 只有拿不到码，或者拿到的是 upstream_error 这种通用值时才退回读文案。
 _BY_CODE = {
+    # **服务商自己抛的码也走这张表。** 我们在 provider 里 raise 时给的
+    # err_code 如果不在这儿，code_of 就落到 UNKNOWN —— 页面上显示
+    # 「没见过的错误」，而那条失败的修法其实是确定的（实遇 2026-08-28：
+    # HVTALD 的 outs 路径不对，正文写得很清楚，标题却是「没见过的错误」）。
+    "hvtald_outs_missing": "HVTALD_OUTS_MISSING",
     "content_policy_violation": "CONTENT_REJECTED",
     "content_policy": "CONTENT_REJECTED",
     "content_filter": "CONTENT_REJECTED",
