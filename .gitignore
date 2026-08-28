@@ -44,3 +44,8 @@ desktop.ini
 *.pdf
 *.txt
 !requirements.txt
+# 自带的字幕样式（ASS V4+ 块）**必须进仓库** —— 打包脚本会把这个目录
+# --add-data 打进 exe。被 *.txt 排掉的话，仓库里没有它，换台机器
+# 重新 clone 打出来的包就少这四份样式，而缺样式不报错：
+# 字幕照出，只是用 videocaptioner 的默认样子。
+!字幕样式/*.txt
