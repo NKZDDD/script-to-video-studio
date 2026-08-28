@@ -1908,16 +1908,22 @@ function matRender(r, imported) {
   const lim = r.limits || {};
   box.innerHTML =
     `<div class="alert ${imported ? '' : 'warn'}">
-       <b>${imported ? '已导入' : '预览'}</b>：${s.total} 条
-       （${s.image} 张图 + ${s.video} 段视频）·
-       ${(s.episodes || []).length} 集 · 参考图最多 ${s.refs_max} 张
+       <b>${imported ? '已导入' : '预览'}</b>：${
+         typeof s.total === 'number' ? `${s.total} 条
+         （${s.image} 张图 + ${s.video} 段视频）·
+         ${(s.episodes || []).length} 集 · 参考图最多 ${s.refs_max} 张`
+         : '（条数这一步没回）'}
        ${lim.image || lim.video ? `<span class="muted">（目标模型上限：出图 ${
          lim.image || '未知'} 张 / 出片 ${lim.video || '未知'} 张）</span>` : ''}
        ${r.declared && r.declared.total ? `<br><span class="muted">材料自己申报 ${
          r.declared.total} 条（图 ${r.declared.image} · 片 ${r.declared.video} · ${
          r.declared.episodes} 集）—— ${
-         r.declared.total === s.total ? '对得上' :
-         '<b style="color:#c00">和实际的 ' + s.total + ' 条对不上</b>'}</span>`
+         // 拿不到实际条数就**别下结论**。原来这里直接拿 s.total 去比，
+         // 而导入的返回里没有 summary（只有预览有）—— 于是写成
+         // 「和实际的 undefined 条对不上」，看着像材料出了大问题。
+         typeof s.total !== 'number' ? '（实际条数这一步没回，看上面的任务数）'
+         : r.declared.total === s.total ? '对得上'
+         : '<b style="color:#c00">和实际的 ' + s.total + ' 条对不上</b>'}</span>`
          : `<br><span class="muted">材料没有申报头 —— 查不出「少产了」：
             该 84 条只给 80 条时，剩下的内部完全自洽，没有一处会说话。</span>`}
        ${imported && r.used_params ? `<br><span class="muted">实际派出去用的参数：
@@ -2287,14 +2293,14 @@ function renderGen(summary) {
           .join('');
       if (kind === 'video') {
         pbox.innerHTML =
-          `<select class="v-ratio" title="画面比例">${opt(selected.ratios, d.ratio)}</select>
-           <select class="v-dur" title="单段时长（秒）">${opt(selected.durations, d.duration)}</select>`;
+          `<select class="v-ratio" title="画面比例">${opt(selected.ratios, '')}</select>
+           <select class="v-dur" title="单段时长（秒）">${opt(selected.durations, '')}</select>`;
         if (!(selected.durations || []).length || String(selected.durations) === '0')
-          pbox.innerHTML = `<select class="v-ratio">${opt(selected.ratios, d.ratio)}</select>
+          pbox.innerHTML = `<select class="v-ratio">${opt(selected.ratios, '')}</select>
             <span class="muted" style="font-size:11px">时长写在模型名里</span>`;
       } else {
         pbox.innerHTML = `<select class="i-size" title="出图尺寸">${
-          opt(selected.sizes, d.image_size)}</select>`;
+          opt(selected.sizes, '')}</select>`;
       }
     };
     const fill = () => {

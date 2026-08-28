@@ -595,7 +595,8 @@ def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
     pj.log_event({"stage": stage, "id": key, "result": "ratio_mismatch", **bad})
     return diagnose.warn(
         "WRONG_RATIO",
-        f"要的是 {bad['want']}，实际出来 {bad['got']}（约 {bad['got_ratio']}）。{flip}",
+        f"请求发的是 {bad['want']}，回来的是 {bad['got']}"
+        f"（约 {bad['got_ratio']}）。{flip}",
         stage=stage, target=key, provider=provider_cfg.get("provider", ""), model=model,
         # 「要的是 X」原来没说清 X 是谁给的。任务里烧的是装配时的值，而这一次
         # 的请求可能被生产页那一行或一键跑到底的覆盖改过 —— 不说清的话，人对着
@@ -770,6 +771,10 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
                 poll_interval=interval, poll_timeout=timeout),
             prompt, pj=pj, llm=_llm(), kind=kind, key=task["key"],
             rounds=_soften_rounds(provider_cfg), log=log)
+        # **记下本次实际请求的尺寸。** 面板上「参数」显示的是 tasks.json 里
+        # 装配时烧进去的值，而实际请求可能被「生产页那一行」或「一键跑到底」
+        # 的覆盖改过 —— 两个数并排出现（参数 9:16 / 要的是 16:9）看着像程序
+        # 自相矛盾，人会去查生产链，而真正该看的是「谁覆盖了它」。
         pj.upsert_registry(kind, {"id": task["key"], "file_ref": task["output"],
                                   "status": "generated",
                                   "requested_size": want, **meta})
@@ -843,7 +848,8 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             # 同上：跳过时也重新量，别把「比例不对」的提醒清没了
             return {"skipped": True, "msg": "已经有了，跳过",
                     "warn": _ratio_warn(pj, out, want, "video", task["key"],
-                                        provider_cfg, model, "video")}
+                                        provider_cfg, model, "video",
+                                        str(p.get("ratio") or ""))}
         # V6.2 第 19 章：视频必须带覆盖**完整关键时间推进**的有序故事板骨架。
         # 所以这里传的是整条，不是一张。老产物只有一张，那就是一条长度 1 的骨架。
         spine = [str(s.get("file_ref") or "")
@@ -999,6 +1005,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                       duration=int(p.get("duration", 15)), ratio=want)
         return {"output": task["output"],
                 "warn": _ratio_warn(pj, out, want, "video", task["key"],
-                                    provider_cfg, model, "video")}
+                                    provider_cfg, model, "video",
+                                    str(p.get("ratio") or ""))}
 
     return worker
