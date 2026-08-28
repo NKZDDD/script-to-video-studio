@@ -2270,8 +2270,21 @@ function renderGen(summary) {
       const currentCap = BOOT.capabilities.find(c => c.id === sel.value) || {};
       const selected = effectiveBlock(currentCap, sel.dataset.cap, msel.value);
       msel.title = selected.notes || block.notes || '';
-      const opt = (list, cur) => (list || []).map(x =>
-        `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`).join('');
+      // **第一项是「跟随任务」，而且默认选它。**
+      //
+      // 原来这里预选的是「设置 → 默认参数」里的值，然后 go() **无条件**把
+      // 当前选中值当覆盖发出去。任务里烧的是环节8 装配那一刻的值，两个来源
+      // 不一致时，生产页每次点「开始」都静默把它盖掉 —— 而且默认参数不在
+      // 这家的候选里时（比如默认 1024x1536、这家只收比例），浏览器会选中
+      // 列表第一项，于是覆盖成一个你从没选过的值。
+      //
+      // 表现出来就是「参数 9:16 / 请求发的是 16:9」并排摆着，看着像程序
+      // 自相矛盾。空 value = 不覆盖，go() 里判空跳过。
+      const opt = (list, cur) =>
+        '<option value="">跟随任务（不覆盖）</option>'
+        + (list || []).map(x =>
+          `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`)
+          .join('');
       if (kind === 'video') {
         pbox.innerHTML =
           `<select class="v-ratio" title="画面比例">${opt(selected.ratios, d.ratio)}</select>
@@ -2304,12 +2317,14 @@ function renderGen(summary) {
     };
     sel.onchange = fill; fill();
     const go = failedOnly => {
+      // 空 = 跟随任务，**不进 ov**。进了就是覆盖，而覆盖是不可见的：
+      // 面板上「参数」显示的永远是 tasks.json 里的值。
       const ov = {};
       const size = tr.querySelector('.i-size'), ratio = tr.querySelector('.v-ratio'),
             dur = tr.querySelector('.v-dur');
-      if (size) ov.size = size.value;
-      if (ratio) ov.ratio = ratio.value;
-      if (dur) ov.duration = +dur.value;
+      if (size && size.value) ov.size = size.value;
+      if (ratio && ratio.value) ov.ratio = ratio.value;
+      if (dur && dur.value) ov.duration = +dur.value;
       startGen(kind, sel.value, msel.value, +tr.querySelector('.c-in').value, failedOnly, ov);
     };
     tr.querySelector('[data-run]').onclick = () => go(false);
@@ -2824,6 +2839,12 @@ function renderProviders() {
     // 以前是一个大文本框，让人把客服发的那段话粘进去。三个问题都真实发生过：
     // 不知道要填哪几项（跑起来报「缺 webdav_url」才知道）、不知道怎么分隔、
     // 共用字段只写一次会在拆分时丢掉（三条任务同一秒全失败就是这个）。
+    // 这家自己声明的轮询默认值（能力表里带下来的）。**框里显示的必须是程序
+    // 实际会用的那个数** —— 显示 2400 而实际按 600 判失败，人会以为程序卡了。
+    const pollDef = {timeout: (c.video || {}).poll_timeout
+                              || (c.image || {}).poll_timeout || 0,
+                     interval: (c.video || {}).poll_interval
+                               || (c.image || {}).poll_interval || 0};
     const keyBoxes = (c.account_form && (c.account_form.per || []).length)
       ? accountForm(c, (BOOT.provider_accounts || {})[c.id] || {})
       : c.per_account_serial
@@ -2866,12 +2887,15 @@ function renderProviders() {
         <div><label>Base URL</label><input data-pv="${c.id}" data-f="base_url" value="${esc(saved.base_url || c.default_base_url)}"></div>
         ${keyBoxes}
         <div><label>等出结果最多多久（秒）
-          <span class="muted">提交后轮询的总时长，不是连接超时</span></label>
+          <span class="muted">提交后轮询的总时长，不是连接超时${
+            pollDef.timeout ? '；这家自己声明的默认是 ' + pollDef.timeout + ' 秒' : ''}</span></label>
           <input data-pv="${c.id}" data-f="poll_timeout" type="number" min="60" max="7200" step="60"
-                 value="${saved.poll_timeout || (isVideo ? 2400 : 900)}"></div>
+                 value="${saved.poll_timeout || pollDef.timeout
+                          || (isVideo ? 2400 : 900)}"></div>
         <div><label>每隔几秒查一次</label>
           <input data-pv="${c.id}" data-f="poll_interval" type="number" min="2" max="60"
-                 value="${saved.poll_interval || (isVideo ? 10 : 5)}"></div>
+                 value="${saved.poll_interval || pollDef.interval
+                          || (isVideo ? 10 : 5)}"></div>
         ${isVideo ? `<div style="grid-column:1/-1"><label>时长档位（实测过的写在这里）
           <span class="muted">各家文档对现役模型的秒数常常根本没写 ——
             程序只报有依据的，你验过的写在这里就会出现在下拉里</span></label>

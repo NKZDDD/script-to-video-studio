@@ -574,7 +574,8 @@ def _check_video_ref_map(prompt: str, task: dict, spine: list,
 
 
 def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
-                provider_cfg: dict, model: str, media: str):
+                provider_cfg: dict, model: str, media: str,
+                task_size: str = ""):
     """出完东西量一下真实尺寸，比例不对就挂一条提醒。
 
     这类问题接口不会报错——200、文件也正常下载，只是画面躺倒了。
@@ -596,7 +597,18 @@ def _ratio_warn(pj: Project, path: str, want: str, stage: str, key: str,
         "WRONG_RATIO",
         f"要的是 {bad['want']}，实际出来 {bad['got']}（约 {bad['got_ratio']}）。{flip}",
         stage=stage, target=key, provider=provider_cfg.get("provider", ""), model=model,
-        extra_fix=[f"这个文件在：{pj.rel(path)}"])
+        # 「要的是 X」原来没说清 X 是谁给的。任务里烧的是装配时的值，而这一次
+        # 的请求可能被生产页那一行或一键跑到底的覆盖改过 —— 不说清的话，人对着
+        # 「参数 9:16 / 要的是 16:9」会以为程序自相矛盾，然后去查生产链。
+        extra_fix=[
+            f"这一次请求发的是 {bad['want']}；任务里烧的是 "
+            f"{task_size or '（没写）'}"
+            + ("　—— 两个不一样，就是被「生产」页那一行或「一键跑到底」的"
+               "覆盖改过了；那两处不选具体值就不会覆盖"
+               if task_size and task_size != bad["want"] else ""),
+            "请求里确实带了这个值（各家字段名不同，程序按各家规范转过）——"
+            "回来的不对就是这家/这个模型没听，换个模型或换一家",
+            f"这个文件在：{pj.rel(path)}"])
 
 
 def _lazy_llm(llm_factory: Optional[Callable]) -> Callable:
@@ -706,7 +718,9 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
             # 而文件其实还是那个躺倒的文件。以磁盘上的东西为准。
             return {"skipped": True, "msg": "已经有了，跳过（做出来的就不再动）",
                     "warn": _ratio_warn(pj, out, want, kind, task["key"],
-                                        provider_cfg, model, "image")}
+                                        provider_cfg, model, "image",
+                                        str((task.get("params") or {})
+                                            .get("size") or ""))}
         prompt = read_text(pj.p(*task["prompt_ref"].split("/")))
         want_refs = sorted(task.get("reference_images", []),
                            key=lambda x: x.get("image_n", 0))
@@ -757,7 +771,8 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
             prompt, pj=pj, llm=_llm(), kind=kind, key=task["key"],
             rounds=_soften_rounds(provider_cfg), log=log)
         pj.upsert_registry(kind, {"id": task["key"], "file_ref": task["output"],
-                                  "status": "generated", **meta})
+                                  "status": "generated",
+                                  "requested_size": want, **meta})
         pj.log_event({"stage": kind, "id": task["key"], "result": "ok", **meta})
         # 记一次出图。出图出片是按次计费的，钱主要花在这里，必须入账。
         ledger.record(pj.root, kind="image", stage=kind, target=task["key"],
@@ -766,7 +781,9 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
                       model=meta.get("model", model), count=1, size=want)
         return {"output": task["output"],
                 "warn": _ratio_warn(pj, out, want, kind, task["key"],
-                                    provider_cfg, model, "image")}
+                                    provider_cfg, model, "image",
+                                    str((task.get("params") or {})
+                                        .get("size") or ""))}
 
     return worker
 
@@ -888,8 +905,18 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                      key=lambda r: r.get("image_n") or 0)
         for r in aux:
             f = str(r.get("url") or r.get("file_ref") or "")
-            if f:
-                refs.append(to_ref(f, log))
+            if not f:
+                continue
+            if f in seen:
+                dup += 1
+                continue
+            seen.add(f)
+            refs.append(to_ref(f, log))
+        if dup:
+            log(f"⚠️ 补图里有 {dup} 张就是骨架本身，已去重 —— "
+                f"同一张传两次会让后面每张图的编号整体错位（画面出得来、"
+                f"参考全是错的）。装配那一层应该已经剔过了，"
+                f"这条日志出现说明有一处漏剔，去看 run_v34 的视频装配。")
         # V6.1 的老字段照旧认 —— **但只在没有 reference_images 的时候。**
         #
         # 通用版的视频补图从「一个」改成「一组」之后，两个字段都会有值：

@@ -68,8 +68,21 @@ CONTENT_REJECT_RE = re.compile(
     r"|(涉嫌|涉及|存在|判定为?|属于)违规|违规内容|内容违规|违规，"
     r"|不当内容|不适当内容|敏感内容|命中敏感"
     r"|(拒绝|不予|无法)生成|已被拦截|被(拦截|屏蔽)"
+    # unsafe 那一族。实遇（2026-08-26，超模出图）：
+    #   "The generated images appear to be unsafe. Try modifying the prompt or seeds."
+    #   服务商错误码 image_task_error —— 那是个通用码，**不能拿它判审核**
+    #   （网络错、参数错也是这个码），只有文案能分。
+    # 这条以前判成 UNKNOWN，于是**一轮改写都不走**：短剧里打人流血是常规戏，
+    # 本该自动改写重发的活儿直接算失败，人得手动去改提示词。
+    # 只收「明确说这东西不安全」的写法，不收裸的 safe/safety ——
+    # 剧本里「安全屋」「他不安全」会误伤。
+    r"|appear\w* to be unsafe|(is|was|are|were) unsafe"
+    r"|unsafe (image|content|prompt|output)|\bnsfw\b"
     # 让你怎么办 —— 最强的信号，只有内容问题才会这么说
-    r"|修改提示(语|词)|调整提示(语|词)|更换描述", re.I)
+    r"|修改提示(语|词)|调整提示(语|词)|更换描述"
+    # 同一句的英文写法。原来只有中文，于是英文网关的同一句话认不出来。
+    r"|(modify|modifying|change|adjust|rephrase|revise)\w*"
+    r"\s+(the\s+|your\s+)?prompt", re.I)
 
 _TASK_FATAL_KW = (
     "invalid prompt", "prompt too long", "unsupported",
@@ -210,6 +223,14 @@ def extract_status(data: Any) -> str:
     return ""
 
 
+# 文本里嵌的链接：<video src='…'> / <img src="…"> / ![alt](…) / 裸 URL
+_EMBEDDED_URL_RE = re.compile(
+    r"""<(?:video|source|img|audio)[^>]*?\ssrc=["'](https?://[^"']+)["']"""
+    r"""|!\[[^\]]*\]\((https?://[^)\s]+)\)"""
+    r"""|(https?://[^\s"'<>)\]]+)""",
+    re.I | re.X)
+
+
 def _collect_urls(node: Any, found: list, key: str = "") -> None:
     if isinstance(node, dict):
         for k, v in node.items():
@@ -217,8 +238,18 @@ def _collect_urls(node: Any, found: list, key: str = "") -> None:
     elif isinstance(node, (list, tuple)):
         for v in node:
             _collect_urls(v, found, key)
-    elif isinstance(node, str) and node.startswith("http"):
-        found.append((key, node))
+    elif isinstance(node, str):
+        if node.startswith("http"):
+            found.append((key, node))
+            return
+        # 有的家把结果**嵌在一段文本里**，整串不是 URL：
+        #   好漫剧 chat/completions → 一段 html 代码块，里面是 <video src='…mp4'>
+        #   香蕉/若干图片接口       → markdown 图片 ![Generated Image](http://…png)
+        # 只看 startswith("http") 的话这两种一个都取不到，
+        # 而报错会是「没返回结果」—— 指向完全错的方向（会去查线路、查余额）。
+        if "http" in node and len(node) < 20000:
+            for m in _EMBEDDED_URL_RE.finditer(node):
+                found.append((key, m.group(1) or m.group(2) or m.group(3)))
 
 
 def _dig(node: Any, keys: tuple, depth: int = 4) -> str:

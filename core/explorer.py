@@ -446,22 +446,50 @@ def tasks(pj: Project, episode: str = "") -> dict:
             out = _file(pj, it.get("output", ""))
             r, lg = reg.get(k, {}), logs.get(k, {})
             if kind == "video":
-                # 视频执行器固定按「故事板 → 可选补充资产」传图；这两项分别存放在
-                # storyboard_ref / aux_reference，不在通用 reference_images 里。
-                # 旧页面只看后者，于是任务明明有故事板却显示“无参考图”。
+                # **按 produce 实际的上传顺序列：整条骨架，然后补图。**
+                #
+                # 这里原来只读 `storyboard_ref` / `aux_reference`（都是单数）——
+                # 那是 V6.1 的形状。V6.2 之后一段有 1..N 张有序故事板
+                # （`storyboard_refs`），补图在 `reference_images` 里，
+                # 而这两个字段面板一个都没读。
+                #
+                # 后果不是显示得少一点：用户看着「参 1/1　本段固定故事板」，
+                # 而提示词里映射了 Image 1..5，于是判断「视频只吃了一张参考图」，
+                # 去查生产链 —— **面板在说谎，人按谎去修另一处**。
+                # 顺序必须和 produce 一致（produce.py 的视频那一段），
+                # 否则编号对不上，看着更像 bug。
                 display_refs = []
-                storyboard_ref = str(it.get("storyboard_ref") or "")
-                aux_reference = str(it.get("aux_reference") or "")
-                if storyboard_ref:
+                spine = sorted((it.get("storyboard_refs") or []),
+                               key=lambda s: s.get("order") or 0)
+                for i, s in enumerate(spine, 1):
                     display_refs.append({
-                        "image_n": 1, "asset_id": "本段固定故事板",
-                        "file": _file(pj, storyboard_ref),
+                        "image_n": i,
+                        "asset_id": str(s.get("sheet_id") or "故事板")
+                        + (f"（{s['spine_role']}）" if s.get("spine_role") else ""),
+                        "file": _file(pj, str(s.get("file_ref") or "")),
                     })
-                if aux_reference:
+                aux_rows = sorted((it.get("reference_images") or []),
+                                  key=lambda r: r.get("image_n") or 0)
+                for j, r in enumerate(aux_rows, len(display_refs) + 1):
                     display_refs.append({
-                        "image_n": 2, "asset_id": "补充资产参考图",
-                        "file": _file(pj, aux_reference),
+                        "image_n": r.get("image_n") or j,
+                        "asset_id": str(r.get("asset_id") or "补图"),
+                        "file": _file(pj, str(r.get("file_ref") or "")),
                     })
+                # 老 tasks.json 的单数字段：**只在上面两样都空的时候**才用。
+                # 两边都列的话，同一张图会出现两次，而 image_n 是上传顺序 ——
+                # 看着就是「编号重了」。
+                if not display_refs:
+                    sb = str(it.get("storyboard_ref") or "")
+                    ax = str(it.get("aux_reference") or "")
+                    if sb:
+                        display_refs.append({
+                            "image_n": 1, "asset_id": "本段固定故事板",
+                            "file": _file(pj, sb)})
+                    if ax:
+                        display_refs.append({
+                            "image_n": len(display_refs) + 1,
+                            "asset_id": "补充资产参考图", "file": _file(pj, ax)})
             else:
                 display_refs = [
                     {"image_n": x.get("image_n"), "asset_id": x.get("asset_id"),
