@@ -692,8 +692,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
     prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
                           provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
     model = provider_cfg.get("model", "")
-    interval = int(provider_cfg.get("poll_interval", 5))
-    timeout = int(provider_cfg.get("poll_timeout", 900))
+    interval, timeout = _poll_of(prov, provider_cfg, "image", 5, 900)
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="image")
     _llm = _lazy_llm(llm_factory)
@@ -772,13 +771,31 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
     return worker
 
 
+def _poll_of(prov, provider_cfg: dict, kind: str,
+             fb_interval: int, fb_timeout: int) -> tuple:
+    """(间隔, 总墙)。优先级：**配置 > 服务商声明 > 这一类的兜底**。
+
+    加这一层的原因：各家合理的墙差一个数量级。HVTALD 的判定就是「outs/ 里
+    有没有出现成片」，固定 15 秒的活几分钟就该落盘，等 40 分钟只是把「任务
+    异常」拖成「任务异常，但你晚 35 分钟才知道」；而别家排队几十分钟是常态，
+    墙短了会把**快出来的片子判成失败** —— 钱照花、东西没拿到。
+    一个数管所有家，两头都得罪。
+
+    配置仍然最高：页面上那两格改了就该生效，服务商声明只是**没填时**的默认。
+    """
+    d = getattr(prov, "poll_defaults", None) or {}
+    i = provider_cfg.get("poll_interval")
+    w = provider_cfg.get("poll_timeout")
+    return (int(i if i else d.get("interval") or fb_interval),
+            int(w if w else d.get("timeout") or fb_timeout))
+
+
 def make_video_worker(pj: Project, provider_cfg: dict,
                       llm_factory: Optional[Callable] = None) -> Callable:
     prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
                           provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
     model = provider_cfg.get("model", "")
-    interval = int(provider_cfg.get("poll_interval", 10))
-    timeout = int(provider_cfg.get("poll_timeout", 2400))
+    interval, timeout = _poll_of(prov, provider_cfg, "video", 10, 2400)
     ref_side = int(provider_cfg.get("ref_max_side", 1024))
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video")
     _llm = _lazy_llm(llm_factory)

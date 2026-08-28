@@ -125,14 +125,37 @@ class HvtaldTests(unittest.TestCase):
         ]
         self.assertEqual(p._wait(aid, 1, 5, log=lambda *a: None), "u3")
 
-    def test_wait_timeout_is_retryable_not_fatal(self):
-        """排队等超时不是「参数错了」，任务还在，标 retryable 让上层可以再来取。"""
+    def test_wait_timeout_does_not_resubmit(self):
+        """★ 超时**不重投**（2026-08-26 改的判断，原来是 retryable）。
+
+        用户原话：「有调整提示词这个操作才要重试，如果没有就不需要重试」。
+        超时这条路上提示词一个字都没变，同参重投只是换一个 actionId 再撞一次
+        同样的墙，而**每次都算一次钱**。更难看的是取片按 actionId 前缀找 ——
+        重投之后前一次的成片如果晚到，没人认领（WebDAV 只存 48 小时）。
+
+        提示词被审核拒绝那条不受影响：那条走 soften 改写后重发，
+        发出去的东西真的变了，才值得再花一次。
+        """
         p = HvtaldProvider(api_key=FULL)
         p._find_outs = lambda log=None: "http://dav/outs"
         p._list_url = lambda url, missing_ok=True, sub="": []
         with self.assertRaises(ApiError) as raised:
             p._wait("zzz", 1, 1, log=lambda *a: None)
-        self.assertNotEqual(raised.exception.kind, TASK_FATAL)
+        exc = raised.exception
+        self.assertEqual(exc.kind, TASK_FATAL)
+        # 有自己的码：原来落到 UNKNOWN，于是 should_failover 判 True ——
+        # 「换不换家」是猜出来的，不是定下来的。
+        self.assertEqual(exc.err_code, "VIDEO_POLL_TIMEOUT")
+        # 任务没丢这件事必须写在报文里，否则人会以为白花了钱
+        self.assertIn("actionId", str(exc))
+
+    def test_the_wall_is_shorter_than_the_generic_video_default(self):
+        """★ 这一家的判定就是「outs/ 里有没有出现成片」，别的什么都不看，
+        所以墙可以短。能短的前提是**排队在墙外**（账号池的槽位在调
+        generate_video 之前拿）。别家排队几十分钟是常态，墙短了会把快出来的
+        片子判成失败 —— 钱照花、东西没拿到。"""
+        d = HvtaldProvider.poll_defaults
+        self.assertLess(d["timeout"], 2400)
 
 
 if __name__ == "__main__":
@@ -169,17 +192,18 @@ class OutsDirTests(unittest.TestCase):
         return p
 
     def test_a_missing_outs_dir_is_reported_at_once(self):
-        """★ 以前要等满 poll_timeout（默认 2400 秒）才说话，而且说错。
+        """★ 以前要等满 poll_timeout（默认现在 1200 秒）才说话，而且说错。
 
-        现在先把整个空间找一遍（往上剪到根 + 往下看一层），
-        真的哪儿都没有才报 —— 并且把试过的路径列出来。
+        2026-08-28 起不再「把整个空间找一遍」—— 位置是固定的
+        （`<填的地址>/outs`）。所以这条改成：**探的那一个地址要出现在报错里**，
+        并且要说清该往哪层填。
         """
         p = self._prov(404)
         with self.assertRaises(ApiError) as e:
             p._wait("abc123", 1, 5, log=lambda m: None)
         msg = str(e.exception)
-        self.assertIn("找不到成片目录", msg)
-        self.assertIn("已经试过", msg)
+        self.assertIn("没有 `outs/`", msg)
+        self.assertIn("/outs", msg)
         self.assertIn("5051", msg, "得把它填的那一层也列出来")
 
     def test_it_is_task_fatal_not_a_retry(self):
@@ -213,7 +237,19 @@ class OutsDirTests(unittest.TestCase):
 
 
 class FindOutsTests(unittest.TestCase):
-    """`outs/` 在哪一层是**程序的活**，不是用户填的时候要数的。
+    """`outs/` 就在填的那一层下面。**2026-08-28 改了判断。**
+
+    原来是「哪一层有 outs 是程序的活」，往上剪 8 层、往下看一层地找。
+    用户否掉了：「理论上他的生产位置是固定的一个 outs，而不是要去找多层…
+    为什么有这种八、九层的查找」。翻找的两种结果都不好 —— 白探十几次，
+    或者探到另一条线路的同名 outs 然后一直等一个不会出现的成片。
+    现在只探一次，不在那儿就把「该改哪儿」说清。
+
+    下面几条原来断言「往上 3 层也能找到」，已按新判断改写。
+
+    历史（保留着，因为报错文案还靠它）：客服给的地址可能指到线路目录
+    （实遇 `/project/pro_test/conf/sd2_HVTALD_0818/5051`）—— 所以报错里要
+    列出这一层有哪些子目录，人一眼看得出该往哪层填。
 
     用户问（2026-08-21）：「这个生产的层级是我填写的时候要填的吗」。不该。
     客服给的地址可能指到线路目录（实遇 `/project/pro_test/conf/
@@ -246,23 +282,26 @@ class FindOutsTests(unittest.TestCase):
         p = self._prov({self.BASE + "/outs"})
         self.assertEqual(p._find_outs(lambda m: None), self.BASE + "/outs")
 
-    def test_outs_three_levels_up(self):
-        """★ 客服给的是线路目录，而 outs 在项目那一层 —— 这是实遇的形状。"""
-        want = "http://dav.x/project/pro_test/outs"
-        p = self._prov({want})
-        self.assertEqual(p._find_outs(lambda m: None), want)
+    def test_outs_up_the_tree_is_not_used(self):
+        """★ 上层有 outs 也**不认** —— 那多半是别条线路的。
 
-    def test_outs_at_the_space_root(self):
-        """★ 写死「往上 4 层」正好差一层到不了根 —— 而根恰好可能是它。"""
+        原来这一条断言「往上 3 层也能找到」。去掉翻找之后，
+        上层那个 outs 正是最危险的一种命中：成片永远不会出现在那儿，
+        而程序会一直等到超时，报「等了 N 秒没看到」——
+        比直接说「你填的这一层没有 outs」难查得多。
+        """
+        p = self._prov({"http://dav.x/project/pro_test/outs"})
+        self.assertEqual(p._find_outs(lambda m: None), "")
+
+    def test_the_space_root_is_not_used_either(self):
         p = self._prov({"http://dav.x/outs"})
-        self.assertEqual(p._find_outs(lambda m: None), "http://dav.x/outs")
+        self.assertEqual(p._find_outs(lambda m: None), "")
 
-    def test_it_says_where_it_found_it(self):
-        """★ 不说的话，人不知道自己填的地址其实不对（只是被兜住了）。"""
-        logs = []
-        self._prov({"http://dav.x/project/pro_test/outs"})._find_outs(logs.append)
-        self.assertTrue(any("上 3 层" in m for m in logs), logs)
-        self.assertTrue(any("不用改" in m for m in logs), logs)
+    def test_it_probes_only_the_configured_level(self):
+        """★ 只探一次。每一次 PROPFIND 都要等，而这发生在每条视频出片之前。"""
+        p = self._prov(set())
+        p._find_outs(lambda m: None)
+        self.assertEqual(p._tried, [self.BASE + "/outs"])
 
     def test_it_never_uses_dotdot_in_the_url(self):
         """★ URL 里的 `..` 要服务端规范化，不少自建 WebDAV 不做。"""
@@ -272,12 +311,10 @@ class FindOutsTests(unittest.TestCase):
         for u in p._tried:
             self.assertNotIn("..", u)
 
-    def test_it_stops_at_the_root(self):
-        """★ 剪过头是同一个地址，白探 —— 而每一次 PROPFIND 都要等。"""
+    def test_no_duplicate_probes(self):
         p = self._prov(set())
         p._find_outs(lambda m: None)
         self.assertEqual(len(p._tried), len(set(p._tried)), "有重复的探测")
-        self.assertEqual(p._tried[-1], "http://dav.x/outs")
 
     def test_it_lists_everything_it_tried_when_it_fails(self):
         """★ 只说「找不到」等于让人自己猜；列出来他一眼看得出该填哪个。"""
@@ -345,18 +382,26 @@ class SelftestTests(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertIn("/outs", r["msg"])
 
-    def test_it_says_when_outs_is_not_where_you_typed(self):
-        """★ 不说的话，人不知道自己填的其实不是那一层（只是被兜住了）。"""
+    def test_outs_only_counts_at_the_configured_level(self):
+        """★ 上层有 outs **不算通过**（原来算，还提示「程序自己找到的」）。
+
+        改的原因：那个 outs 多半属于别条线路，成片永远不会出现在那儿 ——
+        自检绿着、出片却一直等到超时，比自检直接说「这一层没有」难查得多。
+        """
         r = self._run(self.KEY.format(self.BASE),
                       {self.BASE: 207,
                        "http://dav.x/project/pro_test/outs": 207})
-        self.assertTrue(r["ok"])
-        self.assertIn("不在你填的那一层", r["msg"])
+        self.assertFalse(r["ok"])
+        self.assertIn("没有 `outs/`", r["msg"])
+        self.assertIn("上一层", r["msg"], "得说清该往哪层填")
 
-    def test_connected_but_no_outs_anywhere(self):
+    def test_connected_but_no_outs_here(self):
+        """连得上、但这一层没有 outs。（文案从「整个空间里找不到」改成
+        「这个地址下面没有」—— 因为不再翻整个空间了。）"""
         r = self._run(self.KEY.format(self.BASE), {self.BASE: 207})
         self.assertFalse(r["ok"])
-        self.assertIn("找不到 `outs/`", r["msg"])
+        self.assertIn("没有 `outs/`", r["msg"])
+        self.assertIn("上一层", r["msg"])
 
     def test_the_endpoint_prefers_the_providers_own_selftest(self):
         """★ 不接的话后端改了也白改 —— 页面上按的还是那个假绿灯。"""
@@ -375,3 +420,118 @@ class SelftestTests(unittest.TestCase):
         """别家没有专门自检 —— 回落到拉模型列表，别把它们弄坏。"""
         from core.providers.paisio import PaisioProvider
         self.assertIsNone(PaisioProvider(api_key="sk-x").selftest())
+
+
+class OutsIsOneFixedLevelTests(unittest.TestCase):
+    """★ `outs` 的位置是固定的：`<填的 webdav 地址>/outs`。不再翻目录。
+
+    用户原话（2026-08-28）：「理论上他的生产位置是固定的一个 outs，
+    而不是要去找多层…为什么有这种八、九层的查找」。
+
+    原来往上剪 8 层、往下看一层地找。两种结果都不好：
+      · 白探十几次 —— 每一次都是一个 WebDAV 请求，而这发生在每条视频的
+        第一次轮询之前
+      · **探到一个同名但不属于这条线路的 `outs`** —— 然后一直等一个永远
+        不会出现在那儿的成片，等到超时。这比直接报「路径不对」难查得多。
+    """
+
+    def test_it_probes_exactly_one_url(self):
+        p = HvtaldProvider(api_key=FULL)
+        seen = []
+        p._probe_url = lambda u: (seen.append(u), False)[1]
+        p._child_dirs = lambda: ["a", "b", "c"]
+        self.assertEqual(p._find_outs(), "")
+        self.assertEqual(len(seen), 1, f"探了 {len(seen)} 次：{seen}")
+        self.assertTrue(seen[0].endswith("/outs"), seen[0])
+
+    def test_it_no_longer_climbs_or_descends(self):
+        import inspect
+        src = inspect.getsource(HvtaldProvider._find_outs)
+        self.assertNotIn("_UP_LEVELS", src)
+        self.assertNotIn("_child_dirs", src)
+
+    def test_the_error_names_the_exact_url_and_what_to_change(self):
+        """★ 不翻了，就必须把「该改哪儿」说清 —— 否则等于把翻找的活推给人，
+        而他不知道该往哪层填。"""
+        p = HvtaldProvider(api_key=FULL)
+        p._probe_url = lambda u: False
+        p._child_dirs = lambda: ["sd2_HVTALD_0818", "conf"]
+        with self.assertRaises(ApiError) as e:
+            p._wait("aid", 1, 1, log=lambda *a: None)
+        msg = str(e.exception)
+        self.assertIn("/outs", msg)                      # 探的那个确切地址
+        self.assertIn("sd2_HVTALD_0818", msg)            # 这一层有哪些目录
+        self.assertIn("共用存储", msg)                    # 去哪改
+        self.assertEqual(e.exception.kind, TASK_FATAL)   # 路径不对，重试无意义
+
+    def test_it_caches_the_hit(self):
+        """找到了就记住 —— 每轮轮询都重探一次是白花请求。"""
+        p = HvtaldProvider(api_key=FULL)
+        n = {"c": 0}
+
+        def probe(u):
+            n["c"] += 1
+            return True
+
+        p._probe_url = probe
+        self.assertEqual(p._find_outs(), p._find_outs())
+        self.assertEqual(n["c"], 1)
+
+
+class SubmitNonJsonTests(unittest.TestCase):
+    """★ 投递回了非 JSON 时，报错要带状态码和正文。
+
+    用户实遇（2026-08-28）：日志里只有
+        HVTALD 投递失败（http://ha.z988.top/dy/brush/fromApi）：
+        Expecting value: line 1 column 1 (char 0)
+    那句话是 `r.json()` 抛的 —— 不含状态码、不含它到底回了什么，
+    看不出是网关 502 还是 base_url 填错回了个登录页。
+    """
+
+    class _R:
+        def __init__(self, code, text):
+            self.status_code, self.text = code, text
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    def _submit(self, code, text):
+        import core.providers.hvtald as M
+        from core.providers.base import VideoTask
+        p = HvtaldProvider(api_key=FULL)
+        real = M.requests
+        M.requests = type("X", (), {
+            "post": staticmethod(lambda *a, **k: self._R(code, text))})()
+        try:
+            with self.assertRaises(ApiError) as e:
+                p.generate_video(
+                    VideoTask(prompt="p", refs=["https://x/a.png"], duration=15,
+                              ratio="9:16", model="即梦国际版"),
+                    "out.mp4", log=lambda *a: None)
+            return e.exception
+        finally:
+            M.requests = real
+
+    def test_it_reports_the_status_code(self):
+        exc = self._submit(502, "<html>502 Bad Gateway</html>")
+        self.assertIn("502", str(exc))
+        self.assertIn("Bad Gateway", str(exc))
+
+    def test_an_empty_200_says_the_gateway_is_probably_down(self):
+        """★ 200 + 空正文和 502 是两种毛病，改法不同 —— 话要分开。"""
+        exc = self._submit(200, "")
+        self.assertIn("空", str(exc))
+        self.assertIn("网关", str(exc))
+
+    def test_html_hints_at_a_wrong_base_url(self):
+        exc = self._submit(200, "<!doctype html><title>登录</title>")
+        self.assertIn("base_url", str(exc))
+
+    def test_it_is_retryable_not_fatal(self):
+        """★ 网关抖动换个时间就好 —— 判死这一条等于把能救的活丢掉。"""
+        self.assertEqual(self._submit(502, "x").kind, "retryable")
+
+    def test_the_bare_parse_error_is_gone(self):
+        """★ 这一句本身就是那个「什么都没说」的报错。"""
+        exc = self._submit(200, "")
+        self.assertNotIn("Expecting value", str(exc))

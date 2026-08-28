@@ -116,6 +116,19 @@ class HvtaldProvider(Provider):
     # 只会排队超时或者直接拒，而失败记录里只看得到「生成失败」。
     per_account_serial = True
 
+    # **这一家的判定就是「outs/ 里有没有出现成片」，别的什么都不看。**
+    # 用户原话（2026-08-26）：「长时间没有出现作物就是出现了任务异常，
+    # 我不去判断是什么异常只要他超过多少时间我就算他失败了」。
+    #
+    # 所以墙可以短。能短的前提是**排队在墙外**：账号池的槽位是在调
+    # generate_video 之前拿的，全局闸门上限也被压到账号数（见
+    # produce.make_video_worker），所以这个墙只覆盖「投递 + 远端生成」，
+    # 不含本地等空账号那一段。固定 15 秒 / 1080p 的活，正常几分钟内落盘。
+    #
+    # 别把它写进全局默认：出图 900、别家出片 2400，各家的合理值差一个
+    # 数量级，一个数管所有家的结果就是「有的家白等半小时，有的家没等够」。
+    poll_defaults = {"interval": 10, "timeout": 1200}
+
     # 账号表单。键名和上面 `_ALIAS` 认的一致 —— 不一致就是「填了读不到」。
     #
     # 共用/各自的分法按客服实际给凭据的形状来：deviceId + token 一个账号一份，
@@ -164,6 +177,8 @@ class HvtaldProvider(Provider):
                 "resolutions": ["1080p"],
                 "max_refs": MAX_REFS,
                 "ref_mode": "url",
+                "poll_interval": self.poll_defaults["interval"],
+                "poll_timeout": self.poll_defaults["timeout"],
                 "notes": "固定 **15 秒 / 1080P**，不卡人脸，参考图 ≤9 张、必须是公网绝对地址。"
                          "这家**没有比例字段** —— 比例是从提示词最前面提取的，"
                          "本类会自动把所选比例拼到 prompt 开头，调用方照常设 ratio 即可。"
@@ -198,16 +213,23 @@ class HvtaldProvider(Provider):
             return {"ok": False, "msg": f"WebDAV 连不上：{m[:160]}{hint}"}
         outs = self._find_outs(lambda _m: None)
         if not outs:
+            kids = self._child_dirs()
+            # **只探这一层。** 不再「把整个空间找一遍」——
+            # 位置是固定的（见 _find_outs 的说明）。所以这里的任务是把
+            # 「该往哪层填」摆出来，让人一次填对。
             return {"ok": False,
-                    "msg": (f"WebDAV 通了（{base}），但整个空间里找不到 `outs/` —— "
-                            f"成片是从那里取的。已经试过 {len(self._tried)} 个路径；"
-                            f"这一层下面现有的目录："
-                            f"{'、'.join(self._child_dirs()) or '（一个都没有）'}")}
-        same = outs.rstrip("/") == self._up(0, "outs").rstrip("/")
-        return {"ok": True,
-                "msg": (f"WebDAV 通了，成片目录：{outs}"
-                        + ("" if same else "　（不在你填的那一层，程序自己找到的，"
-                                           "不用改地址）"))}
+                    "msg": (f"WebDAV 通了（{base}），但这个地址下面没有 `outs/`"
+                            f" —— 成片是从那里取的。" + chr(10)
+                            + f"探的是：{self._tried[0]}" + chr(10)
+                            + "这一层现有的目录："
+                            + (("、".join(kids[:12])
+                                + ("…" if len(kids) > 12 else ""))
+                               if kids else "（一个都没有 —— 多半是地址或账号密码不对）")
+                            + chr(10)
+                            + "把地址改成 `outs` 的上一层"
+                            + ("（多半是上面某个目录里面）" if kids else "")
+                            + "，再点一次自检。")}
+        return {"ok": True, "msg": f"WebDAV 通了，成片目录：{outs}"}
 
     def ready(self) -> tuple:
         """凭据齐不齐。缺哪项直接说，别等发出去才 401。"""
@@ -296,47 +318,25 @@ class HvtaldProvider(Provider):
     _UP_LEVELS = 8
 
     def _find_outs(self, log: Callable = print) -> str:
-        """成片目录的**绝对地址**。找不到返回空串。
+        """成片目录：就是 `<你填的 webdav 地址>/outs`。不在那儿就返回空串。
 
-        **不让用户去数目录层级。** 客服给的地址可能指到线路目录
-        （`.../conf/sd2_HVTALD_0818/5051`）、`conf/` 上面，或者空间根 ——
-        而 `outs` 在哪一层是查得出来的事。
+        **不翻目录了。** 原来会往上剪 8 层、往下看一层地找 `outs` ——
+        用户原话（2026-08-28）：「理论上他的生产位置是固定的一个 outs，
+        而不是要去找多层…为什么有这种八、九层的查找」。对。位置是固定的，
+        翻找只有两种结果：要么白探十几次（每一次都是一个 WebDAV 请求），
+        要么**探到一个同名但不属于这条线路的 outs**，然后一直等一个永远不会
+        出现在那儿的成片 —— 后者比直接报错难查得多。
 
-        找的顺序（每一步都比下一步便宜）：
-          ① 填的这一层就有 `outs/`   → 绝大多数情况
-          ② 往上剪几层再找 `outs`     → 客服给的常是线路目录
-          ③ 往下看一层的每个子目录里有没有 `outs`
-
-        找到之后记住，别每轮轮询都重找一遍。
+        所以只认这一层。不在这一层就说清该改哪儿，让人把地址填对 ——
+        那是一次性的事，不该每次投递都靠猜。
         """
         if self._outs is not None:
             return self._outs
-        tried = []
-
-        def take(url, note=""):
-            tried.append(url)
-            if not self._probe_url(url):
-                return False
+        url = self._up(0, "outs")
+        self._tried = [url]
+        if self._probe_url(url):
             self._outs = url
-            if note:
-                log(note + "（程序自己找到的，webdav 地址不用改）")
-            return True
-
-        # ① 这一层
-        if take(self._up(0, "outs")):
-            return self._outs
-        # ② 往上剪
-        # 只剪到根为止，多剪的那几层是同一个地址，白探
-        depth = len([x for x in urlparse(self.creds["webdav_url"]).path.split("/") if x])
-        for lv in range(1, min(depth, self._UP_LEVELS) + 1):
-            if take(self._up(lv, "outs"), f"HVTALD 成片目录在上 {lv} 层：{self._up(lv, 'outs')}"):
-                return self._outs
-        # ③ 往下一层
-        for name in self._child_dirs():
-            u = self._up(0, f"{name}/outs")
-            if take(u, f"HVTALD 成片目录在下一层：{u}"):
-                return self._outs
-        self._tried = tried
+            return url
         return ""
 
     def _probe_url(self, url: str) -> bool:
@@ -431,9 +431,27 @@ class HvtaldProvider(Provider):
         url = self.session.base_url.rstrip("/") + API_PATH
         try:
             r = requests.post(url, json=body, timeout=self._timeout)
-            data = r.json()
         except Exception as exc:                            # noqa: BLE001
-            raise ApiError(f"HVTALD 投递失败（{url}）：{exc}")
+            raise ApiError(f"HVTALD 投递发不出去（{url}）：{exc}")
+        # **别直接 r.json()。** 网关这一刻没起来、被前置拦了、或者返回
+        # 一个 HTML 页面时，抛出来的是
+        #   Expecting value: line 1 column 1 (char 0)
+        # 那句话不含状态码、也不含它到底回了什么 —— 看不出是网关 502
+        # 还是地址填错回了个登录页。用户实遇（2026-08-28）就是这一句，
+        # 而它对着一屏日志什么都说明不了。
+        raw = (r.text or "").strip()
+        try:
+            data = r.json()
+        except Exception:                                    # noqa: BLE001
+            head = raw[:300].replace(chr(10), " ")
+            raise ApiError(
+                f"HVTALD 投递回了非 JSON（{url}）：HTTP {r.status_code}，"
+                f"正文前 300 字：{head or '（空的）'}" + chr(10)
+                + ("（200 + 空正文：多半是网关这一刻没起来，稍后重来）"
+                   if r.status_code == 200 and not raw
+                   else "（看状态码：502/504 是网关挂了；回 HTML 多半是"
+                        "base_url 填错了，填的不是接口地址）"),
+                status=r.status_code, kind="retryable")
         if int(data.get("code", 0)) != 200:
             raise ApiError(f"HVTALD 投递被拒：{str(data)[:300]}"
                            f"（检查 deviceId/token，以及线路是否还有余量）")
@@ -454,16 +472,21 @@ class HvtaldProvider(Provider):
         # 而哪一层有 `outs` 是查得出来的事。
         outs = self._find_outs(log)
         if not outs:
+            kids = self._child_dirs()
             raise ApiError(
-                f"在 WebDAV 上找不到成片目录 `outs/`。成片是从那里取的，"
-                f"找不到就永远取不到。\n"
-                f"已经试过：{'、'.join(self._tried[:10])}"
-                f"{'…' if len(self._tried) > 10 else ''}\n"
-                f"（往上找了 {self._UP_LEVELS} 层、往下看了一层）。\n"
-                f"这一层下面现有的目录："
-                f"{'、'.join(self._child_dirs()) or '（一个都没有，多半是地址或账号密码不对）'}\n"
-                f"去「设置 → HVTALD → 共用存储」核对 WebDAV 地址 —— "
-                f"填空间里任意一层都行（程序会自己找），但得是这个空间。",
+                f"这个地址下面没有 `outs/`：{self._tried[0]}" + chr(10)
+                + "成片是从 `outs/` 取的，路径不对就永远取不到。" + chr(10)
+                + "这一层现有的目录：" + (
+                    ("、".join(kids[:12]) + ("…" if len(kids) > 12 else ""))
+                    if kids else "（一个都没有 —— 多半是地址或账号密码不对）")
+                + chr(10)
+                + "去「设置 → HVTALD → 共用存储」把 WebDAV 地址改成 "
+                + "**`outs` 的上一层**"
+                + ("（看上面那几个目录名，多半要填到其中某一个里面）"
+                   if kids else "") + "。" + chr(10)
+                + "（程序不再自己翻目录找 outs：位置是固定的，翻找要么白探"
+                + "十几次，要么探到另一条线路的同名 outs，"
+                + "然后一直等一个不会出现在那儿的成片。）",
                 status=404, kind="task_fatal")
         start, seen = time.time(), -1
         while time.time() - start < timeout:
@@ -480,12 +503,23 @@ class HvtaldProvider(Provider):
                     log(f"HVTALD 成片就绪：{name}")
                     return full
             time.sleep(interval)
+        # **不重投。** 用户原话（2026-08-26）：「有调整提示词这个操作才要
+        # 重试，如果没有就不需要重试」。对 —— 超时这条路上提示词一个字都
+        # 没变，同参重投只是换一个 actionId 再撞一次同样的墙，而**每次都
+        # 算一次钱**；更难看的是取片按 actionId 前缀找，重投之后前一次的
+        # 成片如果晚到，没人认领（WebDAV 只存 48 小时）。
+        # 提示词被审核拒绝那条路不受影响：那条走 soften 改写后重发，
+        # 发出去的东西真的变了，才值得再花一次。
         raise ApiError(
             f"等了 {timeout} 秒没在 `{outs}/` 看到 {aid} 开头的成片"
             f"（那个目录在，只是里面没有这一条）。\n"
-            f"这家按线路排队，满负荷时要等；任务没丢，"
-            f"actionId={aid} 记下来可以稍后取。\n"
+            f"**这条不再重投** —— 提示词没有变，同参再发一次只会撞"
+            f"同一个墙，而每次都算一次钱。任务没丢，"
+            f"actionId={aid} 记下来可以稍后取；"
+            f"成片晚到的话它就在 `{outs}/` 里。\n"
+            f"这家按线路排队，满负荷时要等。一个账号同时只跑一条 —— "
+            f"经常撞墙就加账号（加并发），调大这个墙只是等更久。\n"
             f"顺便说一句：`conf/.../used/` 不是成片目录 —— 那是「投文件式」"
             f"用法里服务端取走配置后挪过去的地方，我们走的是 HTTP 接口，"
             f"那个目录永远是空的，别拿它判断任务有没有发出去。",
-            status=0, kind="retryable")
+            status=0, kind="task_fatal", err_code="VIDEO_POLL_TIMEOUT")
