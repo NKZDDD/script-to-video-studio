@@ -2230,12 +2230,19 @@ CAPABILITY = ("RELIABLE", "LIMITED", "UNSUPPORTED", "UNKNOWN")
 # 不假设模型有多镜头能力，是这一层的默认立场。
 _MULTISHOT = {
     # 片段匹配，所以写不带档位号的前缀就能覆盖 seedance2.5-4-1-720p /
-    # -00-720p / -26-480p 等一整族。
+    # -26-480p 等一整族。
     # ⚠ 2026-08-19 修正：以前写的是 "seedance-2.5"（带连字符），
-    # 而真实模型名是 "seedance2.5-…" —— 一个都匹配不上，
+    # 而当时真实模型名是 "seedance2.5-…" —— 一个都匹配不上，
     # 于是这档能力一直是 UNKNOWN，多镜头按 LIMITED 走了，**且不报错**。
+    # ⚠ 2026-08-28 又一次：鹤新增了 `paisio-seedance-2.5-*` 和
+    # `doubao-seedance-2-5-*` 两种写法，上面那三个前缀又是一个都不匹配 ——
+    # 同样的静默降级第二次发生。所以这次把连字符/无连字符/2-5 三种写法都列上，
+    # 而不是只补当前看到的那一个名字。判定口径和
+    # core/providers/paisio.is_seedance25() 保持一致。
     "seedance2.5": "RELIABLE",      # 鹤 Seedance 2.5：4-30 秒，实测能多镜头
-    "sd2.5-ultra": "RELIABLE",
+    "seedance-2.5": "RELIABLE",     # paisio-seedance-2.5-480p/-720p（08-28 新增）
+    "seedance-2-5": "RELIABLE",     # doubao-seedance-2-5-720p（同一个 2.5 的透传名）
+    "sd2.5": "RELIABLE",            # 原来写的是 sd2.5-ultra，已下线；改成覆盖整族
     "paisiodance-2.5": "RELIABLE",
 }
 

@@ -24,22 +24,56 @@ from ..apiutil import ApiError, extract_image_items, extract_task_id, extract_vi
 from .base import ImageTask, Provider, VideoTask
 
 
-# 2026-08-19 用真 Key 实拉 GET /v1/models 校正过。
-# **上一版写的 `seedance-2.5-480p` / `-720p` 根本不存在**（多了连字符、少了档位号），
-# 发出去只会 503 no available channel —— 模型名不能靠文档或旧材料猜。
+# 2026-08-28 用真 Key 实拉 GET /v1/models 校正（83 个）。上一版是 08-19 的快照。
+# **鹤这次换了一整轮清单**：新增 `paisio-seedance-2.5-480p` / `-720p` 这套带
+# `paisio-` 前缀的 2.5 写法，而 `seedance2.5-00-720p` / `-480p`、`sd2.5-ultra-720p`
+# 已经下线 —— 模型名不能靠文档或旧材料猜，也不能指望上一次实拉的结果还成立。
 SEEDANCE25_MODELS = (
     "seedance2.5-4-1-720p",                      # 广场按次分组：3.5/次，4-30s，图10/视频0/音频0
-    "seedance2.5-00-720p", "seedance2.5-00-480p",
     "seedance2.5-26-720p", "seedance2.5-26-480p",
-    "sd2.5-ultra-720p",
     "paisiodance-2.5-720p", "paisiodance-2.5-480p",
+    "paisio-seedance-2.5-720p", "paisio-seedance-2.5-480p",   # 08-28 新增的写法
+    "doubao-seedance-2-5-720p",                  # 同一个 2.5，豆包品牌的透传名
+    "sd2.5-720p-standard",
 )
 SEEDANCE25_DURATIONS = list(range(4, 31))        # 广场标 4-30s（不是 4-29）
-# 广场上标出来的硬约束，只写有依据的那几个
+
+# 名单会过期，家族不会 —— 所以能力判定一律走这个函数，别再拿名字去
+# SEEDANCE25_MODELS 里精确比对。
+#
+# 为什么非改不可：2.5 的能力以前挂在**六处精确名单成员判定**上（下拉候选、
+# 时长档位、参考图形式、body 形状、档位校验、多镜头能力）。鹤 08-28 加了
+# `paisio-seedance-2.5-*` 这套新写法，六处**一起**漏判，而其中三处是静默的：
+#   · 时长回落到整家的 15 秒上限 —— 用户想选 30 秒选不到（页面上看不出原因）
+#   · 参考图按 data URI 发，而 2.5 只收公网 URL —— 图被丢掉照样出片，脸不对，不报错
+#   · body 走旧的 metadata+images 形状
+# 同一个毛病 08-19 已经犯过一次（那次是 _MULTISHOT 里的连字符）。名单继续
+# 写死就还会有第三次，所以判定收敛到这里一处。
+_SD25_MARKS = ("seedance2.5", "seedance-2.5", "seedance-2-5", "paisiodance-2.5", "sd2.5")
+
+
+def is_seedance25(model: str) -> bool:
+    """这个名字属于 Seedance 2.5 家族吗（4-30 秒 / 公网 URL / 新 body 形状）。
+
+    片段匹配，覆盖 `seedance2.5-*`、`paisio-seedance-2.5-*`、`paisiodance-2.5-*`、
+    `doubao-seedance-2-5-*`、`sd2.5-*` 一整族。
+    刻意**不**匹配 `paisio-seedance-2-mini-*` / `seedance2-4-*`（那是 2.0 系
+    和按次分组，body 形状不一样）。
+
+    宽判的代价是可控的：万一鹤出一个名字带 2.5 但规格不同的模型，会被当成 2.5
+    发出去、被网关 400 挡掉（不计费）。漏判的代价是参考图静默失效 —— 出片、计费、
+    脸不对。两害相权取宽判。
+    """
+    m = (model or "").lower().replace("_", "-")
+    return any(mark in m for mark in _SD25_MARKS)
+
+
+# 广场上标出来的硬约束，只写有依据的那几个。08-28 实拉：`seedance2-4-8-720p`
+# 已下线，规则一并撤掉；新上的 `seedance2-4-6/4-7-720p` 广场没截到档位，
+# 不写 —— 宁可让网关去 400（不计费），也别拿猜的规则拦住能跑的活。
 DURATION_RULES = {
     "seedance2.5-4-1-720p": tuple(range(4, 31)),
     "seedance2-4-2-fast-720p": (10,),
-    "seedance2-4-8-720p": (10, 15),
     "seedance2-4-1-720p": tuple(range(4, 16)),
     "seedance2-4-4-720p": tuple(range(4, 16)),
 }
@@ -62,6 +96,15 @@ class PaisioProvider(Provider):
     # 没配对象存储时宁可在发送前报清楚，也不能把 data URI 发出去后让参考图静默失效。
     url_only_models = SEEDANCE25_MODELS
 
+    def needs_url(self, model: str = "", media: str = "image") -> bool:
+        """2.5 家族一律只收公网 URL —— 按家族判，不按名单判。
+
+        基类是 `model in url_only_models` 的精确比对。鹤 08-28 新增的
+        `paisio-seedance-2.5-*` 不在名单里时，这里会返回 False，于是参考图按
+        data URI 发出去 —— 2.5 接口把它丢掉，照样出片、照样计费，脸不对而且不报错。
+        """
+        return is_seedance25(model) or super().needs_url(model, media)
+
     # -- 余额与实时价格（GET /v1/balance）--------------------------------
     def balance(self) -> dict:
         """余额 / VIP等级 / 今日次数 / **current_prices 实时价格表**。
@@ -72,7 +115,15 @@ class PaisioProvider(Provider):
         return self.session.request("GET", "/v1/balance", retries=1, timeout=60)
 
     def live_models(self) -> list:
-        """从 /v1/balance 的价格表取模型名（按价格升序）。取不到就退回写死的清单。"""
+        """从 /v1/balance 的价格表取模型名（按价格升序）。取不到就返回空。
+
+        ⚠ 2026-08-28 实测：这条路在鹤这边**是死的** —— 同一个 Key，
+        `/v1/models` 通，`/v1/balance` 报 401 INVALID_TOKEN（`/api/pricing`
+        和 `/api/status` 都 403）。也就是说这个函数现在恒返回 []，
+        而它目前没有任何调用方。要实拉清单请用基类的 `list_models()`
+        （GET /v1/models，零费用，已验证可用）。留着它是因为余额接口
+        将来可能开放；别在它上面搭新功能。
+        """
         try:
             data = self.balance()
         except Exception:                                   # noqa: BLE001
@@ -88,45 +139,68 @@ class PaisioProvider(Provider):
             "default_base_url": self.default_base_url,
             "supports": list(self.supports),
             "image": {
-                "models": ["gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k",
-                           "gpt-image2-low", "gpt-image2-medium", "gpt-image2-high",
-                           "nano-banana-2-1k", "nano-banana-2-2k", "nano-banana-2-4k",
-                           "nano-banana-pro-1k", "nano-banana-pro-2k", "nano-banana-pro-4k",
-                           "gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview",
-                           "image-2-1K", "image-2-2K"],
-                "default_model": "gpt-image-2-1k",
+                # 2026-08-28 实拉：上一版这 16 个名字**一个都不在线上了**
+                # （gpt-image-2-1k/2k/4k、gpt-image2-low/medium/high、
+                #  nano-banana-2-*、nano-banana-pro-*、image-2-1K/2K、
+                #  gemini-*-image-preview 不带尾号的那两个）。
+                # 鹤当图片服务商时整家都是假绿灯：页面上选得到、跑起来全 503。
+                # 现在的写法是 gpt-image2-<分组>-<画质>、gemini-*-preview<分组号>。
+                # 分组号（1/2/3）是网关的通道分组，不是画质；画质是 low/medium/high。
+                "models": ["gpt-image2-1-low", "gpt-image2-1-medium", "gpt-image2-1-high",
+                           "gpt-image2-2-low", "gpt-image2-2-medium", "gpt-image2-2-high",
+                           "gemini-3-pro-image-preview1", "gemini-3-pro-image-preview2",
+                           "gemini-3-pro-image-preview3",
+                           "gemini-3.1-flash-image-preview1",
+                           "gemini-3.1-flash-image-preview2",
+                           "gemini-3.1-flash-image-preview3"],
+                "default_model": "gpt-image2-1-high",
                 "sizes": ["1024x1536", "1024x1024", "1536x1024"],
                 "default_size": "1024x1536",
                 "max_refs": 9,
                 "ref_mode": "data_uri",
-                "notes": "⚠ 这家的名字带分辨率后缀：是 gpt-image-2-1k / -2k / -4k，"
+                "notes": "⚠ 2026-08-28 实拉：**旧的 gpt-image-2-1k / -2k / -4k 和 "
+                         "nano-banana 全系都已下线**，现在是 gpt-image2-1-high 这种"
+                         "「分组号 + 画质」写法（1/2 是网关通道分组，low/medium/high 是画质）。"
+                         "Gemini 的三个尾号 1/2/3 同理，也是分组不是画质。"
                          "**没有**不带后缀的 gpt-image-2（那是灵感鸭的写法，"
-                         "填错会报「找不到这个模型」）。1k 最便宜，试跑用它。",
+                         "填错会报「找不到这个模型」）。low 最便宜，试跑用它。"
+                         "名字以 /v1/models 为准 —— 这家半年内换过两轮。",
             },
             "video": {
                 # 分辨率写在模型名里，所以不用也不能传 resolution。
                 # 名字里带 fast 的便宜、带 480p 的更便宜 —— 调试和试跑用它们。
                 "models": [
-                    # 2026-08-19 用真 Key 实拉 GET /v1/models 校正。
-                    # **上一版这份清单里大半是死的**（sd2-pro-720p、
-                    # seedance2.0-official2-*、seedance-discount-*、video-fast-* …），
-                    # 页面上照样能选中，跑起来才 503 —— 而失败记录里只看到"生成失败"。
-                    # 名字只能来自 /v1/models 或模型广场，不能照文档抄。
+                    # 2026-08-28 用真 Key 实拉 GET /v1/models 校正（上一次是 08-19）。
+                    # 名字只能来自 /v1/models，不能照文档或上一次的快照抄 ——
+                    # 页面上留一个已下线的名字，是能选中、跑起来才 503，
+                    # 而失败记录里只看到"生成失败"。
+                    # 这轮下线的（已从清单里撤掉）：sd2-ultra-720p、
+                    # sd2-ultra-fast-720p、paisiodance2.0-fast-720p、
+                    # seedance2-4-8-720p、seedance2.5-00-720p/-480p、
+                    # sd2.5-ultra-720p、grok-imagine-video-1.5(-fast)。
                     "sd2-720p", "sd2-480p", "sd2-1080p",
                     "sd2-fast-720p", "sd2-fast-480p",
-                    "sd2-ultra-720p", "sd2-ultra-fast-720p",
                     "sd2-video20-mini-720p", "sd2-video20-mini-480p",
                     "sd3-720p", "sd3-480p", "sd3-1080p",
                     "sd3-fast-720p", "sd3-fast-480p",
+                    # 2.0 系。08-28 新上的 paisio-seedance-2.0-* / -2-mini-* /
+                    # seedance2.0-standard-* / -26-* / doubao-seedance-2-0-*
+                    "paisio-seedance-2.0-480p", "paisio-seedance-2.0-720p",
+                    "paisio-seedance-2.0-1080p", "paisio-seedance-2.0-4k",
+                    "paisio-seedance-2.0-fast-480p", "paisio-seedance-2.0-fast-720p",
+                    "paisio-seedance-2-mini-480p", "paisio-seedance-2-mini-720p",
+                    "seedance2.0-standard-480p", "seedance2.0-standard-720p",
+                    "seedance2.0-26-3-480p", "seedance2.0-26-3-720p",
+                    "seedance2.0-26-4-720p", "seedance2.0-fast720p",
                     "seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
-                    "paisiodance2.0-720p", "paisiodance2.0-fast-720p",
+                    "paisiodance2.0-720p",
+                    "doubao-seedance-2-0-720p", "doubao-seedance-2-0-fast-720p",
                     # 按次分组
                     "seedance2-4-1-720p", "seedance2-4-2-fast-720p",
-                    "seedance2-4-4-720p", "seedance2-4-8-720p",
+                    "seedance2-4-4-720p", "seedance2-4-6-720p", "seedance2-4-7-720p",
                     # Seedance 2.5 全家
                     *SEEDANCE25_MODELS,
-                    "grok-imagine-video-1.5", "grok-imagine-video-1.5-fast",
-                    "minimax-h3", "mx-h3",
+                    "minimax-h3", "minimax-h3-2k", "minimax-h3-768p", "mx-h3",
                 ],
                 "default_model": "sd2-720p",
                 "ratios": ["9:16", "16:9", "1:1"],
@@ -135,8 +209,15 @@ class PaisioProvider(Provider):
                 "resolutions": [""],
                 "max_refs": 9,
                 "ref_mode": "data_uri",
-                # 不能把 2.5 的 29 秒/30 图能力写成整家通用值，否则切回旧模型时
-                # 前端仍会允许选 29 秒，直到付费请求发出去才收到 400。
+                # 不能把 2.5 的 30 秒/30 图能力写成整家通用值，否则切回旧模型时
+                # 前端仍会允许选 30 秒，直到付费请求发出去才收到 400。
+                #
+                # 依据分两档，别混：**名字**是 08-28 实拉 /v1/models 确认的；
+                # **4-30 秒**只对 seedance2.5-4-1-720p 有广场截图，其余 2.5 是
+                # 按家族推断的（鹤没开放 /api/pricing —— 实测 403，/v1/balance
+                # 也 401，拿不到按模型的档位）。推断错的代价是网关 400，不计费；
+                # 真跑通了别的档位就写进「设置 → 服务商 → 时长档位」，那份覆盖
+                # 优先级最高（web/index.html:effectiveBlock）。
                 "model_options": {
                     model: {
                         "durations": SEEDANCE25_DURATIONS,
@@ -151,9 +232,12 @@ class PaisioProvider(Provider):
                 "notes": "分辨率写在模型名里，不用也不能单独传。名字带 fast 的便宜、"
                          "带 480p 的更便宜 —— 试跑和调提示词用 sd3-fast-480p / "
                          "sd2-fast-480p，定稿再换 720p/1080p。"
-                         "sd2-720p 一档实测稳定；**模型名以 /v1/models 为准**，2026-08-19 实拉发现旧清单里大半已下线。"
+                         "sd2-720p 一档实测稳定；**模型名以 /v1/models 为准**，"
+                         "2026-08-28 实拉又下线了 9 个（sd2-ultra 系、seedance2.5-00 系、"
+                         "sd2.5-ultra-720p、grok 视频），同时新增了 paisio-seedance-2.5-* 这套写法。"
                          "旧模型参考图可用压缩 data URI；Seedance 2.5 必须使用公网 URL，"
-                         "支持4-29秒、30图/10视频/10音频。",
+                         "支持 4-30 秒、30图/10视频/10音频 —— 要 30 秒就选 2.5 家族的名字，"
+                         "选旧模型时上限是 15 秒。",
             },
             "notes": "视频首选。也提供 chat 模型（claude/gpt 系）可作 LLM 分析引擎。",
         }
@@ -206,7 +290,7 @@ class PaisioProvider(Provider):
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
         model = task.model or "sd2-720p"
-        if model in SEEDANCE25_MODELS:
+        if is_seedance25(model):
             body = self._seedance25_body(task, model)
         else:
             body = self._legacy_video_body(task, model)

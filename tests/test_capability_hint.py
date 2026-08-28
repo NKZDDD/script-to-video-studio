@@ -59,11 +59,37 @@ class Seedance25Tests(unittest.TestCase):
         self.assertEqual(e["max_refs"], 30)
 
     def test_it_is_the_only_model_trusted_for_multishot(self):
-        """能力冻结把它标成 RELIABLE，六类转场才全放开。"""
-        from core.run_v34 import _MULTISHOT, detect_capability
-        self.assertEqual(detect_capability("seedance2.5-4-1-720p"), "RELIABLE")
-        self.assertEqual(detect_capability("sd2-pro-720p"), "UNKNOWN")
-        self.assertEqual(list(_MULTISHOT), ["seedance2.5", "sd2.5-ultra", "paisiodance-2.5"])
+        """能力冻结把 2.5 标成 RELIABLE，六类转场才全放开。
+
+        ★ 断言的是**每种写法都认得**，不再是「键的列表等于这三个」——
+        写死键的列表等于每次鹤改名都要动这条断言，而它拦不住真正的毛病
+        （08-19 和 08-28 各漏判过一次，两次都不报错）。
+        """
+        from core.run_v34 import detect_capability
+        for m in ("seedance2.5-4-1-720p", "seedance2.5-26-480p",
+                  "paisiodance-2.5-720p",
+                  "paisio-seedance-2.5-480p",      # 08-28 新写法
+                  "doubao-seedance-2-5-720p",      # 2-5 写法
+                  "sd2.5-720p-standard"):
+            self.assertEqual(detect_capability(m), "RELIABLE", m)
+        for m in ("sd2-pro-720p", "sd2-720p", "seedance2-4-1-720p",
+                  "paisio-seedance-2-mini-480p"):  # 2.0 mini，不是 2.5
+            self.assertEqual(detect_capability(m), "UNKNOWN", m)
+
+    def test_the_family_check_and_the_multishot_table_agree(self):
+        """★ 这次修的根因：同一个「是不是 2.5」判了六处，各自一份名单。
+
+        判定收敛到 paisio.is_seedance25() 之后，多镜头表必须跟它口径一致 ——
+        不一致的后果是静默的：能力判成 UNKNOWN，第九环节按 LIMITED 写提示词，
+        多镜头能力白扔，而页面上一切正常。
+        """
+        from core.providers.paisio import is_seedance25
+        from core.run_v34 import detect_capability
+        from core.providers import build
+        for m in build("paisio", "k", "", "").capabilities()["video"]["models"]:
+            if is_seedance25(m):
+                self.assertEqual(detect_capability(m), "RELIABLE",
+                                 f"{m} 是 2.5 家族，多镜头表却没认出来")
 
 
 class HintWiringTests(unittest.TestCase):

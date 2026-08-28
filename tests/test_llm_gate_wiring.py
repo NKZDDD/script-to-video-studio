@@ -109,19 +109,24 @@ class ProviderModelTests(unittest.TestCase):
             self.assertIn(m, got)
 
     def test_paisio_models_all_exist_upstream(self):
-        """★ 2026-08-19 用真 Key 拉过 /v1/models 校正。
+        """★ 2026-08-28 用真 Key 拉过 /v1/models 校正（上一次 08-19）。
 
         这条以前断言的是 `paisiodance2.0`、`video-2.0`、`官方稳定seedance-2.0-720p-fast`
         之类 —— **上游一个都没有**，是照着旧文档抄的。清单里留着假名字比缺名字更糟：
         页面上能选中，跑起来才 503，而失败记录里只写「生成失败」。
         所以这里改成断言「只列真实存在的」。
+
+        08-28 这一轮：`sd2-ultra-720p`、`paisiodance2.0-fast-720p`、
+        `grok-imagine-video-1.5(-fast)` 又下线了，从这条断言里撤掉 ——
+        这份名单**本身就会过期**，改它的唯一依据是实拉结果。
         """
         got = self._models("paisio", "video")
-        for m in ("paisiodance2.0-720p", "paisiodance2.0-fast-720p",
+        for m in ("paisiodance2.0-720p",
                   "seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
-                  "sd2-720p", "sd2-fast-720p", "sd2-ultra-720p",
+                  "sd2-720p", "sd2-fast-720p",
                   "sd3-720p", "sd3-fast-720p",
-                  "grok-imagine-video-1.5", "grok-imagine-video-1.5-fast",
+                  "paisio-seedance-2.0-720p", "paisio-seedance-2-mini-720p",
+                  "seedance2.0-standard-720p", "doubao-seedance-2-0-720p",
                   "minimax-h3"):
             self.assertIn(m, got, m)
 
@@ -130,15 +135,40 @@ class ProviderModelTests(unittest.TestCase):
         got = set(self._models("paisio", "video"))
         for dead in ("sd2-pro-720p", "paisiodance2.0", "paisiodance933-720p",
                      "seedance2.0-official2-720p", "seedance-discount-720p",
-                     "video-2.0", "seedance-2.5-720p"):
+                     "video-2.0", "seedance-2.5-720p",
+                     # 2026-08-28 实拉确认这一批也下线了
+                     "sd2-ultra-720p", "sd2-ultra-fast-720p",
+                     "paisiodance2.0-fast-720p", "seedance2-4-8-720p",
+                     "seedance2.5-00-720p", "seedance2.5-00-480p",
+                     "sd2.5-ultra-720p",
+                     "grok-imagine-video-1.5", "grok-imagine-video-1.5-fast"):
             self.assertNotIn(dead, got, f"{dead} 已下线，不该还在清单里")
 
     def test_paisio_has_the_real_seedance25_family(self):
         got = self._models("paisio", "video")
-        for m in ("seedance2.5-4-1-720p", "seedance2.5-00-720p",
-                  "seedance2.5-26-720p", "sd2.5-ultra-720p",
-                  "paisiodance-2.5-720p"):
+        for m in ("seedance2.5-4-1-720p", "seedance2.5-26-720p",
+                  "paisiodance-2.5-720p",
+                  # 08-28 鹤新增的写法。用户就是在这儿撞上的：选了它，
+                  # 时长下拉只到 15 秒，因为它不在当时那份 2.5 名单里。
+                  "paisio-seedance-2.5-480p", "paisio-seedance-2.5-720p",
+                  "doubao-seedance-2-5-720p", "sd2.5-720p-standard"):
             self.assertIn(m, got, m)
+
+    def test_paisio_image_models_are_the_new_naming(self):
+        """★ 08-28 实拉：旧的 16 个图片模型**一个都不在线上了**。
+
+        鹤当图片服务商时整家是假绿灯 —— 页面上选得到、跑起来全 503。
+        当前图片链排的是章鱼哥，所以这一条一直没暴露。
+        """
+        got = self._models("paisio", "image")
+        for m in ("gpt-image2-1-high", "gpt-image2-2-low",
+                  "gemini-3-pro-image-preview1",
+                  "gemini-3.1-flash-image-preview1"):
+            self.assertIn(m, got, m)
+        for dead in ("gpt-image-2-1k", "gpt-image-2-4k", "gpt-image2-high",
+                     "nano-banana-2-1k", "nano-banana-pro-4k",
+                     "image-2-1K", "gemini-3-pro-image-preview"):
+            self.assertNotIn(dead, got, f"{dead} 已下线，不该还在清单里")
 
     def test_no_duplicates_crept_in(self):
         """★ 补清单时最容易的错：同一个写两遍，下拉里出现两条一样的。"""
