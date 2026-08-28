@@ -977,6 +977,13 @@ function renderProjects() {
 async function openProject(root) {
   PROJ = root;
   PROJ_SYSTEM = '';        // 上一个项目的体系不能带到这一个身上
+  // 材料的选择也不能带过来。留着的话卡片上还显示「选了 xxx.jsonl」，
+  // 人以为那是这个项目的（matBody 那道拦截是第二层，这里是第一层）。
+  MAT = null;
+  const mo = $('#matOut'); if (mo) mo.innerHTML = '';
+  const mp = $('#matPick'); if (mp) mp.innerHTML = '';
+  const mf = $('#matFile'); if (mf) mf.value = '';
+  const mi = $('#matImport'); if (mi) mi.disabled = true;
 
   $('#projTag').textContent = root.split(/[\\/]/).pop();
   await refreshProject();
@@ -1807,12 +1814,27 @@ async function saveRunParams() {
 // 所以这条路能整个跳过 27 个 LLM 环节 —— 没有网络往返、没有超时、没有截断。
 //
 // **先预览再导**：导进去之后那些错已经变成任务了，那时候改要连带清任务。
-let MAT = null;                        // 这次选中的材料（rel 或 text）
+// 这次选中的材料。**必须带上是在哪个项目里选的**（proj）——
+// 这是个模块级变量，切项目时它不会自己消失：在项目 A 里点了「选文件」，
+// 切到项目 B 再点「导入」，发出去的是 `{project_root: B, text: A 的材料}`，
+// **A 的材料静默导进 B**。用户问到点上了（2026-08-27）：
+// 「项目1和项目2他不知道我导入的是哪个」—— 对，它确实不知道。
+// 走 rel 那条更阴：B 里正好也有同名文件时读的是 B 的，什么都不报。
+let MAT = null;
 
 async function matBody() {
   const b = {project_root: PROJ};
-  if (MAT && MAT.text !== undefined) b.text = MAT.text;
-  else if (MAT && MAT.rel) b.rel = MAT.rel;
+  if (!MAT) throw new Error('先选一份材料');
+  // **选的时候在哪个项目，就只能导进那个项目。** 不对就明说，别猜 ——
+  // 猜的代价是一整部剧的任务表被另一部剧的材料覆盖，而且不报错。
+  if (MAT.proj && MAT.proj !== PROJ) {
+    const was = MAT.proj.split(/[\\/]/).pop();
+    const now = (PROJ || '').split(/[\\/]/).pop();
+    throw new Error(`这份材料是在「${was}」里选的，现在打开的是「${now}」——`
+      + '重新选一次。（材料会重写 tasks.json 和全部提示词，导错项目要重来。）');
+  }
+  if (MAT.text !== undefined) b.text = MAT.text;
+  else if (MAT.rel) b.rel = MAT.rel;
   else throw new Error('先选一份材料');
   b.provider_sel = chainSel();
   return b;
@@ -1922,13 +1944,13 @@ $('#matScan').onclick = async () => {
     $('#matOut').innerHTML = `<div class="alert warn">${esc(r.dir)} 里没有材料文件
       —— 契约要求的是 <code>生产材料.jsonl</code>，把它放进这个目录再点一次，
       或者直接用右边那个选文件。</div>`;
-  else MAT = {rel: sel.value};
+  else MAT = {rel: sel.value, proj: PROJ};
 };
-$('#matPick').onchange = e => { MAT = {rel: e.target.value}; };
+$('#matPick').onchange = e => { MAT = {rel: e.target.value, proj: PROJ}; };
 $('#matFile').onchange = async e => {
   const f = (e.target.files || [])[0];
   if (!f) return;
-  MAT = {text: await f.text()};
+  MAT = {text: await f.text(), proj: PROJ, name: f.name};
   $('#matOut').innerHTML = `<div class="alert warn">选了 ${esc(f.name)}（${
     Math.round(f.size / 1024)} KB）—— 点「预览 + 验收」。</div>`;
 };

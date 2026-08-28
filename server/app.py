@@ -372,6 +372,55 @@ def _read_material(body: dict) -> str:
     return read_text(path)
 
 
+def _wrong_project(pj, units: list) -> list:
+    """材料像是别的项目的吗。返回 0 或 1 条 warn。
+
+    **比的是「这个项目现有任务的编号前缀」，不是项目码。**
+
+    原来拿 `project_code` 比 —— 那个字段实测没用：用户所有项目的编号都是
+    默认的 `PROJ-001`，而材料的 key 前缀是它自己起的（`PRJ_YHJ__...`）。
+    两个命名体系压根不在一个宇宙里，一比就是每次都误报 ——
+    而误报比漏报贵：人会学会忽略这条，然后真导错那次也被忽略。
+
+    改成同一个宇宙里比：项目里已经有 `PRJ_YHJ__*` 的任务，而这次导进来的是
+    `PRJ_ABC__*`，那是真的换了一部剧。项目还是空的就不表态。
+
+    只报 warn 不拦：同一个项目换一版材料、顺手改了前缀，是正常操作。
+    """
+    if pj is None:
+        return []
+    from core import matimport as _m
+
+    def _pre(keys):
+        pres = [k.split("__")[0] for k in keys if k and "__" in k]
+        if len(pres) < 3:
+            return "", 0, 0
+        top = max(set(pres), key=pres.count)
+        return top, pres.count(top), len(keys)
+
+    try:
+        old = pj.tasks() or {}
+    except Exception:                                       # noqa: BLE001
+        return []
+    have = [str(t.get("key") or "") for k, v in old.items()
+            if isinstance(v, list) for t in v if isinstance(t, dict)]
+    was, _n, _t = _pre(have)
+    if not was:
+        return []                       # 项目还是空的（或者命名里没有前缀）
+    now, hit, tot = _pre([u["stem"] for u in _m.units_of(units)])
+    if not now:
+        return []
+    norm = (lambda s: s.replace("-", "_").replace(" ", "").upper())
+    if norm(was) == norm(now) or norm(was) in norm(now) or norm(now) in norm(was):
+        return []
+    return [{"level": "warn", "code": "MAYBE_WRONG_PROJECT",
+             "msg": f"这个项目里现有的任务是「{was}」开头的，"
+                    f"而这份材料是「{now}」开头的（{hit}/{tot} 条）—— "
+                    f"**像是把另一部剧的材料导进来了**。"
+                    f"导入会重写这个项目的 tasks.json 和全部提示词。"
+                    f"确认一下；要是这个项目本来就要换成这一版材料，忽略这条。"}]
+
+
 def _material_limits(cfg: dict, sel: dict) -> dict:
     """出图 / 出片各自的目标模型一次能吃几张参考图。
 
@@ -1178,7 +1227,12 @@ def api_post(path: str, body: dict) -> dict:
         text = _read_material(body)
         raw = _mat.parse(text)
         limits = _material_limits(cfg, body.get("provider_sel") or {})
-        issues = _mat.audit(raw, limits)
+        # 预览不要求开项目（没开也能看一份材料对不对），所以项目拿不到就不比
+        try:
+            _pj = proj_of(body)
+        except Exception:                                   # noqa: BLE001
+            _pj = None
+        issues = _mat.audit(raw, limits) + _wrong_project(_pj, raw)
         # 申报头不是一条要生产的活 —— 列进表里会多出一行没有产物的东西
         units = _mat.units_of(raw)
         return {"ok": True, "summary": _mat.summary(raw),
@@ -1206,7 +1260,7 @@ def api_post(path: str, body: dict) -> dict:
         text = _read_material(body)
         units = _mat.parse(text)
         limits = _material_limits(cfg, body.get("provider_sel") or {})
-        issues = _mat.audit(units, limits)
+        issues = _mat.audit(units, limits) + _wrong_project(pj, units)
         bad = [i for i in issues if i["level"] == "error"]
         if bad and not body.get("force"):
             # **先把不合格的点告知清楚**，并且给一份能直接丢给 codex 的清单 ——
@@ -1610,6 +1664,24 @@ def api_post(path: str, body: dict) -> dict:
         base = cfg["projects_dir"]
         name = body["name"].strip()
         root = os.path.join(base, name)
+        # **同名要拦。**「批量建剧」那条一直拦着（同名项目目录已存在），
+        # 只有这一条漏了 —— 而漏的后果是最字面意义的「项目之间资产混用」：
+        # 直接打开旧项目那个目录，接着 save_meta 覆盖它的 project.json
+        # （**连 system 一起覆盖**，体系一改产物结构的判断全乱），
+        # 剧本也被新剧本盖掉，而旧项目的 02_固定资产/、04_故事板/、
+        # 05_分段视频/、tasks.json 全都还在 —— 新项目直接继承了另一部剧的
+        # 全部资产和任务，页面上看着就是「建好了，而且居然已经有一堆资产」。
+        #
+        # 判据用 project.json 而不是「目录存在」：用户可能先手建了个空目录
+        # 再来建项目，那不该拦。
+        # 路径以 `Project.meta_path` 为准（`00_项目说明/project.json`），
+        # **别自己拼一个** —— 我第一版写的是根目录下的 project.json，
+        # 于是这道拦截一次都没生效，实测「第二次同名：没拦住」。
+        if os.path.isfile(Project(root).meta_path):
+            raise ValueError(
+                f"「{name}」已经是一个项目了 —— 换个名字，或者去项目列表直接打开它。\n"
+                f"（同名建下去会覆盖它的 project.json：体系、编号、剧本全被换掉，"
+                f"而它已经出好的资产和任务还留在原地，两部剧就混在一个目录里了。）")
         pj = Project(root)
         pj.init_dirs()
         meta = {"title": body.get("title") or name,
