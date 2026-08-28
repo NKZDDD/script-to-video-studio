@@ -29,7 +29,9 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NAME = "script-to-video-studio"        # exe 文件名，改成中文也行，但英文最省事
+NAME = "Respect短剧制作平台"                  # exe 文件名 = 显示名（用户双击的就是它）
+# 数据目录名**不跟着这个改** —— 那个在 core/paths.APP_NAME，是 ASCII，
+# 而且留了老名字兜底：改名不能让人的配置凭空消失。
 
 # 分体系打包：`--system v34` / `--system v61`。
 #
@@ -37,8 +39,8 @@ NAME = "script-to-video-studio"        # exe 文件名，改成中文也行，�
 # 真裁掉另一套的话，拿错包打开老项目会把产物全判成「还没做」，重跑花第二份钱；
 # 而且引擎层是共用的，裁不干净。包大小也省不下多少：大头是 Python 运行时。
 FLAVORS = {
-    "v34": ("script-to-video-studio-电影级十七章", "电影级十七章"),
-    "v61": ("script-to-video-studio-通用十二环节", "通用十二环节"),
+    "v34": ("Respect短剧制作平台-电影级十七章", "电影级十七章"),
+    "v61": ("Respect短剧制作平台-通用十二环节", "通用十二环节"),
 }
 
 

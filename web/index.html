@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>剧本 → AI视频 自动化生产台</title>
+<title>Respect短剧制作平台</title>
 <style>
 :root{
   --bg:#0f1115; --panel:#171a21; --panel2:#1d222b; --line:#2a303c;
@@ -169,7 +169,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 </head>
 <body>
 <header>
-  <h1>剧本 → AI视频 自动化生产台</h1>
+  <h1>Respect短剧制作平台</h1>
   <span id="flavorTag" class="flavor all" title="这一版主打的生产体系（分体系打包的 exe 各自带标志，源码方式跑 = 全体系）"></span>
   <!-- 项目名做成可点的切换器：切项目是最高频的动作（同时做好几部剧时尤其），
        而它原来只有一条路 —— 回「项目」页在表格里找到那一行点「打开」。
@@ -926,7 +926,7 @@ async function boot() {
       ft.textContent = f;
       ft.className = 'flavor ' + (f.includes('电影') ? 'v34' : f.includes('通用') ? 'v61' : 'all');
     }
-    document.title = `剧本 → AI视频 自动化生产台 · ${f}`;
+    document.title = `Respect短剧制作平台 · ${f}`;
   }
   $('#projDir').textContent = BOOT.projects_dir;
   renderProjects();

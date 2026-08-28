@@ -5,7 +5,7 @@
 配置（各家 API key、R2 凭证、优先级链、计价表）和产物（几十 GB 的图和视频）
 绝不能跟着一起被覆盖掉。
 
-  程序目录  script-to-video-studio/        ← 覆盖它 = 更新程序，随便覆盖
+  程序目录  Respect短剧制作平台/           ← 覆盖它 = 更新程序，随便覆盖
   数据目录  config.json + 默认 projects/   ← 只属于这台机器，程序更新碰不到
 
 数据目录按这个顺序定，先命中的算：
@@ -13,7 +13,8 @@
   2. 环境变量 STV_DATA_DIR
   3. 程序目录里已经有 config.json —— 老装法，原地不动别乱搬
      （只是每次启动会提醒一句：这个位置覆盖程序就丢）
-  4. %LOCALAPPDATA%\\script-to-video-studio（Windows）/ ~/.script-to-video-studio
+  4. %LOCALAPPDATA%\\Respect-Studio（Windows）/ ~/.Respect-Studio
+     —— 那儿没有、而老名字（script-to-video-studio）那儿有的话，用老的
 
 项目目录（projects/）另外还能在设置页单独改，因为它体积大，常要放到别的盘。
 """
@@ -23,7 +24,17 @@ from __future__ import annotations
 import os
 import sys
 
-APP_NAME = "script-to-video-studio"
+# 数据目录名。**用 ASCII，不用中文显示名** —— 这个字符串会变成磁盘路径
+# （%LOCALAPPDATA% 下面那一层），中文路径在命令行、压缩包、某些第三方库里
+# 会出各种编码怪事，而它是给程序自己用的，没人需要看懂。
+# 显示名（Respect短剧制作平台）在页面标题和 exe 文件名上。
+APP_NAME = "Respect-Studio"
+
+# 改名之前叫这个。**必须留着**：老装法的配置就在
+# %LOCALAPPDATA% 下的 script-to-video-studio 里，只认新名字的话，
+# 改个名就等于「所有 API Key、优先级链、计价表、项目列表全没了」——
+# 而且它不报错，只是干干净净地开了一个空的新家。
+LEGACY_APP_NAMES = ("script-to-video-studio",)
 
 # 打包成 exe 之后有两个「目录」，混用会出各种找不到文件的怪事：
 #   PROGRAM_DIR  exe 自己在哪 —— 用来判断「配置是不是放在程序旁边」（绿色版）
@@ -56,12 +67,30 @@ def legacy_config() -> str:
     return os.path.join(PROGRAM_DIR, "config.json")
 
 
+def _under(base: str, app: str) -> str:
+    # 家目录下按惯例加点前缀；LOCALAPPDATA 这种专门的位置不加
+    return os.path.join(base, app if base != os.path.expanduser("~")
+                        else "." + app)
+
+
 def default_data_dir() -> str:
+    """默认数据目录。**老名字那儿已经有配置就用老的。**
+
+    改名不能让人的配置凭空消失。只认新名字的话，老用户升级之后看到的是一个
+    全新的空程序：API Key 没了、优先级链没了、计价表没了、项目列表空了 ——
+    而且**不报错**，看起来就像「新版本把我的东西删了」。
+    东西都还在，只是程序不再往那儿看。
+    """
     base = (os.environ.get("LOCALAPPDATA")
             or os.environ.get("XDG_CONFIG_HOME")
             or os.path.expanduser("~"))
-    name = APP_NAME if base != os.path.expanduser("~") else "." + APP_NAME
-    return os.path.join(base, name)
+    fresh = _under(base, APP_NAME)
+    if not os.path.isfile(os.path.join(fresh, "config.json")):
+        for old_name in LEGACY_APP_NAMES:
+            cand = _under(base, old_name)
+            if os.path.isfile(os.path.join(cand, "config.json")):
+                return cand
+    return fresh
 
 
 def data_dir() -> str:

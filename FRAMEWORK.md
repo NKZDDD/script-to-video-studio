@@ -174,7 +174,7 @@ seg_target() 现算：180 ÷ 15 = 12 段
 
 | | 放什么 | 更新程序时 |
 |---|---|---|
-| 程序目录 `script-to-video-studio/` | 代码、提示词模板、页面 | **整个被覆盖** |
+| 程序目录 `Respect短剧制作平台/` | 代码、提示词模板、页面 | **整个被覆盖** |
 | 数据目录 | `config.json`（各家 key、R2 凭证、优先级链、计价表） | 不碰 |
 | 产物目录 `projects/` | 剧本、资产图、故事板、视频（几十 GB） | 不碰 |
 
@@ -185,13 +185,13 @@ seg_target() 现算：180 ÷ 15 = 12 段
 2. 环境变量 STV_DATA_DIR
 3. 程序目录里已经有 config.json —— 老装法，原地不动别乱搬
    （启动时会提醒：这个位置覆盖程序就丢；设置页有一键搬出）
-4. %LOCALAPPDATA%\script-to-video-studio
+4. %LOCALAPPDATA%\Respect-Studio
 ```
 
 启动时必打这四行，换机器时比任何文档都管用：
 
 ```
-  程序目录  ...\script-to-video-studio
+  程序目录  ...\Respect短剧制作平台
   数据目录  D:\stv-data   （--data 参数）
   配置文件  D:\stv-data\config.json
   产物目录  D:\stv-data\projects
