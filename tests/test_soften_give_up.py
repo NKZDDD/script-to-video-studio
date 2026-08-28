@@ -84,25 +84,33 @@ class GiveUpTests(unittest.TestCase):
 
     # ---- ① 验收没过 ----
 
-    def test_a_rejected_rewrite_says_how_many_rounds_were_left(self):
-        """★ 这就是用户看到的那件事：给了 5 轮，停下来了，页面上没说为什么。"""
+    def test_a_rejected_rewrite_no_longer_ends_the_ladder(self):
+        """★ **2026-08-27 改了判断。** 用户原话：「下次遇到 400 这个问题，
+        必须按照流程试满 12 次」。
+
+        原来一版改写没过验收就放弃整条阶梯 —— 哪怕那是第 1 轮、后面还有
+        11 轮没用。那是把两种失败搞混了：服务商拒绝走的是「同级再换一版、
+        试满三次才降级」，而改写本身没写好也是「这一版没写好」，
+        不是「这一级救不了」。
+
+        现在轮数给多少就走满多少，报错里说清有几轮是卡在验收上、
+        那几轮没发出图请求。
+        """
         with self.assertRaises(ApiError) as e:
             self._run(boom(rejection()), FakeLLM("太短"))   # 必然过不了验收
         fix = self._fix(e.exception)
-        self.assertIn("自动改写停在第 0 轮", fix)
-        self.assertIn("还剩 4 轮没试", fix)     # 第 1 轮试过了、被扔掉了
-        self.assertIn("不是轮数不够", fix)
+        self.assertIn("轮，每一轮都还是被拒", fix)
+        self.assertIn("没通过验收", fix)
+        self.assertIn("没发出图请求", fix)
+        # 不该再出现「停在第 0 轮」那种「一次就收手」的说法
+        self.assertNotIn("自动改写停在第 0 轮", fix)
 
-    def test_it_names_the_round_that_was_thrown_away(self):
+    def test_it_still_names_the_acceptance_failure(self):
+        """★ 卡在验收上和「服务商一直拒」是两回事，话要分得开 ——
+        不然人会去改提示词，而真正的问题是改写回来的东西不合格。"""
         with self.assertRaises(ApiError) as e:
             self._run(boom(rejection()), FakeLLM("太短"))
         self.assertIn("没通过验收", self._fix(e.exception))
-
-    def test_the_thrown_away_version_is_not_used(self):
-        """★ 扔掉就是扔掉 —— 硬用的代价是悄悄少一场戏。"""
-        with self.assertRaises(ApiError) as e:
-            self._run(boom(rejection()), FakeLLM("太短"))
-        self.assertIn("没有落盘", self._fix(e.exception))
 
     # ---- ② 不是审核问题 ----
 

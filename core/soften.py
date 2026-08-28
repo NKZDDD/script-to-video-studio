@@ -316,6 +316,7 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
     g = _gen_with_upstream_retry(gen, log)
     used = prompt
     reasons = []                    # 每一轮服务商说的话 —— 用来看是不是同一个坎
+    bad_streak = 0                  # 连续几轮的改写没过验收（见下面那段）
     for attempt in range(1, rounds + 2):
         try:
             return g(used)
@@ -323,7 +324,10 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
             # 把这一轮实际发出去的提示词交给判定：报错里回显了它的话要先剔掉
             if attempt > rounds:
                 _gave_up(exc, attempt - 1, rounds, rounds, reasons,
-                         f"改写了 {rounds} 轮，每一轮都还是被拒", log)
+                         f"改写了 {rounds} 轮，每一轮都还是被拒"
+                         + (f"（其中 {bad_streak} 轮的改写没通过验收，"
+                            f"那几轮没发出图请求）" if bad_streak else ""),
+                         log)
                 raise
             if llm is None:
                 _gave_up(exc, attempt - 1, attempt - 1, rounds, reasons,
@@ -352,14 +356,29 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
             new = soften(used, str(exc), llm=llm, pj=pj, kind=kind, key=key,
                          round_no=attempt, log=log, origin=prompt)
             if not new:
-                # 验收没过（`_check`）。**这一条也以前只 log 一行** ——
-                # 而它正是「明明还有几轮没用，却停下来了」的原因。
-                _gave_up(exc, attempt - 1, attempt, rounds, reasons,
-                         f"第 {attempt} 轮改写没通过验收，被扔掉了"
-                         f"（上一条日志里写了是哪一项不合格）。"
-                         f"扔掉的那一版没有落盘 —— 用它出图会悄悄少东西。",
-                         log)
-                raise
+                # 验收没过（`_check`）。**这里以前直接放弃整条阶梯** ——
+                # 哪怕这是第 1 轮、后面还有 11 轮没用。用户实遇
+                #（2026-08-27）：「为什么这个失败不会跑完 12 次」。
+                #
+                # 那是把两种失败搞混了：服务商拒绝走的是「同级再换一版，
+                # 试满三次才降级」，而改写本身没写好（回来和上一版一样、
+                # 只回了改动的片段、短太多、身份映射被动过）**也是
+                # 「这一版没写好」，不是「这一级救不了」** ——
+                # 改写是生成动作，有随机性，同级再来一版常常就过了。
+                # 那正是 ATTEMPTS_PER_TIER 存在的理由。
+                #
+                # **不设上限：给了多少轮就走满多少轮。**
+                # 用户原话（2026-08-27）：「下次遇到 400 这个问题，
+                # 必须按照流程试满 12 次」。所以这里既不因为一次不过就放弃，
+                # 也不因为连着几次不过就提前收手 —— 阶梯是四级 × 三次，
+                # 走完为止。代价说清：过不了验收的那几轮各花一次分析调用，
+                # 而且不会发出图请求（没有可用的新版本可发）。
+                bad_streak += 1
+                log(f"  第 {attempt}/{rounds} 轮的改写没过验收"
+                    f"（这一趟里第 {bad_streak} 次）—— 这一版扔掉，"
+                    f"**不当作这一级救不了**，接着上一个通过的版本再改一版")
+                continue            # `used` 保持上一个**通过验收**的版本
+            bad_streak = 0          # 过了就清零：三次是「连续」，不是累计
             used = new
     raise AssertionError("到不了这里")   # pragma: no cover
 
