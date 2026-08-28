@@ -231,6 +231,27 @@ _EMBEDDED_URL_RE = re.compile(
     re.I | re.X)
 
 
+# 接口**动作词**。出错时网关常把请求路径原样写进正文（OpenAI 风格的
+# `Invalid URL (POST /v1/images/edits)` 最常见）。把它当成结果捞回来，
+# 后果不是「多了一项」，是**网关真正说的那句话被顶掉了**：
+# 报错变成「结果解析不出来」，而人会去查线路、查余额，查不到任何东西。
+_API_TAIL = frozenset((
+    "generations", "generation", "edits", "edit", "variations", "completions",
+    "embeddings", "uploads", "upload", "files", "videos", "video", "images",
+    "image", "models", "chat", "audio", "speech", "transcriptions",
+    "tasks", "task", "status", "query",
+))
+# ⚠ **"content" 绝不能进这张表。** `/v1/videos/{id}/content` 是小裴、阿珂、
+# 好漫剧、灵感鸭、巨轮**真正的下载地址**，挡掉它等于把成片本身当成噪音扔了。
+# 这张表只放「后面必然还跟着东西才成立」的动作词。
+
+
+def _is_api_endpoint(u: str) -> bool:
+    """这个 URL 是不是「接口地址」而不是「结果文件」。"""
+    tail = (u or "").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1].lower()
+    return tail in _API_TAIL
+
+
 def _collect_urls(node: Any, found: list, key: str = "") -> None:
     if isinstance(node, dict):
         for k, v in node.items():
@@ -240,7 +261,10 @@ def _collect_urls(node: Any, found: list, key: str = "") -> None:
             _collect_urls(v, found, key)
     elif isinstance(node, str):
         if node.startswith("http"):
-            found.append((key, node))
+            # 整串就是 URL 也可能是**接口地址**：网关把请求路径塞进
+            # `action` / `request_url` / `docs_url` 之类的字段是常事。
+            if not _is_api_endpoint(node):
+                found.append((key, node))
             return
         # 有的家把结果**嵌在一段文本里**，整串不是 URL：
         #   好漫剧 chat/completions → 一段 html 代码块，里面是 <video src='…mp4'>
@@ -249,7 +273,11 @@ def _collect_urls(node: Any, found: list, key: str = "") -> None:
         # 而报错会是「没返回结果」—— 指向完全错的方向（会去查线路、查余额）。
         if "http" in node and len(node) < 20000:
             for m in _EMBEDDED_URL_RE.finditer(node):
-                found.append((key, m.group(1) or m.group(2) or m.group(3)))
+                u = m.group(1) or m.group(2) or m.group(3)
+                # 整串就是 URL 的（上面那条分支）当结果收；**夹在一段话里**的
+                # 就要挑一下 —— 报错原文里回显的接口地址正是长这样。
+                if not _is_api_endpoint(u):
+                    found.append((key, u))
 
 
 def _dig(node: Any, keys: tuple, depth: int = 4) -> str:
@@ -352,7 +380,7 @@ def data_array_images(data: Any) -> list:
         url = item.get("url") or item.get("image_url")
         if isinstance(url, dict):
             url = url.get("url")
-        if isinstance(url, str) and url.strip():
+        if isinstance(url, str) and url.strip() and not _is_api_endpoint(url):
             out.append(url.strip())          # 链接优先：不会被截断
             continue
         b64 = item.get("b64_json") or item.get("image_b64")
@@ -400,7 +428,11 @@ def extract_image_items(data: Any) -> list:
                 embeds.append(node)
             elif node.startswith("http"):
                 base = node.split("?", 1)[0].lower()
-                if base.endswith(MEDIA_IMAGE) or "image" in base:
+                # `"image" in base` 这一条**顺手把接口地址也收了**：
+                # https://host/v1/images/edits 里就有 image。收进来的后果不是
+                # 多一项，是 _pick_images 看见非空 items 就**不去轮询了**，
+                # 而报错变成「解析不出图」，网关原话再也没人看见。
+                if (base.endswith(MEDIA_IMAGE) or "image" in base)                         and not _is_api_endpoint(node):
                     urls.append(node)
 
     walk(data)
