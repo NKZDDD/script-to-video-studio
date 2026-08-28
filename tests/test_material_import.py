@@ -181,12 +181,22 @@ class AuditTests(unittest.TestCase):
 class BuildTests(unittest.TestCase):
 
     def test_reference_file_refs_resolve_to_where_they_land(self):
-        """★ 引用链闭合是前提，所以这里能直接算出落点 —— 不用等出图再解析。"""
+        """★ 引用链闭合是前提，所以这里能直接算出落点 —— 不用等出图再解析。
+
+        **2026-08-27 改了语义**：骨架在 `storyboard_refs`，`reference_images`
+        只放骨架之外的补图。原来两边都放整份，出片那一层「骨架 + 补图」一加
+        就是双倍（实遇：9 张骨架变 18 张，编号整体错位）。
+        所以这里改成两边分别验落点。
+        """
         got = M.build(M.parse(MD))
         v = got["tasks"]["video_tasks"][0]
-        self.assertTrue(all(r["file_ref"] for r in v["reference_images"]))
-        self.assertEqual(v["reference_images"][0]["file_ref"],
+        self.assertTrue(all(r["file_ref"]
+                            for r in v["reference_images"] + v["storyboard_refs"]))
+        self.assertEqual(v["storyboard_refs"][0]["file_ref"],
                          "04_故事板/PRJ_X__SBSHEET_EP01_SEG01_A_R01.png")
+        # 骨架不许在补图里再出现一次
+        self.assertNotIn("04_故事板/PRJ_X__SBSHEET_EP01_SEG01_A_R01.png",
+                         [r["file_ref"] for r in v["reference_images"]])
 
     def test_the_storyboard_spine_is_picked_out_for_video(self):
         """★ 视频那一层读 `storyboard_refs` —— 不挑出来就是「缺故事板」。"""
@@ -284,9 +294,15 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(M.parse(arr)), 3)
 
     def test_the_spine_comes_first_then_supplements(self):
-        """★ image_n 就是上传顺序：骨架排前面，补图接着排。"""
+        """★ image_n 就是上传顺序：骨架排前面，补图接着排。
+
+        两个字段合起来才是整条上传顺序 —— 骨架占前 N 号（`storyboard_refs`
+        按 order），补图接着排（`reference_images` 保留原来的 image_n）。
+        **两边都放整份是错的**：出片那一层会把骨架传两次。
+        """
         v = M.build(M.parse(JSONL))["tasks"]["video_tasks"][0]
-        self.assertEqual([r["image_n"] for r in v["reference_images"]], [1, 2])
+        self.assertEqual([s["order"] for s in v["storyboard_refs"]], [1])
+        self.assertEqual([r["image_n"] for r in v["reference_images"]], [2])
         self.assertEqual(v["storyboard_refs"][0]["sheet_id"],
                          "A__SB_EP01_SEG01_A")
 
@@ -895,3 +911,74 @@ class TwoSchemasTests(unittest.TestCase):
             row = {k: v for k, v in base.items() if k != need}
             u = M.units_of(M.parse(json.dumps(row, ensure_ascii=False)))[0]
             self.assertTrue(u["missing"], f"缺 {need} 却没报缺")
+
+
+class ImportResponseShapeTests(unittest.TestCase):
+    """★ 页面那张卡是预览和导入**共用**的渲染函数。
+
+    实遇（2026-08-27）：导入完那一行显示「已导入 undefined 条（undefined 张图
+    + undefined 段视频）· 0 集 · 参考图最多 undefined 张」，紧跟着的对账写成
+    「和实际的 undefined 条对不上」—— 看着像材料出了大问题，
+    而材料好好的（申报 62 条、建出 42+18+2=62）。
+
+    原因：`summary` 只有预览的返回里有，导入没回。
+    共用渲染函数就得给一样的字段，缺一个就是满屏 undefined。
+    """
+
+    def _import(self):
+        import tempfile
+        from core.store import Project
+        from server import app as A
+        root = tempfile.mkdtemp()
+        pj = Project(root)
+        pj.init_dirs()
+        pj.save_meta({"project_name": "x", "system": "v34"})
+        rows = [{"kind": "manifest", "total": 2, "image": 1, "video": 1,
+                 "episodes": 1, "segs_per_episode": {"EP01": 1}},
+                {"kind": "image", "key": "A__SBSHEET_EP01_SEG01_A_R01",
+                 "filename": "a.png", "prompt": "板"},
+                {"kind": "video", "key": "EP01-SEG01", "episode": "EP01",
+                 "seg": "SEG01", "filename": "v.mp4", "prompt": "片",
+                 "storyboard_refs": [
+                     {"image_n": 1, "key": "A__SBSHEET_EP01_SEG01_A_R01"}]}]
+        return A.api_post("/api/material/import", {
+            "project_root": root,
+            "text": "\n".join(json.dumps(x, ensure_ascii=False)
+                              for x in rows)})
+
+    def test_import_returns_a_summary(self):
+        got = self._import()
+        self.assertIn("summary", got)
+        for k in ("total", "image", "video", "episodes", "refs_max"):
+            self.assertIn(k, got["summary"], k)
+
+    def test_the_counts_agree_with_the_manifest(self):
+        """★ 这一条就是页面上那句对账 —— 数对不上时才该报红。"""
+        got = self._import()
+        self.assertEqual(got["summary"]["total"], got["declared"]["total"])
+
+    def test_preview_and_import_share_the_same_fields(self):
+        """★ 共用渲染函数 → 两边字段必须一致。少一个就是满屏 undefined。"""
+        import tempfile
+        from core.store import Project
+        from server import app as A
+        root = tempfile.mkdtemp()
+        pj = Project(root)
+        pj.init_dirs()
+        pj.save_meta({"project_name": "x", "system": "v34"})
+        text = json.dumps({"kind": "image", "key": "A__C001",
+                           "filename": "c.png", "prompt": "甲"},
+                          ensure_ascii=False)
+        body = {"project_root": root, "text": text}
+        pre = A.api_post("/api/material/preview", body)
+        imp = A.api_post("/api/material/import", body)
+        for k in ("summary", "issues", "declared"):
+            self.assertIn(k, pre, f"预览缺 {k}")
+            self.assertIn(k, imp, f"导入缺 {k}")
+
+    def test_the_page_does_not_print_undefined(self):
+        """★ 万一哪天又缺了字段，页面也该说「这一步没回」，不该印 undefined。"""
+        from core.store import read_text
+        html = read_text("web/index.html")
+        i = html.index("已导入' : '预览'")
+        self.assertIn("typeof s.total", html[i:i + 400])

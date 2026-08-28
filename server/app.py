@@ -1253,7 +1253,13 @@ def api_post(path: str, body: dict) -> dict:
         # 但不能悄悄地盖：实际用的是哪几个值要报出来，否则「我明明设了 15 秒」
         # 这类问题永远查不到源头。
         used = built.get("params") or {}
+        # **summary 必须一起回。** 页面那张卡是预览和导入共用的渲染函数，
+        # 它读 `r.summary.total / image / video / episodes / refs_max`——
+        # 预览有、导入没有的话，导入完那一行全是 `undefined`，
+        # 而紧跟着的对账会写成「和实际的 undefined 条对不上」——
+        # 看着像材料出了大问题，其实材料好好的（实遇 2026-08-27）。
         return {"ok": True, "counts": n, "issues": issues, "skipped": sk,
+                "summary": _mat.summary(units),
                 "declared": decl, "used_params": used,
                 "prompts": len(built["prompts"]),
                 "msg": f"导入了 {len(real)} 条，落了 {len(built['prompts'])} 份提示词。"

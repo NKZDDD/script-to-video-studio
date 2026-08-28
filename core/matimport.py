@@ -68,6 +68,10 @@ _SECONDS = re.compile(r"(\d{1,3})\s*秒")
 # 文件名里的集号段号：`..._VIDEO_EP01_SEG01_R01.mp4`
 _EPSEG = re.compile(r"_?(EP\d{2,3})[_-](SEG\d{1,3})", re.I)
 
+# 提示词正文里的身份映射。**和 produce._IMAGE_MAP 保持同一个写法** ——
+# 两份正则迟早对不上，而对不上的表现是「导入说没问题、出片才拦下」。
+_IMAGE_MAP = re.compile(r"[Ii]mage\s*(\d+)\s*[=＝:：]\s*([A-Za-z0-9_\-]+)")
+
 
 def _section(body: str, start, end) -> str:
     """取某一节的正文。取不到返回空串。"""
@@ -410,6 +414,14 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
                                f"画面用错参考，任务照样标成功。"
                                f"要么减到 {cap} 张以内，要么换一家吃得下的。"})
 
+    # 提示词的编号 vs 实际上传顺序
+    for u in units:
+        for why in _map_vs_order(u):
+            out.append({"level": "error", "code": "REF_ORDER_MISMATCH",
+                        "msg": f"第 {u['no']:03d} 条（{u['filename']}）{why} —— "
+                               f"**模型按正文的说明去用图**，编号错位之后每条"
+                               f"描述都套到别的图上，画面出得来而参考全是错的"})
+
     # 骨架只有一张：V6.2 第 19 章要求覆盖完整关键时间推进。
     # **只提醒不拦** —— 已经产出来的材料是一段一张（84 张故事板 : 84 段视频），
     # 判 error 就是把它们全变成死路；而死路比漏检更糟。
@@ -437,6 +449,47 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
                                + "、".join(f"SEG{n:02d}" for n in lost)
                                + " —— 成片会短一截，而拼接那一步不会说话"})
     return out
+
+
+def _map_vs_order(u: dict) -> list:
+    """提示词正文里的 `Image N = <key>` 和这一条的实际上传顺序对不对。
+
+    **这是这一类里最贵的一种错，而且此前一处都查不到。**
+    实遇（2026-08-27）：提示词写着 `Image 5 = PRJ_YHJ__LOC_009_VIEW_A01_R01`，
+    而那张图实际排在第 7 位 —— 前面多了两张。模型按正文的说明去用图，
+    编号错位之后每条描述都套到别的图上：**画面出得来，参考全是错的**，
+    而出图出片、验收、面板全是绿的。
+
+    出片那一层的 `_check_video_ref_map` 只查「声明了的有没有真上传」，
+    查不出「上传了但位置不对」。而位置这件事在导入这一刻就是确定的。
+
+    只在正文真的写了映射时才查（V6.1 的视频提示词不写映射），
+    而且**只报编号对不上的那几条** —— 正文里同一个编号被复述好几遍是常态。
+    """
+    prompt = u.get("prompt") or ""
+    hits = _IMAGE_MAP.findall(prompt)
+    if not hits:
+        return []
+    order = {n: aid for n, aid in u.get("refs") or []}
+    if not order:
+        return []
+    bad = []
+    seen = {}
+    for num, aid in hits:
+        n = int(num)
+        if seen.get(n) == aid:
+            continue                    # 同一条复述，不重复报
+        seen[n] = aid
+        got = order.get(n, "")
+        if not got:
+            bad.append(f"正文说 Image {n} = {aid}，而实际只上传 "
+                       f"{len(order)} 张，没有第 {n} 张")
+        elif got != aid and not (aid.endswith(got) or got.endswith(aid)):
+            at = next((k for k, v in order.items() if v == aid), 0)
+            bad.append(f"正文说 Image {n} = {aid}，"
+                       + (f"而它实际排在第 {at} 位；第 {n} 位是 {got}"
+                          if at else f"而第 {n} 位是 {got}，{aid} 压根没在上传清单里"))
+    return bad
 
 
 def _reconcile(units: list, decl: dict) -> list:
@@ -680,6 +733,19 @@ def build(units: list, size: str = "", ratio: str = "",
                 {"order": i, "sheet_id": r["asset_id"], "spine_role": "",
                  "file_ref": r["file_ref"]} for i, r in enumerate(spine, 1)]
             t["storyboard_ref"] = spine[0]["file_ref"] if spine else ""
+            # **骨架要从 reference_images 里拿掉。**
+            #
+            # `spine` 是从 `refs` 里挑出来的**子集**，而上面 `t` 里的
+            # `reference_images` 是整份 `refs` —— 出片那一层传的是
+            # 「storyboard_refs 整条 + reference_images 整条」，
+            # 一加就是双倍：9 张骨架变 18 张，而 `image_n` 是按上传顺序算的，
+            # 于是后面每一条描述都套到别的图上。**画面出得来，参考全是错的。**
+            #
+            # 用户实遇（2026-08-26，材料导入的项目）：面板上「参 0/18」。
+            # 上一轮我把同样的毛病修在 `run_v34` 的装配里 —— 那是 LLM 那条路，
+            # 材料这条路压根没经过它，所以「修完还是 18」。
+            spine_keys = {id(r) for r in spine}
+            t["reference_images"] = [r for r in refs if id(r) not in spine_keys]
             videos.append(t)
         else:
             t["params"] = {"size": u["ratio"] or size or "9:16"}
