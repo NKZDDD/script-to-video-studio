@@ -3691,7 +3691,7 @@ async function renderTasks(fresh) {
       ? `<button class="btn sm tkrun" data-tkey="${esc(g.key)}" data-kind="${esc(g.kind)}"
            title="按上面选的集跑这一类还没做完的 ${left} 条">跑这一组（${left}）</button>`
       : `<span class="muted" style="font-size:11px">这一类没有待办</span>`;
-    return `<div style="margin-bottom:14px">
+    return `<div class="tkgroup" style="margin-bottom:14px">
       <div class="row" style="gap:8px;align-items:center;margin-bottom:4px">
         <div class="steps tkfold" data-gkey="${esc(g.key)}"
              style="margin:0;flex:1;cursor:pointer" title="点击${open ? '收起' : '展开'}">
@@ -3709,10 +3709,17 @@ async function renderTasks(fresh) {
   }).join('');
   document.querySelectorAll('#tkBody .tkfold').forEach(el => {
     el.onclick = () => {
+      // **锚在分组容器上，不用 parentElement。** 加「跑这一组」那个按钮时
+      // 中间多包了一层 `.row`，于是 `.grp` 从「父节点的子节点」变成了
+      // 「父节点的兄弟节点」—— querySelector 返回 null，下一行抛异常。
+      // 而 TKFold 已经在抛之前翻过了，所以表现是「点了没反应，
+      // 再点刷新就展开了」（实遇 2026-08-31）。层级还会变，别再靠它认亲。
+      const box = el.closest('.tkgroup');
+      const grp = box && box.querySelector('.grp');
+      if (!grp) return;                      // 结构又变了的话，宁可不动
       const k = el.dataset.gkey;
       TKFold[k] = !TKFold[k];
-      el.parentElement.querySelector('.grp')
-        .classList.toggle('hide', !TKFold[k]);
+      grp.classList.toggle('hide', !TKFold[k]);
       el.querySelector('.tk-arrow').textContent = TKFold[k] ? '▾' : '▸';
       el.title = TKFold[k] ? '点击收起' : '点击展开';
     };
@@ -3721,7 +3728,8 @@ async function renderTasks(fresh) {
     // 勾选框在标题栏里，点它不该把这一条展开。
     el.onclick = e => {
       if (e.target.classList.contains('tkpick')) return;
-      el.parentElement.querySelector('.bd').classList.toggle('hide');
+      const bd = el.closest('.segrow') && el.closest('.segrow').querySelector('.bd');
+      if (bd) bd.classList.toggle('hide');
     };
   });
   document.querySelectorAll('#tkBody .tkrun').forEach(el => {
