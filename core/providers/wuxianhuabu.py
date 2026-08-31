@@ -93,9 +93,20 @@ class WuxianhuabuProvider(Provider):
             mime = mimetypes.guess_type(value)[0] or "application/octet-stream"
             with open(value, "rb") as fh:
                 blob = fh.read()
-        else:
+        elif re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", value):
             # 已有 asset_id 是普通字符串，原样使用。
             return value
+        else:
+            # 到这儿说明:不是链接、不是 data URI、本机也没这个文件、
+            # 形状还不像 asset_id。以前这里原样返回 —— 一个写错的路径
+            # 就变成一个假 asset_id 发出去,服务商认不出就当没有这张参考图,
+            # **片子照出、照计费,脸不对而且一处都不报错**。
+            raise ApiError(
+                f"无限画布{kind}参考素材认不出:{value[:120]!r}。"
+                f"既不是 http 链接、不是 data URI,本机也没有这个文件,"
+                f"形状也不像 asset_id。少一张参考素材出来的就不是同一个人,"
+                f"所以这一条不出。",
+                status=0, kind="task_fatal")
         if not blob:
             raise ApiError(f"无限画布{kind}参考素材为空")
         data = self.session.request(
