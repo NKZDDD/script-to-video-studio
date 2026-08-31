@@ -103,12 +103,24 @@ class PaisioProvider(Provider):
     url_only_models = SEEDANCE25_MODELS
 
     def needs_url(self, model: str = "", media: str = "image") -> bool:
-        """2.5 家族一律只收公网 URL —— 按家族判，不按名单判。
+        """视频**一律**只收公网 URL；图片沿用原来的按家族判。
 
-        基类是 `model in url_only_models` 的精确比对。鹤 08-28 新增的
-        `paisio-seedance-2.5-*` 不在名单里时，这里会返回 False，于是参考图按
-        data URI 发出去 —— 2.5 接口把它丢掉，照样出片、照样计费，脸不对而且不报错。
+        文档（提交视频生成任务）:「所有视频模型使用**完全相同**的请求参数格式」，
+        字段是 `image_url` / `extra_images` / `start_image_url`，写明「字符串 URL
+        或 {url:"..."}」—— 没有能塞 data URI 的字段。
+
+        ⚠ 这里以前只对 2.5 家族返回 True，而 `_video_body` 合成一条之后
+        **对所有模型**拒绝非 http 参考图 —— 两处声明打架：
+          · 配了对象存储：参考图本来就是 URL，看不出问题
+          · **没配对象存储**：produce.py 按 needs_url=False 交 data URI，
+            请求体当场 task_fatal —— 旧模型带参考图的活全线失败
+        而报错说的是「请配置对象存储」，位置也不对：该在 uploader 那里说，
+        它才写得清去哪个设置页填什么。
+
+        图片那条不动：出图用的是 `image` 字段，原来就能吃 data URI。
         """
+        if media == "video":
+            return True
         return is_seedance25(model) or super().needs_url(model, media)
 
     # -- 余额与实时价格（GET /v1/balance）--------------------------------
@@ -379,7 +391,9 @@ class PaisioProvider(Provider):
         if local_refs:
             problems.append("参考图必须先转成公网 http/https URL（请配置对象存储）")
         if problems:
-            raise ApiError("Seedance 2.5 参数不符合鹤的接口要求：" + "；".join(problems),
+            # 前缀不能写死「Seedance 2.5」—— 这个函数现在管所有视频模型，
+            # 旧模型看到那句会以为自己选错了模型，往完全错的方向查。
+            raise ApiError(f"鹤 {model} 的视频参数不符合接口要求：" + "；".join(problems),
                            status=0, kind="task_fatal")
 
         body = {

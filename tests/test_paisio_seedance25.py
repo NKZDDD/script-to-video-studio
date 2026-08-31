@@ -79,10 +79,38 @@ class PaisioSeedance25Tests(unittest.TestCase):
         body = PaisioProvider._video_body(task, task.model)
         self.assertEqual(len(body["extra_images"]) + 1, 10)
 
-    def test_provider_marks_only_seedance25_as_url_only(self):
-        provider = PaisioProvider()
-        self.assertTrue(provider.needs_url("seedance2.5-26-480p", "video"))
-        self.assertFalse(provider.needs_url("sd2-720p", "video"))
+    def test_video_needs_url_for_every_model_not_just_25(self):
+        """★ 请求体拒绝 data URI 的模型，needs_url 必须说 True —— 两处不能打架。
+
+        以前这里断言「只有 2.5 需要 URL」。而 _video_body 合成一条之后对**所有**
+        模型拒绝非 http 参考图,于是:
+          · 配了对象存储 -> 参考图本来就是 URL,看不出问题
+          · **没配对象存储** -> produce.py 按 needs_url=False 交 data URI,
+            请求体当场 task_fatal,旧模型带参考图的活全线失败
+        文档写的是「所有视频模型使用完全相同的请求参数格式」,字段只有
+        image_url / extra_images(字符串 URL),没有能塞 data URI 的地方。
+        """
+        p = PaisioProvider()
+        DATA = "data:image/png;base64,iVBORw0KGgo="
+        for m in ("seedance2.5-26-480p", "sd2-720p", "sd3-720p",
+                  "seedance2.0-standard-720p", "paisio-seedance-2.0-720p",
+                  "paisiodance2.0-720p", "minimax-h3"):
+            body_rejects = False
+            try:
+                PaisioProvider._video_body(
+                    VideoTask(prompt="x", refs=[DATA], duration=10,
+                              ratio="9:16", model=m), m)
+            except ApiError:
+                body_rejects = True
+            self.assertTrue(body_rejects, f"{m}: 请求体居然收了 data URI")
+            self.assertTrue(p.needs_url(m, "video"),
+                            f"{m}: 请求体拒绝 data URI,needs_url 却说不需要 URL —— "
+                            f"没配对象存储时解析器会交 data URI,这一条必炸")
+
+    def test_image_still_accepts_data_uri(self):
+        """出图走的是 `image` 字段,原来就能吃 data URI —— 别被上面那条带跑偏。"""
+        p = PaisioProvider()
+        self.assertFalse(p.needs_url("sd2-720p", "image"))
 
     # ---- 2026-08-28：鹤改名之后补的三条回归 --------------------------------
     #
