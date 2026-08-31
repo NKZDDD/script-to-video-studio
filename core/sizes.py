@@ -146,16 +146,35 @@ def resolve(want, supported: list) -> tuple:
                       f"图出来了、尺寸不是你要的、而且不报错。所以这里停。\n"
                       f"这一家支持：{'、'.join(vals[:6])}")
 
+    # **按形状挑的时候，档位（1K/2K/4K）一律不参与。**
+    #
+    # 档位说的是分辨率，形状由那家自己定 —— 上面「档位 → 只收比例的家」
+    # 那一支已经因为这个理由拒了，反过来同样不成立。
+    #
+    # 不排掉的实际后果（坤鸡，实测）：它同时收档位和像素，而 `4K` 的代表
+    # 像素是 2048x2048，约简后正好是 1:1 —— 于是要 `1:1` 会在 ② 步命中
+    # 「同形状的 4K」，发出去的是一个**没说形状**的值。图出得来、
+    # 形状由服务商定、任务标 ok，一处不报错。
+    shaped = [v for v in vals if not (parse(v) and parse(v)[0] == "tier")]
+
     # ② 形状完全一样的（比较约简后的比例，避开浮点）
-    same = [v for v in vals if as_ratio(v) and as_ratio(v) == as_ratio(s)]
+    same = [v for v in shaped if as_ratio(v) and as_ratio(v) == as_ratio(s)]
     if same:
         pick = _pick_biggest(same)
         return pick, (f"你要的 {s} 这一家不收，换成同形状的 {pick}"
                       f"（{as_ratio(pick)}，形状一模一样）")
 
-    # ③ 形状最接近的
-    scored = [(abs((aspect(v) or 0) - a), v) for v in vals if aspect(v)]
+    # ③ 形状最接近的（同样不看档位）
+    scored = [(abs((aspect(v) or 0) - a), v) for v in shaped if aspect(v)]
     if not scored:
+        # 这一家**只收档位**（或者声明的都看不懂）。要的是形状，它只认分辨率 ——
+        # 换不过来。挑一个档位发出去就是「形状听天由命」，那正是要避免的。
+        if shaped != vals:
+            return None, (
+                f"要的是「{s}」（形状），而这一家只收分辨率档位"
+                f"（{'、'.join(vals[:6])}）—— 档位说不了形状，换不过来。"
+                f"把这一类活换一家收比例或像素的，或者把尺寸填成它认的档位"
+                f"（那样形状由服务商定）。")
         return s, (f"这一家声明的尺寸都看不懂（{'、'.join(vals[:6])}），"
                    f"{s} 原样发过去了")
     scored.sort(key=lambda x: (x[0], -_area(x[1])))
