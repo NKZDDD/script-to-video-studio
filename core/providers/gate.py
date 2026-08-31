@@ -14,10 +14,10 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable, Optional
 
-from ..apiutil import (ApiError, extract_image_items, extract_task_id,
-                       extract_video_url)
+from ..apiutil import ApiError, extract_image_items, extract_task_id
 from .base import ImageTask, Provider, VideoTask
 
 IMAGE_MODELS = [
@@ -46,6 +46,62 @@ IMAGE_REF_LIMITS = {
 _NO_N = {"seedream-5-0-lite", "seedream-5-0-pro", "seedream-4-0",
          "seedream-4-5", "kling-image-o3", "kling-image-v3"}
 _KLING = {"kling-image-o3", "kling-image-v3"}
+
+
+# 逐模型硬约束，**直接来自 /public/model_group/info 实拉**（2026-08-31）。
+# 文档正文写「图片最多 9 张」只对 2.0 系成立，它后面跟着「具体以模型 Schema 为准」。
+#
+# `banned` 是这家**主动声明**的不支持参数。Schema 里 seed 那条的原话：
+#   "Unsupported by Seedance 2.0 series; declared for explicit validation
+#    instead of silent dropping."
+# —— 它宁可显式拒绝也不静默丢弃。我们照做：传了就报，不替它兜。
+GATE_VIDEO_SPEC = {
+    "seedance-2.0-fast": dict(
+        duration=(4, 15), resolutions=["480p", "720p", "1080p", "4k"],
+        max_images=9, max_videos=3, max_audios=3,
+        banned=["camera_fixed", "draft", "frames", "seed", "service_tier"],
+        audio_requires=["image_url", "video_url"]),
+    "seedance-2.0-fast-official": dict(
+        duration=(4, 15), resolutions=["480p", "720p"],
+        max_images=9, max_videos=3, max_audios=3,
+        banned=["camera_fixed", "draft", "frames", "seed", "service_tier"],
+        audio_requires=["image_url", "video_url"]),
+    "seedance-2.0-mini": dict(
+        duration=(4, 15), resolutions=["480p", "720p"],
+        max_images=9, max_videos=3, max_audios=3,
+        banned=["camera_fixed", "draft", "frames", "seed", "service_tier"],
+        audio_requires=["image_url", "video_url"]),
+    "seedance-2.0-standard": dict(
+        duration=(4, 15), resolutions=["480p", "720p", "1080p", "4k"],
+        max_images=9, max_videos=3, max_audios=3,
+        banned=["camera_fixed", "draft", "frames", "seed", "service_tier"],
+        audio_requires=["image_url", "video_url"]),
+    "seedance-2.0-standard-official": dict(
+        duration=(4, 15), resolutions=["480p", "720p", "1080p", "4k"],
+        max_images=9, max_videos=3, max_audios=3,
+        banned=["camera_fixed", "draft", "frames", "seed", "service_tier"],
+        audio_requires=["image_url", "video_url"]),
+    "seedance-2.5": dict(
+        duration=(4, 30), resolutions=["480p", "720p"],
+        max_images=30, max_videos=10, max_audios=10,
+        banned=["draft"], audio_requires=None),
+    "seedance-2.5-official": dict(
+        duration=(4, 30), resolutions=["480p", "720p"],
+        max_images=30, max_videos=10, max_audios=10,
+        banned=["draft"], audio_requires=None),
+}
+# metadata 里能放的（文档 4.2「常用 metadata 参数」）。不在这张表里的一律不发 ——
+# 文档 3 行原话：「未被模型声明的参数会被静默丢弃或被下游拒绝」。
+GATE_META_KEYS = ("ratio", "duration", "resolution", "watermark", "generate_audio",
+                  "return_last_frame", "safety_identifier", "execution_expires_after",
+                  "camera_fixed", "seed", "output_format", "omni_reference_task_type",
+                  "service_tier", "biz_id")
+GATE_DONE, GATE_FAIL = ("success",), ("failed",)
+
+
+def gate_spec(model: str) -> dict:
+    """认不出的按 2.0 系最保守的一套走，别拿猜的上限放行。"""
+    return GATE_VIDEO_SPEC.get(model, GATE_VIDEO_SPEC["seedance-2.0-mini"])
 
 
 def _is_25(model: str) -> bool:
@@ -95,12 +151,15 @@ class GateProvider(Provider):
         return media == "video"
 
     def capabilities(self) -> dict:
+        # 直接读实拉的 Schema 表，别再按「名字里有没有 2.5」猜
         video_options = {
-            m: ({"durations": list(range(4, 31)), "max_refs": 30,
-                 "resolutions": ["480p", "720p"]}
-                if _is_25(m) else
-                {"durations": list(range(4, 16)), "max_refs": 9,
-                 "resolutions": ["480p", "720p"]})
+            m: {"durations": list(range(gate_spec(m)["duration"][0],
+                                        gate_spec(m)["duration"][1] + 1)),
+                "max_refs": gate_spec(m)["max_images"],
+                "max_video_refs": gate_spec(m)["max_videos"],
+                "max_audio_refs": gate_spec(m)["max_audios"],
+                "resolutions": gate_spec(m)["resolutions"],
+                "unsupported": gate_spec(m)["banned"]}
             for m in VIDEO_MODELS
         }
         return {
@@ -135,9 +194,14 @@ class GateProvider(Provider):
                 "max_audio_refs": 10,
                 "ref_mode": "url",
                 "model_options": video_options,
-                "notes": "Seedance 2.5：4–30 秒、30 图/10 视频/10 音频；Seedance 2.0："
-                         "4–15 秒、9 图/3 视频/3 音频。字段为 duration、ratio、resolution、"
-                         "image_url/video_url/audio_url，均为纯字符串数组。",
+                "notes": "POST /api/multimodal/create_task，请求体是 **inputs[] + metadata{}**"
+                         "（不是扁平字段）：每条素材在 inputs 里独立一项、各带 format"
+                         "（first_frame / last_frame / reference_image / reference_video /"
+                         " reference_audio），视频参数放 metadata。查询是 "
+                         "**POST /api/multimodal/get_result**，body 要 model + taskId"
+                         "（小驼峰）。Seedance 2.5：4–30 秒、30 图/10 视频/10 音频；"
+                         "2.0 系：4–15 秒、9 图/3 视频/3 音频，且**只给音频不给图/视频会被拒**。"
+                         "各模型禁用参数见 GATE_VIDEO_SPEC['banned']。",
             },
             "notes": "公开 Schema 会持续变化，list_models() 每次从 /public/model_group/info "
                      "读取；静态列表仅用于界面首次打开。默认直连，不继承 Windows 系统代理；"
@@ -190,63 +254,178 @@ class GateProvider(Provider):
         return {"task_id": extract_task_id(data), "source": items[0][:200],
                 "provider": self.id, "model": model}
 
-    def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
-                       cancel: Optional[Callable] = None,
-                       poll_interval: int = 8, poll_timeout: int = 2400) -> dict:
-        model = (task.model or "seedance-2.5").strip()
-        is_25 = _is_25(model)
-        sec, upper = int(task.duration or 15), 30 if is_25 else 15
-        if not 4 <= sec <= upper:
-            raise ApiError(f"Gate {model} 只支持 4–{upper} 秒，本任务是 {sec} 秒",
-                           status=0, kind="task_fatal")
+    def build_video_body(self, task: VideoTask, model: str) -> dict:
+        """按文档 4.1 拼请求体：`inputs[]` + `metadata{}`。
+
+        ⚠ 这里以前发的是**扁平字段**（`prompt`/`duration`/`ratio`/`image_url:[…]`），
+        文档里没有任何一个在那个位置。而文档 3 行原话是「未被模型声明的参数会被
+        **静默丢弃**或被下游拒绝」—— 所以那样发出去，任务建得起来、task_id 也拿得到，
+        但提示词和参考图很可能一个都没进去。片子出得来，只是跟你要的没关系。
+        """
+        spec = gate_spec(model)
+        prompt = (task.prompt or "").strip()
+        if not prompt:
+            raise ApiError("Gate 视频的 prompt 必填", status=0, kind="task_fatal")
 
         images = list(task.refs or [])
         videos = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
         audios = list(task.extra.get("audio_refs") or task.extra.get("audios") or [])
-        max_i, max_va = (30, 10) if is_25 else (9, 3)
-        if len(images) > max_i or len(videos) > max_va or len(audios) > max_va:
-            raise ApiError(f"Gate {model} 素材超限：图 {len(images)}/{max_i}、"
-                           f"视频 {len(videos)}/{max_va}、音频 {len(audios)}/{max_va}。"
-                           "不能静默裁掉参考素材。", status=0, kind="task_fatal")
+        lo, hi = spec["duration"]
+        sec = int(task.duration or 15)
+        ratio = task.ratio or "adaptive"
+        res = (task.resolution or "720p").lower()
+
+        problems = []
+        if not lo <= sec <= hi:
+            problems.append(f"时长只支持 {lo}–{hi} 秒，收到 {sec} 秒")
+        if ratio not in RATIOS:
+            problems.append(f"比例只支持 {'、'.join(RATIOS)}，收到 {ratio}")
+        if res not in spec["resolutions"]:
+            problems.append(f"分辨率只支持 {'、'.join(spec['resolutions'])}，收到 {res}")
+        for got, cap, what in ((images, spec["max_images"], "图片"),
+                               (videos, spec["max_videos"], "视频"),
+                               (audios, spec["max_audios"], "音频")):
+            if len(got) > cap:
+                problems.append(f"{what}素材最多 {cap} 个，收到 {len(got)} 个")
+        # Schema 的 x-requires-any-of：2.0 系只给音频、不给图/视频会被拒
+        if audios and spec["audio_requires"] and not (images or videos):
+            problems.append(f"{model} 的音频素材必须搭配参考图或参考视频一起给")
         bad = [r for r in images + videos + audios
                if not str(r).startswith(("http://", "https://"))]
         if bad:
-            raise ApiError(f"Gate 视频参考素材只收公网 URL，本任务有 {len(bad)} 项不是。"
-                           "请配置参考图对象存储，不能少素材后继续生成。",
+            problems.append(f"参考素材必须是**下游能取到的公网 URL**，有 {len(bad)} 条不是")
+        # 这家自己声明的不支持参数：传了就报，不替它兜（Schema 原话是宁可显式拒绝
+        # 也不静默丢弃）。静默丢的后果是你以为锁了镜头，实际没锁，而且不报错。
+        banned = [k for k in spec["banned"] if k in task.extra]
+        if banned:
+            problems.append(f"{model} 不支持 {'、'.join(banned)}（这家自己声明的），请去掉")
+        if problems:
+            raise ApiError(f"Gate {model} 的参数不符合它的 Schema：" + "；".join(problems),
                            status=0, kind="task_fatal")
 
-        body: dict = {
-            "model": model,
-            "prompt": task.prompt or "",
-            "duration": sec,
-            "ratio": task.ratio or "9:16",
-            "resolution": (task.resolution or "720p").lower(),
-            "generate_audio": bool(task.extra.get("generate_audio", True)),
-            "watermark": bool(task.extra.get("watermark", False)),
-        }
-        if images:
-            body["image_url"] = images
-        if videos:
-            body["video_url"] = videos
-        if audios:
-            body["audio_url"] = audios
-        for key in ("seed", "camera_fixed", "return_last_frame", "output_format",
-                    "omni_reference_task_type", "priority"):
-            if key in task.extra:
-                body[key] = task.extra[key]
+        # 每条素材是 inputs[] 里**独立一项**，各带自己的 format —— 不是数组字段
+        inputs = [{"name": "prompt", "value": prompt, "format": "text"}]
+        first_last = bool(task.extra.get("first_last")) and len(images) >= 2
+        for n, url in enumerate(images):
+            fmt = "reference_image"
+            if first_last:
+                fmt = "first_frame" if n == 0 else "last_frame" if n == 1 else "reference_image"
+            inputs.append({"name": "image_url", "value": url, "format": fmt})
+        for url in videos:
+            inputs.append({"name": "video_url", "value": url, "format": "reference_video"})
+        for url in audios:
+            inputs.append({"name": "audio_url", "value": url, "format": "reference_audio"})
 
-        log(f"Gate 视频 {model}: {sec}s {body['resolution']} {body['ratio']} "
-            f"图{len(images)}/视频{len(videos)}/音频{len(audios)}")
+        meta = {"ratio": ratio, "duration": sec, "resolution": res,
+                "watermark": bool(task.extra.get("watermark", False)),
+                "generate_audio": bool(task.extra.get("generate_audio", True))}
+        # 只放文档列过、且这个模型没禁的键
+        for k in GATE_META_KEYS:
+            if k in task.extra and k not in meta and k not in spec["banned"]:
+                meta[k] = task.extra[k]
+
+        body = {"model": model, "inputs": inputs, "metadata": meta}
+        if "priority" in task.extra:
+            body["priority"] = max(0, min(9, int(task.extra["priority"])))
+        for k in ("callback_url", "callback_headers", "callback_secret"):
+            if task.extra.get(k):
+                body[k] = task.extra[k]
+        return body
+
+    def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
+                       cancel: Optional[Callable] = None,
+                       poll_interval: int = 5, poll_timeout: int = 2400) -> dict:
+        model = (task.model or "seedance-2.5").strip()
+        body = self.build_video_body(task, model)
+        n_img = sum(1 for i in body["inputs"] if i["name"] == "image_url")
+        log(f"Gate 视频 {model}: {body['metadata']['duration']}s "
+            f"{body['metadata']['resolution']} {body['metadata']['ratio']} "
+            f"素材 {len(body['inputs']) - 1} 项（图 {n_img}）")
         data = self.session.request("POST", "/api/multimodal/create_task",
                                     json_body=body, retries=1, timeout=300)
-        task_id = extract_task_id(data)
-        url = extract_video_url(data)
-        if not url:
-            if not task_id:
-                raise ApiError(f"Gate 创建任务没返回 ID: {str(data)[:300]}")
-            url = self.session.poll("/v1/videos/{id}", task_id, picker=extract_video_url,
-                                    content_path_tpl="/v1/videos/{id}/content",
-                                    interval=poll_interval, timeout=poll_timeout,
-                                    log=log, cancel=cancel)
+        task_id = str((data or {}).get("task_id") or "")
+        if not task_id:
+            raise ApiError(f"Gate 创建任务没返回 task_id: {str(data)[:300]}")
+
+        url = self._poll_result(model, task_id, poll_interval, poll_timeout,
+                                log=log, cancel=cancel)
         self.session.save_item(url, dest)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
+
+    def _poll_result(self, model: str, task_id: str, interval: int, timeout: int,
+                     *, log, cancel=None) -> str:
+        """查询任务。**POST /api/multimodal/get_result，body 要 model + taskId。**
+
+        ⚠ 这里以前查的是 `GET /v1/videos/{id}` —— 那个端点在 Gate 的文档里
+        **根本不存在**，是我们自己编的。而 Gate 是 litellm 搭的网关，`/v1/videos/*`
+        在 litellm 里是 **OpenAI 直通路由**，于是它把我们的 task_id 转发去了
+        `api.openai.com/v1/videos/{uuid}`，超时回 500。用户看到的就是一屏
+        `litellm.APIConnectionError: openai - Connection timeout to host
+        https://api.openai.com/...` —— 地址是 Gate 拼的，不是我们配错了 base_url。
+
+        注意参数名是 **taskId（小驼峰）**，不是 task_id；而且**必须带 model**。
+        """
+        start, last = time.time(), ""
+        stuck = 0
+        while time.time() - start < timeout:
+            if cancel and cancel():
+                raise ApiError("用户已取消")
+            try:
+                data = self.session.request(
+                    "POST", "/api/multimodal/get_result",
+                    json_body={"model": model, "taskId": task_id},
+                    retries=1, timeout=60)
+                stuck = 0
+            except ApiError as exc:
+                # 同一个错一直回 = 端点/参数不对，不是抖动。别拖满 40 分钟。
+                stuck += 1
+                if stuck >= 3:
+                    raise ApiError(
+                        f"Gate 查询任务连续 {stuck} 次同样失败，停止等待：{exc}\n"
+                        f"（任务 {task_id} 可能仍在它那边跑；这类错重试无意义，"
+                        f"多半是端点或参数不对）", status=0, kind="task_fatal") from exc
+                log(f"Gate 查询出错（第 {stuck} 次，继续）：{exc}")
+                time.sleep(interval)
+                continue
+
+            status = str((data or {}).get("status") or "").lower()
+            if status != last:
+                log(f"Gate {task_id}: {status or '(无状态字段)'}")
+                last = status
+            if status in GATE_FAIL:
+                raise ApiError(f"Gate 任务失败：{(data or {}).get('error') or str(data)[:300]}",
+                               status=0, kind="task_fatal")
+            url = _gate_result_url(data)
+            if url:
+                return url
+            if status in GATE_DONE:
+                raise ApiError(
+                    f"Gate 说任务成功了，但 results 里没有 video_url："
+                    f"{str(data)[:400]}", status=0, kind="task_fatal")
+            time.sleep(interval)
+        raise ApiError(f"Gate 任务超时：{task_id}（建议 2~5 秒轮询，长任务可调大 poll_timeout）",
+                       status=0, kind="retryable")
+
+
+def _gate_result_url(payload) -> str:
+    """从 get_result 响应里取成片地址。
+
+    文档 4.4 的成功响应把它放在两个地方，两处都取（前者是官方列出的取值口）：
+      results[].parameters[]  里 name == "video_url" 的 value
+      results[].result.content.video_url
+    """
+    if not isinstance(payload, dict):
+        return ""
+    for item in payload.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        for par in item.get("parameters") or []:
+            if (isinstance(par, dict) and par.get("name") == "video_url"
+                    and isinstance(par.get("value"), str)
+                    and par["value"].startswith("http")):
+                return par["value"]
+        content = ((item.get("result") or {}).get("content") or {})
+        url = content.get("video_url")
+        if isinstance(url, str) and url.startswith("http"):
+            return url
+    return ""
