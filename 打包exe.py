@@ -80,14 +80,20 @@ REQUIRED = {
     "requests": "所有服务商的 HTTP 请求",
     "certifi": "HTTPS 根证书（否则换电脑后所有 HTTPS 接口会失败）",
     "urllib3": "HTTP 连接池和重试",
-    "boto3": "参考图上传到对象存储（只收公网链接的模型会用不了）",
+    "boto3": "参考图上传到对象存储 —— 只收公网链接的模型"
+             "（HVTALD、seedance 那几条）缺了它一条都出不了",
     "botocore": "对象存储请求签名和连接配置",
     "s3transfer": "对象存储文件传输",
-    "PIL": "参考图压缩（不压直接转 base64，请求体会很大）",
-    "pypdf": "读 PDF 剧本（docx / txt 不受影响）",
-    "imageio_ffmpeg": "环节12 拼接成片及内置 ffmpeg 程序",
+    "PIL": "参考图压缩 —— 缺了不报错，改成原样转 base64，"
+           "请求体大几倍，更容易撞网关体积上限（踩过）",
+    "pypdf": "读 PDF 剧本 —— 缺了传 PDF 直接失败，"
+             "而报错写的是「pip install pypdf」，exe 用户照不了",
+    "imageio_ffmpeg": "拼接成片的兜底 ffmpeg —— 目标机器装了系统 ffmpeg "
+                      "也行，但不能赌它装了",
     # ---- 字幕：v34-cinematic 这条线加的 ----
-    "videocaptioner": "字幕（转写 / 优化 / 翻译 / 压制）——"
+    "videocaptioner": "字幕（转写 / 优化 / 翻译 / 压制）—— "
+                      "从 `<本程序>.exe caption ...` 进去。本机装法："
+                      "pip install --ignore-requires-python "
                       "videocaptioner audioop-lts",
     # audioop 在 Python 3.13 被从标准库删了（PEP 594），而 pydub 导它 ——
     # 这就是 videocaptioner 声明 Requires-Python <3.13 的真正原因。
