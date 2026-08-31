@@ -930,15 +930,30 @@ def api_get(path: str, q: dict) -> dict:
     if path == "/api/project":
         pj = Project(q["root"][0])
         tasks = pj.tasks()
-        done = {}
+        done, by_ep = {}, {}
         for kind, key in (("asset_tasks", "asset"), ("storyboard_tasks", "storyboard"),
                           ("video_tasks", "video")):
             items = tasks.get(kind, [])
-            done[key] = {
-                "total": len(items),
-                "done": sum(1 for t in items
-                            if probe.have_output(pj.p(*t["output"].split("/")))),
-            }
+            ok = {t["key"] for t in items
+                  if probe.have_output(pj.p(*t["output"].split("/")))}
+            done[key] = {"total": len(items), "done": len(ok)}
+            # **按集也要给一份。** 生产页那张表现在能选「只跑这一集」，
+            # 而进度列一直数的是全部任务 —— 于是标签写着 EP02、数字是全剧的
+            # 76（实遇 2026-08-31）。两个数并排摆着自相矛盾，人会以为
+            # 选集没生效，而选集是生效的，只是这一列没跟上。
+            #
+            # 一次给全，切集就不用再往返一次 —— 40 集 × 3 类也只是几十个数。
+            # 资产图**不进这里**：它不带集号（全剧共享，同一个角色跨集只出
+            # 一张），按集分只会分出个空的，然后页面显示 0/0。
+            if key == "asset":
+                continue
+            for it in items:
+                e = str(it.get("episode") or "")
+                if not e:
+                    continue
+                slot = by_ep.setdefault(e, {}).setdefault(key, {"total": 0, "done": 0})
+                slot["total"] += 1
+                slot["done"] += 1 if it["key"] in ok else 0
         ep = (q.get("episode") or [""])[0]
         # **按这个项目自己的体系算**，不是写死 V6.1 的环节表。
         # 写死的后果：v34 项目拿到的是 s1..s8 的完成状态，
@@ -964,7 +979,8 @@ def api_get(path: str, q: dict) -> dict:
         if system_of(pj) == "v34":
             from core import migrate_v56
             need_migrate = migrate_v56.pending(pj)
-        return {"meta": pj.meta(), "tasks_summary": done, "stages_done": stage_state,
+        return {"meta": pj.meta(), "tasks_summary": done,
+                "tasks_by_episode": by_ep, "stages_done": stage_state,
                 "root": pj.root, "episodes": episodes.summary(pj), "episode": ep,
                 # 这个项目**实际**用哪套 —— 页面必须用这个，不许自己从项目列表里猜。
                 # 猜的后果实跑撞过：新建的项目还不在那份列表里，页面回落成
