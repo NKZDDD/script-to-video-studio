@@ -450,6 +450,14 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
 <section id="t-gen" class="hide">
   <div class="card">
     <h2>生产任务 <span class="tag">读 tasks.json；已存在的输出自动跳过</span></h2>
+    <!-- **范围就摆在按钮旁边。** 以前这里跟的是「项目」页那个集下拉，
+         人在这一页根本看不见它选的是哪一集，点「开始」不知道会跑多少条。
+         资产图不受它影响 —— 全剧共享，同一个角色跨集只出一张。 -->
+    <div class="row" style="margin-bottom:10px;gap:8px;align-items:center;flex-wrap:wrap">
+      <label style="margin:0"><b>只跑这一集</b>
+        <select id="genEp" style="width:auto"></select></label>
+      <span class="muted" id="genEpHint"></span>
+    </div>
     <table><thead><tr><th>类型</th><th>进度</th><th>服务商</th><th>模型</th>
       <th>尺寸 / 比例 · 时长</th><th>并发</th><th></th></tr></thead>
       <tbody id="genRows"></tbody></table>
@@ -469,8 +477,14 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <label style="margin:0">集 <select id="tkEp" style="width:auto"></select></label>
       <label style="margin:0"><input type="checkbox" id="tkOnlyBad"> 只看没做成的</label>
       <span class="sp"></span>
+      <span class="muted" id="tkPickInfo"></span>
+      <button class="btn sm" id="tkRunPick" disabled>跑选中的</button>
       <button class="btn ghost sm" id="tkRefresh">刷新</button>
     </div>
+    <p class="muted" style="margin:0 0 8px">
+      每一组标题右边有「跑这一组」——按上面选的集跑那一类（场景状态图也能单跑，
+      以前这一类只看得见、跑不了）。要挑着跑就勾单条，再点「跑选中的」。
+      服务商和并发用上面「生产任务」那张表里对应那一行的设置。</p>
     <div id="tkBody"><p class="muted">打开项目后看这里</p></div>
   </div>
   <div class="card">
@@ -2580,14 +2594,33 @@ function providerOptions(kind, cur) {
     .map(c => `<option value="${c.id}"${c.id === cur ? ' selected' : ''}>${c.name}</option>`)
     .join('');
 }
+// 「只跑这一集」——**这一页自己的范围**，不再跟「项目」页那个下拉。
+// 空 = 全部集。资产图不受它影响（全剧共享）。
+function genEp() { return ($('#genEp') || {}).value || ''; }
+function renderGenEp() {
+  const sel = $('#genEp');
+  if (!sel) return;
+  const eps = (EPS.episodes || []).map(e => e.episode);
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部集</option>'
+    + eps.map(e => `<option${e === cur ? ' selected' : ''}>${esc(e)}</option>`).join('');
+  // 集清单为空时说清楚是怎么回事 —— 材料导入模式下这份清单是导入时落的，
+  // 老项目（那次修复之前导入的）没有，重新导一次材料就有了。
+  $('#genEpHint').textContent = eps.length
+    ? (sel.value ? `只跑 ${sel.value} 这一集的图和片（资产图除外）`
+                 : `共 ${eps.length} 集，现在是全部集`)
+    : '这个项目还没有集清单：文字流程走到环节1 就有；材料导入模式是导入时落的，'
+      + '老项目重新导一次材料即可。';
+}
 function renderGen(summary) {
+  renderGenEp();
   const multi = (EPS.episodes || []).length > 1;
   // 资产图是全剧共享的（同一个角色跨集就一张，不按集出），所以不受选集影响
   $('#genRows').innerHTML = GEN_KINDS.map(([k, label, cap]) => {
     const s = summary[k] || {total:0, done:0};
     const scope = !multi ? '' : (k === 'asset'
       ? '<span class="tag" title="同一个角色跨集只出一张图，跨集人脸才一致">全剧共享</span>'
-      : `<span class="tag">${EP || '全部集'}</span>`);
+      : `<span class="tag">${genEp() || '全部集'}</span>`);
     // 没有任务时别摆一个点了没反应的「开始」：0/0 的原因是前置环节还没产出清单，
     // 说清楚是哪一步、点不动的原因，比让人点三次再来问强。
     const why = {asset: '环节5 还没编出资产生产提示词',
@@ -2687,17 +2720,51 @@ function renderGen(summary) {
     tr.querySelector('[data-retry]').onclick = () => go(true);
   });
 }
-async function startGen(kind, provider, model, concurrency, failedOnly, paramsOverride) {
+// taskKey：跑哪一批活（asset_tasks / scstate_tasks / storyboard_tasks / video_tasks）。
+// 和 kind 分开 —— 场景状态图和故事板的 kind 都是 storyboard，只有 taskKey 分得开。
+// only：挑着跑的那几条的 key，不给就是这一类全跑。
+async function startGen(kind, provider, model, concurrency, failedOnly, paramsOverride,
+                        taskKey, only) {
   if (!PROJ) return alert('先打开项目');
   const r = await api.post('/api/generate', {
     project_root: PROJ, kind, concurrency, failed_only: !!failedOnly,
-    episode: kind === 'asset' ? '' : EP,        // 资产全剧共享，不按集筛
+    task_key: taskKey || '',
+    // 资产全剧共享，不按集筛。挑着跑时也不筛 —— 勾了哪条就跑哪条，
+    // 再叠一层集过滤只会把人勾中的条目悄悄滤掉。
+    episode: (kind === 'asset' || (only && only.length)) ? '' : genEp(),
+    only: only && only.length ? only : null,
     provider_sel: {provider, model},
     params_override: paramsOverride || {},      // 尺寸/比例/时长，只影响这一次
   });
   if (r.error || r.ok === false) return alert(r.error || r.msg);
   if (r.todo === 0) alert('这批任务的产物都已存在，全部会跳过（生成即固定，不覆盖）');
   DETAIL = r.job_id;
+}
+// 换集只重画标签和提示 —— 不重新拉 summary（那是全项目的数，和选集无关）。
+$('#genEp').onchange = () => {
+  renderGenEp();
+  document.querySelectorAll('#genRows tr').forEach(tr => {
+    const tag = tr.querySelector('td .tag');
+    if (tag && tr.dataset.k !== 'asset') tag.textContent = genEp() || '全部集';
+  });
+  renderTasks(true);        // 明细也跟着这个范围走，两处别各说各话
+};
+
+// 「生产任务」那张表里某一类当前选的服务商 / 模型 / 并发 / 参数覆盖。
+// 明细页那些「跑这一组」「跑选中的」都用它 —— 免得同一个项目两个入口
+// 用不同的服务商（那种不一致两边都不报错，只是出来的东西不一样）。
+function genSettings(kind) {
+  const tr = document.querySelector(`#genRows tr[data-k="${kind}"]`);
+  if (!tr) return null;
+  const ov = {};
+  const size = tr.querySelector('.i-size'), ratio = tr.querySelector('.v-ratio'),
+        dur = tr.querySelector('.v-dur');
+  if (size && size.value) ov.size = size.value;
+  if (ratio && ratio.value) ov.ratio = ratio.value;
+  if (dur && dur.value) ov.duration = +dur.value;
+  return {provider: tr.querySelector('.p-sel').value,
+          model: (tr.querySelector('.m-sel') || {}).value || '',
+          concurrency: +tr.querySelector('.c-in').value || 3, ov};
 }
 $('#rebuildTasks').onclick = async () => {
   const r = await api.post('/api/tasks/rebuild', {project_root: PROJ});
@@ -3608,14 +3675,27 @@ async function renderTasks(fresh) {
     const rows = g.rows.filter(r => !bad || (!r.done));
     if (!rows.length && bad) return '';
     const open = !!TKFold[g.key];
+    const left = g.total - g.done;
+    // 「跑这一组」——跑的是这一批（g.key = task_key），不是 g.kind：
+    // 场景状态图和故事板的 kind 都是 storyboard，只有 task_key 分得开。
+    // 没有待办就别摆一个点了没反应的按钮。
+    const runBtn = left
+      ? `<button class="btn sm tkrun" data-tkey="${esc(g.key)}" data-kind="${esc(g.kind)}"
+           title="按上面选的集跑这一类还没做完的 ${left} 条">跑这一组（${left}）</button>`
+      : `<span class="muted" style="font-size:11px">这一类没有待办</span>`;
     return `<div style="margin-bottom:14px">
-      <div class="steps tkfold" data-gkey="${esc(g.key)}" title="点击${open ? '收起' : '展开'}">
-      <div class="s ${g.done >= g.total && g.total ? 'full' : g.done ? '' : 'none'}">
-        <span class="tk-arrow">${open ? '▾' : '▸'}</span>
-        ${esc(g.label)}（${esc(g.stage)}） ${g.done}/${g.total}
-        ${g.failed ? ` · <b style="color:#c0392b">${g.failed} 项没做成</b>` : ''}</div></div>
+      <div class="row" style="gap:8px;align-items:center;margin-bottom:4px">
+        <div class="steps tkfold" data-gkey="${esc(g.key)}"
+             style="margin:0;flex:1;cursor:pointer" title="点击${open ? '收起' : '展开'}">
+        <div class="s ${g.done >= g.total && g.total ? 'full' : g.done ? '' : 'none'}">
+          <span class="tk-arrow">${open ? '▾' : '▸'}</span>
+          ${esc(g.label)}（${esc(g.stage)}） ${g.done}/${g.total}
+          ${g.failed ? ` · <b style="color:#c0392b">${g.failed} 项没做成</b>` : ''}</div></div>
+        ${runBtn}
+      </div>
       <div class="grp${open ? '' : ' hide'}">
-      ${rows.map(r => taskRow(r, g.key)).join('') || '<p class="muted">（这一类没有待办）</p>'}
+      ${rows.map(r => taskRow(r, g.key, g.kind)).join('')
+        || '<p class="muted">（这一类没有待办）</p>'}
       </div>
     </div>`;
   }).join('');
@@ -3630,16 +3710,62 @@ async function renderTasks(fresh) {
     };
   });
   document.querySelectorAll('#tkBody .segrow > .hd').forEach(el => {
-    el.onclick = () => el.parentElement.querySelector('.bd').classList.toggle('hide');
+    // 勾选框在标题栏里，点它不该把这一条展开。
+    el.onclick = e => {
+      if (e.target.classList.contains('tkpick')) return;
+      el.parentElement.querySelector('.bd').classList.toggle('hide');
+    };
   });
+  document.querySelectorAll('#tkBody .tkrun').forEach(el => {
+    el.onclick = () => runTaskKey(el.dataset.tkey, el.dataset.kind, []);
+  });
+  document.querySelectorAll('#tkBody .tkpick').forEach(el => {
+    el.onchange = tkPickChanged;
+  });
+  tkPickChanged();
 }
-function taskRow(r, kind) {
+
+// 勾中的条目：{task_key: [key...]}。**跨组不混着跑** ——
+// 一次 /api/generate 只跑一批活，混着发会用错 worker、也算错 relay 的批次。
+function tkPicked() {
+  const out = {};
+  document.querySelectorAll('#tkBody .tkpick:checked').forEach(el => {
+    (out[el.dataset.tkey] = out[el.dataset.tkey] || []).push(el.dataset.key);
+  });
+  return out;
+}
+function tkPickChanged() {
+  const picked = tkPicked();
+  const groups = Object.keys(picked);
+  const n = groups.reduce((a, k) => a + picked[k].length, 0);
+  $('#tkRunPick').disabled = !n;
+  $('#tkPickInfo').textContent = !n ? ''
+    : `已勾 ${n} 条` + (groups.length > 1 ? `（跨 ${groups.length} 类，会分批跑）` : '');
+}
+async function runTaskKey(taskKey, kind, only) {
+  const s = genSettings(kind);
+  if (!s) return alert(`上面「生产任务」表里没有「${kind}」这一行，读不到服务商设置`);
+  await startGen(kind, s.provider, s.model, s.concurrency, false, s.ov, taskKey, only);
+}
+$('#tkRunPick').onclick = async () => {
+  const picked = tkPicked();
+  // 每一类各发一趟。KIND_OF 从这一次渲染的结果里取，别猜。
+  for (const tkey of Object.keys(picked)) {
+    const el = document.querySelector(`#tkBody .tkpick[data-tkey="${tkey}"]`);
+    await runTaskKey(tkey, el.dataset.kind, picked[tkey]);
+  }
+};
+function taskRow(r, taskKey, kind) {
   const lamp = (on, t, warn) =>
     `<span class="chip ${on ? 'on' : (warn ? 'warn' : 'off')}">${t}</span>`;
   const refBad = r.refs.filter(x => !x.file.exists).length;
   const sp = r.spend || {};
-  return `<div class="segrow" data-kind="${esc(kind || '')}">
+  return `<div class="segrow" data-kind="${esc(taskKey || '')}">
     <div class="hd">
+      <input type="checkbox" class="tkpick" style="width:auto;margin:0 4px 0 0"
+             data-tkey="${esc(taskKey || '')}" data-kind="${esc(kind || '')}"
+             data-key="${esc(r.key)}"
+             title="勾上再点上面「跑选中的」${r.done ? '（这条已经出过了，重跑不会覆盖）' : ''}">
       <b style="font-size:12px">${esc(r.key)}</b>
       <span class="sname">${esc(r.name || r.episode)}</span>
       <span>

@@ -2153,15 +2153,31 @@ def api_post(path: str, body: dict) -> dict:
 
     if path == "/api/generate":
         pj = proj_of(body)
-        kind = body["kind"]                    # asset | storyboard | video
+        # `task_key` 指的是**跑哪一批活**，`kind` 只是「用哪个 worker / 算哪种能力」。
+        # 两者以前是同一个字段，于是场景状态图（scstate_tasks）没有入口可跑 ——
+        # 它和故事板的 worker 都是 image，kind 都是 "storyboard"，而 key_map 里
+        # "storyboard" 只指向 storyboard_tasks。结果：明细页把它列出来、
+        # 有多少条都写着，但页面上没有任何一个按钮能跑它。
+        # 给它一个按钮而不分开这两个概念的话，点下去跑的是故事板 —— 更糟。
+        # task_key → (worker 用哪种, relay 的哪一批)。一张表，别在下面散着写。
+        BATCH = {"asset_tasks": ("asset", "p1"), "scstate_tasks": ("storyboard", "p2"),
+                 "storyboard_tasks": ("storyboard", "p3"), "video_tasks": ("video", "p4")}
+        key_map = {"asset": "asset_tasks", "storyboard": "storyboard_tasks",
+                   "video": "video_tasks"}
+        task_key = str(body.get("task_key") or "").strip() or key_map.get(body.get("kind"), "")
+        if task_key not in BATCH:
+            raise ValueError(f"不认识的任务类别 {task_key or body.get('kind')!r}，"
+                             f"只能是 {'、'.join(BATCH)}")
+        # **kind 一律从 task_key 推**，不用请求里那个 —— 两者对不上时以「跑哪一批」
+        # 为准。下面服务商解析、worker 选择、能力上限全看它，先定死再往下走。
+        kind, _mine = BATCH[task_key]
         pcfg = resolve_provider_cfg(cfg, body.get("provider_sel") or {}, kind)
         conc = int(body.get("concurrency") or (cfg.get("defaults") or {}).get("concurrency", 3))
         retry = int(body.get("max_retry") or (cfg.get("defaults") or {}).get("max_retry", 2))
         only = set(body.get("only") or [])
 
         tasks = pj.tasks()
-        key_map = {"asset": "asset_tasks", "storyboard": "storyboard_tasks", "video": "video_tasks"}
-        items = tasks.get(key_map[kind], [])
+        items = tasks.get(task_key, [])
         # 按集过滤：40 集的项目里只想出某一集的图/片。
         # 资产任务不带集号（全剧共享），所以不参与过滤。
         ep_sel = (body.get("episode") or "").strip()
@@ -2178,11 +2194,14 @@ def api_post(path: str, body: dict) -> dict:
             # 空的原因不止一个，说错了会把人支到完全无关的地方去查。
             # 按集筛空最常见 —— 材料导入模式下尤其：那一集本来就没有这一类活。
             if ep_sel and kind != "asset":
-                whole = len(tasks.get(key_map[kind], []))
+                whole = len(tasks.get(task_key, []))
+                name = {"asset_tasks": "资产图", "scstate_tasks": "场景状态图",
+                        "storyboard_tasks": "故事板",
+                        "video_tasks": "分段视频"}.get(task_key, task_key)
                 return {"ok": False,
-                        "msg": f"{ep_sel} 这一集没有「{kind}」的任务"
+                        "msg": f"{ep_sel} 这一集没有「{name}」的任务"
                                f"（整个项目共 {whole} 条）。"
-                               f"换一集，或者把页头的集选成空 = 全部集。"}
+                               f"换一集，或者把「只跑这一集」选成「全部集」。"}
             return {"ok": False, "msg": "没有匹配的任务（先跑环节8生成 tasks.json，"
                                         "材料导入模式下是先导入材料）"}
 
@@ -2243,7 +2262,9 @@ def api_post(path: str, body: dict) -> dict:
                     relay.declare(_bk, tasks.get(_tk) or [])
                 # 别的三类这一趟不跑 —— 标成「那一批已经收摊」，
                 # 否则本类会一直等一个永远不会开始的批次。
-                _mine = {"asset": "p1", "storyboard": "p3", "video": "p4"}[kind]
+                # _mine 在上面按 task_key 定过了 —— 这里再按 kind 算一次的话，
+                # 场景状态图会被当成故事板那一批（两者 kind 都是 storyboard），
+                # 于是它自己那一批 p2 被标成「收摊」，等它的下游立刻开跑撞空。
                 for _bk in ("p1", "p2", "p3", "p4"):
                     if _bk != _mine:
                         relay.finished(_bk)
@@ -2276,7 +2297,7 @@ def api_post(path: str, body: dict) -> dict:
                 # 「满足条件就开始干，没做出图片，满足条件继续重试」。
                 # sweep_redo 一直只在「一键跑到底」里被调用，这边现在接上。
                 step = {"produce": kind, "batch": _mine,
-                        "task_key": key_map[kind], "label": kind,
+                        "task_key": task_key, "label": task_key,
                         "only": [ep_sel] if ep_sel else None}
                 _relay.sweep_redo(
                     pj, [step], relay,
