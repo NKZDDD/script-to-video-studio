@@ -653,7 +653,15 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       <div><label>字幕样式
           <span class="muted">只在「烧录进画面」时生效</span></label>
         <select id="sbStyle"><option value="">（VideoCaptioner 默认）</option></select>
-        <span class="muted" id="sbStyleNote"></span></div>
+        <span class="muted" id="sbStyleNote"></span>
+        <div class="row" style="gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap">
+          <button class="btn ghost sm" id="sbStyleAdd">上传样式…</button>
+          <input type="file" id="sbStyleFile" accept=".txt,.json" class="hide">
+          <span class="muted" style="font-size:11px">
+            .txt（ASS <code>[V4+ Styles]</code> 块）或 .json（VideoCaptioner 导出的）。
+            <b>文件名就是样式名</b>，同名 = 替换。</span>
+        </div>
+        <div id="sbStyleMine" style="margin-top:6px"></div></div>
       <div><label>LLM 优化 <span class="muted">纠错别字、顺句子</span></label>
         <label class="row" style="margin:0;gap:7px;align-items:center">
           <input id="sbOptimize" type="checkbox" style="width:auto">
@@ -4335,8 +4343,44 @@ async function loadSubtitleStyles(want) {
       `<option value="${esc(want)}">${esc(want)}（⚠ 现在找不到这份样式）</option>`);
   }
   sel.value = want || '';
+  renderMyStyles(r.user_styles || [], r.user_dir || '');
   syncSubtitleBoxes();
 }
+// 自己传的那几份 —— 只有这些能删（自带四份和 VideoCaptioner 自己的删了找不回来）。
+function renderMyStyles(list, dir) {
+  const box = $('#sbStyleMine');
+  if (!box) return;
+  box.innerHTML = !list.length ? ''
+    : `<span class="muted" style="font-size:11px">你传的：</span>`
+      + list.map(s => `<span class="tag" title="${esc(dir)}">${esc(s.name)}
+          <a href="#" class="sbdel" data-name="${esc(s.name)}"
+             style="margin-left:4px" title="删掉这一份">×</a></span>`).join(' ');
+  box.querySelectorAll('.sbdel').forEach(a => {
+    a.onclick = async e => {
+      e.preventDefault();
+      const n = a.dataset.name;
+      if (!confirm(`删掉字幕样式「${n}」？`)) return;
+      const r = await api.post('/api/subtitle/style/delete', {name: n});
+      if (r.error) return alert(r.error);
+      // 删掉的正好是当前选中的那份时，别留一个指向不存在样式的值。
+      const cur = $('#sbStyle').value;
+      await loadSubtitleStyles(cur === n ? '' : cur);
+    };
+  });
+}
+$('#sbStyleAdd').onclick = () => $('#sbStyleFile').click();
+$('#sbStyleFile').onchange = async e => {
+  const f = (e.target.files || [])[0];
+  e.target.value = '';                    // 同一个文件改完再传一次也要能触发
+  if (!f) return;
+  const r = await api.post('/api/subtitle/style/upload',
+                           {filename: f.name, text: await f.text()});
+  if (r.error) return alert(r.error);
+  alert(r.msg);
+  // 传完直接选中它 —— 传了不选中的话还得自己去下拉里找，
+  // 而「传了但没生效」的样子和「选中了」一模一样。
+  await loadSubtitleStyles(r.installed ? r.name : $('#sbStyle').value);
+};
 function renderSubtitle() {
   const s = BOOT.config.subtitle || {};
   for (const [el, k] of Object.entries(SB_TEXT)) if ($('#'+el)) $('#'+el).value = s[k] ?? '';

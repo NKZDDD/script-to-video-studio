@@ -1676,7 +1676,25 @@ def api_post(path: str, body: dict) -> dict:
                 # 所选样式的当前值：微调框的 placeholder 用它，
                 # 让人看得见「不填的话是多少」，而不是对着空框猜。
                 "preset": _sub.preset_values(name),
+                # 哪几份是用户自己传的 —— 只有这些能删。自带的四份和
+                # VideoCaptioner 自己的不给删（删了没法找回来）。
+                "user_styles": _cap.user_styles(),
+                "user_dir": _cap.user_dir(),
                 "not_available": _sub.STYLE_NOT_AVAILABLE}
+
+    if path == "/api/subtitle/style/upload":
+        """收一份用户自己的字幕样式。
+
+        落到 `<数据目录>/字幕样式-自定义/`，同时装进 VideoCaptioner。
+        两处都要：只装进 VideoCaptioner 的话，换机器/清了它的目录就没了，
+        而那个目录在 %LOCALAPPDATA% 深处，没人会想到去备份。
+        """
+        from core import captions as _cap           # noqa: PLC0415
+        return _cap.add_style(body.get("filename") or "", body.get("text") or "")
+
+    if path == "/api/subtitle/style/delete":
+        from core import captions as _cap           # noqa: PLC0415
+        return _cap.remove_style(body.get("name") or "")
 
     if path == "/api/subtitle/selftest":
         # 零成本：只问 VideoCaptioner 装没装、它自己的依赖齐不齐

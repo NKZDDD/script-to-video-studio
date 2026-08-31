@@ -26,24 +26,70 @@ from . import paths
 DIR_NAME = "字幕样式"
 
 
-def bundled() -> list:
-    """自带的那几份样式文件（打包后从解压目录读）。"""
-    d = paths.res(DIR_NAME)
-    if not os.path.isdir(d):
+_EXT = (".txt", ".json")
+
+
+def _styles_in(d: str) -> list:
+    if not d or not os.path.isdir(d):
         return []
     return [os.path.join(d, f) for f in sorted(os.listdir(d))
-            if f.lower().endswith((".txt", ".json"))]
+            if f.lower().endswith(_EXT)]
 
 
-def install(log: Optional[Callable] = None) -> dict:
-    """把自带样式装进 videocaptioner 的样式目录。返回 {装了, 已有, 失败}。
+def bundled() -> list:
+    """自带的那几份样式文件（打包后从解压目录读）。"""
+    return _styles_in(paths.res(DIR_NAME))
+
+
+USER_DIR_NAME = DIR_NAME + "-自定义"
+
+
+def user_dir() -> str:
+    """用户自己传的样式放这儿：`<数据目录>/字幕样式-自定义/`。
+
+    **不能放自带那个目录**，两个原因：
+      · 打成 exe 之后自带样式在 onefile 的临时解压目录（`_MEI*`）里 ——
+        每次启动重建、退出即删，往里写等于下次就没了，而且不报错
+      · 源码方式跑的时候 `paths.data_dir()` 就是仓库根，和自带样式同一个
+        目录 —— 传一份同名的会直接覆盖仓库里的源文件
+
+    所以另起一个目录名，任何运行方式下都不会和自带的撞。
+    """
+    return os.path.join(paths.data_dir(), USER_DIR_NAME)
+
+
+def sources() -> list:
+    """所有要装进 videocaptioner 的样式文件：自带的 + 用户传的。
+
+    同名以**用户传的**为准 —— 他后传的那份就是他要的。
+    """
+    out = {}
+    for p in bundled() + _styles_in(user_dir()):
+        out[os.path.splitext(os.path.basename(p))[0]] = p
+    return [out[k] for k in sorted(out)]
+
+
+def user_styles() -> list:
+    """用户自己传的那几份（页面上列出来、可以删）。"""
+    return [{"name": os.path.splitext(os.path.basename(p))[0],
+             "file": os.path.basename(p),
+             "size": os.path.getsize(p)}
+            for p in _styles_in(user_dir())]
+
+
+def install(log: Optional[Callable] = None, force=None) -> dict:
+    """把样式装进 videocaptioner 的样式目录。返回 {装了, 已有, 失败}。
 
     **同名的不覆盖** —— 用户在那边改过的样式是他的，我们每次启动都盖回去
     等于「我改的怎么又没了」。要更新就先删掉那一份。
+
+    `force` 是刚上传的那几个名字：人明确要求换这一份，这时候必须覆盖，
+    否则「传了新的、字幕还是老样子」，而且一处都不报错。
     """
     say = log or (lambda *a: None)
     out = {"installed": [], "kept": [], "failed": []}
-    src = bundled()
+    src = sources()
+    force = set(force or ())
     if not src:
         return out
     try:
@@ -57,7 +103,7 @@ def install(log: Optional[Callable] = None) -> dict:
     for p in src:
         stem = os.path.splitext(os.path.basename(p))[0]
         dst = os.path.join(str(dst_dir), stem + ".json")
-        if os.path.isfile(dst):
+        if os.path.isfile(dst) and stem not in force:
             out["kept"].append(stem)
             continue
         try:
@@ -73,6 +119,109 @@ def install(log: Optional[Callable] = None) -> dict:
     for bad in out["failed"]:
         say(f"  ⚠ 字幕样式装不进去 —— {bad}")
     return out
+
+
+# 文件名就是**样式名**（videocaptioner 的 legacy txt 分支拿 `path.stem` 当名字）。
+# 所以名字要挡住路径分隔符和跨平台的非法字符 —— 不挡的话
+# `../../x` 能写到样式目录外面去。
+_BAD_NAME = set(chr(92) + '/:*?"<>|') | {chr(i) for i in range(32)}
+
+
+def add_style(filename: str, text: str) -> dict:
+    """收一份用户传的样式，落到用户目录并立刻装进 videocaptioner。
+
+    **先解析再落盘。** 解析不过就当场拒 —— 存下来的话页面上会列出一份
+    永远装不进去的样式，而「列出来了、选中了、字幕还是默认样子」正是
+    这一路上一直在消灭的那类失效。
+    """
+    raw = str(filename or "").strip()
+    # 带路径的**直接拒**，不要 basename 一下悄悄接受。
+    # basename 确实挡住了穿越（`../../x.txt` 只会落在用户目录里），但它把
+    # 一个和用户写的不一样的名字静默收下了 —— 而文件名就是样式名，
+    # 人会在下拉里找一个自己没起过的名字。
+    if set(raw) & {"/", chr(92)}:
+        raise ValueError(f"文件名里不能带路径：{raw!r}")
+    name = os.path.splitext(os.path.basename(raw))[0].strip()
+    ext = os.path.splitext(raw)[1].lower()
+    if not name:
+        raise ValueError("没给文件名 —— 文件名就是样式名，页面下拉里显示的就是它")
+    if set(name) & _BAD_NAME:
+        raise ValueError(f"样式名 {name!r} 里有不能做文件名的字符"
+                         f"（{chr(92)}/:*?{chr(34)}<>| 和控制字符）")
+    if ext not in _EXT:
+        raise ValueError(f"只认 .txt（ASS [V4+ Styles] 块）和 .json"
+                         f"（VideoCaptioner 自己导出的），收到 {ext or '（没有扩展名）'}")
+    if not str(text or "").strip():
+        raise ValueError("文件是空的")
+
+    import tempfile
+    from pathlib import Path
+    try:
+        from videocaptioner.core.subtitle.style_manager import SubtitleStyle
+    except Exception as exc:                                # noqa: BLE001
+        raise ValueError(f"这一版里没有 videocaptioner，装不了样式：{exc}") from exc
+    # 用真名建临时文件 —— txt 分支拿 stem 当样式名，用随机名解析出来的
+    # 名字是错的，而它只在最后写 json 时才看得出来。
+    tmp = os.path.join(tempfile.mkdtemp(prefix="stystyle-"), name + ext)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    try:
+        st = SubtitleStyle.from_file(Path(tmp))
+    except Exception as exc:                                # noqa: BLE001
+        raise ValueError(
+            f"这份样式解析不了：{exc}。"
+            f".txt 要是 ASS 的 `[V4+ Styles]` 块（至少有一行 `Style: ...`）；"
+            f".json 要是 VideoCaptioner 自己导出的那种。") from exc
+
+    d = user_dir()
+    os.makedirs(d, exist_ok=True)
+    dst = os.path.join(d, name + ext)
+    replaced = os.path.isfile(dst)
+    # 同名但换了扩展名的旧的那份要清掉，否则 sources() 里两份同名打架
+    other = os.path.join(d, name + (".json" if ext == ".txt" else ".txt"))
+    if os.path.isfile(other):
+        os.remove(other)
+        replaced = True
+    with open(dst, "w", encoding="utf-8") as f:
+        f.write(text)
+    r = install(force=[name])          # 明确要换这一份，必须覆盖
+    ok = name in r["installed"]
+    return {"name": name, "replaced": replaced, "installed": ok,
+            "font": getattr(st, "font_name", "") or "",
+            "font_size": getattr(st, "font_size", None),
+            "failed": r["failed"],
+            "msg": (f"「{name}」已{'替换' if replaced else '加入'}，"
+                    f"字幕样式下拉里现在能选它了。"
+                    if ok else
+                    f"「{name}」存下来了，但没能装进 VideoCaptioner："
+                    + "；".join(r["failed"] or ["原因不明"]))}
+
+
+def remove_style(name: str) -> dict:
+    """删掉一份**用户自己传的**样式（自带的和 VideoCaptioner 自带的不动）。"""
+    name = os.path.splitext(os.path.basename(str(name or "").strip()))[0].strip()
+    if not name or set(name) & _BAD_NAME:
+        raise ValueError(f"样式名不合法：{name!r}")
+    hits = [p for p in _styles_in(user_dir())
+            if os.path.splitext(os.path.basename(p))[0] == name]
+    if not hits:
+        raise ValueError(f"「{name}」不是你传上来的样式 —— "
+                         f"自带的四份和 VideoCaptioner 自己的不从这里删。")
+    for p in hits:
+        os.remove(p)
+    # videocaptioner 那边那份也要清，不然下拉里还在、选中了还能用，
+    # 而它在用户目录里已经没有了 —— 下次换机器就少了一份，说不清为什么。
+    gone = False
+    try:
+        from videocaptioner.config import SUBTITLE_STYLE_PATH as dst_dir
+        p = os.path.join(str(dst_dir), name + ".json")
+        if os.path.isfile(p):
+            os.remove(p)
+            gone = True
+    except Exception:                                       # noqa: BLE001
+        pass
+    return {"name": name, "removed": len(hits), "unregistered": gone,
+            "msg": f"「{name}」已删。"}
 
 
 def ensure_ffmpeg(log: Optional[Callable] = None) -> tuple:
