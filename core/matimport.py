@@ -311,11 +311,26 @@ def _from_json(no: int, r: dict) -> dict:
         missing.append("key")
     ep = str(r.get("episode") or "").upper()
     seg = str(r.get("seg") or "").upper()
-    if kind == "video" and not (ep and seg):
+    # **集号对图也要解出来，不只是视频。**
+    #
+    # 契约里只有 video 行要求写 episode / seg；故事板那种 image 行的集号
+    # 藏在 key 里（`..._SBSHEET_EP01_SEG01_A_R01`）。原来这段只在
+    # kind == "video" 时才解，于是所有图的 episode 都是空串 ——
+    # 而按集过滤的两个入口对空串的处理**是相反的**：
+    #   · 生产页 /api/generate 用 `t.get("episode","") == ep` → 空串永远
+    #     不等于 EP01 → 选了集就一条都不剩，点「开始」什么都不做
+    #   · 「只跑生产」的 _produce_todo 用 `not t.get("episode") or ...`
+    #     → 空串一律留下 → 选了 EP01 却把全部集的图都出了，钱按全剧花
+    # 一个漏做一个多做，两个都不报错。所以在源头解出来，别在两个下游各补一次。
+    #
+    # 资产（CHAR_001 这种）本来就不属于任何一集，key 里没有 EPnn，
+    # 解不出来就是空 —— 那是对的，资产全剧共享，不参与按集过滤。
+    if not (ep and seg):
         m = _EPSEG.search(str(r.get("key") or "") + " " + fn)
         if m:
-            ep, seg = m.group(1).upper(), m.group(2).upper()
-        else:
+            ep, seg = ep or m.group(1).upper(), seg or m.group(2).upper()
+        elif kind == "video":
+            # 视频缺集号是硬伤：分集和拼接顺序全靠它。图缺了只是不参与按集。
             missing.append("episode / seg（视频要它来分集和排序，拼接靠这个）")
     spine = [a for _n, a in _rows("storyboard_refs")]
     if kind == "video" and not spine:
@@ -600,6 +615,46 @@ def summary(units: list) -> dict:
         "refs_hist": {k: sum(1 for u in units if len(u["refs"]) == k)
                       for k in sorted({len(u["refs"]) for u in units})},
     }
+
+
+
+def episodes_stub(units: list) -> dict:
+    """材料导入模式下的**集清单**，形状和环节1 切集的产物一致。
+
+    为什么非有不可：材料里每一条都带集号，任务也带（`_produce_todo` 和
+    `/api/generate` 都按它过滤），**按集过滤的机器一直是通的**。缺的只是
+    「这个项目有哪几集」这份清单 —— 而那份清单只有环节1（切集）写，
+    材料导入把环节1 整个顶掉了，于是它一直是空的。
+
+    后果是静默降级，不是报错：
+      · 页头那个「集」下拉是空的 → 生产页发出去的 `episode` 是空串
+        → 不过滤 → 想只出 EP01，实际把全部集都出了（钱照花）
+      · 「只跑生产」走的是 `_eps.ids(pj)`，同样空 → produce 步的
+        `only` 是 None → 也是全部集
+      · 生产页那一行连「全部集」的标签都不显示（`multi` 要求 >1 集），
+        所以页面上看不出范围失效了
+
+    只填集号和条数 —— 正文（`script`）故意留空，材料导入模式下压根没有
+    剧本正文这回事。后面真跑环节1 的话 `episodes.build()` 会整份覆盖掉。
+    """
+    units = units_of(units)
+    eps = sorted({u["episode"] for u in units if u["episode"]})
+    rows = []
+    for ep in eps:
+        mine = [u for u in units if u["episode"] == ep]
+        rows.append({
+            "episode": ep, "title": "", "range": "",
+            "entry_state": "", "exit_state": "",
+            "duration_sec": 0, "key_events": [],
+            "start_line": 0, "chars": 0, "script": "",
+            # 页面上一眼看出这一集有多少活
+            "image_units": sum(1 for u in mine if u["kind"] == "image"),
+            "video_units": sum(1 for u in mine if u["kind"] == "video"),
+        })
+    return {"episodes": rows, "issues": [], "scope": "",
+            # 这份不是切出来的，是数出来的。**标出来** —— 不标的话，
+            # 后面谁拿它当「环节1 已经跑过」用，会得到一份没有正文的集清单。
+            "from_material": True}
 
 
 # ---------------------------------------------------------------- 导入

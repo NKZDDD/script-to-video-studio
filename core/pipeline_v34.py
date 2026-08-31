@@ -30,6 +30,7 @@ from .executor import LLM_GATE, Job, run_chain
 
 def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
          only_episodes: Optional[list] = None,
+         produce_episodes: Optional[list] = None,
          include_llm: bool = True) -> list:
     """算出要做哪些步骤（含已完成的，执行时再跳过）。
 
@@ -82,6 +83,17 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
                 # 逐段环节：一段失败不毒掉整集，下游按段自己判断哪些能做
                 **({"soft": True} if V.scope_of(sid) == "segment" else {})})
 
+    # 生产范围默认跟分析范围一致；给了 produce_episodes 就只出那几集。
+    # **这一项以前 v34 根本没接** —— 页面上「只出这几集的图/片」那个框，
+    # JS 一直在发，通用级（pipeline.py）收，电影级这边没有这个参数，
+    # 于是填了等于没填，全部集照出。又是一个「旋钮看着在、其实没接线」。
+    prod = [e for e in (produce_episodes or eps) if not eps or e in eps] or eps
+    if produce_episodes and eps and not [e for e in produce_episodes if e in eps]:
+        raise ValueError(
+            f"「只出这几集的图/片」填的 {'、'.join(sorted(set(produce_episodes)))} "
+            f"不在本次范围里 —— 本次是 {'、'.join(eps[:6])}"
+            f"{'…' if len(eps) > 6 else ''}。把那个框清空 = 跟分析范围一致。")
+
     if include_produce:
         for sid in V.PRODUCE_ORDER:
             s = V.by_id()[sid]
@@ -90,8 +102,8 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
                           "produce": _worker_kind(sid),
                           # relay 用这个，**不用 produce** —— 见 _batch_kind
                           "batch": _batch_kind(sid),
-                          "episode": "", "only": list(eps) if eps else None,
-                          "label": _label(sid) + _scope_tag(eps, pj)})
+                          "episode": "", "only": list(prod) if prod else None,
+                          "label": _label(sid) + _scope_tag(prod, pj)})
 
     if include_deliver:
         for ep in (eps if include_llm else []):
@@ -105,8 +117,8 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
             deliver.append("d3")
         for sid in deliver:
             steps.append({"kind": "deliver", "stage": sid, "episode": "",
-                          "only": list(eps) if eps else None,
-                          "label": _label(sid) + _scope_tag(eps, pj)})
+                          "only": list(prod) if prod else None,
+                          "label": _label(sid) + _scope_tag(prod, pj)})
     return steps
 
 
@@ -237,6 +249,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
         params: dict, jobs=None, concurrency: int = 3, max_retry: int = 2,
         include_produce: bool = True, include_deliver: bool = True,
         only_episodes: Optional[list] = None,
+        produce_episodes: Optional[list] = None,
         ep_concurrency: int = 4, seg_concurrency: int = 4,
         llm_concurrency: int = 0, include_llm: bool = True) -> None:
     # **必须配。** 这一行以前只有 pipeline.py（通用级）有，这边一直没接 ——
@@ -247,7 +260,7 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
     LLM_GATE.reset_peak()
     steps = plan(pj, include_produce=include_produce,
                  include_deliver=include_deliver, only_episodes=only_episodes,
-                 include_llm=include_llm)
+                 produce_episodes=produce_episodes, include_llm=include_llm)
     job.total = len(steps)
     for s in steps:
         job.set_item(s["label"], state="pending")
@@ -508,7 +521,8 @@ def run(job: Job, pj, *, llm_factory: Callable, provider_factory: Callable,
 
     # 环节1 跑完集才切出来 —— 重新算一次计划，把逐集步骤补上
     rest = plan(pj, include_produce=include_produce,
-                include_deliver=include_deliver, only_episodes=only_episodes)[len(head):]
+                include_deliver=include_deliver, only_episodes=only_episodes,
+                produce_episodes=produce_episodes)[len(head):]
     steps = head + rest
     job.total = len(steps)
     for s in rest:
@@ -648,6 +662,7 @@ def start(job: Job, pj, **kw) -> None:
 
 def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
             only_episodes: Optional[list] = None,
+            produce_episodes: Optional[list] = None,
             include_llm: bool = True) -> dict:
     """不跑，只说清「这一次会做什么、跳过什么」。点之前先看一眼，别花冤枉钱。
 
@@ -656,7 +671,7 @@ def preview(pj, *, include_produce: bool = True, include_deliver: bool = True,
     """
     steps = plan(pj, include_produce=include_produce,
                  include_deliver=include_deliver, only_episodes=only_episodes,
-                 include_llm=include_llm)
+                 produce_episodes=produce_episodes, include_llm=include_llm)
     todo, skip, calls = [], [], 0
     for s in steps:
         if s["kind"] == "freeze":

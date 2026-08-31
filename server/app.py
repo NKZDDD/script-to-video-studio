@@ -1313,6 +1313,12 @@ def api_post(path: str, body: dict) -> dict:
         for rel, txt in built["prompts"].items():
             write_prompt_txt(pj, rel, txt)
         pj.save_tasks(built["tasks"])
+        # **集清单也要落盘。** 材料导入顶掉了环节1，而「这个项目有哪几集」
+        # 只有环节1 写 —— 不写的话页头「集」下拉是空的，生产页发出去的
+        # episode 是空串，「只出 EP01」实际会把全部集都出了，钱照花而且
+        # 页面上看不出范围失效了（见 matimport.episodes_stub 的说明）。
+        from core import episodes as _episodes
+        pj.save_stage(_episodes.FILE[:-5], _mat.episodes_stub(units))
         real = _mat.units_of(units)      # 申报头不是一条活，别数进去
         pj.log_event({"stage": "material_import", "result": "ok",
                       "units": len(real),
@@ -1515,7 +1521,8 @@ def api_post(path: str, body: dict) -> dict:
                 pj, include_llm=body.get("include_llm", True),
                 include_produce=body.get("include_produce", True),
                 include_deliver=body.get("include_deliver", True),
-                only_episodes=body.get("only_episodes"))
+                only_episodes=body.get("only_episodes"),
+                produce_episodes=body.get("produce_episodes"))
         return pipeline.preview(pj,
                                include_llm=body.get("include_llm", True),
                                include_produce=body.get("include_produce", True),
@@ -1585,6 +1592,9 @@ def api_post(path: str, body: dict) -> dict:
                 include_produce=body.get("include_produce", True),
                 include_deliver=body.get("include_deliver", True),
                 only_episodes=body.get("only_episodes"),
+                # 「只出这几集的图/片」。页面一直在发，v34 一直没收 ——
+                # 填了等于没填，全部集照出（钱按全剧花）。
+                produce_episodes=body.get("produce_episodes"),
                 ep_concurrency=int(body.get("llm_episodes")
                                    or (cfg.get("defaults") or {}).get("llm_episodes", 4)),
                 seg_concurrency=int(body.get("llm_segments")
@@ -2165,7 +2175,16 @@ def api_post(path: str, body: dict) -> dict:
             if not items:
                 return {"ok": False, "msg": "没有记录在案的失败任务"}
         if not items:
-            return {"ok": False, "msg": "没有匹配的任务（先跑环节8生成 tasks.json）"}
+            # 空的原因不止一个，说错了会把人支到完全无关的地方去查。
+            # 按集筛空最常见 —— 材料导入模式下尤其：那一集本来就没有这一类活。
+            if ep_sel and kind != "asset":
+                whole = len(tasks.get(key_map[kind], []))
+                return {"ok": False,
+                        "msg": f"{ep_sel} 这一集没有「{kind}」的任务"
+                               f"（整个项目共 {whole} 条）。"
+                               f"换一集，或者把页头的集选成空 = 全部集。"}
+            return {"ok": False, "msg": "没有匹配的任务（先跑环节8生成 tasks.json，"
+                                        "材料导入模式下是先导入材料）"}
 
         # 尺寸/比例/时长的运行时覆盖。
         # tasks.json 里的值是环节8 装配时按「默认参数」烧进去的；换了服务商之后
