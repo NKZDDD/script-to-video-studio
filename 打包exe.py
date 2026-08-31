@@ -118,6 +118,18 @@ HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg", "psutil",
 # 写成了无条件依赖（它自己的 `gui` extra 是空摆设），而我们只用它的 CLI ——
 # 不排的话 PyInstaller 顺着 `caption gui` 那个分支把整个 Qt 拖进来，
 # 包大一倍多，而那个子命令在我们这儿压根用不上（我们是网页界面）。
+# --hidden-import 只带入口模块，不保证子模块、证书、Pillow 插件或 ffmpeg.exe。
+# 这些发布库必须用 --collect-all 做完整收集。
+#
+# 这个常量在合并 main 时**定义丢了、用法留着** —— 下面 435 行还在 for 它。
+# 表现是打包脚本自检全绿、依赖全 ✓，走到拼命令那一行才 NameError。
+COLLECT_ALL = ["requests", "certifi", "urllib3", "charset_normalizer",
+               "boto3", "botocore", "s3transfer", "PIL",
+               "pypdf", "imageio_ffmpeg",
+               # 字幕这条线：videocaptioner 自带模型配置和资源文件，
+               # 光 --collect-submodules 只收 .py，配置读不到就崩在运行时。
+               "videocaptioner"]
+
 EXCLUDE = ["PyQt5", "qfluentwidgets", "qframelesswindow", "PyQt5.QtWebEngine"]
 
 # 打完之后要**在 exe 里**确认这几个模块真的能 import。
