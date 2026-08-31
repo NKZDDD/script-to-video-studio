@@ -463,6 +463,64 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
                         "msg": f"{ep} 的段号不连续，缺 "
                                + "、".join(f"SEG{n:02d}" for n in lost)
                                + " —— 成片会短一截，而拼接那一步不会说话"})
+
+    # ---- 五、画幅。**都归提醒，不硬拦** —— 两条都跟目标服务商有关，
+    #      而挑哪家是导入之后的事，这里拦等于替人做决定。
+    from . import sizes as _sz
+    fallback = str((decl.get("params") or {}).get("image_size") or "")
+
+    # 5a 分辨率档位说不了形状。收档位的家（坤鸡）没问题，只收比例的家
+    #    换不过来 —— 出图那一步会停下来说清楚，但那是几百步之后的事，
+    #    现在就说一声，让它趁材料还在手上改。
+    tiers = sorted({str(u["ratio"]) for u in units
+                    if u["kind"] == "image" and u["ratio"]
+                    and (_sz.parse(u["ratio"]) or ("", 0, 0))[0] == "tier"})
+    if tiers or (fallback and (_sz.parse(fallback) or ("", 0, 0))[0] == "tier"):
+        out.append({"level": "warn", "code": "SIZE_IS_A_TIER",
+                    "msg": f"画幅写成了分辨率档位（{'、'.join(tiers or [fallback])}）"
+                           f"—— 档位说的是分辨率，**说不了形状**。"
+                           f"收档位的家（坤鸡）没问题；只收比例或像素的家换不过来，"
+                           f"出图那一步会停下。写成 `9:16` / `16:9` / `1024x1536` "
+                           f"这种形状最稳，各家都能换。"})
+
+    # 5b 故事板的形状和用它出片的那一段对不上。
+    #    视频那一步要么裁要么加黑边，**而那一步不会说话** —— 片子出得来，
+    #    构图被切掉一块，几百段里靠肉眼发现。
+    #    画幅现在是每张各写各的（就是为了这个），所以这种错配第一次成为可能。
+    def _shape(v: str) -> str:
+        """形状。**档位（1K/2K/4K）没有形状** —— 别拿它的代表像素当形状比。
+
+        不排掉的话 `4K`（代表像素 2048x2048）会被算成 1:1，于是一条写了
+        档位的故事板会顺带报一条**假的**形状错配 —— 而假警报比漏报更贵：
+        人会学会忽略这一条，然后真错配那次也被忽略。上面 5a 已经说过档位了。
+        """
+        p = _sz.parse(v or "")
+        if p and p[0] == "tier":
+            return ""
+        return _sz.as_ratio(v or "") or ""
+
+    shape = {}
+    for u in units:
+        if u["kind"] == "image":
+            shape[u["stem"]] = _shape(u["ratio"] or fallback)
+    bad = []
+    for u in units:
+        if u["kind"] != "video":
+            continue
+        vr = _shape(u["ratio"] or str((decl.get("params") or {}).get("ratio") or ""))
+        if not vr:
+            continue
+        for aid in (u.get("spine") or []):
+            sr = shape.get(aid)
+            if sr and sr != vr:
+                bad.append(f"{u['stem'] or u['episode']} 要 {vr}，"
+                           f"骨架 {aid} 是 {sr}")
+    if bad:
+        out.append({"level": "warn", "code": "SHAPE_MISMATCH",
+                    "msg": f"有 {len(bad)} 处故事板的形状和用它出片的那一段对不上（"
+                           + "；".join(bad[:4]) + ("…" if len(bad) > 4 else "")
+                           + "）。视频那一步要么裁要么加黑边，**而那一步不会说话** ——"
+                           "片子出得来、构图被切掉一块，几百段里只能靠肉眼发现。"})
     return out
 
 
