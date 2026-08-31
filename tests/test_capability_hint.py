@@ -36,11 +36,16 @@ class Seedance25Tests(unittest.TestCase):
 
     def test_the_declaration_matches_what_the_request_builder_enforces(self):
         """★ 声明和校验是两处代码，写歪了就会「页面上能选、发出去被拒」。"""
-        src = io.open(os.path.join(ROOT, "core", "providers", "paisio.py"),
-                      encoding="utf-8").read()
-        self.assertIn("if not 4 <= duration <= 29", src)
+        from core.providers.paisio import _standard_limits
         d = effective("paisio", "video", "seedance-2.5-720p")["durations"]
         self.assertEqual(set(d), set(range(4, 30)))
+        self.assertEqual(set(d), set(_standard_limits("seedance-2.5-720p")[0]))
+
+        # 带 paisio- 的真实新模型经接口确认只有 4-15 秒，不能和旧名混用。
+        prefixed = effective("paisio", "video", "paisio-seedance-2.5-720p")["durations"]
+        self.assertEqual(set(prefixed), set(range(4, 16)))
+        self.assertEqual(set(prefixed),
+                         set(_standard_limits("paisio-seedance-2.5-720p")[0]))
 
     def test_twentynine_is_not_offered_at_the_provider_level(self):
         """★ 故意的：29 写成整家通用值的话，切回旧模型时前端还允许选 29，

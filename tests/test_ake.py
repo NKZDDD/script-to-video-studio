@@ -2,7 +2,8 @@
 import unittest
 
 from core.providers import REGISTRY, resolve_id
-from core.providers.ake import MAX_REFS, SIZE_TABLE, AkeProvider, _size_of
+from core.providers.ake import AkeProvider, _duration, _limits
+from core.providers.base import VideoTask
 
 
 class AkeTests(unittest.TestCase):
@@ -11,26 +12,54 @@ class AkeTests(unittest.TestCase):
         for alias in ("snumom", "阿珂", "ako"):
             self.assertEqual(resolve_id(alias), "ake")
 
-    def test_video_only(self):
-        cap = AkeProvider().capabilities()
-        self.assertEqual(tuple(cap["supports"]), ("video",))
-        self.assertEqual(cap["video"]["ratios"], ["16:9", "9:16"])
-        self.assertEqual(cap["video"]["max_refs"], MAX_REFS)
+    def test_capabilities_match_unified_document(self):
+        cap = AkeProvider().capabilities()["video"]
+        self.assertIn("wan3.0-video", cap["models"])
+        self.assertIn("grok-imagine-video-1.5", cap["models"])
+        self.assertEqual(cap["max_refs"], 10)
+        self.assertEqual(cap["model_options"]["grok-imagine-video-1.5"]["max_refs"], 7)
+        self.assertEqual(AkeProvider.ref_mode, "url")
 
-    def test_size_merges_resolution_and_ratio(self):
-        """这家没有 aspect_ratio 字段，画面全靠 size —— 四种组合必须对上文档。"""
-        self.assertEqual(_size_of("720p", "16:9"), "1280x720")
-        self.assertEqual(_size_of("720p", "9:16"), "720x1280")
-        self.assertEqual(_size_of("480p", "16:9"), "854x480")
-        self.assertEqual(_size_of("480p", "9:16"), "480x854")
-        self.assertEqual(len(SIZE_TABLE), 4)
+    def test_model_limits(self):
+        self.assertEqual(_duration("wan3.0-video", 40), 30)
+        self.assertEqual(_duration("grok-imagine-video-1.5", 2), 4)
+        self.assertEqual(_duration("wan-3.0", 60), 60)
+        self.assertEqual(_limits("wan3.0-video"), (10, 5, 5))
+        self.assertEqual(_limits("wan3.0-image"), (10, 0, 5))
+        self.assertEqual(_limits("grok-imagine-video-1.5"), (7, 0, 0))
 
-    def test_size_falls_back_for_unsupported_inputs(self):
-        # 只有横竖两种：其它比例按长宽归边，不认识的分辨率退回 720p
-        self.assertEqual(_size_of("720p", "21:9"), "1280x720")
-        self.assertEqual(_size_of("720p", "3:4"), "720x1280")
-        self.assertEqual(_size_of("1080p", "9:16"), "720x1280")
-        self.assertEqual(_size_of("", ""), "720x1280")
+    def test_request_uses_object_reference_arrays(self):
+        p = AkeProvider(api_key="k")
+        captured = {}
+
+        def fake(method, path, **kwargs):
+            captured.update(kwargs["json_body"])
+            return {"id": "job-1", "metadata": {"url": "https://cdn.example/out.mp4"}}
+
+        p.session.request = fake
+        p.session.save_item = lambda *_: None
+        p.generate_video(VideoTask(
+            prompt="图1的人物参考视频1", refs=["https://cdn.example/char.jpg"],
+            duration=15, ratio="9:16", resolution="720P", model="wan3.0-video",
+            extra={"video_refs": ["https://cdn.example/motion.mp4"],
+                   "audio_refs": ["https://cdn.example/voice.mp3"],
+                   "video_durations": [5], "image_roles": ["reference_image"]}),
+            "out.mp4")
+        self.assertEqual(captured["seconds"], "15")
+        self.assertEqual(captured["size"], "720P")
+        self.assertEqual(captured["aspect_ratio"], "9:16")
+        self.assertEqual(captured["reference_images"], [{
+            "url": "https://cdn.example/char.jpg", "role": "reference_image"}])
+        self.assertEqual(captured["reference_videos"], [{
+            "url": "https://cdn.example/motion.mp4", "duration": 5}])
+        self.assertEqual(captured["reference_audios"], [{
+            "url": "https://cdn.example/voice.mp3"}])
+
+    def test_missing_public_reference_fails_instead_of_dropping(self):
+        p = AkeProvider(api_key="k")
+        with self.assertRaisesRegex(Exception, "只收公网 URL"):
+            p.generate_video(VideoTask(prompt="x", refs=["data:image/png;base64,abc"],
+                                       model="wan3.0-video"), "out.mp4")
 
 
 if __name__ == "__main__":

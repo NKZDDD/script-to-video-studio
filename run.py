@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import threading
@@ -25,6 +26,8 @@ def main() -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--package-selfcheck", action="store_true",
+                    help=argparse.SUPPRESS)
     ap.add_argument("--data", default="", metavar="目录",
                     help="数据目录（config.json 和默认 projects/ 放这儿）。"
                          "也可以用环境变量 STV_DATA_DIR。"
@@ -32,6 +35,16 @@ def main() -> int:
     args = ap.parse_args()
     if args.data:
         paths.set_data_dir(args.data)
+
+    if args.package_selfcheck:
+        from core.packagecheck import run_package_check   # noqa: PLC0415
+
+        report = run_package_check()
+        for item in report["checks"]:
+            mark = "OK" if item["ok"] else "FAIL"
+            print(f"  [{mark}] {item['name']}：{item['detail']}")
+        print("PACKAGE_SELFCHECK_JSON=" + json.dumps(report, ensure_ascii=False))
+        return 0 if report["ok"] else 2
 
     # 先把路径打出来再起服务：配置到底读的哪一份、产物写到哪儿，
     # 换机器时这两行比什么文档都管用

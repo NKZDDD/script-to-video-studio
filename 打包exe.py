@@ -8,8 +8,7 @@
 
 要点：
   · web/ 和 prompts/ 必须打进去 —— 它们是运行时读的资源，不是代码
-  · 可选依赖（boto3/Pillow/pypdf/imageio-ffmpeg）装了才打得进去。
-    缺哪个，exe 就缺对应能力（见下面的清单）
+  · 发布依赖会完整收集子模块、数据和二进制文件；缺任一项都会停止打包
   · 打包机器的位数决定 exe 的位数；64 位机上打的 exe 不能在 32 位机上跑
 """
 
@@ -30,16 +29,23 @@ for _stream in (sys.stdout, sys.stderr):
 HERE = os.path.dirname(os.path.abspath(__file__))
 NAME = "script-to-video-studio"        # exe 文件名，改成中文也行，但英文最省事
 
-# 可选依赖 → 缺了会少什么能力。打包时逐个检查并如实报告，
-# 别让人拿到一个「拼不了片」的 exe 还不知道为什么。
-OPTIONAL = {
+# 发布依赖 → 缺了会少什么能力。正式包不允许带缺项继续生成。
+REQUIRED = {
+    "requests": "所有服务商的 HTTP 请求",
+    "certifi": "HTTPS 根证书（否则换电脑后所有 HTTPS 接口会失败）",
+    "urllib3": "HTTP 连接池和重试",
     "boto3": "参考图上传到对象存储（只收公网链接的模型会用不了）",
+    "botocore": "对象存储请求签名和连接配置",
+    "s3transfer": "对象存储文件传输",
     "PIL": "参考图压缩（不压直接转 base64，请求体会很大）",
     "pypdf": "读 PDF 剧本（docx / txt 不受影响）",
-    "imageio_ffmpeg": "环节12 拼接成片（目标机装了系统 ffmpeg 也行）",
+    "imageio_ffmpeg": "环节12 拼接成片及内置 ffmpeg 程序",
 }
-# 这些包 PyInstaller 有时扫不出来（运行时才 import 的），显式点名
-HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg"]
+# --hidden-import 只带入口模块，不保证子模块、证书、Pillow 插件或 ffmpeg.exe。
+# 这些发布库必须用 --collect-all 做完整收集。
+COLLECT_ALL = ["requests", "certifi", "urllib3", "charset_normalizer",
+               "boto3", "botocore", "s3transfer", "PIL",
+               "pypdf", "imageio_ffmpeg"]
 
 
 def selfcheck(exe: str) -> bool:
@@ -57,7 +63,25 @@ def selfcheck(exe: str) -> bool:
     import time
     import urllib.request
 
-    print("\n自检：把 exe 跑起来，对比源码方式认得的东西 —— 打包漏了不会报错，只会缺")
+    print("\n自检：从 exe 内部实际调用发布库，并对比源码方式认得的资源")
+    check_env = os.environ.copy()
+    # 不允许本机环境变量把系统 ffmpeg 冒充成包内置的 ffmpeg。
+    check_env.pop("IMAGEIO_FFMPEG_EXE", None)
+    try:
+        dep = subprocess.run([exe, "--package-selfcheck"], capture_output=True,
+                             encoding="utf-8", errors="replace", timeout=120,
+                             env=check_env)
+    except subprocess.TimeoutExpired:
+        print("  ✗ 运行库自检 120 秒未完成")
+        return False
+    if dep.stdout:
+        print(dep.stdout.rstrip())
+    if dep.returncode:
+        if dep.stderr:
+            print(dep.stderr[-2000:])
+        print(f"  ✗ exe 内部运行库自检失败，退出码 {dep.returncode}")
+        return False
+
     sys.path.insert(0, HERE)
     from core import providers as P                       # noqa: PLC0415
     want_prov = sorted(p["id"] for p in P.status()["providers"])
@@ -174,17 +198,17 @@ def main() -> int:
           f"　→ 打出来的 exe 也是这个位数\n")
 
     have, miss = [], []
-    for mod, what in OPTIONAL.items():
+    for mod, what in REQUIRED.items():
         (have if importlib.util.find_spec(mod) else miss).append((mod, what))
-    print("可选依赖：")
+    print("发布依赖：")
     for mod, what in have:
         print(f"  ✓ {mod:<16}{what}")
     for mod, what in miss:
-        print(f"  ✗ {mod:<16}{what}　← exe 里会缺这个能力")
+        print(f"  ✗ {mod:<16}{what}　← 不能生成完整发布包")
     if miss:
         print(f"\n  想补齐：pip install {' '.join(m for m, _ in miss)}")
-        if input("  现在就这样打包？(y/N) ").strip().lower() != "y":
-            return 1
+        print("  已停止：不再允许生成缺少运行库的小包。")
+        return 1
     print()
 
     for d in ("build", "dist"):
@@ -199,13 +223,14 @@ def main() -> int:
         # 关掉控制台等于把出错原因藏起来。
         "--console",
         "--name", NAME,
+        # 生成的临时 spec 放 build/，不要覆盖仓库里可供人工打包的 spec。
+        "--specpath", os.path.join(HERE, "build"),
         # 运行时读的资源，必须打进去
         "--add-data", f"{os.path.join(HERE, 'web')}{sep}web",
         "--add-data", f"{os.path.join(HERE, 'prompts')}{sep}prompts",
     ]
-    for h in HIDDEN:
-        if importlib.util.find_spec(h):
-            cmd += ["--hidden-import", h]
+    for package in COLLECT_ALL:
+        cmd += ["--collect-all", package]
     # 服务商是运行时按目录扫出来 import 的，没有任何一处静态 import ——
     # PyInstaller 的静态分析看不见它们，不点名就一个都不打进去。
     # 后果不是报错，是 exe 里「一家服务商都没有」，页面下拉框空白。
@@ -236,6 +261,9 @@ def main() -> int:
 
     print(f"\n完成 → {exe}　({size:.0f} MB)")
     print(f"       dist/ 整个文件夹拷走就能用（手册也在里面）")
+    if not onedir:
+        print("       单文件会压缩内部资源；体积小于 ffmpeg 解压后的大小不代表遗漏，"
+              "以上面的 exe 内部自检为准")
     print()
     print("目标机器上怎么跑：")
     print(f"  双击 {NAME}.exe，或在命令行里：")
