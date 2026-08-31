@@ -33,7 +33,7 @@ class PaisioSeedance25Tests(unittest.TestCase):
                 "audio_refs": ["https://cdn.example/voice.wav"],
             },
         )
-        body = PaisioProvider._seedance25_body(task, task.model)
+        body = PaisioProvider._video_body(task, task.model)
         self.assertEqual(body, {
             "model": "paisio-seedance-2.5-720p",
             "prompt": "让人物保持一致并自然运动",
@@ -52,7 +52,7 @@ class PaisioSeedance25Tests(unittest.TestCase):
                          duration=31, ratio="2:1", model="paisio-seedance-2.5-720p",
                          extra={"videos": ["v"] * 11, "audios": ["a"] * 11})
         with self.assertRaises(ApiError) as raised:
-            PaisioProvider._seedance25_body(task, task.model)
+            PaisioProvider._video_body(task, task.model)
         self.assertEqual(raised.exception.kind, TASK_FATAL)
         message = str(raised.exception)
         self.assertIn("4-30秒", message)
@@ -70,13 +70,13 @@ class PaisioSeedance25Tests(unittest.TestCase):
                          ratio="9:16", model="seedance2.5-4-1-720p",
                          extra={"videos": ["https://cdn/m.mp4"]})
         with self.assertRaises(ApiError) as raised:
-            PaisioProvider._seedance25_body(task, task.model)
+            PaisioProvider._video_body(task, task.model)
         self.assertIn("不支持参考视频", str(raised.exception))
 
     def test_the_4_1_model_allows_up_to_ten_images(self):
         task = VideoTask(prompt="x", refs=[f"https://cdn/{i}.png" for i in range(10)],
                          duration=30, ratio="9:16", model="seedance2.5-4-1-720p")
-        body = PaisioProvider._seedance25_body(task, task.model)
+        body = PaisioProvider._video_body(task, task.model)
         self.assertEqual(len(body["extra_images"]) + 1, 10)
 
     def test_provider_marks_only_seedance25_as_url_only(self):
@@ -144,15 +144,28 @@ class PaisioSeedance25Tests(unittest.TestCase):
             if is_seedance25(m):
                 self.assertEqual(max(video["model_options"][m]["durations"]), 30, m)
 
-    def test_legacy_video_payload_is_unchanged(self):
-        task = VideoTask(prompt="legacy", refs=["data:image/png;base64,abc"],
-                         duration=15, ratio="9:16", model="sd2-720p")
-        body = PaisioProvider._legacy_video_body(task, task.model)
-        self.assertEqual(body["model"], "sd2-720p")
-        self.assertEqual(body["images"], task.refs)
-        self.assertEqual(body["metadata"]["ratio"], "9:16")
-        self.assertIn("@图1", body["prompt"])
+    def test_every_model_uses_the_documented_body(self):
+        """★ **所有视频模型同一套请求体。** 文档原话（提交视频生成任务）：
+        「视频生成请求体。所有视频模型使用相同的参数格式。」
 
+        原来按模型分两条路，旧模型那条自己造了一套：`images` 数组、
+        `metadata.ratio` / `modeType`（文档里没有 metadata），而且**往正文
+        末尾追加 `@图1..N`** —— 文档的引用语法是 `@Image1` / `@Img1`，
+        压根没有 `@图N` 这个写法。
 
-if __name__ == "__main__":
-    unittest.main()
+        后果就是用户报的「提示词失效 / 参考图失效」：材料正文已经用
+        `@Image1..N` 写好了身份映射，末尾又被追加一串 `@图1..5`，同一个
+        请求里两套编号；而参考图塞在一个服务商不认的字段里。片子出得来，
+        用的参考图和正文说的对不上，一处都不报错。
+        """
+        prompt = "@Image1 与 @Image2 对话"
+        refs = ["https://x/a.png", "https://x/b.png", "https://x/c.png"]
+        for model in ("sd2-720p", "paisio-seedance-2.5-720p"):
+            b = PaisioProvider._video_body(VideoTask(prompt=prompt, refs=refs, duration=10, ratio='9:16', model=model), model)
+            b.pop("_note", None)
+            self.assertEqual(b["prompt"], prompt, f"{model}: 正文被改写了")
+            self.assertEqual(b["image_url"], refs[0], model)
+            self.assertEqual(b["extra_images"], refs[1:], model)
+            self.assertIn("aspect_ratio", b, model)
+            self.assertNotIn("images", b, f"{model}: 文档里没有 images 这个字段")
+            self.assertNotIn("metadata", b, f"{model}: 文档里没有 metadata")

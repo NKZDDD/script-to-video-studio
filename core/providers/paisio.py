@@ -5,7 +5,9 @@
 就是 api.paisio.online，文档是 y5dprsil1i.apifox.cn。之前这里显示成「派系」，
 现在统一叫「鹤」。
 
-视频：POST /v1/videos。旧模型沿用 metadata+images 兼容格式；Seedance 2.5
+视频：POST /v1/videos。**所有视频模型同一套请求体**（文档：「视频生成请求体。
+所有视频模型使用相同的参数格式。」）——  prompt 原样 + image_url / extra_images，
+用 @Image1 / @Img1 在正文里引用。旧模型那套 metadata+images 是我们自己造的，已删。
 使用文档规定的 aspect_ratio/image_url/extra_* 标准格式。
 图片：OpenAI 兼容 /v1/images/generations（同步或异步都兼容）。
 
@@ -28,6 +30,10 @@ from .base import ImageTask, Provider, VideoTask
 # **鹤这次换了一整轮清单**：新增 `paisio-seedance-2.5-480p` / `-720p` 这套带
 # `paisio-` 前缀的 2.5 写法，而 `seedance2.5-00-720p` / `-480p`、`sd2.5-ultra-720p`
 # 已经下线 —— 模型名不能靠文档或旧材料猜，也不能指望上一次实拉的结果还成立。
+# 鹤文档写的提示词上限。**只提醒不硬校验** —— 见 _video_body 里的说明：
+# 这套流程的视频提示词普遍 7800-8400 字，硬拦等于这家不能用。
+PROMPT_SOFT_MAX = 2500
+
 SEEDANCE25_MODELS = (
     "seedance2.5-4-1-720p",                      # 广场按次分组：3.5/次，4-30s，图10/视频0/音频0
     "seedance2.5-26-720p", "seedance2.5-26-480p",
@@ -46,7 +52,7 @@ SEEDANCE25_DURATIONS = list(range(4, 31))        # 广场标 4-30s（不是 4-29
 # `paisio-seedance-2.5-*` 这套新写法，六处**一起**漏判，而其中三处是静默的：
 #   · 时长回落到整家的 15 秒上限 —— 用户想选 30 秒选不到（页面上看不出原因）
 #   · 参考图按 data URI 发，而 2.5 只收公网 URL —— 图被丢掉照样出片，脸不对，不报错
-#   · body 走旧的 metadata+images 形状
+#   · body 一律走文档那套：prompt + image_url + extra_images
 # 同一个毛病 08-19 已经犯过一次（那次是 _MULTISHOT 里的连字符）。名单继续
 # 写死就还会有第三次，所以判定收敛到这里一处。
 _SD25_MARKS = ("seedance2.5", "seedance-2.5", "seedance-2-5", "paisiodance-2.5", "sd2.5")
@@ -290,10 +296,22 @@ class PaisioProvider(Provider):
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
         model = task.model or "sd2-720p"
-        if is_seedance25(model):
-            body = self._seedance25_body(task, model)
-        else:
-            body = self._legacy_video_body(task, model)
+        # **所有视频模型用同一套请求体。** 文档原话（提交视频生成任务）：
+        # 「视频生成请求体。所有视频模型使用相同的参数格式。」
+        #
+        # 原来这里按模型分两条路，旧模型那条自己造了一套字段 ——
+        # `images` 数组（文档没有这个字段）、`metadata.ratio` / `modeType`
+        # （文档没有 metadata），而且**往正文末尾追加 `@图1..N`**。
+        # 文档里的引用语法是 `@Image1` / `@Img1`，压根没有 `@图N` 这个写法。
+        #
+        # 后果正是用户报的「提示词失效 / 参考图失效」：材料里的正文已经用
+        # `@Image1..N` 写好了身份映射，末尾又被追加一串 `@图1..5` ——
+        # 同一个请求里两套编号，而参考图塞在一个服务商不认的字段里。
+        # 图能出、片能出，用的参考图和正文说的对不上，一处都不报错。
+        body = self._video_body(task, model)
+        note = body.pop("_note", "")
+        if note:
+            log("⚠️ " + note)
         data = self.session.request("POST", "/v1/videos", json_body=body, retries=2, timeout=300)
         url = extract_video_url(data)
         task_id = extract_task_id(data)
@@ -308,27 +326,7 @@ class PaisioProvider(Provider):
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
 
     @staticmethod
-    def _legacy_video_body(task: VideoTask, model: str) -> dict:
-        refs = task.refs[:9]
-        prompt = task.prompt or ""
-        if refs and "@图" not in prompt:
-            prompt = prompt.strip() + " " + " ".join(f"@图{i + 1}" for i in range(len(refs)))
-        body = {
-            "model": model,
-            "prompt": prompt,
-            "duration": int(task.duration),
-            "metadata": {
-                "modeType": "image2video" if refs else "text2video",
-                "ratio": task.ratio or "9:16",
-                "enableSound": "on" if task.extra.get("enable_sound", True) else "off",
-            },
-        }
-        if refs:
-            body["images"] = refs
-        return body
-
-    @staticmethod
-    def _seedance25_body(task: VideoTask, model: str) -> dict:
+    def _video_body(task: VideoTask, model: str) -> dict:
         refs = list(task.refs or [])
         videos = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
         audios = list(task.extra.get("audio_refs") or task.extra.get("audios") or [])
@@ -336,6 +334,27 @@ class PaisioProvider(Provider):
         ratio = task.ratio or "9:16"
 
         problems = []
+        prompt = task.prompt or ""
+        # 空提示词一定不出片 —— 与其花一次调用换一句 400，不如现在停。
+        if not prompt.strip():
+            problems.append("提示词是空的")
+        # **文档写的 2500 字上限只提醒、不拦。**
+        #
+        # origin/main（2026-08-31）按文档把它写成了硬校验。合并时没照搬 ——
+        # 拿真材料量过：这套流程的视频提示词 7800-8400 字，**98 段全部超过**；
+        # 图片提示词 331 条里 289 条超。照那条硬拦，鹤这家一条都发不出去。
+        # 而这个数字来自文档、没有实测背书（这个项目里「文档和实拉对不上」
+        # 已经出过好几次：模型清单一次就下线了 15 个）。
+        #
+        # 这里是 @staticmethod，**没有 log** —— 直接调会 NameError，而它只在
+        # 真跑到这一行时才炸。所以把话挂在 body 上，让调用方打。
+        note = ""
+        if len(prompt) > PROMPT_SOFT_MAX:
+            note = (f"提示词 {len(prompt)} 字，鹤的文档写的上限是 "
+                    f"{PROMPT_SOFT_MAX} 字 —— **没有实测确认，所以没拦**。"
+                    f"这一条要是回 400 说提示词过长，那就是它；去 "
+                    f"core/providers/paisio.py 把 PROMPT_SOFT_MAX 那段改成 "
+                    f"problems.append 就是硬校验。")
         allowed = DURATION_RULES.get(model)
         if allowed and duration not in allowed:
             problems.append(f"{model}的时长只能是{min(allowed)}-{max(allowed)}秒，收到{duration}秒"
@@ -365,7 +384,7 @@ class PaisioProvider(Provider):
 
         body = {
             "model": model,
-            "prompt": task.prompt or "",
+            "prompt": prompt,   # 上面校验过的那一份，原样发，不追加任何 @ 引用
             "duration": duration,
             "aspect_ratio": ratio,
         }
@@ -383,4 +402,6 @@ class PaisioProvider(Provider):
             body["extra_videos"] = videos
         if audios:
             body["extra_audios"] = audios
+        if note:
+            body["_note"] = note   # 调用方打完就 pop，不发给服务商
         return body
