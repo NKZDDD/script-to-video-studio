@@ -113,17 +113,59 @@ class HvtaldTests(unittest.TestCase):
 
     # -- 取片：只认以 actionId 开头的 mp4 --------------------------------
     def test_wait_picks_matching_mp4_only(self):
+        """★ 成片在 `outs/<日期>/` 里，不在 `outs/` 一层。
+
+        实拉的布局（2026-08-31，用户的空间）：
+            outs/20260821/kionrlxozknnblmxjroyjldrzvvmobao_MMTVTCALD000004-….mp4
+            outs/20260828/…  outs/20260830/…  outs/20260831/…
+        `PROPFIND outs Depth:1` 拿回来的是**四个目录名**，一个文件都没有。
+        原来的匹配条件是「以 actionId 开头且 .mp4 结尾」——一条都对不上，
+        于是每条视频白等满 1200 秒，然后报「那个目录在，只是里面没有这一条」：
+        听起来像服务商没出片，而片子早就躺在里面了。日志里那句
+        「outs/ 现有 N 个文件」也永远是 0。
+
+        所以这个桩按**真实布局**摆：outs 一层只有日期目录。
+        """
         aid = "jdbamfupzohjmbsnxsombhip"
         p = HvtaldProvider(api_key=FULL)
         # `_wait` 先找成片目录（`_find_outs`），再按**绝对地址**列 ——
         # 桩要跟着真签名走，不跟就是「测试挡住了调用形状的改动」。
         p._find_outs = lambda log=None: "http://dav/outs"
-        p._list_url = lambda url, missing_ok=True, sub="": [
-            ("other.mp4", "u1"),
-            (f"{aid}.txt", "u2"),               # 同名 txt 不能当成成片
-            (f"{aid}_ab-4785.mp4", "u3"),
-        ]
+        tree = {
+            "http://dav/outs": [("20260830", "http://dav/outs/20260830", True),
+                                ("20260831", "http://dav/outs/20260831", True)],
+            "http://dav/outs/20260830": [("other.mp4", "u1", False)],
+            "http://dav/outs/20260831": [
+                (f"{aid}.txt", "u2", False),        # 同名 txt 不能当成成片
+                (f"{aid}_ab-4785.mp4", "u3", False),
+            ],
+        }
+
+        def listing(url, missing_ok=True, sub="", depth="1", kinds=False):
+            if depth == "infinity":
+                raise ApiError("这台服务端禁了 infinity")   # 逼它走逐层那条
+            rows = tree.get(url, [])
+            return rows if kinds else [(n, u) for n, u, _d in rows]
+
+        p._list_url = listing
         self.assertEqual(p._wait(aid, 1, 5, log=lambda *a: None), "u3")
+
+    def test_wait_uses_one_infinity_request_when_the_server_allows_it(self):
+        """认 infinity 的服务端（用户这台就认）一次拿全，不用逐个子目录再问。"""
+        aid = "abcdef"
+        p = HvtaldProvider(api_key=FULL)
+        p._find_outs = lambda log=None: "http://dav/outs"
+        calls = []
+
+        def listing(url, missing_ok=True, sub="", depth="1", kinds=False):
+            calls.append(depth)
+            rows = [("20260831", "http://dav/outs/20260831", True),
+                    (f"{aid}_x-1.mp4", "u9", False)]
+            return rows if kinds else [(n, u) for n, u, _d in rows]
+
+        p._list_url = listing
+        self.assertEqual(p._wait(aid, 1, 5, log=lambda *a: None), "u9")
+        self.assertEqual(calls, ["infinity"], "infinity 够用就别再逐层问一遍")
 
     def test_wait_timeout_does_not_resubmit(self):
         """★ 超时**不重投**（2026-08-26 改的判断，原来是 retryable）。
@@ -138,7 +180,8 @@ class HvtaldTests(unittest.TestCase):
         """
         p = HvtaldProvider(api_key=FULL)
         p._find_outs = lambda log=None: "http://dav/outs"
-        p._list_url = lambda url, missing_ok=True, sub="": []
+        p._list_url = (lambda url, missing_ok=True, sub="", depth="1",
+                       kinds=False: [])
         with self.assertRaises(ApiError) as raised:
             p._wait("zzz", 1, 1, log=lambda *a: None)
         exc = raised.exception

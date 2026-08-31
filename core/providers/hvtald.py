@@ -56,8 +56,13 @@ _ALIAS = {
     "deviceid": "device_id", "device_id": "device_id",
     "token": "token",
     "webdavurl": "webdav_url", "webdav_url": "webdav_url", "webdav": "webdav_url",
+    # 别名要宽。认不出来的后果是**静默变成空密码** —— 然后 WebDAV 401，
+    # 而人明明填了。`dav_user` / `dav_pass` 这几个是很自然会写的写法。
     "user": "user", "username": "user", "webdav_user": "user",
+    "dav_user": "user", "davuser": "user", "webdavuser": "user",
     "password": "password", "pass": "password", "webdav_password": "password",
+    "dav_pass": "password", "dav_password": "password", "davpass": "password",
+    "webdav_pass": "password", "passwd": "password",
 }
 
 
@@ -268,15 +273,22 @@ class HvtaldProvider(Provider):
         """PROPFIND 列目录 → [(文件名, 完整URL)]。相对 webdav 地址的那一版。"""
         return self._list_url(self._dav(sub), missing_ok, sub)
 
-    def _list_url(self, url: str, missing_ok: bool = True, sub: str = "") -> list:
+    def _list_url(self, url: str, missing_ok: bool = True, sub: str = "",
+                  depth: str = "1", kinds: bool = False) -> list:
         """按**绝对地址**列目录。WebDAV 就是 HTTP 扩展方法，不用额外依赖。
 
         `missing_ok=False` 时，目录不存在会抛错而不是返回空列表 ——
         **「目录不存在」和「目录是空的」不是一回事**，见 `_wait`。
+
+        `depth="infinity"` 会连子目录里的东西一起列出来。取片要用它 ——
+        这一家的成片在 `outs/<日期>/` 里，只列一层拿回来的全是目录名。
+        `kinds=True` 时返回 `[(名字, 地址, 是不是目录)]` —— 取片要按**这一条**
+        判，不能查 `self._is_dir`（那是按名字存的，多层列举时会串）。
         """
         try:
             r = requests.request("PROPFIND", url, auth=self._auth(),
-                                 headers={"Depth": "1", "Content-Type": "application/xml"},
+                                 headers={"Depth": depth,
+                                          "Content-Type": "application/xml"},
                                  timeout=60)
         except requests.RequestException as exc:
             raise ApiError(f"连不上 WebDAV（{url}）：{exc}")
@@ -329,9 +341,46 @@ class HvtaldProvider(Provider):
             is_col = (rt is not None
                       and rt.find("{DAV:}collection") is not None)
             # 结尾斜杠仍然认 —— 有的服务端不给 resourcetype
-            self._is_dir[name] = is_col or raw.endswith("/")
-            out.append((name, full))
+            is_dir = is_col or raw.endswith("/")
+            self._is_dir[name] = is_dir
+            out.append((name, full, is_dir) if kinds else (name, full))
         return out
+
+    def _outs_files(self, outs: str) -> tuple:
+        """`outs/` 里所有**文件**（含日期子目录里的）→ `([(名字, 地址)], 说明)`。
+
+        这一家的实际布局（实拉，2026-08-31）：
+            outs/20260821/kionrlxozknnblmxjroyjldrzvvmobao_MMTVTCALD000004-….mp4
+            outs/20260828/…  outs/20260830/…  outs/20260831/…
+
+        也就是**按日期分子目录**。原来这里只 `Depth: 1` 列 `outs/`，
+        拿回来的四条全是目录名（`20260821` 这种），而匹配条件是
+        「以 actionId 开头且 .mp4 结尾」—— 一条都对不上。
+        后果不是报错：每一条视频白等满 1200 秒，然后报「那个目录在，
+        只是里面没有这一条」，听起来像服务商没出片，而片子早就躺在里面了。
+        日志里那句「outs/ 现有 N 个文件」也永远是 0。
+
+        先试 `Depth: infinity`（这台服务器认，一次拿全）；服务端不认的
+        （有些 WebDAV 默认禁 infinity）退回「列一层 + 逐个子目录再列一层」。
+        **不做无限递归** —— 位置是固定的，只是多了一层日期桶。
+        """
+        try:
+            rows = self._list_url(outs, depth="infinity", kinds=True)
+            files = [(n, u) for n, u, d in rows if not d]
+            if files or not [1 for _n, _u, d in rows if d]:
+                return files, "Depth:infinity"
+        except ApiError:
+            pass            # 不认 infinity，走下面那条
+        rows = self._list_url(outs, kinds=True)
+        files = [(n, u) for n, u, d in rows if not d]
+        subs = [(n, u) for n, u, d in rows if d]
+        for _n, u in subs:
+            try:
+                files += [(n2, u2) for n2, u2, d2
+                          in self._list_url(u, kinds=True) if not d2]
+            except ApiError:
+                continue    # 某个日期目录读不了，不该毒掉整次取片
+        return files, f"逐层：outs + {len(subs)} 个子目录"
 
     # ------------------------------------------------------------ 找 outs
     # 往上最多剪几层。**一路剪到空间根**（路径有几段就剪几层，再封一个上界）——
@@ -588,9 +637,11 @@ class HvtaldProvider(Provider):
                 raise ApiError("用户已取消")
             # 目录已经确认存在了，所以这里用宽松模式：
             # 临时挪走或网络抖一下不该判死这一条。
-            files = self._list_url(outs)
+            # **要连日期子目录一起看。** 成片在 `outs/<日期>/` 里，
+            # 只列 outs 一层拿回来的全是目录名，一条都匹配不上（见 _outs_files）。
+            files, how = self._outs_files(outs)
             if len(files) != seen:
-                log(f"HVTALD outs/ 现有 {len(files)} 个文件，等 {aid} …")
+                log(f"HVTALD outs/ 现有 {len(files)} 个成片文件（{how}），等 {aid} …")
                 seen = len(files)
             for name, full in files:
                 if name.startswith(aid) and name.lower().endswith((".mp4", ".mov")):
@@ -604,9 +655,11 @@ class HvtaldProvider(Provider):
         # 成片如果晚到，没人认领（WebDAV 只存 48 小时）。
         # 提示词被审核拒绝那条路不受影响：那条走 soften 改写后重发，
         # 发出去的东西真的变了，才值得再花一次。
+        files, how = self._outs_files(outs)
         raise ApiError(
             f"等了 {timeout} 秒没在 `{outs}/` 看到 {aid} 开头的成片"
-            f"（那个目录在，只是里面没有这一条）。\n"
+            f"（那个目录在，连日期子目录一起扫的，{how}，"
+            f"现有 {len(files)} 个成片文件）。\n"
             f"**这条不再重投** —— 提示词没有变，同参再发一次只会撞"
             f"同一个墙，而每次都算一次钱。任务没丢，"
             f"actionId={aid} 记下来可以稍后取；"
