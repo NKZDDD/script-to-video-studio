@@ -451,29 +451,98 @@ def extract_image_items(data: Any) -> list:
 
 # ---------------------------------------------------------------- 参考图
 
-def file_to_data_uri(path: str, max_side: int = 1024, quality: int = 80) -> str:
-    """本地图片 → base64 data URI（装了 Pillow 会先压缩）。"""
+# **默认不动原图。** 用户原话（2026-08-31）：「我就不需要你做这个压缩，
+# PNG 改 JPG 除非是服务商要求，否则都不要对原图进行修改才对」。
+#
+# 原来是无条件缩到最长边 1024 再转 JPEG q80 —— 而那个 1024 全项目没有一处
+# 设置过，是 produce 里的硬编码兜底。代价实测过：1024x1536 的故事板发出去
+# 是 682x1024，只剩 44% 的像素；2048x2048 的资产只剩 25%。参考图是喂给模型
+# 的身份和构图来源，缩掉一半而没人选过这件事。
+#
+# 现在只有**这一家自己声明要**的时候才动（`ref_max_side` / `ref_format`），
+# 而且动了必须在日志里说出来。声明缺失 = 不动，不是「猜一个安全值」。
+REF_KEEP = 0                    # max_side 传这个 = 不缩
+
+
+def _alpha(path: str) -> bool:
+    """这张图有没有透明通道 —— 只读文件头，不解码。"""
     try:
         from PIL import Image
+        with Image.open(path) as im:
+            return im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+    except Exception:                                       # noqa: BLE001
+        return False
 
-        img = Image.open(path)
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        w, h = img.size
-        if max_side > 0 and max(w, h) > max_side:
-            scale = max_side / float(max(w, h))
-            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        raw, mime = buf.getvalue(), "image/jpeg"
-    except ImportError:
+
+def encode_ref(path: str, max_side: int = REF_KEEP, quality: int = 80,
+               fmt: str = "") -> tuple:
+    """本地图片 → `(字节, mime, 扩展名, 说明)`。
+
+    `max_side <= 0` 且 `fmt` 为空 = **原样读、原样发**，一个字节都不改。
+    这是默认。只有这一家声明了上限或指定了格式，才会重新编码。
+
+    **说明不是可选的。** 改过就要在日志里看得见 —— 出来的脸不像时，
+    第一件要排除的就是「是不是我们把参考图改小了」，而那件事以前只有
+    读代码才知道。
+    """
+    ext = (os.path.splitext(path)[1] or ".png").lower()
+    fmt = (fmt or "").strip().upper()
+    if fmt in ("JPG", "JPEG"):
+        fmt = "JPEG"
+
+    if max_side <= 0 and not fmt:
         with open(path, "rb") as f:
             raw = f.read()
         mime = mimetypes.guess_type(path)[0] or "image/png"
+        note = "原样（未改）"
+        if _alpha(path):
+            # 以前一律 convert("RGB") 会把透明压平成黑或白。现在不动它 ——
+            # 但各家对 alpha 的处理不一样，出图不对时要能想到这一条。
+            note += "；带透明通道，各家处理不一样"
+        return raw, mime, ext, note
+
+    try:
+        from PIL import Image
+    except ImportError:
+        # 这一家声明了要改，而我们改不了。**不能装作改过了** ——
+        # 原样发过去撞上限时报的是别的错，方向完全跑偏。
+        with open(path, "rb") as f:
+            raw = f.read()
+        return (raw, mimetypes.guess_type(path)[0] or "image/png", ext,
+                f"这一家要求改（上限 {max_side or '—'} / 格式 {fmt or '—'}），"
+                f"但没装 Pillow，只能原样发")
+
+    img = Image.open(path)
+    w, h = img.size
+    bits = []
+    if max_side > 0 and max(w, h) > max_side:
+        scale = max_side / float(max(w, h))
+        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+        img = img.resize((nw, nh), Image.LANCZOS)
+        bits.append(f"{w}x{h}→{nw}x{nh}（这一家最长边限 {max_side}，"
+                    f"剩 {nw * nh / float(w * h) * 100:.0f}% 像素）")
+    out_fmt = fmt or ((img.format or "PNG").upper())
+    if out_fmt == "JPEG" and img.mode != "RGB":
+        img = img.convert("RGB")                # JPEG 没有 alpha
+    if fmt and fmt != (Image.open(path).format or "").upper():
+        bits.append(f"转成 {fmt}（这一家要求的）")
+    buf = io.BytesIO()
+    img.save(buf, format=out_fmt,
+             **({"quality": quality} if out_fmt == "JPEG" else {}))
+    ext2 = ".jpg" if out_fmt == "JPEG" else ("." + out_fmt.lower())
+    mime2 = "image/jpeg" if out_fmt == "JPEG" else f"image/{out_fmt.lower()}"
+    return buf.getvalue(), mime2, ext2, ("；".join(bits) or f"{w}x{h} 原尺寸")
+
+
+def file_to_data_uri(path: str, max_side: int = REF_KEEP, quality: int = 80,
+                     fmt: str = "") -> str:
+    """本地图片 → base64 data URI。默认不改原图，见 `encode_ref`。"""
+    raw, mime, _ext, _note = encode_ref(path, max_side, quality, fmt)
     return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
 
 
-def resolve_ref(ref: str, project_root: str, max_side: int = 1024) -> str:
+def resolve_ref(ref: str, project_root: str, max_side: int = REF_KEEP,
+                fmt: str = "") -> str:
     """参考图引用 → 可入 images[] 的值。http/data 原样；本地路径转 data URI。"""
     ref = (ref or "").strip()
     if not ref:
@@ -483,7 +552,7 @@ def resolve_ref(ref: str, project_root: str, max_side: int = 1024) -> str:
     path = ref if os.path.isabs(ref) else os.path.join(project_root, ref)
     if not os.path.isfile(path):
         raise ApiError(f"参考图文件不存在: {path}")
-    return file_to_data_uri(path, max_side=max_side)
+    return file_to_data_uri(path, max_side=max_side, fmt=fmt)
 
 
 # ---------------------------------------------------------------- HTTP

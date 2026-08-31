@@ -22,7 +22,7 @@ import os
 import threading
 from typing import Callable, Optional
 
-from .apiutil import ApiError, TASK_FATAL, file_to_data_uri
+from .apiutil import ApiError, TASK_FATAL, encode_ref
 from .store import LOCK, read_json, write_json
 
 CACHE_NAME = "upload_cache.json"
@@ -47,10 +47,15 @@ def configured(cfg: Optional[dict]) -> bool:
 
 
 # ---------------------------------------------------------------- 缓存
-def _sha(path: str, max_side: int) -> str:
-    """按文件内容 + 压缩参数算 key。同一张图换了压缩尺寸要重新上传。"""
+def _sha(path: str, max_side: int, fmt: str = "") -> str:
+    """按文件内容 + 处理参数算 key。参数变了就要重新上传。
+
+    `fmt` 必须进 key。不进的话，改成「默认原样发」之后，同一张图会命中
+    上一次那条 JPEG 的缓存 URL —— 于是设置改了、日志说「原样」、
+    服务商拿到的还是那张压过的旧图。一处都不报错。
+    """
     h = hashlib.sha256()
-    h.update(f"{max_side}|".encode())
+    h.update(f"{max_side}|{fmt}|".encode())
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
@@ -140,9 +145,13 @@ def put(cfg: dict, data: bytes, key: str) -> str:
     return public_url(cfg, key)
 
 
-def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 1536,
-           log: Callable = print) -> str:
-    """本地图片 → 公网 URL。命中缓存就不重复上传。"""
+def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 0,
+           fmt: str = "", log: Callable = print) -> str:
+    """本地图片 → 公网 URL。命中缓存就不重复上传。
+
+    `max_side=0` 且 `fmt` 为空（默认）= **原样上传，一个字节都不改**。
+    只有这一家自己声明了要求才会重编码，见 `produce._ref_rules`。
+    """
     if not os.path.isfile(path):
         raise ApiError(f"参考图文件不存在: {path}")
     if not configured(cfg):
@@ -152,19 +161,28 @@ def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 1536
             "密钥和公开访问域名；或者把这一类任务换成能直接收本地图的服务商。",
             kind=TASK_FATAL)
 
-    h = _sha(path, max_side)
+    h = _sha(path, max_side, fmt)
     hit = _cache_get(project_root, h)
     if hit:
         return hit
 
-    # 统一压成 JPEG：省流量，也避开各家对 png 透明通道的处理差异
-    data = base64.b64decode(file_to_data_uri(path, max_side=max_side).split(",", 1)[1])
+    # **默认原样传。** 原来这里无条件压成 JPEG，理由写的是「省流量、
+    # 避开各家对 png 透明通道的处理差异」—— 但那是拿画质换的，而且
+    # 没人选过：参考图是喂给模型的身份和构图来源。
+    data, _mime, ext, how = encode_ref(path, max_side=max_side, fmt=fmt)
     prefix = (cfg.get("prefix") or "respect").strip().strip("/")
-    name = f"{os.path.splitext(os.path.basename(path))[0]}_{h[:12]}.jpg"
+    # 扩展名跟着**实际发出去的那份**走，不再写死 .jpg。
+    # 写死的话对象是 PNG 内容却叫 .jpg —— 多数服务商按 Content-Type 走
+    # 不受影响，但按扩展名判断的那几家会读不了，而那时报的是「图片无效」。
+    name = f"{os.path.splitext(os.path.basename(path))[0]}_{h[:12]}{ext}"
     key = f"{prefix}/{name}" if prefix else name
 
+    # put() 按 key 的扩展名猜 ContentType —— 上面扩展名跟着实际内容走了，
+    # 所以这里不用另传一份，两处不会再对不上。
     url = put(cfg, data, key)
-    log(f"已上传 {os.path.basename(path)}（{len(data)//1024}KB）→ {url}")
+    # **改没改要说出来。** 原来只写「已上传（57KB）」，而那时它其实被缩到了
+    # 682x1024。出来的脸不像时，日志里得有这一行，否则谁都不会想到问题在这儿。
+    log(f"已上传 {os.path.basename(path)}　{how}　{len(data)//1024}KB → {url}")
     _cache_put(project_root, h, url)
     return url
 

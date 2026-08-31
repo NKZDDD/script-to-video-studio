@@ -275,6 +275,29 @@ CATALOG = {
         "resume": "换好之后回「生产」页点「开始」",
         "resumable": True, "scope": "batch", "level": "error",
     },
+    # 参考图现在**默认原样发**（不缩、不转 JPEG）—— 那是用户定的规矩：
+    # 「PNG 改 JPG 除非是服务商要求，否则都不要对原图进行修改」。
+    # 代价是内联 base64 那条路的请求体会变大（本项目里只有小裴的出图接口
+    # 是纯内联，别家都能走公网链接）。撑不住的时候必须**指到能改的那一格**，
+    # 否则这条错长得像网络问题，人会去调并发。
+    "BODY_TOO_LARGE": {
+        "title": "请求体太大，这家收不下",
+        "why": "参考图是**原样**发过去的（没缩、没转 JPEG）—— 那是刻意的："
+               "参考图是喂给模型的身份和构图来源，压过就不是原图了。"
+               "但内联 base64 的接口有请求体上限，整张 PNG 顶上去就会被拒。"
+               "只有少数家是纯内联（本项目里是小裴出图），"
+               "配了对象存储的话别家都走公网链接，不吃这个限制。",
+        "where": "服务商配置里这一家的 `ref_max_side` / `ref_format`",
+        "fix": ["先确认「设置 → 参考图上传」配好了对象存储 —— "
+                "配好之后能走链接的家都不再内联，这条错就不会出现",
+                "确实只能内联的那一家：给它填 `ref_max_side`"
+                "（比如 1536，故事板就不缩；1024 更省但只剩 44% 像素）",
+                "这个值**只影响填了的那一家**，别的家照旧原样发",
+                "要它转格式才收的话再填 `ref_format`（jpeg）—— "
+                "两个都不填就是一个字节都不改"],
+        "resume": "改完点「开始」，只会补没做完的那些",
+        "resumable": True, "scope": "task", "level": "error",
+    },
     "RATE_LIMITED": {
         "title": "发得太快，被服务商拦了",
         "why": "短时间里发的请求太多，超过了这家允许的速度。"
@@ -827,6 +850,13 @@ _PATTERNS = [
     ("ACCOUNT_BANNED", r"banned|封禁|禁用|账户异常|无可用渠道|no available channel|suspend"),
     ("MODEL_NOT_FOUND", r"model.*not (found|exist)|不存在的?模型|unsupported model|无此模型"),
     ("RATE_LIMITED", r"429|rate limit|too many request|限流|请求过于频繁"),
+    # 请求体过大。**要排在 PROMPT_INVALID 前面** —— 好几家把它回成 400
+    # 并带一句 "invalid request"，而那条规则会把它认成「提示词有问题」，
+    # 于是人去改提示词，改到第三遍才会怀疑别的。
+    ("BODY_TOO_LARGE", r"\b413\b|payload too large|request entity too large"
+                       r"|body (size )?(too large|exceeded)|too large to process"
+                       r"|请求体?(过大|太大)|文件过大|图片过大|超过最大(体积|大小)"
+                       r"|maximum (allowed )?size|exceeds? maximum size"),
     # 规则本体在 apiutil.CONTENT_REJECT_RE —— **一份，两处用**。
     # 那边定「要不要重试」，这边定「跟人怎么说」，各写一张表迟早对不上，
     # 而对不上的表现是「有时候会自动改写、有时候不会」，比不做还难查。

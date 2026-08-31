@@ -182,8 +182,46 @@ def asset_layers(tasks: list) -> list:
     return layers
 
 
+def _ref_rules(provider_cfg: dict, media: str) -> tuple:
+    """这一家对参考图有什么要求 → `(最长边, 要什么格式)`。
+
+    **没声明就是没要求：不缩、不转、原样发。** 用户原话（2026-08-31）：
+    「PNG 改 JPG 除非是服务商要求，否则都不要对原图进行修改才对」。
+
+    原来这里是 `provider_cfg.get("ref_max_side", 1024)` —— 而 `ref_max_side`
+    全项目没有任何一处设置过，所以那个 1024 是**唯一**生效的值：每一张
+    参考图都被缩到最长边 1024 再转 JPEG q80。1024x1536 的故事板发出去是
+    682x1024，只剩 44% 的像素；2048x2048 的资产只剩 25%。而参考图是喂给
+    模型的身份和构图来源，谁都没选过这件事。
+
+    要求写在服务商自己的 capabilities 里（`ref_max_side` / `ref_format`），
+    这样「这一家的限制」和「代码里的默认值」不会再混成一件事。
+    项目配置里显式填了就盖过声明 —— 那是人明确要的。
+    """
+    side, fmt = 0, ""
+    try:
+        from . import providers as _P
+        cls = _P.REGISTRY.get(_P.resolve_id(provider_cfg.get("provider") or ""))
+        cap = (cls().capabilities() if cls else {}) or {}
+        for blk in ((cap.get(media) or {}), cap):
+            side = side or int(blk.get("ref_max_side") or 0)
+            fmt = fmt or str(blk.get("ref_format") or "")
+    except Exception:                                       # noqa: BLE001
+        pass
+    # 配置里填了就听配置的。**空字符串不算填了** ——
+    # 页面上没填的框存下来是空串，拿它当 0 会把声明的上限抹掉。
+    v = provider_cfg.get("ref_max_side")
+    if v not in (None, ""):
+        side = int(v)
+    v = provider_cfg.get("ref_format")
+    if v not in (None, ""):
+        fmt = str(v)
+    return side, fmt
+
+
 def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
-                      ref_side: int, media: str = "image") -> Callable:
+                      ref_side: int, media: str = "image",
+                      ref_fmt: str = "") -> Callable:
     """把参考图引用变成能发出去的形式。
 
     配了对象存储 → 一律传上去换公网链接。不只是为了那些只收 URL 的接口：
@@ -224,10 +262,10 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
                 # 本机绝对路径，provider 自己读字节塞 multipart
                 return src if os.path.isabs(src) else os.path.join(pj.root, src)
             if not use_url:
-                return resolve_ref(src, pj.root, max_side=ref_side)
+                return resolve_ref(src, pj.root, max_side=ref_side, fmt=ref_fmt)
             path = src if os.path.isabs(src) else os.path.join(pj.root, src)
             return uploader.to_url(path, up, project_root=pj.root,
-                                   max_side=ref_side, log=log)
+                                   max_side=ref_side, fmt=ref_fmt, log=log)
         except ApiError as exc:
             raise _why_ref_missing(pj, src, exc) from exc
 
@@ -706,8 +744,8 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
                           provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
     model = provider_cfg.get("model", "")
     interval, timeout = _poll_of(prov, provider_cfg, "image", 5, 900)
-    ref_side = int(provider_cfg.get("ref_max_side", 1024))
-    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="image")
+    ref_side, ref_fmt = _ref_rules(provider_cfg, "image")
+    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="image", ref_fmt=ref_fmt)
     _llm = _lazy_llm(llm_factory)
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
@@ -818,8 +856,8 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                           provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
     model = provider_cfg.get("model", "")
     interval, timeout = _poll_of(prov, provider_cfg, "video", 10, 2400)
-    ref_side = int(provider_cfg.get("ref_max_side", 1024))
-    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video")
+    ref_side, ref_fmt = _ref_rules(provider_cfg, "video")
+    to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video", ref_fmt=ref_fmt)
     _llm = _lazy_llm(llm_factory)
     # 按账号计费、一个账号只能同时跑一条的家（HVTALD）：按账号排队。
     # 声明在服务商自己身上，这里只问一句。别家 pool 是 None，走老路。
