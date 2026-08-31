@@ -1,34 +1,14 @@
 # -*- coding: utf-8 -*-
-"""阿珂（snumom.com）。**只做视频**，同一个网关有两条模型线：
+"""阿珂 snumom.com 统一视频 API。
 
-  · Grok Imagine 线（grok-imagine-video-1.5-preview）
-  · minimax_h3 线（minimax_h3-768p / minimax_h3-1080p）
+文档版本：用户提供的《snumom 视频 API》（2026-08-30）。
 
-两条线共用 `POST /v1/videos` 提交 + `GET /v1/videos/{id}` 轮询，但请求体的
-规矩**几乎相反**，所以按模型分支各走各的（`_is_h3`）。
+  · 创建 POST /v1/videos
+  · 查询 GET  /v1/videos/{task_id}
+  · 下载 GET  /v1/videos/{task_id}/content
 
-Grok 线四个和别家不一样、写错就白花钱的点：
-  1. `seconds` 是**字符串**（`"8"`），不是整数。
-  2. **`size` 同时决定分辨率和比例** —— 没有单独的 aspect_ratio / resolution 字段。
-     只有四种组合：720p 16:9=1280x720 / 9:16=720x1280；480p 16:9=854x480 / 9:16=480x854。
-  3. 参考图有**两个字段、二选一**，且形状不同：
-       `reference_images` = **对象**数组 `[{"url": "…"}]`（文档推荐，只能给公网 URL）
-       `input_reference`  = **字符串**数组（URL 或 base64，可带 data:image/...;base64, 前缀）
-     所以：全是链接 → reference_images；含本地图 → 整批走 input_reference。
-  4. 最多 **7 张**。
-
-H3 线（2026-08 文档）自己的硬规矩：
-  · size 从「模型×画幅」对照表取，768P 列 / 1080P 列**不通用**（768p 模型传
-    1080P 的 size 直接 400）；1080p 没有 21:9（上游 2560x1088 会创建失败）。
-  · 参考素材**只收三个字段**：reference_images（对象数组，无 role）、
-    reference_videos / reference_audios（**裸字符串数组**）。再写 input_reference
-    等任何别的字段会报「metadata is too long」—— 一个都不许多发。
-  · 上限：图≤9 视频≤3 音频≤3，合计≤12；参考图**没有首尾帧模式**。
-  · seconds 4～15（数字或字符串都认），不传按 5 秒生成**并计费**。
-  · `unknown` 状态不是失败（还在排队），照常轮询。
-  · 计费按秒：768p $0.07/s、1080p $0.11/s；22 点后八折、0-8 点五折；
-    参考图第 6 张起每张 +$0.10；768p 的 4:3/3:4/3:2/2:3 每秒 +$0.005。
-    1080P 排队几分钟到十几分钟正常，别急着停。
+统一协议的重要约束：seconds 是字符串；图片/视频/音频都是带 url 的对象数组；
+aspect_ratio 与 size 分开。万相 3.0 的提示词增强默认开启，参考图顺序对应“图1、图2”。
 """
 
 from __future__ import annotations
@@ -38,60 +18,54 @@ from typing import Callable, Optional
 from ..apiutil import ApiError, extract_task_id, extract_video_url
 from .base import Provider, VideoTask
 
-GROK_MODELS = ["grok-imagine-video-1.5-preview"]
-H3_MODELS = ["minimax_h3-768p", "minimax_h3-1080p"]
-VIDEO_MODELS = GROK_MODELS + H3_MODELS
-RATIOS = ["16:9", "9:16"]
-RESOLUTIONS = ["720p", "480p"]
-MAX_REFS = 7
-
-# size 是唯一的画面控制字段：(分辨率, 比例) → 取值
-SIZE_TABLE = {
-    ("720p", "16:9"): "1280x720", ("720p", "9:16"): "720x1280",
-    ("480p", "16:9"): "854x480", ("480p", "9:16"): "480x854",
-}
-
-# H3 的 size 对照表（文档第四节）—— 计费按表内比例识别，两列不能混用。
-# 1080P 的 21:9 上游会创建失败，干脆不给这个键，选了当场说清。
-H3_SIZES_768 = {"16:9": "1376x768", "9:16": "768x1376", "1:1": "1024x1024",
-                "4:3": "1152x864", "3:4": "864x1152", "3:2": "1248x832",
-                "2:3": "832x1248", "21:9": "1792x768"}
-H3_SIZES_1080 = {"16:9": "1920x1080", "9:16": "1080x1920", "1:1": "1440x1440",
-                 "4:3": "1664x1248", "3:4": "1248x1664", "3:2": "1728x1152",
-                 "2:3": "1152x1728"}
-# H3 参考素材上限：图≤9 视频≤3 音频≤3，合计≤12
-H3_MAX = {"images": 9, "videos": 3, "audios": 3, "total": 12}
+VIDEO_MODELS = [
+    "wan3.0-video", "wan3.0-video-prime", "wan3.0-image", "wan3.0-image-prime",
+    "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview", "wan-3.0",
+]
+RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "adaptive"]
+RESOLUTIONS = ["", "480P", "720P", "1080P"]
 
 
-def _is_h3(model: str) -> bool:
-    return (model or "") in H3_MODELS
+def _remote(ref: str) -> bool:
+    return str(ref or "").startswith(("http://", "https://"))
 
 
-def _size_of(resolution: str, ratio: str) -> str:
-    res = (resolution or "").strip().lower() or "720p"
-    rat = (ratio or "").strip() or "9:16"
-    if res not in RESOLUTIONS:
-        res = "720p"
-    if rat not in RATIOS:
-        # 这家只有横竖两种，其余比例按长宽归到最近的一边
-        try:
-            w, h = rat.replace("：", ":").split(":")[:2]
-            rat = "16:9" if int(w) >= int(h) else "9:16"
-        except Exception:                                   # noqa: BLE001
-            rat = "9:16"
-    return SIZE_TABLE[(res, rat)]
+def _duration(model: str, want: int) -> int:
+    sec = int(want or 5)
+    if model.startswith("wan3.0-"):
+        return min(30, max(2, sec))
+    if model == "wan-3.0":
+        return min(60, max(1, sec))
+    if model.startswith("grok-imagine-video-1.5"):
+        return min(15, max(4, sec))
+    if model.startswith("minimax_h3-"):
+        return min(15, max(4, sec))
+    return min(10, max(4, sec)) if "h3" in model.lower() else max(1, sec)
+
+
+def _limits(model: str) -> tuple[int, int, int]:
+    """返回图片/视频/音频上限。0 表示该类素材不支持。"""
+    if model.startswith("wan3.0-video"):
+        return 10, 5, 5
+    if model.startswith("wan3.0-image"):
+        return 10, 0, 5
+    if model == "wan-3.0":
+        return 9, 3, 3
+    if model.startswith("grok-imagine-video-1.5"):
+        return 7, 0, 0
+    if model.startswith("minimax_h3-"):
+        return 9, 3, 3
+    return 4, 0, 0
 
 
 class AkeProvider(Provider):
     id = "ake"
-    name = "阿珂 snumom.com（Grok Imagine / minimax_h3 视频）"
+    name = "阿珂 snumom.com（统一视频 API）"
     aliases = ("snumom", "阿珂", "ako")
     default_base_url = "https://snumom.com"
     supports = ("video",)
-    # Grok 线链接和 base64 都能收（分别走 reference_images / input_reference）；
-    # H3 线明令只收 reference_* 三个字段 —— 本地图必须先上传换成公网链接。
-    ref_mode = "data_uri"
-    url_only_models = tuple(H3_MODELS)
+    # 文档的三类 reference_* 都要求服务端可访问的 URL。
+    ref_mode = "url"
 
     def capabilities(self) -> dict:
         return {
@@ -101,143 +75,102 @@ class AkeProvider(Provider):
             "supports": list(self.supports),
             "video": {
                 "models": VIDEO_MODELS,
-                "default_model": GROK_MODELS[0],
-                "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"],
-                "durations": list(range(1, 16)),
-                "default_duration": 8,
+                "default_model": "wan3.0-video",
+                "ratios": RATIOS,
+                "durations": list(range(2, 31)),
+                "default_duration": 15,
                 "resolutions": RESOLUTIONS,
-                # 上限取两条线的最大值（H3 线 9；Grok 线 7 由 body 层裁）
-                "max_refs": 9,
-                "ref_mode": "data_uri",
-                "notes": "两条模型线，规矩不同（程序按模型自动分派）：\n"
-                         "**Grok Imagine** —— 只有 16:9 / 9:16，480p/720p 合成一个 "
-                         "`size` 字段（无 aspect_ratio）；seconds 是字符串 1–15 秒；"
-                         "参考图最多 7 张：全链接走 reference_images，含本地图整批走 "
-                         "input_reference。\n"
-                         "**minimax_h3** —— size 由「模型×画幅」对照表锁定（程序自动"
-                         "查表），1080p 无 21:9；参考素材只收 reference_* 三个字段、"
-                         "**必须公网链接**（本机图先配对象存储），图≤9 视频≤3 音频≤3 "
-                         "合计≤12，无首尾帧模式；seconds 4–15。按秒计费：768p $0.07/s、"
-                         "1080p $0.11/s，22 点后八折、0-8 点五折；参考图第 6 张起每张 "
-                         "+$0.10。1080P 排队几分钟到十几分钟正常，别急着停。",
+                "max_refs": 10,
+                "ref_mode": "url",
+                "model_options": {
+                    "wan3.0-video": {"durations": list(range(2, 31)), "max_refs": 10},
+                    "wan3.0-video-prime": {"durations": list(range(2, 31)), "max_refs": 10},
+                    "wan3.0-image": {"durations": list(range(2, 31)), "max_refs": 10},
+                    "wan3.0-image-prime": {"durations": list(range(2, 31)), "max_refs": 10},
+                    "grok-imagine-video-1.5": {
+                        "durations": list(range(4, 16)), "max_refs": 7},
+                    "grok-imagine-video-1.5-preview": {
+                        "durations": list(range(4, 16)), "max_refs": 7},
+                    "wan-3.0": {"durations": list(range(1, 61)), "max_refs": 9},
+                },
+                "notes": "seconds 必须按字符串发送；reference_images 是 {url,role?} 对象数组。"
+                         "wan3.0-video* 支持 10 图/5 视频/5 音频，wan3.0-image* 不支持参考视频；"
+                         "Grok 最多 7 图且不支持视频/音频。万相 3.0 未指定 size 时默认 1080P。",
             },
-            "notes": "400 多半是参数越界或参考图 URL 不可达，429 是并发/日额度。",
+            "notes": "模型清单最终以控制台和 GET /v1/models 为准。万相创建时预扣，"
+                     "必须显式传 seconds，不能用 -1 智能时长。",
         }
-
-    # ---------------------------------------------------------------- video
-    def build_video_body(self, task: VideoTask, log: Callable = print) -> dict:
-        """按模型线拼 body —— 两条线的字段规矩几乎相反，别想着糊成一套。"""
-        model = task.model or GROK_MODELS[0]
-        if _is_h3(model):
-            return self._h3_body(task, log)
-        return self._grok_body(task, log)
-
-    def _grok_body(self, task: VideoTask, log: Callable) -> dict:
-        model = task.model or GROK_MODELS[0]
-        sec = int(task.duration or 8)
-        if not 1 <= sec <= 15:
-            near = min(15, max(1, sec))
-            log(f"阿珂 {model} 只支持 1–15 秒，已把 {sec} 纠正为 {near}")
-            sec = near
-        size = _size_of(task.resolution, task.ratio)
-
-        refs = list(task.refs or [])
-        if len(refs) > MAX_REFS:
-            log(f"阿珂最多 {MAX_REFS} 张参考图，已裁掉多余 {len(refs) - MAX_REFS} 张")
-            refs = refs[:MAX_REFS]
-
-        body: dict = {"model": model, "prompt": task.prompt or "",
-                      "seconds": str(sec), "size": size}
-        if refs:
-            # 两个字段形状不同，别混：全链接用对象数组，含本地图整批用字符串数组
-            if all(str(r).startswith(("http://", "https://")) for r in refs):
-                body["reference_images"] = [{"url": r} for r in refs]
-            else:
-                body["input_reference"] = refs
-        log(f"阿珂 {model}: seconds='{sec}' size={size} 参考图{len(refs)}张"
-            f"（{'reference_images' if 'reference_images' in body else 'input_reference' if refs else '无'}）")
-        return body
-
-    def _h3_body(self, task: VideoTask, log: Callable) -> dict:
-        """H3 线：只发 model/prompt/seconds/size + reference_* 三个字段。
-
-        多发任何一个别的字段（input_reference / images / extra…）都会报
-        「metadata is too long」—— 不是参数错，是字段本身就不许在。
-        """
-        model = task.model or H3_MODELS[0]
-        ratio = (task.ratio or "9:16").strip()
-        table = H3_SIZES_1080 if "1080" in model else H3_SIZES_768
-        size = table.get(ratio)
-        if not size:
-            if "1080" in model and ratio == "21:9":
-                raise ApiError(
-                    "minimax_h3-1080p 暂不支持 21:9（上游 2560x1088 会创建失败）。"
-                    "要 21:9 画幅请换 minimax_h3-768p。",
-                    status=0, kind="task_fatal")
-            raise ApiError(
-                f"{model} 不认识画幅 {ratio}；这条线只收 "
-                f"{'、'.join(table)} 这几种（768P 和 1080P 的 size 表不通用）。",
-                status=0, kind="task_fatal")
-
-        body: dict = {"model": model, "prompt": task.prompt or "",
-                      # 不传 seconds 上游按 5 秒生成并计费 —— 明着传，账才算得清。
-                      # 必须是**字符串**（文件头规矩①）—— 发整数，上游
-                      # Go 解 JSON 直接 400 invalid_json（实跑撞过）。
-                      "seconds": str(max(4, min(15, int(task.duration or 5)))),
-                      "size": size}
-
-        refs = [r for r in (task.refs or []) if str(r).startswith(("http://", "https://"))]
-        vids = [v for v in (task.extra.get("video_refs") or task.extra.get("videos") or [])
-                if str(v).startswith(("http://", "https://"))]
-        auds = [a for a in (task.extra.get("audio_refs") or task.extra.get("audios") or [])
-                if str(a).startswith(("http://", "https://"))]
-        dropped = (len(task.refs or []) - len(refs)
-                   + len(task.extra.get("video_refs") or task.extra.get("videos") or [])
-                   - len(vids)
-                   + len(task.extra.get("audio_refs") or task.extra.get("audios") or [])
-                   - len(auds))
-        if dropped:
-            # H3 线只收公网链接；本地图混进来只能舍掉，别让整个任务被拒
-            log(f"阿珂 {model}（H3 线）参考素材只收公网链接，已舍掉 {dropped} 项本机素材")
-        # 合计≤12：图片最要紧（人物身份全靠它），超了先舍音频、再舍视频
-        imgs = refs[:H3_MAX["images"]]
-        vids = vids[:H3_MAX["videos"]]
-        auds = auds[:H3_MAX["audios"]]
-        while len(imgs) + len(vids) + len(auds) > H3_MAX["total"]:
-            if auds:
-                auds.pop()
-            elif vids:
-                vids.pop()
-            else:
-                imgs.pop()
-        if imgs:
-            # 不带 role —— 这条线没有首尾帧模式
-            body["reference_images"] = [{"url": r} for r in imgs]
-        if vids:
-            body["reference_videos"] = vids            # 裸字符串数组（文档原样）
-        if auds:
-            body["reference_audios"] = auds            # 裸字符串数组（文档原样）
-        log(f"阿珂 {model}（H3 线）: size={size} seconds={body['seconds']} "
-            f"图{len(imgs)} 视频{len(vids)} 音频{len(auds)}")
-        return body
 
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 5, poll_timeout: int = 2400) -> dict:
-        model = task.model or GROK_MODELS[0]
-        body = self.build_video_body(task, log)
+        model = (task.model or "wan3.0-video").strip()
+        sec = _duration(model, task.duration)
+        if sec != int(task.duration or 5):
+            log(f"阿珂 {model} 时长范围有限，已把 {task.duration} 秒收敛为 {sec} 秒")
 
-        data = self.session.request("POST", "/v1/videos", json_body=body, retries=2, timeout=300)
-        url = extract_video_url(data)
+        img_max, video_max, audio_max = _limits(model)
+        refs = list(task.refs or [])
+        bad = [r for r in refs if not _remote(r)]
+        if bad:
+            raise ApiError(
+                f"阿珂 reference_images 只收公网 URL；本任务有 {len(bad)} 张不是公网链接。"
+                "请在设置里配置参考图对象存储，不能少图后继续生成。",
+                status=0, kind="task_fatal")
+        if len(refs) > img_max:
+            raise ApiError(f"阿珂 {model} 最多 {img_max} 张参考图，本任务有 {len(refs)} 张；"
+                           "不能静默裁图，否则人物/场景绑定会丢失。",
+                           status=0, kind="task_fatal")
+
+        videos = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
+        audios = list(task.extra.get("audio_refs") or task.extra.get("audios") or [])
+        if videos and not video_max:
+            raise ApiError(f"阿珂 {model} 不支持参考视频", status=0, kind="task_fatal")
+        if audios and not audio_max:
+            raise ApiError(f"阿珂 {model} 不支持参考音频", status=0, kind="task_fatal")
+        if len(videos) > video_max or len(audios) > audio_max:
+            raise ApiError(f"阿珂 {model} 素材超限：视频 {len(videos)}/{video_max}，"
+                           f"音频 {len(audios)}/{audio_max}", status=0, kind="task_fatal")
+        if any(not _remote(r) for r in videos + audios):
+            raise ApiError("阿珂参考视频/音频也必须是公网 URL", status=0, kind="task_fatal")
+
+        body: dict = {"model": model, "prompt": task.prompt or "", "seconds": str(sec)}
+        if task.resolution:
+            body["size"] = task.resolution.upper()
+        if task.ratio:
+            body["aspect_ratio"] = task.ratio
+        if refs:
+            roles = list(task.extra.get("image_roles") or [])
+            body["reference_images"] = [
+                dict({"url": ref}, **({"role": roles[i]} if i < len(roles) and roles[i] else {}))
+                for i, ref in enumerate(refs)
+            ]
+        if videos:
+            durations = list(task.extra.get("video_durations") or [])
+            body["reference_videos"] = [
+                dict({"url": ref}, **({"duration": durations[i]}
+                                      if i < len(durations) and durations[i] else {}))
+                for i, ref in enumerate(videos)
+            ]
+        if audios:
+            body["reference_audios"] = [{"url": ref} for ref in audios]
+        if model.startswith("wan3.0-") and "prompt_extend" in task.extra:
+            body["prompt_extend"] = bool(task.extra["prompt_extend"])
+
+        log(f"阿珂 {model}: seconds='{sec}' size={body.get('size', '默认')} "
+            f"aspect_ratio={body.get('aspect_ratio', '默认')} "
+            f"图{len(refs)}/视频{len(videos)}/音频{len(audios)}")
+        data = self.session.request("POST", "/v1/videos", json_body=body,
+                                    # 创建接口没有幂等键，网络层不能自动重发，否则可能重复扣费。
+                                    retries=1, timeout=300)
         task_id = extract_task_id(data)
+        url = extract_video_url(data)
         if not url:
             if not task_id:
                 raise ApiError(f"提交没返回任务 ID: {str(data)[:300]}")
-            # H3 线的 completed 成片在 metadata.url，没有就 GET content 兜底；
-            # 排队中 status=unknown 不是失败，轮询层照常等。
             url = self.session.poll("/v1/videos/{id}", task_id, picker=extract_video_url,
-                                    interval=poll_interval, timeout=poll_timeout,
                                     content_path_tpl="/v1/videos/{id}/content",
+                                    interval=poll_interval, timeout=poll_timeout,
                                     log=log, cancel=cancel)
         self.session.save_item(url, dest)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}

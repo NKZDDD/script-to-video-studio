@@ -713,17 +713,25 @@ class HttpSession:
         return h
 
     def _proxies(self) -> Optional[dict]:
+        if self.proxy.lower() in ("direct", "none", "off", "关闭", "直连"):
+            # requests 在 Windows 上即使 proxies=None 也会读取系统代理。给空字符串
+            # 才是真正直连；有些国内网关经系统代理会在 TLS 握手时直接 EOF。
+            return {"http": "", "https": ""}
         return {"http": self.proxy, "https": self.proxy} if self.proxy else None
 
     def request(self, method: str, path: str, *, json_body: Any = None, params: Any = None,
-                files: Any = None, retries: int = 3, timeout: Optional[int] = None) -> Any:
+                files: Any = None, raw_body: Any = None, headers: Optional[dict] = None,
+                retries: int = 3, timeout: Optional[int] = None) -> Any:
         url = path if path.startswith("http") else self.base_url + path
         last: Optional[Exception] = None
         for attempt in range(max(1, retries)):
             try:
+                request_headers = self._headers(multipart=bool(files))
+                if headers:
+                    request_headers.update(headers)
                 resp = requests.request(
-                    method, url, headers=self._headers(multipart=bool(files)),
-                    json=json_body, params=params, files=files,
+                    method, url, headers=request_headers,
+                    json=json_body, data=raw_body, params=params, files=files,
                     timeout=timeout or self.timeout, proxies=self._proxies(),
                 )
                 if resp.status_code >= 400:

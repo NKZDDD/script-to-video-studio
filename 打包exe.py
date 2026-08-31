@@ -8,8 +8,7 @@
 
 要点：
   · web/ 和 prompts/ 必须打进去 —— 它们是运行时读的资源，不是代码
-  · 可选依赖（boto3/Pillow/pypdf/imageio-ffmpeg）装了才打得进去。
-    缺哪个，exe 就缺对应能力（见下面的清单）
+  · 发布依赖会完整收集子模块、数据和二进制文件；缺任一项都会停止打包
   · 打包机器的位数决定 exe 的位数；64 位机上打的 exe 不能在 32 位机上跑
 """
 
@@ -78,17 +77,17 @@ def _stamp(sid: str) -> None:
 # 传 PDF 剧本直接失败，报「未安装 pypdf，可 pip install pypdf」。
 # 而当时自检是绿的（它只查服务商数、模板数、页面字符数）。
 REQUIRED = {
-    "pypdf": "读 PDF 剧本 —— 缺了传 PDF 直接失败，"
-             "而报错写的是「pip install pypdf」，exe 用户照不了",
-    "PIL": "参考图压缩 —— 缺了不报错，改成原样转 base64，"
-           "请求体大几倍，更容易撞网关体积上限（踩过）",
-    "imageio_ffmpeg": "拼接成片的兜底 ffmpeg —— 目标机器装了系统 ffmpeg "
-                      "也行，但不能赌它装了",
-    "boto3": "参考图上传到对象存储 —— 只收公网链接的模型（HVTALD、"
-             "seedance 那几条）缺了它一条都出不了",
+    "requests": "所有服务商的 HTTP 请求",
+    "certifi": "HTTPS 根证书（否则换电脑后所有 HTTPS 接口会失败）",
+    "urllib3": "HTTP 连接池和重试",
+    "boto3": "参考图上传到对象存储（只收公网链接的模型会用不了）",
+    "botocore": "对象存储请求签名和连接配置",
+    "s3transfer": "对象存储文件传输",
+    "PIL": "参考图压缩（不压直接转 base64，请求体会很大）",
+    "pypdf": "读 PDF 剧本（docx / txt 不受影响）",
+    "imageio_ffmpeg": "环节12 拼接成片及内置 ffmpeg 程序",
+    # ---- 字幕：v34-cinematic 这条线加的 ----
     "videocaptioner": "字幕（转写 / 优化 / 翻译 / 压制）——"
-                      "从 `<本程序>.exe caption ...` 进去。"
-                      "本机装法：pip install --ignore-requires-python "
                       "videocaptioner audioop-lts",
     # audioop 在 Python 3.13 被从标准库删了（PEP 594），而 pydub 导它 ——
     # 这就是 videocaptioner 声明 Requires-Python <3.13 的真正原因。
@@ -164,7 +163,25 @@ def selfcheck(exe: str) -> bool:
     import time
     import urllib.request
 
-    print("\n自检：把 exe 跑起来，对比源码方式认得的东西 —— 打包漏了不会报错，只会缺")
+    print("\n自检：从 exe 内部实际调用发布库，并对比源码方式认得的资源")
+    check_env = os.environ.copy()
+    # 不允许本机环境变量把系统 ffmpeg 冒充成包内置的 ffmpeg。
+    check_env.pop("IMAGEIO_FFMPEG_EXE", None)
+    try:
+        dep = subprocess.run([exe, "--package-selfcheck"], capture_output=True,
+                             encoding="utf-8", errors="replace", timeout=120,
+                             env=check_env)
+    except subprocess.TimeoutExpired:
+        print("  ✗ 运行库自检 120 秒未完成")
+        return False
+    if dep.stdout:
+        print(dep.stdout.rstrip())
+    if dep.returncode:
+        if dep.stderr:
+            print(dep.stderr[-2000:])
+        print(f"  ✗ exe 内部运行库自检失败，退出码 {dep.returncode}")
+        return False
+
     sys.path.insert(0, HERE)
     from core import providers as P                       # noqa: PLC0415
     want_prov = sorted(p["id"] for p in P.status()["providers"])
@@ -361,13 +378,17 @@ def main() -> int:
         return 1
 
     have, miss = [], []
-    for mod, what in OPTIONAL.items():
+    for mod, what in REQUIRED.items():
         (have if importlib.util.find_spec(mod) else miss).append((mod, what))
-    print("\n可选的（缺了只是少一点体验）：")
+    print("发布依赖：")
     for mod, what in have:
         print(f"  ✓ {mod:<16}{what}")
     for mod, what in miss:
-        print(f"  ✗ {mod:<16}{what}")
+        print(f"  ✗ {mod:<16}{what}　← 不能生成完整发布包")
+    if miss:
+        print(f"\n  想补齐：pip install {' '.join(m for m, _ in miss)}")
+        print("  已停止：不再允许生成缺少运行库的小包。")
+        return 1
     print()
     if not check_page():
         return 1
@@ -396,7 +417,9 @@ def main() -> int:
         # 保留控制台：启动时打的四行路径、跑批时的进度和报错都在那儿。
         # 关掉控制台等于把出错原因藏起来。
         "--console",
-        "--name", name,
+        "--name", NAME,
+        # 生成的临时 spec 放 build/，不要覆盖仓库里可供人工打包的 spec。
+        "--specpath", os.path.join(HERE, "build"),
         # 运行时读的资源，必须打进去
         "--add-data", f"{os.path.join(HERE, 'web')}{sep}web",
         "--add-data", f"{os.path.join(HERE, 'prompts')}{sep}prompts",
@@ -405,9 +428,8 @@ def main() -> int:
         # 而缺样式的表现不是报错，是「字幕出来是它的默认样子」。
         "--add-data", f"{os.path.join(HERE, '字幕样式')}{sep}字幕样式",
     ]
-    for h in HIDDEN:
-        if importlib.util.find_spec(h):
-            cmd += ["--hidden-import", h]
+    for package in COLLECT_ALL:
+        cmd += ["--collect-all", package]
     # 服务商是运行时按目录扫出来 import 的，没有任何一处静态 import ——
     # PyInstaller 的静态分析看不见它们，不点名就一个都不打进去。
     # 后果不是报错，是 exe 里「一家服务商都没有」，页面下拉框空白。
@@ -442,6 +464,9 @@ def main() -> int:
 
     print(f"\n完成 → {exe}　({size:.0f} MB)")
     print(f"       dist/ 整个文件夹拷走就能用（手册也在里面）")
+    if not onedir:
+        print("       单文件会压缩内部资源；体积小于 ffmpeg 解压后的大小不代表遗漏，"
+              "以上面的 exe 内部自检为准")
     print()
     print("目标机器上怎么跑：")
     print(f"  双击 {name}.exe，或在命令行里：")

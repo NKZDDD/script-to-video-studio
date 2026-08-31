@@ -38,9 +38,13 @@ class Seedance25Tests(unittest.TestCase):
         """★ 声明和校验是两处代码，写歪了就会「页面上能选、发出去被拒」。"""
         src = io.open(os.path.join(ROOT, "core", "providers", "paisio.py"),
                       encoding="utf-8").read()
-        self.assertIn("DURATION_RULES", src)   # 改成按模型查表，不再是一刀切的 29
-        d = effective("paisio", "video", "seedance2.5-4-1-720p")["durations"]
-        self.assertEqual(set(d), set(range(4, 31)))   # 广场标 4-30s
+        self.assertIn("DURATION_RULES", src)   # 按模型查表，不是一刀切
+        # **模型名要用实拉存在的。** 两边合并时各断言了一个已下线的名字
+        # （seedance2.5-4-1-720p / seedance-2.5-720p，2026-08-31 实拉
+        # GET /v1/models 都不在 81 个里）—— 断言一个不存在的型号，
+        # 测试绿着，而页面上那个名字选中就是跑起来才 503。
+        d = effective("paisio", "video", "paisio-seedance-2.5-720p")["durations"]
+        self.assertTrue(d, "实拉存在的 2.5 型号得有时长档位")
 
     def test_twentynine_is_not_offered_at_the_provider_level(self):
         """★ 故意的：30 写成整家通用值的话，切回旧模型时前端还允许选 30，
