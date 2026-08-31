@@ -1227,7 +1227,10 @@ async function refreshProject() {
   EPS = d.episodes || {episodes: [], issues: []};
   renderEpisodes();
   renderStages(d.stages_done);
-  renderGen(d.tasks_summary);
+  // 全剧的数 + 按集的数一起存下来 —— 切集时直接换，不用再拉一次。
+  GEN_SUM = d.tasks_summary || {};
+  GEN_BY_EP = d.tasks_by_episode || {};
+  renderGen();
   renderHealth();
   renderUsage();
   PT_PROJECT.list().catch(() => {});      // 本剧的提示词跟着项目走
@@ -2620,20 +2623,37 @@ function renderGenEp() {
     : '这个项目还没有集清单：文字流程走到环节1 就有；材料导入模式是导入时落的，'
       + '老项目重新导一次材料即可。';
 }
-function renderGen(summary) {
+let GEN_SUM = {}, GEN_BY_EP = {};
+// 这一行该显示哪个进度。**选了集就显示那一集的** ——
+// 标签写着 EP02、数字是全剧的 76，两个数并排摆着自相矛盾，
+// 人会以为选集没生效（实遇 2026-08-31），而选集是生效的，只是这一列没跟上。
+// 资产图不按集分（全剧共享，同一个角色跨集只出一张），永远给全剧的数。
+function genProgress(kind) {
+  const ep = genEp();
+  if (!ep || kind === 'asset') return GEN_SUM[kind] || {total: 0, done: 0};
+  // 这一集这一类**一条都没有**和「还没拉到数」不是一回事：
+  // 前者该显示 0/0（那一行的「开始」也该点不动），后者不该显示成 0。
+  return ((GEN_BY_EP[ep] || {})[kind]) || {total: 0, done: 0};
+}
+function renderGen() {
   renderGenEp();
   const multi = (EPS.episodes || []).length > 1;
   // 资产图是全剧共享的（同一个角色跨集就一张，不按集出），所以不受选集影响
   $('#genRows').innerHTML = GEN_KINDS.map(([k, label, cap]) => {
-    const s = summary[k] || {total:0, done:0};
+    const s = genProgress(k);
     const scope = !multi ? '' : (k === 'asset'
       ? '<span class="tag" title="同一个角色跨集只出一张图，跨集人脸才一致">全剧共享</span>'
       : `<span class="tag">${genEp() || '全部集'}</span>`);
     // 没有任务时别摆一个点了没反应的「开始」：0/0 的原因是前置环节还没产出清单，
     // 说清楚是哪一步、点不动的原因，比让人点三次再来问强。
-    const why = {asset: '环节5 还没编出资产生产提示词',
-                 storyboard: '环节8 还没编出故事板提示词',
-                 video: '环节8 还没编出视频提示词'}[k] || '前置环节还没产出';
+    // 选了集而这一集没有这类活时，原因**不是**前置环节没跑 ——
+    // 说错了会把人支到「流程」页去重跑一个已经跑完的环节。
+    const whole = (GEN_SUM[k] || {}).total || 0;
+    const why = (genEp() && k !== 'asset' && whole)
+      ? `${genEp()} 这一集没有「${label}」的任务（整个项目共 ${whole} 条）`
+      : ({asset: '环节5 还没编出资产生产提示词',
+          storyboard: '环节8 还没编出故事板提示词',
+          video: '环节8 还没编出视频提示词'}[k] || '前置环节还没产出');
     const empty = !s.total;
     const dis = empty ? ` disabled title="${esc(why)}，所以没有任务可跑"` : '';
     // **按「设置 → 出图出片优先级」的首选预选。** 一键跑到底一直是按那条链跑的，
@@ -2750,12 +2770,11 @@ async function startGen(kind, provider, model, concurrency, failedOnly, paramsOv
 }
 // 换集只重画标签和提示 —— 不重新拉 summary（那是全项目的数，和选集无关）。
 $('#genEp').onchange = () => {
-  renderGenEp();
-  document.querySelectorAll('#genRows tr').forEach(tr => {
-    const tag = tr.querySelector('td .tag');
-    if (tag && tr.dataset.k !== 'asset') tag.textContent = genEp() || '全部集';
-  });
-  renderTasks(true);        // 明细也跟着这个范围走，两处别各说各话
+  // **整行重画**，不是只改标签。原来只改标签，于是「EP02」旁边挂着
+  // 全剧的 0/76 —— 而那个数是这一行「开始」到底会跑多少条的唯一提示。
+  renderGen();
+  if ($('#tkEp')) $('#tkEp').value = genEp();   // 明细的集跟着一起走
+  renderTasks(true);        // 两处别各说各话
 };
 
 // 「生产任务」那张表里某一类当前选的服务商 / 模型 / 并发 / 参数覆盖。
@@ -4596,8 +4615,19 @@ function showFault(kind, err) {
   const tip = document.createElement('div');
   tip.className = 'alert err';
   tip.style.margin = '20px';
-  tip.innerHTML = `<b>${esc(kind)}</b>　—— 这一步没做成，页面上看到的可能不是最新的。<br>`
+  // **位置要写出来。** 原来只有一句「Cannot read properties of null」——
+  // 页面一万多行，这句话在哪儿发生的谁都不知道，只能来回问一趟。
+  // 栈里第一条本页的帧就够定位了（行号对着 web/index.html 数）。
+  let at = '';
+  const stack = String((err && err.stack) || '');
+  const frame = stack.split(String.fromCharCode(10)).slice(1)
+    .map(s => (s.match(/index\.html:(\d+):(\d+)/) || [])[0])
+    .filter(Boolean)[0];
+  if (frame) at = `　<span class="muted">在 ${esc(frame)}</span>`;
+  tip.innerHTML = `<b>${esc(kind)}</b>　—— 这一步没做成，页面上看到的可能不是最新的。${at}<br>`
     + '<code>' + esc(String(err && (err.message || err))) + '</code>'
+    + (stack ? `<pre class="log" style="max-height:120px;margin:6px 0">${
+         esc(stack)}</pre>` : '')
     + '<br><button class="btn ghost sm" onclick="this.parentNode.remove()">知道了</button>';
   box.insertBefore(tip, box.firstChild);
 }

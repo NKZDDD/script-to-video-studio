@@ -47,19 +47,46 @@ class ErrorNetTests(unittest.TestCase):
         self.assertIn("unhandledrejection", self.html)
         self.assertIn("window.addEventListener('error'", self.html)
 
+    def _fault_body(self) -> str:
+        """`showFault` 的**函数体**。
+
+        原来这几条按「函数名之后 N 个字符」截 —— 往函数里加两行注释就会把
+        要找的文案推出窗口，测试红了而行为一个字没变（2026-08-31 就这么红过）。
+        按大括号配平取函数体，加注释不再影响它。
+        """
+        i = self.html.index("function showFault")
+        j = self.html.index("{", i)
+        depth = 0
+        for k in range(j, len(self.html)):
+            if self.html[k] == "{":
+                depth += 1
+            elif self.html[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    return self.html[i:k + 1]
+        raise AssertionError("showFault 的大括号没配平")
+
     def test_the_banner_says_the_page_may_be_stale(self):
         """★ 光报错不够 —— 要告诉人「你现在看到的可能不是最新的」。"""
-        i = self.html.index("function showFault")
-        self.assertIn("可能不是最新的", self.html[i:i + 700])
+        self.assertIn("可能不是最新的", self._fault_body())
+
+    def test_the_banner_says_where_it_happened(self):
+        """★ 还要说清**在哪一行**。
+
+        原来只有一句「Cannot read properties of null (reading 'classList')」——
+        页面一万多行，这句话在哪儿发生的谁都不知道，只能拿着截图来回问一趟
+        （2026-08-31 实遇，问了两次）。栈里第一条本页的帧就够定位。
+        """
+        body = self._fault_body()
+        self.assertIn("err.stack", body)
+        self.assertIn("index", body)      # 从栈里挑本页的帧
 
     def test_repeated_faults_do_not_spam(self):
         """一次失败常常连带好几个 —— 弹一屏横幅比不弹更糟。"""
-        i = self.html.index("function showFault")
-        self.assertIn("_faultShown", self.html[i:i + 400])
+        self.assertIn("_faultShown", self._fault_body())
 
     def test_the_banner_can_be_dismissed(self):
-        i = self.html.index("function showFault")
-        self.assertIn("知道了", self.html[i:i + 900])
+        self.assertIn("知道了", self._fault_body())
 
 
 class BackendTests(unittest.TestCase):
