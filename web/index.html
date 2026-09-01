@@ -2703,12 +2703,32 @@ function renderGen() {
           `<option${String(x) === String(cur) ? ' selected' : ''}>${esc(x)}</option>`)
           .join('');
       if (kind === 'video') {
+        // **清晰度也要能选。** `task.resolution` 是一等公民（八家 provider
+        // 在读它），可页面上一直没有地方填 —— 它只从服务商配置里取，
+        // 于是换一个需要别的清晰度的模型时，只能去改配置文件。
+        // 用户原话（2026-09-01）：「像无限画布这种有清晰度作为参数内容的
+        // 也需要把参数展示出来并且可选，否则我新增模型的时候需要不同的
+        // 清晰度时不能选择」。
+        //
+        // 候选跟着**选中的模型**走（model_options 里的 resolutions），
+        // 这家整体没声明 resolutions 的就不摆这个框 —— 摆一个空框比没有更糟。
+        // **自由输入 + 候选，不是纯下拉。** 纯下拉又会回到同一个坑：
+        // 表外的新模型要 1080p，而候选里只有这家现有模型的 480p/720p ——
+        // 「选不了」正是要修的那件事。和模型框同一个设计。
+        const res = (selected.resolutions || []).length
+          ? `<input class="v-res" list="rl_${kind}" placeholder="清晰度（留空=跟随）"
+                    title="留空 = 不覆盖，用任务/模型自带的。候选是这个模型声明的，
+                           表外的新模型可以直接敲" style="width:120px">
+             <datalist id="rl_${kind}">${
+               (selected.resolutions || []).map(x =>
+                 `<option value="${esc(x)}">`).join('')}</datalist>`
+          : '';
         pbox.innerHTML =
           `<select class="v-ratio" title="画面比例">${opt(selected.ratios, '')}</select>
-           <select class="v-dur" title="单段时长（秒）">${opt(selected.durations, '')}</select>`;
+           <select class="v-dur" title="单段时长（秒）">${opt(selected.durations, '')}</select>${res}`;
         if (!(selected.durations || []).length || String(selected.durations) === '0')
           pbox.innerHTML = `<select class="v-ratio">${opt(selected.ratios, '')}</select>
-            <span class="muted" style="font-size:11px">时长写在模型名里</span>`;
+            <span class="muted" style="font-size:11px">时长写在模型名里</span>${res}`;
       } else {
         pbox.innerHTML = `<select class="i-size" title="出图尺寸">${
           opt(selected.sizes, '')}</select>`;
@@ -2738,11 +2758,15 @@ function renderGen() {
       // 面板上「参数」显示的永远是 tasks.json 里的值。
       const ov = {};
       const size = tr.querySelector('.i-size'), ratio = tr.querySelector('.v-ratio'),
-            dur = tr.querySelector('.v-dur');
+            dur = tr.querySelector('.v-dur'), res = tr.querySelector('.v-res');
       if (size && size.value) ov.size = size.value;
       if (ratio && ratio.value) ov.ratio = ratio.value;
       if (dur && dur.value) ov.duration = +dur.value;
-      startGen(kind, sel.value, msel.value, +tr.querySelector('.c-in').value, failedOnly, ov);
+      // 清晰度走的是 provider_sel 那条路（produce 从 provider_cfg 读它，
+      // 再塞进 VideoTask.resolution）—— 和比例/时长不是同一条，
+      // 别混进 params_override，混了后端不认。
+      startGen(kind, sel.value, msel.value, +tr.querySelector('.c-in').value, failedOnly, ov,
+               '', null, (res && res.value) || '');
     };
     tr.querySelector('[data-run]').onclick = () => go(false);
     tr.querySelector('[data-retry]').onclick = () => go(true);
@@ -2752,7 +2776,7 @@ function renderGen() {
 // 和 kind 分开 —— 场景状态图和故事板的 kind 都是 storyboard，只有 taskKey 分得开。
 // only：挑着跑的那几条的 key，不给就是这一类全跑。
 async function startGen(kind, provider, model, concurrency, failedOnly, paramsOverride,
-                        taskKey, only) {
+                        taskKey, only, resolution) {
   if (!PROJ) return alert('先打开项目');
   const r = await api.post('/api/generate', {
     project_root: PROJ, kind, concurrency, failed_only: !!failedOnly,
@@ -2761,7 +2785,9 @@ async function startGen(kind, provider, model, concurrency, failedOnly, paramsOv
     // 再叠一层集过滤只会把人勾中的条目悄悄滤掉。
     episode: (kind === 'asset' || (only && only.length)) ? '' : genEp(),
     only: only && only.length ? only : null,
-    provider_sel: {provider, model},
+    // 清晰度进 provider_sel：produce 从 provider_cfg 读它再塞进
+    // VideoTask.resolution。空 = 不覆盖（resolve_provider_cfg 会跳过空值）。
+    provider_sel: {provider, model, ...(resolution ? {resolution} : {})},
     params_override: paramsOverride || {},      // 尺寸/比例/时长，只影响这一次
   });
   if (r.error || r.ok === false) return alert(r.error || r.msg);
@@ -2789,9 +2815,11 @@ function genSettings(kind) {
   if (size && size.value) ov.size = size.value;
   if (ratio && ratio.value) ov.ratio = ratio.value;
   if (dur && dur.value) ov.duration = +dur.value;
+  const res = tr.querySelector('.v-res');
   return {provider: tr.querySelector('.p-sel').value,
           model: (tr.querySelector('.m-sel') || {}).value || '',
-          concurrency: +tr.querySelector('.c-in').value || 3, ov};
+          concurrency: +tr.querySelector('.c-in').value || 3, ov,
+          resolution: (res && res.value) || ''};
 }
 $('#rebuildTasks').onclick = async () => {
   const r = await api.post('/api/tasks/rebuild', {project_root: PROJ});
@@ -3780,7 +3808,8 @@ function tkPickChanged() {
 async function runTaskKey(taskKey, kind, only) {
   const s = genSettings(kind);
   if (!s) return alert(`上面「生产任务」表里没有「${kind}」这一行，读不到服务商设置`);
-  await startGen(kind, s.provider, s.model, s.concurrency, false, s.ov, taskKey, only);
+  await startGen(kind, s.provider, s.model, s.concurrency, false, s.ov,
+                 taskKey, only, s.resolution);
 }
 $('#tkRunPick').onclick = async () => {
   const picked = tkPicked();

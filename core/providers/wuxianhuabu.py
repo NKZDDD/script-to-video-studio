@@ -252,6 +252,12 @@ class WuxianhuabuProvider(Provider):
         if lim.get("min_images") and len(image_src) < lim["min_images"]:
             bad.append(f"{model} 要求至少 {lim['min_images']} 张参考图，"
                        f"这一条一张都没有")
+        # 页面上选的清晰度（`task.resolution`）**盖过表里的** —— 那是人明确挑的。
+        # 但如果这个模型声明了它只有哪几档，选了它没有的就当场停：
+        # 发出去多半是「片子出得来、清晰度不是你要的」，而且不报错。
+        picked = (task.resolution or "").strip()
+        if picked and lim.get("resolution") and picked != lim["resolution"]:
+            bad.append(f"{model} 只有 {lim['resolution']}，选的是 {picked}")
         if lim.get("max_prompt") and len(task.prompt or "") > lim["max_prompt"]:
             bad.append(f"提示词 {len(task.prompt or '')} 字，"
                        f"超了 {model} 的 {lim['max_prompt']} 字上限")
@@ -275,7 +281,9 @@ class WuxianhuabuProvider(Provider):
         # 表外的模型按名字里的 720p/480p 认；认不出来**就不填这个字段**，
         # 让平台用它自己的默认 —— 随手填一个的后果是「片子出得来、
         # 分辨率不是你要的」，而且不报错。
-        res = lim.get("resolution") or _guess_resolution(model)
+        # 优先级：**页面上选的 > 表里记的 > 从名字认的 > 不填**。
+        # 「不填」是有意义的一档：让平台用它自己的默认，比我们蒙一个强。
+        res = picked or lim.get("resolution") or _guess_resolution(model)
         if res:
             body["resolution"] = res
         if images:

@@ -9,6 +9,7 @@
   · 比例和时长原来全局一份，实际逐模型不同 —— 按全局那份填，
     2.0 系列选 20 秒、2.5gs 选 10 秒都会被拒，而那两个值是**我们给的候选**
 """
+import io
 import unittest
 
 from core.apiutil import ApiError
@@ -166,6 +167,72 @@ class WuxianhuabuModelTests(unittest.TestCase):
         with self.assertRaises(ApiError) as c:
             p.generate_video(t, "out.mp4", log=lambda *a: None)
         self.assertIn("31 张", str(c.exception))
+
+    def _sent(self, **kw):
+        from unittest import mock
+        sent = {}
+
+        def fake(self, method, path, **k):
+            if path == "/v1/assets":
+                return {"asset_id": "a1"}
+            sent.clear()
+            sent.update(k.get("json_body") or {})
+            return {"id": "t1", "video_url": "https://x/v.mp4"}
+
+        p = WuxianhuabuProvider(api_key="k")
+        t = VideoTask(prompt="正文", refs=["https://x/a.png"],
+                      duration=kw.pop("duration", 10), ratio=kw.pop("ratio", "9:16"),
+                      model=kw.pop("model"), resolution=kw.pop("resolution", ""))
+        with mock.patch.object(type(p.session), "request", fake),              mock.patch.object(type(p.session), "save_item", lambda *a, **k: None):
+            p.generate_video(t, "o.mp4", log=lambda *a: None)
+        return sent
+
+    def test_an_explicit_resolution_wins(self):
+        """★ 页面上选的清晰度盖过表里的。
+
+        `task.resolution` 一直是一等公民（八家 provider 在读它），可页面上
+        从来没有地方能填 —— 它只从服务商配置里取。于是换一个需要别的清晰度
+        的模型时只能去改配置文件。用户原话（2026-09-01）：「像无限画布这种有
+        清晰度作为参数内容的也需要把参数展示出来并且可选，否则我新增模型的
+        时候需要不同的清晰度时不能选择」。
+
+        优先级：**选的 > 表里记的 > 从名字认的 > 不填**。
+        「不填」是有意义的一档 —— 让平台用它自己的默认，比我们蒙一个强。
+        """
+        # 表外的新模型：选什么发什么
+        self.assertEqual(self._sent(model="全新模型", resolution="1080p")["resolution"],
+                         "1080p")
+        # 表外 + 没选 + 名字看不出 → 不填，别蒙
+        self.assertNotIn("resolution", self._sent(model="全新模型"))
+        # 表里的：没选就用表里的
+        self.assertEqual(self._sent(model="seedance-2.5-hf")["resolution"], "480p")
+
+    def test_a_resolution_the_model_does_not_have_is_refused(self):
+        """选了这个模型没有的那一档 → 当场停。
+
+        发出去多半是「片子出得来、清晰度不是你要的」，而且不报错。
+        """
+        with self.assertRaises(ApiError) as c:
+            self._sent(model="seedance-2.5-hf-720p", resolution="480p")
+        self.assertIn("只有 720p", str(c.exception))
+
+    def test_the_page_offers_resolution_as_free_input(self):
+        """★ 清晰度框是**自由输入 + 候选**，不是纯下拉。
+
+        纯下拉会回到同一个坑：表外的新模型要 1080p，而候选里只有这家现有
+        模型的 480p/720p —— 「选不了」正是要修的那件事。
+        """
+        import os
+        import re
+        page = io.open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "web", "index.html"), encoding="utf-8").read()
+        m = re.search(r"const res = \(selected\.resolutions[\s\S]{0,700}?: '';", page)
+        self.assertIsNotNone(m, "找不到清晰度那个框")
+        blk = m.group(0)
+        self.assertIn('<input class="v-res"', blk, "又变回纯下拉了")
+        self.assertIn("datalist", blk)
+        # 这家没声明 resolutions 时不摆空框 —— 空框比没有更糟
+        self.assertIn(": ''", blk)
 
     def test_the_unverified_resolution_is_marked_as_such(self):
         """`seedance-2.5-hf` 自己什么都没声明 —— 480p 是文档里写的。
