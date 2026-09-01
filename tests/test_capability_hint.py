@@ -29,8 +29,13 @@ def effective(cid, block, model=None):
 class Seedance25Tests(unittest.TestCase):
     """seedance 2.5 的能力声明必须和接口的实际校验一致。"""
 
+    # 被测对象要用**实拉里还在的**那个。原来点名 seedance2.5-4-1-720p，
+    # 而它 2026-09-01 下线了 —— 对着一个不存在的型号断言，测试绿着，
+    # 而页面上那个名字选中就是跑起来才失败。
+    LIVE_25 = "paisio-seedance-2.5-720p"
+
     def test_the_model_declares_four_to_twentynine_seconds(self):
-        d = effective("paisio", "video", "seedance2.5-4-1-720p")["durations"]
+        d = effective("paisio", "video", self.LIVE_25)["durations"]
         self.assertEqual(min(d), 4)
         self.assertEqual(max(d), 30)
 
@@ -58,7 +63,7 @@ class Seedance25Tests(unittest.TestCase):
 
     def test_the_model_needs_public_urls_for_references(self):
         """2.5 只收公网链接。没配对象存储的话它会直接拒，值得在页面上提醒。"""
-        e = effective("paisio", "video", "seedance2.5-4-1-720p")
+        e = effective("paisio", "video", self.LIVE_25)
         self.assertEqual(e["ref_mode"], "url")
         self.assertEqual(e["max_refs"], 30)
 
@@ -70,6 +75,9 @@ class Seedance25Tests(unittest.TestCase):
         （08-19 和 08-28 各漏判过一次，两次都不报错）。
         """
         from core.run_v34 import detect_capability
+        # 这里**故意包含已下线的名字**：老项目的 tasks.json 里存着它们，
+        # 家族判定还得认得，否则那些项目的能力会掉回 UNKNOWN。
+        # 「认得这个名字」和「还在下拉里」是两件事。
         for m in ("seedance2.5-4-1-720p", "seedance2.5-26-480p",
                   "paisiodance-2.5-720p",
                   "paisio-seedance-2.5-480p",      # 08-28 新写法

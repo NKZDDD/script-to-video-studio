@@ -34,13 +34,14 @@ from .base import ImageTask, Provider, VideoTask
 # 这套流程的视频提示词普遍 7800-8400 字，硬拦等于这家不能用。
 PROMPT_SOFT_MAX = 2500
 
+# 2026-09-01 实拉又下线两个：`seedance2.5-4-1-720p`、`sd2.5-720p-standard`。
+# 这一族的名字换得比什么都快 —— 所以能力判定一律走 `is_seedance25()`
+# 的家族标记，别拿名字来精确比对（见下面）。
 SEEDANCE25_MODELS = (
-    "seedance2.5-4-1-720p",                      # 广场按次分组：3.5/次，4-30s，图10/视频0/音频0
     "seedance2.5-26-720p", "seedance2.5-26-480p",
     "paisiodance-2.5-720p", "paisiodance-2.5-480p",
     "paisio-seedance-2.5-720p", "paisio-seedance-2.5-480p",   # 08-28 新增的写法
     "doubao-seedance-2-5-720p",                  # 同一个 2.5，豆包品牌的透传名
-    "sd2.5-720p-standard",
 )
 SEEDANCE25_DURATIONS = list(range(4, 31))        # 广场标 4-30s（不是 4-29）
 
@@ -78,15 +79,63 @@ def is_seedance25(model: str) -> bool:
 # 已下线，规则一并撤掉；新上的 `seedance2-4-6/4-7-720p` 广场没截到档位，
 # 不写 —— 宁可让网关去 400（不计费），也别拿猜的规则拦住能跑的活。
 DURATION_RULES = {
-    "seedance2.5-4-1-720p": tuple(range(4, 31)),
+    # seedance2.5-4-1-720p 已下线（2026-09-01 实拉）；这一条留着无害，
+    # 但清单里不再列它，免得页面上还能选到。
     "seedance2-4-2-fast-720p": (10,),
     "seedance2-4-1-720p": tuple(range(4, 16)),
     "seedance2-4-4-720p": tuple(range(4, 16)),
 }
-# (图, 视频, 音频)。seedance2.5-4-1-720p 广场标 10/0/0 —— **不收参考视频和音频**
+# (图, 视频, 音频)。seedance2.5-4-1-720p 广场标 10/0/0 —— **不收参考视频和音频**。
+# 这个模型 2026-09-01 已下线，这条留着是为了老项目里存着这个名字时还能判对。
 REF_LIMITS = {"seedance2.5-4-1-720p": (10, 0, 0)}
 REF_LIMITS_DEFAULT = (30, 10, 10)
 SEEDANCE25_RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "3:2", "2:3"]
+
+
+# 视频模型清单**提成模块常量**，因为 `model_options` 要按家族标记从它推 ——
+# 内联在返回的字典里时同一个字面量引不到自己，于是那边只能另抄一份
+# 静态元组，两份迟早对不上（2026-09-01 就对不上了，见 model_options）。
+VIDEO_MODELS = [
+                # 2026-08-28 用真 Key 实拉 GET /v1/models 校正（上一次是 08-19）。
+                # 名字只能来自 /v1/models，不能照文档或上一次的快照抄 ——
+                # 页面上留一个已下线的名字，是能选中、跑起来才 503，
+                # 而失败记录里只看到"生成失败"。
+                # 这轮下线的（已从清单里撤掉）：sd2-ultra-720p、
+                # sd2-ultra-fast-720p、paisiodance2.0-fast-720p、
+                # seedance2-4-8-720p、seedance2.5-00-720p/-480p、
+                # sd2.5-ultra-720p、grok-imagine-video-1.5(-fast)。
+                # **sd2-* 整族下线了**（2026-09-01 实拉 /v1/models 确认）：
+                # sd2-720p / -480p / -1080p / sd2-fast-720p / -480p 全都不在了。
+                # 而 `sd2-720p` 正是这一家的 default_model **和代码里的兜底**
+                # （`task.model or "sd2-720p"`）—— 也就是说：没显式指定模型的
+                # 视频任务，一条都发不出去，报「找不到模型」。
+                # 现存的 sd2 只剩这两个 mini：
+                "sd2-video20-mini-720p", "sd2-video20-mini-480p",
+                "sd2-19-720p", "sd2-19-480p", "sd2-19-1080p", "sd2-19-4k",
+                "sd2.5-19-720p", "sd2.5-19-pro-720p",
+                "sd2.5-19-pro-1080p", "sd2.5-19-pro-480p",
+                "sd3-720p", "sd3-480p", "sd3-1080p",
+                "sd3-fast-720p", "sd3-fast-480p",
+                # 2.0 系。08-28 新上的 paisio-seedance-2.0-* / -2-mini-* /
+                # seedance2.0-standard-* / -26-* / doubao-seedance-2-0-*
+                "paisio-seedance-2.0-480p", "paisio-seedance-2.0-720p",
+                "paisio-seedance-2.0-1080p", "paisio-seedance-2.0-4k",
+                "paisio-seedance-2.0-fast-480p", "paisio-seedance-2.0-fast-720p",
+                "paisio-seedance-2-mini-480p", "paisio-seedance-2-mini-720p",
+                "seedance2.0-standard-480p", "seedance2.0-standard-720p",
+                "seedance2.0-26-3-480p", "seedance2.0-26-3-720p",
+                "seedance2.0-26-4-720p", "seedance2.0-fast720p",
+                "seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
+                # paisiodance2.0-720p 这一轮也下线了（实拉确认）
+                "doubao-seedance-2-0-720p", "doubao-seedance-2-0-fast-720p",
+                # 按次分组
+                # seedance2-4-1-720p 下线（实拉确认）
+                "seedance2-4-2-fast-720p",
+                "seedance2-4-4-720p", "seedance2-4-6-720p", "seedance2-4-7-720p",
+                # Seedance 2.5 全家
+                *SEEDANCE25_MODELS,
+                "minimax-h3", "minimax-h3-2k", "minimax-h3-768p", "mx-h3",
+]
 
 
 class PaisioProvider(Provider):
@@ -187,40 +236,11 @@ class PaisioProvider(Provider):
             "video": {
                 # 分辨率写在模型名里，所以不用也不能传 resolution。
                 # 名字里带 fast 的便宜、带 480p 的更便宜 —— 调试和试跑用它们。
-                "models": [
-                    # 2026-08-28 用真 Key 实拉 GET /v1/models 校正（上一次是 08-19）。
-                    # 名字只能来自 /v1/models，不能照文档或上一次的快照抄 ——
-                    # 页面上留一个已下线的名字，是能选中、跑起来才 503，
-                    # 而失败记录里只看到"生成失败"。
-                    # 这轮下线的（已从清单里撤掉）：sd2-ultra-720p、
-                    # sd2-ultra-fast-720p、paisiodance2.0-fast-720p、
-                    # seedance2-4-8-720p、seedance2.5-00-720p/-480p、
-                    # sd2.5-ultra-720p、grok-imagine-video-1.5(-fast)。
-                    "sd2-720p", "sd2-480p", "sd2-1080p",
-                    "sd2-fast-720p", "sd2-fast-480p",
-                    "sd2-video20-mini-720p", "sd2-video20-mini-480p",
-                    "sd3-720p", "sd3-480p", "sd3-1080p",
-                    "sd3-fast-720p", "sd3-fast-480p",
-                    # 2.0 系。08-28 新上的 paisio-seedance-2.0-* / -2-mini-* /
-                    # seedance2.0-standard-* / -26-* / doubao-seedance-2-0-*
-                    "paisio-seedance-2.0-480p", "paisio-seedance-2.0-720p",
-                    "paisio-seedance-2.0-1080p", "paisio-seedance-2.0-4k",
-                    "paisio-seedance-2.0-fast-480p", "paisio-seedance-2.0-fast-720p",
-                    "paisio-seedance-2-mini-480p", "paisio-seedance-2-mini-720p",
-                    "seedance2.0-standard-480p", "seedance2.0-standard-720p",
-                    "seedance2.0-26-3-480p", "seedance2.0-26-3-720p",
-                    "seedance2.0-26-4-720p", "seedance2.0-fast720p",
-                    "seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
-                    "paisiodance2.0-720p",
-                    "doubao-seedance-2-0-720p", "doubao-seedance-2-0-fast-720p",
-                    # 按次分组
-                    "seedance2-4-1-720p", "seedance2-4-2-fast-720p",
-                    "seedance2-4-4-720p", "seedance2-4-6-720p", "seedance2-4-7-720p",
-                    # Seedance 2.5 全家
-                    *SEEDANCE25_MODELS,
-                    "minimax-h3", "minimax-h3-2k", "minimax-h3-768p", "mx-h3",
-                ],
-                "default_model": "sd2-720p",
+                "models": VIDEO_MODELS,
+                # **默认换成一个实拉里真存在的。** 原来是 sd2-720p —— 那一族
+                # 整个下线了，于是「没改过模型就点开始」必然失败。
+                # 挑 720p 的 2.5：这套流程的主力档，实拉在，也是材料里用的那个。
+                "default_model": "paisio-seedance-2.5-720p",
                 "ratios": ["9:16", "16:9", "1:1"],
                 "durations": [4, 5, 8, 10, 12, 15],
                 "default_duration": 15,
@@ -236,6 +256,15 @@ class PaisioProvider(Provider):
                 # 也 401，拿不到按模型的档位）。推断错的代价是网关 400，不计费；
                 # 真跑通了别的档位就写进「设置 → 服务商 → 时长档位」，那份覆盖
                 # 优先级最高（web/index.html:effectiveBlock）。
+                #
+                # **按家族标记推，不按那个静态元组。** 这两处以前不是一回事：
+                # `model_options` 从 `SEEDANCE25_MODELS` 生成，而能力判定走
+                # `is_seedance25()` 的片段匹配 —— 于是任何一个「标记认得、
+                # 元组里没有」的名字（2026-09-01 加进来的 `sd2.5-19-720p`
+                # 就是）会拿到整家的 4-15 秒和 data_uri，而它其实是 2.5：
+                # 时长选不到 30 秒，参考图按 data URI 发而 2.5 只收公网链接 ——
+                # **图被丢掉照样出片，脸不对，不报错**。
+                # 这个文件自己写过「名单会过期，家族不会」，这里补上那一步。
                 "model_options": {
                     model: {
                         "durations": SEEDANCE25_DURATIONS,
@@ -245,12 +274,12 @@ class PaisioProvider(Provider):
                         "max_audio_refs": 10,
                         "ref_mode": "url",
                     }
-                    for model in SEEDANCE25_MODELS
+                    for model in VIDEO_MODELS if is_seedance25(model)
                 },
                 "notes": "分辨率写在模型名里，不用也不能单独传。名字带 fast 的便宜、"
                          "带 480p 的更便宜 —— 试跑和调提示词用 sd3-fast-480p / "
-                         "sd2-fast-480p，定稿再换 720p/1080p。"
-                         "sd2-720p 一档实测稳定；**模型名以 /v1/models 为准**，"
+                         "sd3-fast-480p，定稿再换 720p/1080p。"
+                         "**模型名以 /v1/models 为准**，"
                          "2026-08-28 实拉又下线了 9 个（sd2-ultra 系、seedance2.5-00 系、"
                          "sd2.5-ultra-720p、grok 视频），同时新增了 paisio-seedance-2.5-* 这套写法。"
                          "旧模型参考图可用压缩 data URI；Seedance 2.5 必须使用公网 URL，"
@@ -307,7 +336,9 @@ class PaisioProvider(Provider):
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
-        model = task.model or "sd2-720p"
+        # 兜底也要跟着换 —— 这里和 default_model 是**两处**，
+        # 只改一处的后果是页面显示新的、实际发旧的。
+        model = task.model or "paisio-seedance-2.5-720p"
         # **所有视频模型用同一套请求体。** 文档原话（提交视频生成任务）：
         # 「视频生成请求体。所有视频模型使用相同的参数格式。」
         #

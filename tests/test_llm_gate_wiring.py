@@ -121,9 +121,9 @@ class ProviderModelTests(unittest.TestCase):
         这份名单**本身就会过期**，改它的唯一依据是实拉结果。
         """
         got = self._models("paisio", "video")
-        for m in ("paisiodance2.0-720p",
-                  "seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
-                  "sd2-720p", "sd2-fast-720p",
+        for m in ("seedance2.0-selfsur-720p", "seedance2.0-selfsur-fast-720p",
+                  # sd2-* 整族和 paisiodance2.0-720p 已下线（见下一条测试）
+                  "sd2-video20-mini-720p", "sd2-19-720p", "sd2.5-19-720p",
                   "sd3-720p", "sd3-fast-720p",
                   "paisio-seedance-2.0-720p", "paisio-seedance-2-mini-720p",
                   "seedance2.0-standard-720p", "doubao-seedance-2-0-720p",
@@ -141,17 +141,45 @@ class ProviderModelTests(unittest.TestCase):
                      "paisiodance2.0-fast-720p", "seedance2-4-8-720p",
                      "seedance2.5-00-720p", "seedance2.5-00-480p",
                      "sd2.5-ultra-720p",
-                     "grok-imagine-video-1.5", "grok-imagine-video-1.5-fast"):
+                     "grok-imagine-video-1.5", "grok-imagine-video-1.5-fast",
+                     # 2026-09-01 实拉确认又下线一批。**sd2-720p 尤其要紧** ——
+                     # 它当时是这一家的 default_model 和代码里的兜底，
+                     # 也就是「没显式指定模型的视频任务一条都发不出去」。
+                     "sd2-720p", "sd2-480p", "sd2-1080p",
+                     "sd2-fast-720p", "sd2-fast-480p",
+                     "paisiodance2.0-720p", "seedance2-4-1-720p",
+                     "seedance2.5-4-1-720p", "sd2.5-720p-standard"):
             self.assertNotIn(dead, got, f"{dead} 已下线，不该还在清单里")
+
+    def test_paisio_defaults_point_at_models_that_exist(self):
+        """★ 默认模型必须在自己的清单里，而且**声明和代码兜底要一致**。
+
+        原来 default_model 和 `task.model or "..."` 都写着 sd2-720p，
+        而那一族整个下线了 —— 「没改过模型就点开始」必然失败。
+        两处是**两份代码**，只改一处的后果是页面显示新的、实际发旧的。
+        """
+        import io as _io
+        import os as _os
+        import re as _re
+        from core.providers import REGISTRY
+        cap = REGISTRY["paisio"]().capabilities()
+        for media in ("image", "video"):
+            self.assertIn(cap[media]["default_model"], cap[media]["models"], media)
+        src = _io.open(_os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+            "core", "providers", "paisio.py"), encoding="utf-8").read()
+        fb = _re.search(r'model = task\.model or "([^"]+)"', src).group(1)
+        self.assertEqual(fb, cap["video"]["default_model"],
+                         "代码兜底和 default_model 对不上")
 
     def test_paisio_has_the_real_seedance25_family(self):
         got = self._models("paisio", "video")
-        for m in ("seedance2.5-4-1-720p", "seedance2.5-26-720p",
+        for m in ("seedance2.5-26-720p",
                   "paisiodance-2.5-720p",
                   # 08-28 鹤新增的写法。用户就是在这儿撞上的：选了它，
                   # 时长下拉只到 15 秒，因为它不在当时那份 2.5 名单里。
                   "paisio-seedance-2.5-480p", "paisio-seedance-2.5-720p",
-                  "doubao-seedance-2-5-720p", "sd2.5-720p-standard"):
+                  "doubao-seedance-2-5-720p"):
             self.assertIn(m, got, m)
 
     def test_paisio_image_models_are_the_new_naming(self):
