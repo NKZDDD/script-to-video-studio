@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """无限画布（videogogo.top）统一视频 API。只做视频。
 
-这不是阿珂。文档页面给出的两个模型：
-  · seedance-2.5-hf-720p：720p，4–30 秒
-  · seedance-2.5-hf：480p，4–30 秒
+这不是阿珂。**模型清单和逐模型约束从 `GET /v1/models` 实拉**（2026-09-01）——
+这家每个模型自己回一份 `capability_schema`，比文档准。上一版是照文档抄的
+两个模型，实拉出来是五个，而且比例和时长逐模型不同（见 MODELS 那张表）。
 
-两者均为混合参考：最多 30 图、10 视频、10 音频，默认音频开、水印关。
+混合参考：图 / 视频 / 音频三类，默认音频开、水印关。
 本地图片/data URI 先 POST /v1/assets 上传，随后把 asset_id 放进字符串数组。
 """
 
@@ -22,10 +22,86 @@ from urllib.parse import unquote_to_bytes
 from ..apiutil import ApiError, extract_task_id, extract_video_url
 from .base import Provider, VideoTask
 
-VIDEO_MODELS = ["seedance-2.5-hf-720p", "seedance-2.5-hf"]
-MODEL_RESOLUTION = {"seedance-2.5-hf-720p": "720p", "seedance-2.5-hf": "480p"}
-RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9"]
+# 这张表是 **2026-09-01 从 `GET /v1/models` 实拉的**，不是照文档抄的。
+# 这家每个模型自己回一份 `capability_schema`，比任何文档都准 ——
+# 而实拉出来和我们原来写的差了好几处，每一处的失败都是静默的：
+#
+#   · 只声明了 2 个模型，实际有 5 个 —— 另外三个页面上根本选不到
+#   · 声明了 `21:9`，而**一个模型都不支持** —— 选了它请求会被拒，
+#     或者网关自己挑一个，出来的片子不是这个画幅
+#   · 比例和时长原来是**全局一份**，实际逐模型不同：
+#       seedance-2.5-hf-720p   16:9/9:16/4:3/1:1（**没有 3:4**），4–30 秒
+#       seedance-2.5gs 720p    多 3:4，**15–30 秒**（下限是 15，不是 4）
+#       seedance-2.0(-F)-r     多 3:4，**4–15 秒**（上限是 15，不是 30）
+#     按全局那份填，2.0 系列选 20 秒、2.5gs 选 10 秒都会被拒 ——
+#     而页面上那两个值是我们自己给的候选。
+#
+# `seedance-2.5-hf` 的 `capability_schema` 里**只有一个 notes 网址**，
+# 什么都没声明。它的 480p 是原来文档里写的，实拉没有背书 —— 标出来，
+# 别让「我们写的」看起来像「它说的」。
+_R4 = ["16:9", "9:16", "4:3", "1:1"]                    # 2.5-hf-720p 只有这四个
+_R5 = ["16:9", "9:16", "1:1", "4:3", "3:4"]             # 其余四个多一个 3:4
+
+MODELS = {
+    "seedance-2.5-hf-720p": {
+        "resolution": "720p", "ratios": _R4, "durations": list(range(4, 31)),
+        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 0,
+        "max_prompt": 0,
+    },
+    "seedance-2.5gs 720p": {                            # 名字里**有空格**，照它给的原样
+        "resolution": "720p", "ratios": _R5, "durations": list(range(15, 31)),
+        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 1,
+        "max_prompt": 8000,
+    },
+    "seedance-2.0-r-720P": {
+        "resolution": "720p", "ratios": _R5, "durations": list(range(4, 16)),
+        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 0,
+        "max_prompt": 0,
+    },
+    "seedance-2.0-F-r-720P": {
+        "resolution": "720p", "ratios": _R5, "durations": list(range(4, 16)),
+        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 0,
+        "max_prompt": 0,
+    },
+    "seedance-2.5-hf": {                                # 它自己什么都没声明
+        "resolution": "480p", "ratios": _R5, "durations": list(range(4, 31)),
+        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 0,
+        "max_prompt": 0,
+    },
+}
+VIDEO_MODELS = list(MODELS)
+MODEL_RESOLUTION = {k: v["resolution"] for k, v in MODELS.items()}
+# 全局那份 = 各模型的**并集**，只用来填「这家总体收什么」。
+# 真正判合不合法要按模型来（见 _limits）—— 拿并集去判等于全放行。
+RATIOS = _R5
 MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 30, 10, 10
+
+
+def _limits(model: str) -> dict:
+    """这一个模型的已知约束。**不认识就返回空 —— 空的意思是「不知道」，
+    不是「不允许」。**
+
+    上面那张表是**候选和已知约束**，不是白名单。平台随时会上新模型
+    （这次实拉就多出三个），而写死白名单等于「平台上新，你就得改代码」——
+    用户原话（2026-09-01）：「声明两个的时候会不会导致我填写其他模型名
+    无法使用，这不是我想要的，因为会导致我新增模型的时候一定需要修改代码」。
+
+    所以页面上模型框是自由输入 + 候选（datalist），这里也照办：表里有的
+    按它的约束校验，表外的**原样发出去**，只在日志里说一声「没有它的约束，
+    不校验」。真不合法的话平台会拒，而那句拒绝是响的。
+
+    最新清单随时可以实拉：基类的 `list_models()` 打的就是这家的 `/v1/models`，
+    「生产」页模型框的候选和开跑前的 `preflight_models` 用的都是实拉那一份。
+    """
+    return MODELS.get(model) or {}
+
+
+def _guess_resolution(model: str) -> str:
+    """名字里带 720/480/1080 就按它。**猜不出来就返回空，不填这个字段** ——
+    随手填一个的后果是「片子出得来、分辨率不是你要的」，而且不报错。
+    """
+    m = re.search(r"(2160|1440|1080|720|540|480|360)\s*[pP]", model or "")
+    return (m.group(1) + "p") if m else ""
 
 
 def _data_uri(value: str) -> tuple[bytes, str] | None:
@@ -66,12 +142,25 @@ class WuxianhuabuProvider(Provider):
                 "max_video_refs": MAX_VIDEOS,
                 "max_audio_refs": MAX_AUDIOS,
                 "ref_mode": "data_uri",
+                # **逐模型给。** 页面按选中的模型换候选 —— 全局那份是并集，
+                # 拿并集当候选就会让人选到一个这个模型不收的值，
+                # 而那种拒绝要等跑到那一步才看得见。
                 "model_options": {
-                    "seedance-2.5-hf-720p": {"resolutions": ["720p"]},
-                    "seedance-2.5-hf": {"resolutions": ["480p"]},
+                    m: {"resolutions": [v["resolution"]],
+                        "ratios": v["ratios"],
+                        "durations": v["durations"],
+                        "max_refs": v["max_images"],
+                        "max_video_refs": v["max_videos"],
+                        "max_audio_refs": v["max_audios"]}
+                    for m, v in MODELS.items()
                 },
-                "notes": "两个模型均为 4–30 秒混合参考，最多 30 图/10 视频/10 音频。"
-                         "720p 选 seedance-2.5-hf-720p，480p 选 seedance-2.5-hf；"
+                "notes": "模型清单和逐模型约束是 2026-09-01 从 /v1/models 实拉的。"
+                         "时长按模型不同：2.5-hf / 2.5-hf-720p 是 4–30 秒，"
+                         "**2.5gs 是 15–30 秒**，**2.0 系列是 4–15 秒**。"
+                         "比例也不同：2.5-hf-720p 没有 3:4；**没有任何模型收 21:9**。"
+                         "2.5gs 还要求至少 1 张参考图、提示词 ≤8000 字。"
+                         "seedance-2.5-hf 那一条它自己什么都没声明，480p 是文档里写的、"
+                         "实拉没有背书。"
                          "图片、视频、音频数组都是 URL 或 /v1/assets 返回的 asset_id 字符串。",
             },
             "notes": "独立于阿珂。素材与结果最多保留 24 小时；创建请求带幂等键，"
@@ -123,22 +212,54 @@ class WuxianhuabuProvider(Provider):
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 5, poll_timeout: int = 2400) -> dict:
         model = (task.model or "seedance-2.5-hf-720p").strip()
-        if model not in MODEL_RESOLUTION:
-            raise ApiError(f"无限画布不认识模型 {model!r}，只能选 {' / '.join(VIDEO_MODELS)}",
-                           status=0, kind="task_fatal")
-        sec = int(task.duration or 15)
-        if not 4 <= sec <= 30:
-            raise ApiError(f"无限画布 Seedance 2.5 只支持 4–30 秒，本任务是 {sec} 秒",
-                           status=0, kind="task_fatal")
-
+        lim = _limits(model)
         image_src = list(task.refs or [])
         video_src = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
         audio_src = list(task.extra.get("audio_refs") or task.extra.get("audios") or [])
-        if len(image_src) > MAX_IMAGES or len(video_src) > MAX_VIDEOS or len(audio_src) > MAX_AUDIOS:
-            raise ApiError(
-                f"无限画布素材超限：图片 {len(image_src)}/{MAX_IMAGES}、"
-                f"视频 {len(video_src)}/{MAX_VIDEOS}、音频 {len(audio_src)}/{MAX_AUDIOS}。"
-                "不能静默裁掉参考素材。", status=0, kind="task_fatal")
+
+        # **逐模型判，而且一次把问题说全。** 各条约束按模型不同（时长、比例、
+        # 最少几张图），一条一条报要跑好几趟；而这些都在发请求之前就知道，
+        # 现在停比撞一个 400 便宜 —— 撞 400 的那些家里，有几家是**不报错、
+        # 自己挑一个默认值**，那才是最坏的。
+        sec = int(task.duration or 15)
+        ratio = task.ratio or "9:16"
+        if not lim:
+            # 表里没有 = 我们不知道它的约束，**不是不允许**。照发。
+            log(f"⚠️ 无限画布没有 {model} 的约束记录（这张表是 2026-09-01 实拉的，"
+                f"平台上新会比它快）—— 时长/比例/参考图张数这一趟都不校验，"
+                f"照你填的发出去。不合法的话平台会拒，那句拒绝是响的。"
+                f"要把它变成有校验的：跑一次 list_models() 看它声明的 "
+                f"capability_schema，补进 core/providers/wuxianhuabu.py 的 MODELS。")
+        bad = []
+        if lim and sec not in lim["durations"]:
+            bad.append(f"{model} 的时长只能是 {min(lim['durations'])}–"
+                       f"{max(lim['durations'])} 秒，本任务是 {sec} 秒")
+        if lim and ratio not in lim["ratios"]:
+            bad.append(f"{model} 不收 {ratio} 这个画幅，它只有 "
+                       f"{' / '.join(lim['ratios'])}")
+        # 张数上限对**表外的模型也判** —— 这几个是整家的接口上限，
+        # 不是某个模型的脾气；而超了的后果是服务商截掉多的，
+        # **截掉的正是排在后面的那几张**，画面用错参考却标成功。
+        if len(image_src) > (lim.get("max_images") or MAX_IMAGES):
+            bad.append(f"参考图 {len(image_src)} 张，超了 "
+                       f"{lim.get('max_images') or MAX_IMAGES} 张的上限")
+        if len(video_src) > (lim.get("max_videos") or MAX_VIDEOS):
+            bad.append(f"参考视频 {len(video_src)} 条，超了 "
+                       f"{lim.get('max_videos') or MAX_VIDEOS} 条")
+        if len(audio_src) > (lim.get("max_audios") or MAX_AUDIOS):
+            bad.append(f"参考音频 {len(audio_src)} 条，超了 "
+                       f"{lim.get('max_audios') or MAX_AUDIOS} 条")
+        if lim.get("min_images") and len(image_src) < lim["min_images"]:
+            bad.append(f"{model} 要求至少 {lim['min_images']} 张参考图，"
+                       f"这一条一张都没有")
+        if lim.get("max_prompt") and len(task.prompt or "") > lim["max_prompt"]:
+            bad.append(f"提示词 {len(task.prompt or '')} 字，"
+                       f"超了 {model} 的 {lim['max_prompt']} 字上限")
+        if bad:
+            raise ApiError("无限画布这一条发不出去：" + "；".join(bad)
+                           + "。**不能静默裁掉或改掉** —— 裁了参考素材画面就用错图，"
+                             "改了时长片子和提示词对不上，两种都不报错。",
+                           status=0, kind="task_fatal")
 
         images = [self._asset(r, "图片", log=log) for r in image_src]
         videos = [self._asset(r, "视频", log=log) for r in video_src]
@@ -147,11 +268,16 @@ class WuxianhuabuProvider(Provider):
             "model": model,
             "prompt": task.prompt or "",
             "seconds": sec,
-            "resolution": MODEL_RESOLUTION[model],
-            "ratio": task.ratio or "9:16",
+            "ratio": ratio,
             "generate_audio": bool(task.extra.get("generate_audio", True)),
             "watermark": bool(task.extra.get("watermark", False)),
         }
+        # 表外的模型按名字里的 720p/480p 认；认不出来**就不填这个字段**，
+        # 让平台用它自己的默认 —— 随手填一个的后果是「片子出得来、
+        # 分辨率不是你要的」，而且不报错。
+        res = lim.get("resolution") or _guess_resolution(model)
+        if res:
+            body["resolution"] = res
         if images:
             body["reference_images"] = images
         if videos:
@@ -160,8 +286,8 @@ class WuxianhuabuProvider(Provider):
             body["reference_audios"] = audios
 
         idem = str(task.extra.get("idempotency_key") or uuid.uuid4())
-        log(f"无限画布 {model}: {sec}s {body['resolution']} {body['ratio']} "
-            f"图{len(images)}/视频{len(videos)}/音频{len(audios)}")
+        log(f"无限画布 {model}: {sec}s {body.get('resolution') or '分辨率跟平台默认'} "
+            f"{body['ratio']} 图{len(images)}/视频{len(videos)}/音频{len(audios)}")
         data = self.session.request(
             "POST", "/v1/videos", json_body=body,
             headers={"Idempotency-Key": idem}, retries=2, timeout=300)

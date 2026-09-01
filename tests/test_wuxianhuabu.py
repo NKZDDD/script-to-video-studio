@@ -14,9 +14,19 @@ class WuxianhuabuTests(unittest.TestCase):
         self.assertNotEqual(resolve_id("videogogo"), "ake")
         self.assertEqual(resolve_id("videogogo"), "wuxianhuabu")
 
-    def test_two_models_and_mixed_reference_limits(self):
+    def test_models_and_mixed_reference_limits(self):
+        """清单不写死条数。
+
+        原来这条断言 `models == ["seedance-2.5-hf-720p", "seedance-2.5-hf"]` ——
+        那是照文档写的两个，而 2026-09-01 实拉 `/v1/models` 是**五个**。
+        把条数钉死等于「平台上新，测试红，然后人去改测试」，
+        而该改的是清单（逐模型约束见 tests/test_wuxianhuabu_models.py）。
+        这里只钉「文档里那两个还在」和整家的接口上限。
+        """
         cap = WuxianhuabuProvider().capabilities()["video"]
-        self.assertEqual(cap["models"], ["seedance-2.5-hf-720p", "seedance-2.5-hf"])
+        for m in ("seedance-2.5-hf-720p", "seedance-2.5-hf"):
+            self.assertIn(m, cap["models"])
+        self.assertEqual(cap["default_model"], "seedance-2.5-hf-720p")
         self.assertEqual(cap["durations"], list(range(4, 31)))
         self.assertEqual(cap["max_refs"], MAX_IMAGES)
         self.assertEqual(cap["max_video_refs"], MAX_VIDEOS)
