@@ -166,7 +166,8 @@ class WuxianhuabuModelTests(unittest.TestCase):
                       duration=10, ratio="9:16", model="全新的模型")
         with self.assertRaises(ApiError) as c:
             p.generate_video(t, "out.mp4", log=lambda *a: None)
-        self.assertIn("31 张", str(c.exception))
+        self.assertIn("31 条", str(c.exception))
+        self.assertIn("这个模型没单独声明", str(c.exception))
 
     def _sent(self, **kw):
         from unittest import mock
@@ -233,6 +234,71 @@ class WuxianhuabuModelTests(unittest.TestCase):
         self.assertIn("datalist", blk)
         # 这家没声明 resolutions 时不摆空框 —— 空框比没有更糟
         self.assertIn(": ''", blk)
+
+    def _run(self, model, n_img=1, n_vid=0, n_aud=0, duration=None):
+        from unittest import mock
+        lim = MODELS.get(model) or {}
+        d = duration if duration is not None else (
+            lim["durations"][0] if lim.get("durations") else 10)
+        p = WuxianhuabuProvider(api_key="k")
+        t = VideoTask(
+            prompt="正文", duration=d, ratio="9:16", model=model,
+            refs=[f"https://x/{i}.png" for i in range(n_img)],
+            extra={"video_refs": [f"https://x/{i}.mp4" for i in range(n_vid)],
+                   "audio_refs": [f"https://x/{i}.wav" for i in range(n_aud)]})
+
+        def fake(self, m, path, **kw):
+            return ({"asset_id": "a"} if path == "/v1/assets"
+                    else {"id": "t1", "video_url": "https://cdn/out.mp4"})
+
+        with mock.patch.object(type(p.session), "request", fake),              mock.patch.object(type(p.session), "save_item", lambda *a, **k: None):
+            p.generate_video(t, "o.mp4", log=lambda *a: None)
+
+    def test_the_total_asset_cap_is_checked(self):
+        """★ 三类**加起来**还有一个总数，它声明了而我们一直没判。
+
+        图 30 + 视频 10 + 音频 10 各自都不超，加起来正好 50 —— 再多一条，
+        分类那三道都放行，只有总数这一道拦得住。
+        """
+        self.assertIn("max_assets", MODELS["seedance-2.5gs 720p"])
+        self._run("seedance-2.5gs 720p", 30, 10, 10)          # 正好 50，放行
+        with self.assertRaises(ApiError) as c:
+            self._run("seedance-2.5gs 720p", 30, 10, 11)
+        self.assertIn("一共 51", str(c.exception))
+        self.assertIn("总数上限 50", str(c.exception))
+
+    def test_undeclared_limits_are_not_invented(self):
+        """★ 它没声明的数，表里就不许有。
+
+        第一版我给全部五个模型都填了 30/10/10 —— 而实际只有
+        `seedance-2.5gs 720p` 声明了这三个数，另外四个只声明了
+        `max_reference_assets: 50`，还有两个连这个都没有。
+        填一个「看起来合理」的数和照文档抄没有区别：它会显示在页面上、
+        会拿去拦人，而没有任何东西背书。
+        """
+        declared_per_type = {"seedance-2.5gs 720p"}
+        for m, v in MODELS.items():
+            for k in ("max_images", "max_videos", "max_audios",
+                      "min_images", "max_prompt"):
+                if m not in declared_per_type:
+                    self.assertNotIn(k, v, f"{m} 的 {k} 它没声明，不该出现在表里")
+        # 只有这两个模型声明了总数
+        self.assertEqual(
+            {m for m, v in MODELS.items() if "max_assets" in v},
+            {"seedance-2.5gs 720p", "seedance-2.0-r-720P", "seedance-2.0-F-r-720P"})
+
+    def test_the_error_says_where_the_number_came_from(self):
+        """★ 报错要分清这个上限是**模型声明的**还是**整家的兜底**。
+
+        前者改不了（只能换模型），后者可能只是我们没拿到它的声明 ——
+        指错了人会去做一件解决不了问题的事。
+        """
+        with self.assertRaises(ApiError) as c:
+            self._run("seedance-2.5gs 720p", n_img=31)
+        self.assertIn("seedance-2.5gs 720p 声明的", str(c.exception))
+        with self.assertRaises(ApiError) as c:
+            self._run("seedance-2.0-r-720P", n_img=31)
+        self.assertIn("这个模型没单独声明", str(c.exception))
 
     def test_the_unverified_resolution_is_marked_as_such(self):
         """`seedance-2.5-hf` 自己什么都没声明 —— 480p 是文档里写的。

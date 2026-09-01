@@ -42,31 +42,36 @@ from .base import Provider, VideoTask
 _R4 = ["16:9", "9:16", "4:3", "1:1"]                    # 2.5-hf-720p 只有这四个
 _R5 = ["16:9", "9:16", "1:1", "4:3", "3:4"]             # 其余四个多一个 3:4
 
+# **每一条只写它自己声明过的。** 没声明的键就不放进来 ——
+# 放一个「看起来合理」的数进去，和照文档抄没有区别：它会显示在页面上、
+# 会拿去拦人，而没有任何东西背书。
+#
+# 第一版我就犯了这个：给全部五个模型都填了 30/10/10，
+# 而实际只有 `seedance-2.5gs 720p` 声明了这三个数，另外四个只声明了
+# `max_reference_assets: 50`（三类**加起来**的总数），
+# 还有两个连这个都没有。判张数时退回整家的上限（MAX_IMAGES 那几个），
+# 报错里会说清那是「整家的，这个模型没单独声明」。
 MODELS = {
     "seedance-2.5-hf-720p": {
         "resolution": "720p", "ratios": _R4, "durations": list(range(4, 31)),
-        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 0,
-        "max_prompt": 0,
     },
     "seedance-2.5gs 720p": {                            # 名字里**有空格**，照它给的原样
         "resolution": "720p", "ratios": _R5, "durations": list(range(15, 31)),
-        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 1,
-        "max_prompt": 8000,
+        "max_images": 30, "max_videos": 10, "max_audios": 10,
+        "max_assets": 50, "min_images": 1, "max_prompt": 8000,
     },
     "seedance-2.0-r-720P": {
         "resolution": "720p", "ratios": _R5, "durations": list(range(4, 16)),
-        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 0,
-        "max_prompt": 0,
+        "max_assets": 50,
     },
     "seedance-2.0-F-r-720P": {
         "resolution": "720p", "ratios": _R5, "durations": list(range(4, 16)),
-        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 0,
-        "max_prompt": 0,
+        "max_assets": 50,
     },
-    "seedance-2.5-hf": {                                # 它自己什么都没声明
+    # 它的 capability_schema 里**只有一个 notes 网址**。480p 和比例是文档里
+    # 写的，实拉没有背书 —— 标出来，别让「我们写的」看起来像「它说的」。
+    "seedance-2.5-hf": {
         "resolution": "480p", "ratios": _R5, "durations": list(range(4, 31)),
-        "max_images": 30, "max_videos": 10, "max_audios": 10, "min_images": 0,
-        "max_prompt": 0,
     },
 }
 VIDEO_MODELS = list(MODELS)
@@ -149,9 +154,11 @@ class WuxianhuabuProvider(Provider):
                     m: {"resolutions": [v["resolution"]],
                         "ratios": v["ratios"],
                         "durations": v["durations"],
-                        "max_refs": v["max_images"],
-                        "max_video_refs": v["max_videos"],
-                        "max_audio_refs": v["max_audios"]}
+                        # 没单独声明的退回整家的上限 —— 页面要有个数可显示，
+                        # 但**判的时候**会说清它是整家的（见 generate_video）。
+                        "max_refs": v.get("max_images", MAX_IMAGES),
+                        "max_video_refs": v.get("max_videos", MAX_VIDEOS),
+                        "max_audio_refs": v.get("max_audios", MAX_AUDIOS)}
                     for m, v in MODELS.items()
                 },
                 "notes": "模型清单和逐模型约束是 2026-09-01 从 /v1/models 实拉的。"
@@ -237,18 +244,29 @@ class WuxianhuabuProvider(Provider):
         if lim and ratio not in lim["ratios"]:
             bad.append(f"{model} 不收 {ratio} 这个画幅，它只有 "
                        f"{' / '.join(lim['ratios'])}")
-        # 张数上限对**表外的模型也判** —— 这几个是整家的接口上限，
-        # 不是某个模型的脾气；而超了的后果是服务商截掉多的，
-        # **截掉的正是排在后面的那几张**，画面用错参考却标成功。
-        if len(image_src) > (lim.get("max_images") or MAX_IMAGES):
-            bad.append(f"参考图 {len(image_src)} 张，超了 "
-                       f"{lim.get('max_images') or MAX_IMAGES} 张的上限")
-        if len(video_src) > (lim.get("max_videos") or MAX_VIDEOS):
-            bad.append(f"参考视频 {len(video_src)} 条，超了 "
-                       f"{lim.get('max_videos') or MAX_VIDEOS} 条")
-        if len(audio_src) > (lim.get("max_audios") or MAX_AUDIOS):
-            bad.append(f"参考音频 {len(audio_src)} 条，超了 "
-                       f"{lim.get('max_audios') or MAX_AUDIOS} 条")
+        # 张数上限**表外的模型也判** —— 这几个是整家的接口上限，不是某个
+        # 模型的脾气；而超了的后果是服务商截掉多的，**截掉的正是排在后面的
+        # 那几张**，画面用错参考却标成功。
+        #
+        # 报错里要分清这个数是**这个模型声明的**还是**整家的兜底** ——
+        # 前者改不了（换模型），后者可能只是我们没拿到它的声明。
+        for label, n, key, fam in (("参考图", len(image_src), "max_images", MAX_IMAGES),
+                                   ("参考视频", len(video_src), "max_videos", MAX_VIDEOS),
+                                   ("参考音频", len(audio_src), "max_audios", MAX_AUDIOS)):
+            cap = lim.get(key)
+            src = f"{model} 声明的" if cap is not None else "整家的上限（这个模型没单独声明）"
+            cap = cap if cap is not None else fam
+            if n > cap:
+                bad.append(f"{label} {n} 条，超了 {cap} 条 —— {src}")
+        # **三类加起来还有一个总数。** 这一条它声明了而我们一直没判：
+        # 图 30 + 视频 10 + 音频 10 各自都不超，加起来 50 也可能正好撞上。
+        total_cap = lim.get("max_assets")
+        total = len(image_src) + len(video_src) + len(audio_src)
+        if total_cap and total > total_cap:
+            bad.append(f"参考素材一共 {total} 条（图 {len(image_src)} + "
+                       f"视频 {len(video_src)} + 音频 {len(audio_src)}），"
+                       f"超了 {model} 的总数上限 {total_cap} ——"
+                       f"**分类各自都没超，是加起来超的**")
         if lim.get("min_images") and len(image_src) < lim["min_images"]:
             bad.append(f"{model} 要求至少 {lim['min_images']} 张参考图，"
                        f"这一条一张都没有")
