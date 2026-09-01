@@ -2596,7 +2596,13 @@ async function watchStage(id) {
 }
 
 // ---------- 生产
-const GEN_KINDS = [['asset','资产图','image'], ['storyboard','故事板','image'], ['video','分段视频','video']];
+// 四类，不是三类。**场景状态图以前没有自己这一行** —— 它被错分进
+// asset_tasks，于是明细页把它列在「资产图」下面，而这张表里根本没有它，
+// 按集也就选不到（实遇 2026-09-01）。第四项是 task_key，跑的时候按它派。
+const GEN_KINDS = [['asset','资产图','image','asset_tasks'],
+                   ['scstate','场景状态图','image','scstate_tasks'],
+                   ['storyboard','故事板','image','storyboard_tasks'],
+                   ['video','分段视频','video','video_tasks']];
 // cur = 要预选的那家。**不给的话浏览器选列表第一个** —— 那就是「每次都默认」
 // 的来处：设置里把资产图的首选排成超模，生产页照样显示列表里排第一的那家，
 // 点「开始」就用错了服务商，而且不报错（那家也能出图，只是不是你排的那家）。
@@ -2639,8 +2645,11 @@ function renderGen() {
   renderGenEp();
   const multi = (EPS.episodes || []).length > 1;
   // 资产图是全剧共享的（同一个角色跨集就一张，不按集出），所以不受选集影响
-  $('#genRows').innerHTML = GEN_KINDS.map(([k, label, cap]) => {
+  $('#genRows').innerHTML = GEN_KINDS.map(([k, label, cap, tkey]) => {
     const s = genProgress(k);
+    // 这一类一条任务都没有时**整行不摆**（比如通用十二环节没有场景状态图）。
+    // 摆一行 0/0 加一个点不动的「开始」，只会让人以为是坏的。
+    if (!((GEN_SUM[k] || {}).total)) return '';
     const scope = !multi ? '' : (k === 'asset'
       ? '<span class="tag" title="同一个角色跨集只出一张图，跨集人脸才一致">全剧共享</span>'
       : `<span class="tag">${genEp() || '全部集'}</span>`);
@@ -2652,6 +2661,7 @@ function renderGen() {
     const why = (genEp() && k !== 'asset' && whole)
       ? `${genEp()} 这一集没有「${label}」的任务（整个项目共 ${whole} 条）`
       : ({asset: '环节5 还没编出资产生产提示词',
+          scstate: '第11环节还没编出场景状态提示词',
           storyboard: '环节8 还没编出故事板提示词',
           video: '环节8 还没编出视频提示词'}[k] || '前置环节还没产出');
     const empty = !s.total;
@@ -2659,7 +2669,8 @@ function renderGen() {
     // **按「设置 → 出图出片优先级」的首选预选。** 一键跑到底一直是按那条链跑的，
     // 生产页却不看它 —— 同一个项目两条入口用不同的服务商，而两边都不报错。
     const pick = ((BOOT.config.chains || {})[k] || [])[0] || {};
-    return `<tr data-k="${k}" data-chain-prov="${esc(pick.provider || '')}"
+    return `<tr data-k="${k}" data-tkey="${esc(tkey)}"
+                data-chain-prov="${esc(pick.provider || '')}"
                 data-chain-model="${esc(pick.model || '')}"${
                 empty ? ' style="opacity:.62"' : ''}>
       <td>${label} ${scope}</td>
@@ -2766,7 +2777,7 @@ function renderGen() {
       // 再塞进 VideoTask.resolution）—— 和比例/时长不是同一条，
       // 别混进 params_override，混了后端不认。
       startGen(kind, sel.value, msel.value, +tr.querySelector('.c-in').value, failedOnly, ov,
-               '', null, (res && res.value) || '');
+               tr.dataset.tkey || '', null, (res && res.value) || '');
     };
     tr.querySelector('[data-run]').onclick = () => go(false);
     tr.querySelector('[data-retry]').onclick = () => go(true);
@@ -2806,8 +2817,14 @@ $('#genEp').onchange = () => {
 // 「生产任务」那张表里某一类当前选的服务商 / 模型 / 并发 / 参数覆盖。
 // 明细页那些「跑这一组」「跑选中的」都用它 —— 免得同一个项目两个入口
 // 用不同的服务商（那种不一致两边都不报错，只是出来的东西不一样）。
-function genSettings(kind) {
-  const tr = document.querySelector(`#genRows tr[data-k="${kind}"]`);
+// **优先按 task_key 找那一行**，找不到再按 kind。
+// 场景状态图和故事板的 kind 都是 storyboard（同一个 worker）——
+// 只按 kind 找会拿到故事板那一行的服务商和模型，而人在场景状态图那一行
+// 选的是另一家。两个入口用不同的服务商，**两边都不报错**，
+// 只是出来的东西不一样。
+function genSettings(kind, taskKey) {
+  const tr = (taskKey && document.querySelector(`#genRows tr[data-tkey="${taskKey}"]`))
+          || document.querySelector(`#genRows tr[data-k="${kind}"]`);
   if (!tr) return null;
   const ov = {};
   const size = tr.querySelector('.i-size'), ratio = tr.querySelector('.v-ratio'),
@@ -3806,8 +3823,8 @@ function tkPickChanged() {
     : `已勾 ${n} 条` + (groups.length > 1 ? `（跨 ${groups.length} 类，会分批跑）` : '');
 }
 async function runTaskKey(taskKey, kind, only) {
-  const s = genSettings(kind);
-  if (!s) return alert(`上面「生产任务」表里没有「${kind}」这一行，读不到服务商设置`);
+  const s = genSettings(kind, taskKey);
+  if (!s) return alert(`上面「生产任务」表里没有这一类（${taskKey || kind}），读不到服务商设置`);
   await startGen(kind, s.provider, s.model, s.concurrency, false, s.ov,
                  taskKey, only, s.resolution);
 }

@@ -807,7 +807,7 @@ def build(units: list, size: str = "", ratio: str = "",
     duration = int(p.get("seg_duration") or 0) or duration
     units = units_of(units)        # 申报头不是任务，混进去就是一条永远做不完的活
     where = {u["stem"]: out_path(u) for u in units if u["stem"]}
-    assets, storyboards, videos, texts = [], [], [], {}
+    assets, scstates, storyboards, videos, texts = [], [], [], [], {}
     skipped = []
     for u in units:
         if u["kind"] not in ("image", "video"):
@@ -862,7 +862,23 @@ def build(units: list, size: str = "", ratio: str = "",
             videos.append(t)
         else:
             t["params"] = {"size": u["ratio"] or size or "9:16"}
-            (storyboards if rel.startswith("04_故事板") else assets).append(t)
+            # **按落点分三路，不是「不是故事板就算资产」。**
+            #
+            # 原来只判了一个 `04_故事板`，其余全进 asset_tasks —— 于是
+            # **场景状态图被当成了资产图**（`out_path` 明明已经把它指到
+            # `03b_场景状态图/`）。一串静默后果：
+            #   · 明细页「资产图（第5环节）」里混着 SCSTATE 条目
+            #   · 「场景状态图（第11环节）」永远 0/0，看得见、跑不了
+            #   · **资产按集过滤失效** —— 资产那一类是全剧共享（同一个角色
+            #     跨集只出一张），所以页面故意不按集筛它；而混进来的场景状态图
+            #     是带集号的，于是选了 EP01，别的集的场景状态图照样跟着跑
+            #   · relay 的批次也错：p1（资产）里混着场景状态，而 p2 永远是空的
+            if rel.startswith("04_故事板"):
+                storyboards.append(t)
+            elif rel.startswith("03b_场景状态图"):
+                scstates.append(t)
+            else:
+                assets.append(t)
     return {"skipped": skipped, "params": {"image_size": size, "ratio": ratio,
                                           "seg_duration": duration},
             # 体系写真值。原来写死 "material"，虽然眼下没人读这个字段
@@ -870,6 +886,6 @@ def build(units: list, size: str = "", ratio: str = "",
             # 但写一个两套都不认的值，第一个来读它的人就会挑错。
             "tasks": {"system": system or "material",
                       "from_material": True, "asset_tasks": assets,
-                      "scstate_tasks": [], "storyboard_tasks": storyboards,
+                      "scstate_tasks": scstates, "storyboard_tasks": storyboards,
                       "video_tasks": videos},
             "prompts": texts}

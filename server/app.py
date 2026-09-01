@@ -931,7 +931,12 @@ def api_get(path: str, q: dict) -> dict:
         pj = Project(q["root"][0])
         tasks = pj.tasks()
         done, by_ep = {}, {}
-        for kind, key in (("asset_tasks", "asset"), ("storyboard_tasks", "storyboard"),
+        # **场景状态图要单列一档。** 原来这里只有三类，而 tasks.json 里有四类
+        # —— 于是页面上那一行的进度只能靠别处凑，或者干脆没有这一行。
+        # v34 才有这一层（通用十二环节没有），没有就是 0 条，不占地方。
+        for kind, key in (("asset_tasks", "asset"),
+                          ("scstate_tasks", "scstate"),
+                          ("storyboard_tasks", "storyboard"),
                           ("video_tasks", "video")):
             items = tasks.get(kind, [])
             ok = {t["key"] for t in items
@@ -945,6 +950,9 @@ def api_get(path: str, q: dict) -> dict:
             # 一次给全，切集就不用再往返一次 —— 40 集 × 3 类也只是几十个数。
             # 资产图**不进这里**：它不带集号（全剧共享，同一个角色跨集只出
             # 一张），按集分只会分出个空的，然后页面显示 0/0。
+            # 场景状态图**要进** —— 它是带集号的（`SCSTATE_EP01_SEG01_...`）。
+            # 原来它被错分进 asset_tasks，于是跟着资产一起被当成「全剧共享」
+            # 不按集筛：选了 EP01，别的集的场景状态图照样跑（实遇 2026-09-01）。
             if key == "asset":
                 continue
             for it in items:
