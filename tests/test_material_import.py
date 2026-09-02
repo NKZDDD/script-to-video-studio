@@ -360,14 +360,48 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(len(built["tasks"]["video_tasks"][0]
                              ["storyboard_refs"]), 2)
 
-    def test_the_spec_says_the_real_limits(self):
-        from core import matspec as S
-        self.assertIn("出图一次最多 8 张", S.render({"image": 8, "video": 9}))
+    def test_the_spec_states_no_reference_count_limit(self):
+        """★ 契约里**不写**参考图张数上限。
 
-    def test_it_does_not_invent_a_limit(self):
-        """★ 没配服务商时给个数字就是在猜 —— 而 codex 会照着那个数字产。"""
+        用户原话（2026-09-02）：「希望你删掉这个限制，skill 那边自己会做，
+        所以你这边只需要删除」。
+
+        一段配几张是 codex 按剧情定的，它的 skill 知道目标模型的容量。
+        我们再写一个数进去，除了多一处会过期的事实（模型换一个上限就变，
+        逐模型还各不相同），还会反过来压它 —— 鹤整家声明 9、而 2.5 系列
+        每个模型声明 30，按整家那个数写进契约等于让它少产 21 张的余量。
+
+        **传了 limits 也不许写出来** —— 那是这条最要紧的地方：调用方还在传
+        （导入时那道检查还要用），一不小心又渲染进去就回到老样子了。
+        """
         from core import matspec as S
-        self.assertIn("给不出具体数字", S.render(None))
+        for arg in (None, {"image": 8, "video": 9}):
+            txt = S.render(arg)
+            for s in ("一次最多", "本项目当前的上限", "张数不超上限",
+                      "给不出具体数字"):
+                self.assertNotIn(s, txt, f"limits={arg}: 契约里还写着「{s}」")
+            self.assertIn("参考图张数不写在这儿", txt)
+
+    def test_the_import_check_is_still_there(self):
+        """★ 删的是「告诉 codex 一个数」，**不是「不再拦超限的材料」**。
+
+        两件事分开：契约不写那个数（skill 自己控），而导入时那道检查留着 ——
+        真超了的话服务商会截掉多的，**而截掉的正是排在后面的那几张**，
+        画面用错参考、任务照样标成功。有几家是直接切片（chaomo / haomanju /
+        kunji / lingganya / hvtald / aicopy 都是 `refs[:N]`），一声不出。
+        """
+        import io as _io
+        import os as _os
+        src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.abspath(__file__))), "core", "matimport.py"),
+            encoding="utf-8").read()
+        self.assertIn("REF_OVER_LIMIT", src)
+        # 服务端也还在算这个数喂给它
+        app = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.abspath(__file__))), "server", "app.py"),
+            encoding="utf-8").read()
+        self.assertIn("def _material_limits", app)
+        self.assertIn("_mat.audit(units, limits)", app)
 
     def test_the_spec_lists_every_audit_rule(self):
         """★ 让它**产之前**就知道会被怎么查 —— 事后才说等于白产一遍。"""
