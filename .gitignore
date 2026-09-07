@@ -1,5 +1,10 @@
 # 密钥与本地配置（绝不提交）
 config.json
+# 外挂服务商目录。这台机器上数据目录**就是仓库目录**（config.json 在这儿，
+# 走的是 paths.py 的老装法分支），所以往 providers/ 丢一个插件就会污染
+# git status —— 和 config.json 同一类，都是运行时的东西，不是源码。
+# 内置服务商在 core/providers/，不受这条影响。
+providers/
 legacy/config.legacy.json
 config.local.*
 *.key
