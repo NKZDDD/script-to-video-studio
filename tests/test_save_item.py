@@ -159,5 +159,86 @@ class PartialDownloadTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.dest + ".part"), "临时文件没清掉")
 
 
+class AuthFallbackTests(unittest.TestCase):
+    """鉴权头要**两个方向都能回退**。
+
+    实遇 2026-09-07（云会画 ai.yunhuiart.cn）：`/v1/videos/{id}/content`
+    302 到一个**预签名地址** —— query 串里就是凭证。跳转目标同主机时
+    requests 不会替我们摘掉 Authorization（只有跨主机才摘），于是存储那边
+    拿这个头去验、然后拒掉：
+
+        502 {"code":"artifact_request_rejected",
+             "message":"Artifact redirect was rejected"}
+
+    而那会儿任务已经 completed、**已经计费** —— 取不回来是最亏的一种失败。
+
+    原来这里只有「没带 → 带上」一个方向，这个方向缺着。
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.dest = os.path.join(self.d, "SEG01.mp4")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _run(self, url, judge):
+        """judge(headers) -> status_code。记下每次带的头，返回它判的状态码。"""
+        import core.apiutil as A
+        seen = []
+
+        class Resp:
+            def __init__(self, code):
+                self.status_code = code
+                self.headers = {}
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise AssertionError(f"HTTP {self.status_code}")
+
+            def iter_content(self, chunk_size=0):
+                yield b"v" * (MIN_BYTES * 4)
+
+            def close(self):
+                pass
+
+        def fake_get(u, headers=None, **kw):
+            seen.append(headers)
+            return Resp(judge(headers))
+
+        old = A.requests.get
+        A.requests.get = fake_get
+        try:
+            A.HttpSession("k", "https://x").save_item(url, self.dest)
+        finally:
+            A.requests.get = old
+        return seen
+
+    def test_signed_url_on_our_own_host_retries_without_auth(self):
+        """同主机的签名地址：第一次带 Bearer 被拒，第二次不带就过。"""
+        seen = self._run(
+            "https://x/v1/videos/t1/content",
+            lambda h: 502 if (h or {}).get("Authorization") else 200)
+        self.assertEqual(len(seen), 2, f"应该回退一次，实际发了 {len(seen)} 次")
+        self.assertIn("Authorization", seen[0], "第一次本该带鉴权（是本站地址）")
+        self.assertNotIn("Authorization", seen[1] or {}, "第二次不该再带鉴权")
+        self.assertTrue(os.path.exists(self.dest), "回退之后没落盘")
+
+    def test_a_foreign_url_that_needs_auth_still_gets_it(self):
+        """反方向不能被弄坏：外站地址第一次不带，被拒了要带上再试。"""
+        seen = self._run(
+            "https://cdn.example.com/a.mp4",
+            lambda h: 200 if (h or {}).get("Authorization") else 401)
+        self.assertEqual(len(seen), 2)
+        self.assertIsNone(seen[0], "外站地址第一次本该不带头")
+        self.assertIn("Authorization", seen[1], "被拒之后本该带上鉴权重试")
+        self.assertTrue(os.path.exists(self.dest))
+
+    def test_it_does_not_send_a_second_request_when_the_first_works(self):
+        """能过的时候别多发一次 —— 视频几十 MB，白下一遍不是小事。"""
+        seen = self._run("https://x/v1/videos/t1/content", lambda h: 200)
+        self.assertEqual(len(seen), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -909,8 +909,27 @@ class HttpSession:
             r = requests.get(item, headers=headers, timeout=self.timeout,
                              proxies=self._proxies(), stream=True)
             if r.status_code >= 400 and headers is None:
+                r.close()
                 r = requests.get(item, headers=self._headers(), timeout=self.timeout,
                                  proxies=self._proxies(), stream=True)
+            elif r.status_code >= 400 and headers is not None:
+                # **反方向也要试一次：带了鉴权反而被拒。**
+                #
+                # 原来只有「没带 → 带上」这一个方向。可这条路上最常见的地址是
+                # `/v1/videos/{id}/content` 302 过去的**预签名地址** —— 它的
+                # query 串里就是凭证，再带一个 Authorization 头过去，存储那边
+                # 会拿头去验、然后拒掉。跳转目标同主机时 requests 不会替我们摘掉
+                # 这个头（只有跨主机才摘），于是同主机的签名地址必挂。
+                #
+                # 实遇 2026-09-07：云会画（ai.yunhuiart.cn）回
+                #   502 {"code":"artifact_request_rejected",
+                #        "message":"Artifact redirect was rejected"}
+                # 而任务已经 completed、已经计费 —— 取不回来最亏。
+                r.close()
+                r = requests.get(item,
+                                 headers={"User-Agent": "ScriptToVideoRunner/2.0"},
+                                 timeout=self.timeout, proxies=self._proxies(),
+                                 stream=True)
             r.raise_for_status()
             # 先写 .part 再改名：下到一半断了（视频几十 MB，断过），
             # 直接写 dest 会留下一个**够大但不完整**的文件 ——
