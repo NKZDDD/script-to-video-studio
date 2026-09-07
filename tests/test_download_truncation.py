@@ -75,6 +75,11 @@ def _save(body: bytes, declared, name="x.mp4"):
         sess.base_url = "https://cdn.example"
         sess.timeout = 30
         sess._headers = lambda: {}
+        # 下载这一步用的是 `_download_headers()`（不带 JSON 的 Accept/Content-Type，
+        # 见 apiutil 里那段注释）。这个假会话没走 __init__，身上没有 api_key /
+        # auth_style，所以真调它会 AttributeError —— 而这条用例要测的是
+        # 「少给一半」，不是请求头怎么拼。桩掉。
+        sess._download_headers = lambda: {}
         sess._proxies = lambda: None
         try:
             A.HttpSession._save_once(sess, "https://cdn.example/a.mp4", dest)

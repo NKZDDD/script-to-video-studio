@@ -767,6 +767,26 @@ class HttpSession:
         # 服务商在 __init__ 里改这个属性就行，默认不动。
         self.auth_style = "bearer"
 
+    def _download_headers(self) -> dict:
+        """**取成品用的头，和调 JSON 接口的头不是同一份。**
+
+        `_headers()` 里有 `Accept: application/json` 和 `Content-Type: application/json`。
+        拿它去 GET 一个视频/图片是自相矛盾的：一边说「我只收 JSON」，
+        一边等着对方回二进制；而 GET 带 Content-Type 本身就不合常理，
+        网关和 WAF 有拒的。
+
+        实遇 2026-09-07（云会画 ai.yunhuiart.cn）：`/v1/videos/{id}/content`
+        用 JSON 那份头去请求，回 502
+        `{"code":"artifact_request_rejected","message":"Artifact redirect was rejected"}`。
+        而它文档里的官方示例只带一个 Authorization —— 那份能用。
+
+        鉴权照旧带（很多家的 /content 是要鉴权的代理，比如小霸龙）。
+        """
+        auth = ({"X-API-Key": self.api_key} if self.auth_style == "x-api-key"
+                else {"Authorization": f"Bearer {self.api_key}"})
+        return {**auth, "Accept": "*/*",
+                "User-Agent": "ScriptToVideoRunner/2.0"}
+
     def _headers(self, multipart: bool = False) -> dict:
         auth = ({"X-API-Key": self.api_key} if self.auth_style == "x-api-key"
                 else {"Authorization": f"Bearer {self.api_key}"})
@@ -905,26 +925,28 @@ class HttpSession:
                 f.write(raw)
         elif item.startswith("http"):
             src = item
-            headers = self._headers() if item.startswith(self.base_url) else None
+            # 下载用 `_download_headers()`，**不是** `_headers()` ——
+            # 后者带 JSON 的 Accept/Content-Type，对二进制下载是自相矛盾的，
+            # 有网关会直接拒（见 _download_headers 的注释）。
+            headers = self._download_headers() if item.startswith(self.base_url) else None
             r = requests.get(item, headers=headers, timeout=self.timeout,
                              proxies=self._proxies(), stream=True)
             if r.status_code >= 400 and headers is None:
                 r.close()
-                r = requests.get(item, headers=self._headers(), timeout=self.timeout,
+                r = requests.get(item, headers=self._download_headers(),
+                                 timeout=self.timeout,
                                  proxies=self._proxies(), stream=True)
             elif r.status_code >= 400 and headers is not None:
-                # **反方向也要试一次：带了鉴权反而被拒。**
+                # 反方向也试一次：**带了鉴权反而被拒**。
                 #
-                # 原来只有「没带 → 带上」这一个方向。可这条路上最常见的地址是
-                # `/v1/videos/{id}/content` 302 过去的**预签名地址** —— 它的
-                # query 串里就是凭证，再带一个 Authorization 头过去，存储那边
-                # 会拿头去验、然后拒掉。跳转目标同主机时 requests 不会替我们摘掉
-                # 这个头（只有跨主机才摘），于是同主机的签名地址必挂。
+                # 预签名地址的 query 串里就是凭证，有些存储会拿 Authorization
+                # 头去验然后拒掉；而跳转目标同主机时 requests 不替我们摘掉这个头
+                # （只有跨主机才摘）。
                 #
-                # 实遇 2026-09-07：云会画（ai.yunhuiart.cn）回
-                #   502 {"code":"artifact_request_rejected",
-                #        "message":"Artifact redirect was rejected"}
-                # 而任务已经 completed、已经计费 —— 取不回来最亏。
+                # 云会画那次 502 的主因更可能是 JSON 头（它文档的官方示例
+                # 带着 Authorization 跟随 302 是能用的），已经在上面修掉了。
+                # 这一支留着是**便宜的保险**：只在已经 4xx/5xx 之后多发一次，
+                # 而缺了它的代价是「片子已生成已计费却取不回来」。
                 r.close()
                 r = requests.get(item,
                                  headers={"User-Agent": "ScriptToVideoRunner/2.0"},

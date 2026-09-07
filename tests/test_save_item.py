@@ -239,6 +239,26 @@ class AuthFallbackTests(unittest.TestCase):
         seen = self._run("https://x/v1/videos/t1/content", lambda h: 200)
         self.assertEqual(len(seen), 1)
 
+    def test_download_does_not_send_the_json_headers(self):
+        """**下载不是 JSON 调用，不该带 JSON 的头。**
+
+        `_headers()` 里有 `Accept: application/json` 和
+        `Content-Type: application/json`。拿它去 GET 一个视频是自相矛盾的
+        （一边说只收 JSON，一边等二进制），而 GET 带 Content-Type 本身就不合
+        常理，网关有拒的。
+
+        实遇 2026-09-07（云绘 AI）：`/v1/videos/{id}/content` 用 JSON 那份头
+        请求，回 502 artifact_request_rejected「Artifact redirect was rejected」；
+        而它文档的官方示例只带一个 Authorization，那样能用。
+        那会儿任务已经 completed、**已经计费** —— 取不回来是最亏的一种失败。
+        """
+        seen = self._run("https://x/v1/videos/t1/content", lambda h: 200)
+        h = seen[0] or {}
+        self.assertIn("Authorization", h, "本站地址还是要带鉴权（/content 常是要鉴权的代理）")
+        self.assertNotIn("Content-Type", h, "下载带 Content-Type: 有网关会拒")
+        self.assertNotEqual(h.get("Accept"), "application/json",
+                            "下载声明只收 JSON，那对方回二进制算什么")
+
 
 if __name__ == "__main__":
     unittest.main()
