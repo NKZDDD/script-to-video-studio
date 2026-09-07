@@ -40,8 +40,19 @@ class BuiltinOrderTests(unittest.TestCase):
         self.assertFalse(ghosts, f"_BUILTIN_ORDER 里这几家没有对应文件：{ghosts}")
 
     def test_the_registry_agrees_with_the_files(self):
-        """每个模块都真的注册上了 —— 有文件但没注册也是静默少一家。"""
-        self.assertEqual(set(P.REGISTRY), _module_names())
+        """每个内置模块都真的注册上了 —— 有文件但没注册也是静默少一家。
+
+        **只比内置那部分。** 原来这里拿整个 REGISTRY 去比 core/providers/ 下的
+        文件，而 REGISTRY 里还有外挂（数据目录 providers/ 里的 .py）——
+        于是**装任何一个外挂插件，这条就变红**。而外挂是这个项目明确支持、
+        README 里写着「丢一个 .py 进去就多一家，不用改程序」的功能。
+
+        用 SOURCES 分开两者（`status()` 判断 builtin 也是用它），
+        这样「内置文件没注册上」照样拦得住，装插件不再误伤。
+        实遇 2026-09-07：装云会画插件之后全量测试红了一条。
+        """
+        builtin = {pid for pid in P.REGISTRY if P.SOURCES.get(pid) == "内置"}
+        self.assertEqual(builtin, _module_names())
 
 
 if __name__ == "__main__":
