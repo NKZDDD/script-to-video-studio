@@ -3,8 +3,14 @@ config.json
 # 外挂服务商目录。这台机器上数据目录**就是仓库目录**（config.json 在这儿，
 # 走的是 paths.py 的老装法分支），所以往 providers/ 丢一个插件就会污染
 # git status —— 和 config.json 同一类，都是运行时的东西，不是源码。
-# 内置服务商在 core/providers/，不受这条影响。
-providers/
+#
+# ⚠ **必须带开头那个斜杠。** 不带的话 `providers/` 匹配**任何层级**叫这个名字
+# 的目录，`core/providers/`（内置服务商）也被罩住 —— 已跟踪的 19 个文件不受
+# 影响（gitignore 只管未跟踪的），但**以后新加的内置服务商会静默不进仓库**：
+# `git add` 被拒、`git status` 里看不见，本机跑得好好的，别人 clone 下来少一家。
+# 实遇 2026-09-08：云绘从插件转内置时 `git add` 被拒才发现，
+# 而这行注释当时写的正是「内置服务商在 core/providers/，不受这条影响」。
+/providers/
 legacy/config.legacy.json
 config.local.*
 *.key

@@ -41,7 +41,12 @@ from .base import ImageTask, Provider, VideoTask   # noqa: F401  对外导出
 _BUILTIN_ORDER = ["paisio", "lingganya", "zeroapi", "m86", "aicopy", "kunji",
                   "octopus", "ake", "wuxianhuabu", "gate", "yishou",
                   "chaomo", "xiaobalong", "hvtald", "zhi",
-                  "haomanju", "julun"]
+                  "haomanju", "julun",
+                  # 2026-09-08 从插件转内置。用户原话：「yunhui 也可以打包进去呀，
+                  # 只是我是在其他机器的 exe 我临时加的插件服务商」。
+                  # **加了文件就必须加这里** —— 冻结环境（exe）里扫不到目录时会
+                  # 退回按这张表挨个 import，不在表里就整家被漏掉（见 _load 的说明）。
+                  "yunhui"]
 
 REGISTRY: dict = {}          # id → 类
 ALIASES: dict = {}           # 别名 → id
