@@ -202,7 +202,17 @@ def selfcheck(exe: str) -> bool:
 
     sys.path.insert(0, HERE)
     from core import providers as P                       # noqa: PLC0415
-    want_prov = sorted(p["id"] for p in P.status()["providers"])
+    # **只比内置的那些。** 插件（数据目录 `providers/*.py`）按设计不打进 exe ——
+    # 「丢个 .py 进去就多一家，不用改程序、不用重新打包」就是它的卖点。
+    #
+    # 原来这里用 `P.status()` 的全部，于是打包机器上装了插件就必然「缺」：
+    # 源码侧的数据目录是仓库根（插件在那儿），而自检启动 exe 时用的是一个
+    # 干净的临时数据目录（本来就该干净 —— 那才是目标机器第一次启动的样子）。
+    # 实遇 2026-09-08：本机有一个 `providers/yunhui.py`，自检报
+    # 「服务商 17/18 缺 yunhui」并让人「别发出去」，而包是好的。
+    # **假警报比漏报贵**：这一条会挡住每一次打包，然后人学会忽略它。
+    want_prov = sorted(p["id"] for p in P.status()["providers"] if p.get("builtin"))
+    plugins = sorted(p["id"] for p in P.status()["providers"] if not p.get("builtin"))
     want_tpl = sorted(os.path.splitext(f)[0] for f in os.listdir(os.path.join(HERE, "prompts"))
                       if f.endswith(".md") and not f.endswith("_adapter.md"))
 
@@ -239,10 +249,16 @@ def selfcheck(exe: str) -> bool:
                     return False
                 time.sleep(1)
 
-        # 1. 服务商：运行时动态 import 的，最容易被打包漏掉
+        # 1. 服务商：运行时动态 import 的，最容易被打包漏掉。
+        #    只看内置的 —— exe 里本来就不该有插件（见 want_prov 那里）。
+        builtin_got = [x for x in got_prov if x in want_prov]
         miss = [x for x in want_prov if x not in got_prov]
-        print(f"  {'✓' if not miss else '✗'} 服务商 {len(got_prov)}/{len(want_prov)} 家"
+        print(f"  {'✓' if not miss else '✗'} 内置服务商 "
+              f"{len(builtin_got)}/{len(want_prov)} 家"
               + (f"　缺：{', '.join(miss)}" if miss else ""))
+        if plugins:
+            print(f"     （本机另有 {len(plugins)} 个插件：{', '.join(plugins)} ——"
+                  f" 按设计不打进 exe，放数据目录的 providers/ 里就生效）")
         if miss:
             print("     → 检查 --collect-submodules core.providers，"
                   "以及新加的内置有没有写进 _BUILTIN_ORDER")
