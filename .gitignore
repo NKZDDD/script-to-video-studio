@@ -63,3 +63,7 @@ desktop.ini
 # 本地随包带的 ffmpeg.exe(87MB)。二进制进了 git 就永远在里面 ——
 # 删掉也只是新提交里没有,历史里还占着,以后每次 clone 都要拖一遍。
 bin/
+
+# 打包时的模型清单快照 —— 实拉结果，天天变，不进仓库。
+# 打包前用 tools/刷新模型快照.py 生成；打包脚本发现它就 --add-data 带进去。
+model-snapshot.json

@@ -809,7 +809,11 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
     <h2>服务商插件 <span class="tag">丢个 .py 进去就多一家，不用改程序、不用重新打包</span></h2>
     <div id="plugBox"></div>
     <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-      <button class="btn sm" id="plugReload">重新扫描</button>
+      <!-- **模型清单要能一键实拉。** 代码里写死的那份换得比什么都快 ——
+           无限画布 24 小时内从 5 个变 11 个，鹤一次下线 9 个（其中
+           `sd2-720p` 还是它的默认模型）。只 GET 各家的模型端点，不花钱。 -->
+      <button class="btn sm" id="modelRefresh">拉取最新模型清单</button>
+      <button class="btn ghost sm" id="plugReload">重新扫描插件</button>
       <button class="btn ghost sm" id="plugMkdir">建插件目录并放一份范例</button>
       <button class="btn ghost sm" id="plugOpen">打开插件目录</button>
     </div>
@@ -4228,6 +4232,23 @@ $('#plugReload').onclick = async () => {
   alert(`扫描完成：${r.providers.length} 家`
         + (r.new_quota_for.length ? `\n新增并发配额：${r.new_quota_for.join('、')}` : '')
         + (r.errors.length ? `\n${r.errors.length} 个文件加载失败，看页面上的红框` : ''));
+};
+// 实拉各家的模型清单。**只读，不花钱** —— 只 GET 模型端点。
+// 哪家没配 Key 就报它自己的原因，不连累别家（一家 401 不该让整轮失败）。
+$('#modelRefresh').onclick = async e => {
+  const b = e.target, old = b.textContent;
+  b.disabled = true; b.textContent = '拉取中…';
+  try {
+    const r = await api.post('/api/models/refresh', {});
+    if (r.error) return alert(r.error);
+    BOOT.capabilities = r.capabilities;        // 下拉候选立刻跟着换
+    renderProviders(); renderChains(); renderLimits();
+    if (typeof renderGen === 'function' && GEN_SUM) renderGen();
+    const bad = (r.rows || []).filter(x => !x.ok);
+    alert(r.msg + (bad.length
+      ? '\n\n没拉到的：\n' + bad.map(x => `· ${x.provider}：${x.msg}`).join('\n')
+      : ''));
+  } finally { b.disabled = false; b.textContent = old; }
 };
 $('#plugMkdir').onclick = async () => {
   const r = await api.post('/api/providers/mkdir', {});

@@ -11,6 +11,7 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
+from typing import Optional
 
 from core import build_info, diagnose, docparse, episodes, probe, stages as S
 from core.executor import GATE, LLM_GATE, JobManager, run_batch, run_chain
@@ -96,6 +97,31 @@ class MyProvider(Provider):
 '''
 
 JOBS = JobManager()
+
+
+def caps_of(cfg: Optional[dict] = None) -> list:
+    """服务商能力声明，**模型清单已经按实拉/快照换过**。
+
+    用户原话（2026-09-02）：「批量工具都已经尝试使用拉取最新模型来更新服务商
+    了，现在 studio 也需要这样」。
+
+    原来页面上的模型下拉只有 `providers.list_capabilities()` —— 也就是代码里
+    写死的那份。而模型名换得比什么都快，这几天实拉的账：无限画布 **24 小时内**
+    从 5 个变 11 个（我头一天写进去的 3 个已经下线）；鹤一次下线 9 个，
+    其中 `sd2-720p` 还是它的 default_model 和代码兜底 —— 也就是「没改过模型
+    就点开始」必然失败；`sd2-1080p` 前一天实拉说没有、后一天又回来了。
+
+    优先级（`core/model_catalog.capabilities`）：
+      当前 Key 实拉的缓存 → 打包时快照 → 代码里写死的那份
+
+    拿不到就原样退回写死的那份，**不抛** —— 拉不到清单不该让整个页面打不开。
+    """
+    from core import model_catalog                      # noqa: PLC0415
+    try:
+        return model_catalog.capabilities(cfg if cfg is not None else load_config())
+    except Exception as exc:                            # noqa: BLE001
+        print(f"[模型清单] 实拉/快照都没用上，退回代码里写死的那份：{exc}")
+        return list_capabilities()
 
 
 def load_config() -> dict:
@@ -438,7 +464,7 @@ def _material_limits(cfg: dict, sel: dict) -> dict:
     **取的是首选那一家的 `max_refs`** —— 用户点名要「参考图小于等于目标模型
     上限」，而那个上限是服务商声明的，不是我们猜的。取不到就返回 0（不查）。
     """
-    caps = {c["id"]: c for c in list_capabilities()}
+    caps = {c["id"]: c for c in caps_of(cfg)}
     out = {}
     for kind, media in (("asset", "image"), ("video", "video")):
         try:
@@ -534,7 +560,7 @@ def _llm_provider_id(llm_cfg: dict) -> str:
     """优先按 Base URL 识别，避免页面换了域名却残留旧 provider。"""
     host = (urlparse(str(llm_cfg.get("base_url") or "")).hostname or "").lower()
     if host:
-        for item in list_capabilities():
+        for item in caps_of():
             known = (urlparse(item.get("default_base_url") or "").hostname or "").lower()
             if known and known == host:
                 return resolve_provider_id(item.get("id") or "")
@@ -704,7 +730,7 @@ def ref_limit_of(cfg: dict, kind: str = "video") -> int:
         if not chain:
             return 0
         pid = chain[0].get("provider") if isinstance(chain[0], dict) else chain[0]
-        caps = {c["id"]: c for c in list_capabilities()}
+        caps = {c["id"]: c for c in caps_of(cfg)}
         sec = (caps.get(pid) or {}).get(kind) or {}
         return int(sec.get("max_refs") or 0)
     except Exception:                                   # noqa: BLE001
@@ -901,7 +927,7 @@ def api_get(path: str, q: dict) -> dict:
                     pid: _mask_form(pid, (v or {}).get("api_key", ""))
                     for pid, v in (cfg.get("providers") or {}).items()
                     if _account_form(pid)},
-                "capabilities": list_capabilities(),
+                "capabilities": caps_of(cfg),
                 # 两套体系的环节表都下发，前端按项目的 system 挑一套显示。
                 # 不在这里挑：切项目不用重新拉一遍 bootstrap。
                 "stages": S.STAGES,
@@ -1485,7 +1511,36 @@ def api_post(path: str, body: dict) -> dict:
         if added:
             save_config(cur)
         return {"ok": True, **st, "new_quota_for": added,
-                "capabilities": list_capabilities()}
+                "capabilities": caps_of(cur)}
+
+    if path == "/api/models/refresh":
+        """实拉一家（或全部）的模型清单，写进按凭据隔离的缓存。
+
+        **只读，不花钱** —— 只 GET 各家的模型端点。
+        不给 provider 就全刷一遍；哪家没配 Key 就报它自己的原因，
+        不连累别家（一家 401 不该让整轮失败）。
+        """
+        from core import model_catalog                  # noqa: PLC0415
+        from core import providers as _P                # noqa: PLC0415
+        want = str(body.get("provider") or "").strip()
+        pids = [_P.resolve_id(want)] if want else list(_P.REGISTRY)
+        rows = []
+        for pid in pids:
+            try:
+                r = model_catalog.refresh(pid, cfg)
+            except Exception as exc:                    # noqa: BLE001
+                r = {"ok": False, "msg": f"拉取时出错：{exc}"}
+            rows.append({"provider": pid, "ok": bool(r.get("ok")),
+                         "count": len(r.get("models") or []),
+                         "msg": r.get("msg", ""),
+                         "updated_at": r.get("updated_at", "")})
+        good = [r for r in rows if r["ok"]]
+        return {"ok": True, "rows": rows,
+                "capabilities": caps_of(cfg),
+                "msg": (f"{len(good)}/{len(rows)} 家拉到，"
+                        f"共 {sum(r['count'] for r in good)} 个模型。"
+                        f"没拉到的那几家看它自己那一行的原因 —— "
+                        f"多半是没配 Key（401），或者那一家没有清单接口。")}
 
     if path == "/api/providers/mkdir":
         """把插件目录建出来，并放一份带注释的模板，照着改就能加一家。"""

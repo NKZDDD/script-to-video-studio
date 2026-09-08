@@ -445,6 +445,14 @@ def main() -> int:
         # videocaptioner 的样式目录第一次跑才建，里面一份都没有，
         # 而缺样式的表现不是报错，是「字幕出来是它的默认样子」。
         "--add-data", f"{os.path.join(HERE, '字幕样式')}{sep}字幕样式",
+        # 打包时的模型清单快照。**目标机器第一次启动还没配 Key，拉不到清单** ——
+        # 没有它的话页面上的模型下拉只有代码里写死的那份，而那份换得比什么都快
+        # （无限画布 24 小时内从 5 个变 11 个；鹤一次下线 9 个，其中 sd2-720p
+        # 还是它的 default_model —— 「没改过模型就点开始」必然失败）。
+        # 用 tools/刷新模型快照.py 生成，里面**只有模型字段、没有任何凭据**
+        # （那个工具会当场核对，发现凭据就删掉快照并退出）。
+        *(["--add-data", f"{os.path.join(HERE, 'model-snapshot.json')}{sep}."]
+          if os.path.isfile(os.path.join(HERE, "model-snapshot.json")) else []),
     ]
     for package in COLLECT_ALL:
         cmd += ["--collect-all", package]
