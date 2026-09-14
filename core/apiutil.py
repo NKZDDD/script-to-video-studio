@@ -139,6 +139,27 @@ def code_kind(err_code: str) -> str:
     return ""
 
 
+# 「这个**模型**不行」和「这个**账户**不行」是两回事，而它们共用状态码。
+#
+# 实遇（2026-09-14，超模）：一个账号按能力分四把 Key，**每把能看见的模型完全
+# 不重叠**（一把只有 gpt-image-1k-th，另一把只有 2.5 那六个＋Native 三个）。
+# 拿错 Key 槽去发某个模型，回的是：
+#     403 {"message": "model gpt-image-1k-th is not available for this API key"}
+# 而 403 原来一律判 BATCH_FATAL —— **立即熔断整批**，几百条任务当场停，
+# 报错还写着「账户问题」，人会跑去充值。而真相只是模型选错了/Key 槽用错了。
+#
+# 反向也有一条：`404 model not found` 原来落到 RETRYABLE（0/404 那一档），
+# 于是模型名打错会同参重发，每次撞同一堵墙 —— 而巨轮那家的名字带空格和
+# 全角括号，打错是常事。
+#
+# 两条都归 TASK_FATAL：这一条做不成，但别的任务和账户都是好的。
+_MODEL_LEVEL = re.compile(
+    r"model[^\n]{0,80}(is )?not (available|found|supported|exist)"
+    r"|not (available|permitted) for this api key"
+    r"|模型[^\n]{0,20}(不存在|不可用|无权|没有权限)"
+    r"|无权使用[^\n]{0,20}模型", re.I)
+
+
 def classify(status: int, text: str = "", err_code: str = "") -> str:
     """把 HTTP 状态 + 服务商错误码 + 响应体分成三级。
 
@@ -150,6 +171,10 @@ def classify(status: int, text: str = "", err_code: str = "") -> str:
     if by_code:
         return by_code
     low = (text or "").lower()
+    # **模型级的要排在账户级前面。** 两者共用 403（见 _MODEL_LEVEL 的说明）：
+    # 「这把 Key 用不了这个模型」熔断整批是错的 —— 别的模型和账户都好好的。
+    if _MODEL_LEVEL.search(text or ""):
+        return TASK_FATAL
     if status in (401, 402, 403):
         return BATCH_FATAL
     if status == 429 and _TRANSIENT.search(text or ""):

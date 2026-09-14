@@ -114,9 +114,16 @@ def fetch(pid, pc):
                 # （duration.min/max、aspect_ratio(s)、resolutions、
                 # max_reference_images 这些）—— 比任何文档都准，而字段名和
                 # 上面那几个都不一样。不收的话它整份被丢掉，等于白拉一趟。
+                # 后面这一串是**超模那套**的字段名（2026-09-14 实拉）：
+                # 它把逐模型的比例、参考图上限、一次出几张、quality 档位
+                # 全摆在顶层，名字和别家都不一样。不收的话整份被丢掉 ——
+                # 和无限画布的 capability_schema 是同一个毛病。
                 for field in ('type', 'model_type', 'category', 'output_modalities',
                               'display_name', 'durations_seconds', 'ratios',
-                              'max_images', 'resolution', 'capability_schema'):
+                              'max_images', 'resolution', 'capability_schema',
+                              'resolution_mode', 'supported_aspect_ratios',
+                              'supported_image_sizes', 'max_reference_images',
+                              'n_max', 'supported_quality_values'):
                     if field in row:
                         item[field] = row[field]
                 rows[mid] = item
@@ -191,6 +198,37 @@ def _from_schema(schema):
     return out
 
 
+def _from_toplevel(row):
+    """超模那套：逐模型的约束摆在**顶层**，不在 capability_schema 里。
+
+    字段名和别家都不一样（`supported_aspect_ratios` / `max_reference_images` /
+    `n_max` / `supported_quality_values` / `resolution_mode`），所以单独一支。
+
+    **只取声明了的。** 超模的 `gpt-image2-*-Native` 把 `max_reference_images`
+    写成 null（明确表示没声明），那就不给它填数 —— 填一个「看起来合理」的
+    和照文档抄没有区别：它会显示在页面上、会拿去拦人，而没有任何东西背书。
+    """
+    if not isinstance(row, dict):
+        return {}
+    out = {}
+    v = row.get('supported_aspect_ratios')
+    if isinstance(v, list) and v:
+        out['ratios'] = [str(x) for x in v]
+    v = row.get('resolution_mode') or row.get('supported_image_sizes')
+    if isinstance(v, str) and v:
+        out['resolutions'] = [v]
+    elif isinstance(v, list) and v:
+        out['resolutions'] = [str(x) for x in v]
+    for key, target in (('max_reference_images', 'max_refs'),
+                        ('n_max', 'n_max')):
+        if isinstance(row.get(key), int):          # null / None 不算声明
+            out[target] = row[key]
+    v = row.get('supported_quality_values')
+    if isinstance(v, list) and v:
+        out['quality'] = [str(x) for x in v]
+    return out
+
+
 def apply_catalog(cap, result, source):
     cap = copy.deepcopy(cap)
     rows = result.get('rows') or [{'id': m} for m in result.get('models', [])]
@@ -233,6 +271,7 @@ def apply_catalog(cap, result, source):
             if isinstance(row.get('max_images'), int):
                 options['max_refs'] = row['max_images']
             options.update(_from_schema(row.get('capability_schema')))
+            options.update(_from_toplevel(row))
             if options:
                 block.setdefault('model_options', {}).setdefault(row['id'], {}).update(options)
     cap['model_catalog'] = {'source': source, 'updated_at': result.get('updated_at', ''),
