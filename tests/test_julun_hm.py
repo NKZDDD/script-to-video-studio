@@ -168,3 +168,71 @@ class JulunHmTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FallbackTests(unittest.TestCase):
+    """表外的模型：**不知道 ≠ 不允许**，更不该拿编出来的数去改参数。
+
+    实遇（2026-09-14）：`sd2.5-9img` 不在规格表里，走兜底
+    `("url_media", (4, 15), ["720p"], R5, 9, 3, 3)` —— 那几个数是**代码里编的**，
+    不属于任何一个模型。用户要 30 秒，被这个 4–15 悄悄改成 15 秒发出去。
+    而那个模型平台卡上明写支持 **5/10/15/30 且四档同价** ——
+    也就是白白短了一半、钱一分没省。日志里那句「已把 30 纠正为 15」
+    读起来像是模型的限制，其实是我们自己的默认值。
+    """
+
+    def test_an_unlisted_model_keeps_its_parameters(self):
+        """★ 表外的一秒都不改、一条都不拦。"""
+        from core.providers.julun import is_known
+        self.assertFalse(is_known("某个全新的模型"))
+        logs = []
+        p = JulunProvider(api_key="k")
+        t = VideoTask(prompt="@Image1 正文",
+                      refs=[f"https://x/{i}.png" for i in range(20)],
+                      duration=45, ratio="21:9", model="某个全新的模型")
+        _, b = p.build_video_body(t, log=logs.append)
+        self.assertEqual(b["seconds"], 45, "时长被编出来的范围夹了")
+        self.assertEqual(b["ratio"], "21:9", "比例被编出来的清单拦了")
+        self.assertEqual(len(b["image_urls"]), 20, "张数被编出来的上限削了")
+        self.assertTrue([l for l in logs if "不校验" in l],
+                        "放行了但没说这一趟没校验")
+
+    def test_the_fallback_declares_no_limits(self):
+        """★ 兜底那条里不许再有具体数字。"""
+        from core.providers.julun import _UNKNOWN, spec_of
+        fmt, rule, res, ratios, ci, cv, ca, _note = spec_of("不存在的模型")
+        self.assertIsNone(rule, "兜底又写了一个时长范围")
+        self.assertEqual((res, ratios), ([], []))
+        self.assertEqual((ci, cv, ca), (0, 0, 0))
+        self.assertTrue(fmt, "总得给一个请求形状，否则发不出去")
+        del _UNKNOWN
+
+    def test_sd25_9img_matches_the_model_card(self):
+        """★ `sd2.5-9img` 按平台模型卡进表。
+
+        卡片原话：「SD2.5 原生过人脸（无需认证人脸）· 最多 9 张参考图 ·
+        5/10/15/30 秒 · 默认 720p · 支持 16:9 / 9:16 / 4:3 / 3:4 / 1:1 ·
+        固定按次 4.5 元/次（5/10/15/30 秒同价，不按帧叠加）」
+        """
+        fmt, rule, res, ratios, ci, cv, ca, note = SPEC["sd2.5-9img"]
+        # 时长是**离散四档**，不是区间 —— 写成 (5, 30) 的话 7 秒会被放过去
+        self.assertEqual(rule[2], [5, 10, 15, 30])
+        self.assertEqual(res, ["720p"])
+        self.assertEqual(sorted(ratios),
+                         sorted(["16:9", "9:16", "4:3", "3:4", "1:1"]))
+        self.assertEqual((ci, cv, ca), (9, 0, 0))
+        self.assertIn("没有实拉背书", note, "格式是推的，得标出来")
+        # 四档都要能原样发出去
+        for want in (5, 10, 15, 30):
+            p = JulunProvider(api_key="k")
+            t = VideoTask(prompt="@Image1", refs=["https://x/0.png"],
+                          duration=want, ratio="16:9", model="sd2.5-9img")
+            _, b = p.build_video_body(t, log=lambda *a: None)
+            self.assertEqual(b["seconds"], want, f"{want} 秒被改了")
+
+    def test_the_portrait_way_out_is_actually_listed_now(self):
+        """文档把 `sd2.5-9img` 当肖像保护的出路 —— 它得真在清单里，
+        否则人照着提示换过去，又落回表外没校验那条路。"""
+        from core.providers.julun import PORTRAIT_ALTERNATIVES, VIDEO_MODELS
+        for m in PORTRAIT_ALTERNATIVES:
+            self.assertIn(m, VIDEO_MODELS, m)
