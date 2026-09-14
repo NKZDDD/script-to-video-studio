@@ -42,8 +42,19 @@ _LOCK = threading.RLock()
 
 
 def identity(pid, pc):
+    """缓存的凭据指纹。**所有 Key 字段都要进**，不只 `api_key`。
+
+    和 `fetch` 是同一个毛病的两处：超模按能力分四把 Key、根本没有 `api_key`
+    这个字段，所以原来这个指纹对超模**永远是同一个值** —— 换了任何一把 Key
+    都认不出变化，会一直拿旧清单用，而旧清单里的模型这把新 Key 可能看不见。
+    不报错，只是选中了跑起来才「找不到模型」。
+
+    排序后再算：字典顺序不该影响指纹，否则改一次配置就白拉一次。
+    """
+    keys = sorted(f"{k}={v}" for k, v in (pc or {}).items()
+                  if 'key' in k.lower() and str(v).strip())
     values = [pid, pc.get('base_url') or providers.REGISTRY[pid].default_base_url,
-              pc.get('api_key', '')]
+              *keys]
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 
@@ -57,9 +68,24 @@ def fetch(pid, pc):
                 'zhi': '/api/v1/available-models'}.get(pid, '/v1/models')
     if not prov.session.base_url:
         return {'ok': False, 'msg': '请先填写该服务商的接口地址'}
-    keys = [prov.session.api_key]
-    if pid == 'kunji':
-        keys = list(dict.fromkeys(prov.keys.values())) or keys
+    # **把这一家配置里所有的 Key 都试一遍，不只认 `api_key`。**
+    #
+    # 原来只取 `pc['api_key']`（加一个 kunji 的特例）。而超模**根本没有那个
+    # 字段** —— 它按能力分四把：`llm_api_key` / `image_1k_api_key` /
+    # `image_4k_api_key` / `video_api_key`（server 层的 _CHAOMO_KEY_FIELDS，
+    # 那儿的注释写着「超模没有可跨能力复用的通用 key」）。
+    # 于是「拉取最新模型清单」对超模**必然拉不到**，哪怕四把 Key 都填好了，
+    # 而它只报一句鉴权/网络失败 —— 人会以为是 Key 填错了，
+    # 去改一个本来就对的东西（2026-09-14 查出来）。
+    #
+    # 遍历所有 Key 还有第二个理由：**不同 Key 的可见清单不一样**。
+    # 坤鸡按令牌分组过滤（实拉只回 1 个），超模按 1K/4K 分组 ——
+    # 只用一把等于只看见那一把能看见的那部分。合并起来才是这个账号的全集。
+    keys = [str(v).strip() for k, v in (pc or {}).items()
+            if 'key' in k.lower() and str(v).strip()]
+    if getattr(prov, 'keys', None):                 # 坤鸡把多把 Key 挂在类上
+        keys += [str(v).strip() for v in prov.keys.values() if str(v).strip()]
+    keys = list(dict.fromkeys(keys)) or [prov.session.api_key]
     rows, failures = {}, []
     for key in keys:
         prov.session.api_key = key
