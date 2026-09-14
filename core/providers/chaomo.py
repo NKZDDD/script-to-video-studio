@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""超模（www.chaomoapi.com）。文档：https://www.chaomoapi.com/custom/doc
+"""超模（zntcode.net）。2026-09-14 换的新地址；**旧的 www.chaomoapi.com 已经连不上**
+（DNS 还解析得到 43.227.71.72，80 端口活着回 404，**443 在 TCP 层就超时** ——
+按域名、按 IP、直连、走系统代理，四种都试过）。
 
   · 图片   POST /v1/images/generations（`async:true` → GET /v1/images/{id} 轮询）
   · 图生图 POST /v1/images/edits（**multipart**，字段名 `image[]`，1–9 张）
@@ -34,20 +36,65 @@ from ..apiutil import (ApiError, _b64_bytes, extract_image_items,
 from .base import ImageTask, Provider, VideoTask
 
 VIDEO_MODELS = ["seedance2", "seedance2-fast", "seedance2-mini"]
+
+# 2026-09-14 用真 Key 实拉 `GET /v1/models`（新地址）。那个接口每个模型回一份
+# 很详细的 schema，下面的数都来自它，不是猜的。
+#
+# **image 2.5 是两个系列 × 三档**，`resolution_mode` 分别是 1K/2K/4K：
+#   flare    —— 它自己的 description：「速度更快，适合快速出图」
+#   sunburst —— 「细节更高，适合精细成图」
+# 和老的 gpt-image2-*-Native 比，2.5 多声明了三件事（见 IMAGE_MODEL_OPTIONS）：
+# 参考图上限 9、一次最多出 4 张、quality 多了 low/medium。
+IMAGE_25 = [
+    "gpt-image-2.5-flare", "gpt-image-2.5-flare-2K-Native",
+    "gpt-image-2.5-flare-4K-Native",
+    "gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst-2K-Native",
+    "gpt-image-2.5-sunburst-4K-Native",
+]
 IMAGE_MODELS = [
-    # Native 三档：官方原生接口，2026-08 确认在售
+    *IMAGE_25,
+    # Native 三档：实拉确认还在。`gpt-image2-4K` 是 4K-Native 的 legacy_aliases，
+    # 接口自己声明的，所以留着 —— 老项目的 tasks.json 里可能存着这个名字。
     "gpt-image2-1K-Native", "gpt-image2-2K-Native", "gpt-image2-4K-Native",
+    "gpt-image2-4K",
+    # ⚠ 下面这几个**这把 Key 实拉时看不见**（2026-09-14）。
+    # **没有删掉**，因为超模按能力分四把 Key（llm / image_1k / image_4k /
+    # video），一把 Key 看见的只是它那一组 —— 拿一把的结果去删清单，
+    # 会删掉别的 Key 其实能用的模型。而「少列一个能用的」是页面上根本没有、
+    # 人只会以为不支持；「多列一个下线的」选中了至少有一句响的报错。
+    # 想确认就把四把 Key 都填上，点一次「拉取最新模型清单」——
+    # 那边会把四把的结果合并（core/model_catalog.fetch）。
     "gpt-image2-1K", "gpt-image2-2K-low", "gpt-image2-4K-low",
-    "gpt-image2-2K-Direct", "gpt-image2-4K-Direct", "gpt-image2-4K",
+    "gpt-image2-2K-Direct", "gpt-image2-4K-Direct",
     "gpt-image-1k-th",
     "gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview",
 ]
-RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "21:9"]
+
+# 逐模型的约束，来自实拉 schema。**只写它声明了的** ——
+# gpt-image2-*-Native 的 max_reference_images 是 null（没声明），所以不给它填数。
+IMAGE_MODEL_OPTIONS = {
+    m: {"max_refs": 9, "n_max": 4,
+        "quality": ["auto", "low", "medium", "high"]}
+    for m in IMAGE_25
+}
+
+# 实拉的 `supported_aspect_ratios`，十个。**`5:4` 和 `4:5` 以前没有** ——
+# 少列两个的后果是页面上选不到，人只会以为这家不支持。
+# 非法值的报错会原样列出这十个（`unsupported_ratio`），和这里一字不差。
+RATIOS = ["1:1", "5:4", "4:5", "16:9", "9:16", "4:3", "3:4",
+          "2:3", "3:2", "21:9"]
 SIZES = ["480p", "720p", "1080p", "4k"]          # 视频 size = 分辨率档位
 MAX_REFS = 9
 
-_RATIO_VALUES = {"21:9": 21 / 9, "16:9": 16 / 9, "3:2": 1.5, "4:3": 4 / 3,
-                 "1:1": 1.0, "3:4": 3 / 4, "2:3": 2 / 3, "9:16": 9 / 16}
+# **每一个 RATIOS 里的值都要在这儿有数**：`_to_ratio` 遍历 RATIOS、
+# 去这张表取值，缺一个就 `KeyError` —— 而且只在「传的是像素尺寸」那条路上崩
+# （比例写法会在上面提前返回），所以加比例时很容易漏。
+# 2026-09-14 加 5:4 / 4:5 时就漏了一次，`1024x1280` 直接整条炸掉。
+# 下面这行断言把它钉死，进程一起来就会发现，不用等到出图那一刻。
+_RATIO_VALUES = {"21:9": 21 / 9, "16:9": 16 / 9, "3:2": 1.5, "5:4": 1.25,
+                 "4:3": 4 / 3, "1:1": 1.0, "3:4": 3 / 4, "4:5": 0.8,
+                 "2:3": 2 / 3, "9:16": 9 / 16}
+assert not set(RATIOS) - set(_RATIO_VALUES),     f"RATIOS 里这几个在 _RATIO_VALUES 没有数：{sorted(set(RATIOS) - set(_RATIO_VALUES))}"
 
 
 def _to_ratio(want: str, default: str = "9:16") -> str:
@@ -130,7 +177,10 @@ class ChaomoProvider(Provider):
     id = "chaomo"
     name = "超模 chaomoapi.com"
     aliases = ("chaomoapi", "超模", "cm")
-    default_base_url = "https://www.chaomoapi.com"
+    # 2026-09-14 换址。**老配置里显式填了旧地址的不会自动跟着换** ——
+    # `resolve_provider_cfg` 优先用保存下来的 base_url，改默认值救不了它们。
+    # 那种情况的表现是连接超时，而人会以为是网络问题。
+    default_base_url = "https://zntcode.net"
     supports = ("image", "video")
     # 图生图能吃字节（本类会把 data URI 解码、把链接下载），视频只收链接 → 见 needs_url
     ref_mode = "data_uri"
@@ -148,12 +198,18 @@ class ChaomoProvider(Provider):
             "supports": list(self.supports),
             "image": {
                 "models": IMAGE_MODELS,
-                "default_model": "gpt-image2-1K",
+                # **换成实拉里真存在的。** 原来是 `gpt-image2-1K` —— 那个名字
+                # 实拉里没有，也就是「没改过模型就点开始」必然报找不到模型
+                # （和鹤的 sd2-720p 同一个坑）。挑 2.5 的 1K：最新、最便宜的一档。
+                "default_model": "gpt-image-2.5-flare",
+                "model_options": IMAGE_MODEL_OPTIONS,
                 "sizes": RATIOS,                 # 这家图片的"尺寸"就是比例
                 "default_size": "9:16",
                 "max_refs": MAX_REFS,
                 "ref_mode": "bytes",
-                "notes": "比例字段是 **ratio**（不是 size/aspect_ratio），n 固定 1，异步"
+                "notes": "比例字段 **ratio / size / aspect_ratio 三个名字都收**"
+                         "（2026-09-14 实测：三个都被同一套校验读，非法值统一回"
+                         " `unsupported_ratio` 并列出允许的十个）。n 固定 1，异步"
                          "（async:true → 轮询 /v1/images/{id}）。有参考图时走 /v1/images/edits，"
                          "**multipart 字段名是 image[]**：文档明写参考图 URL 不能直传，"
                          "本类会自动把链接下载成文件再上传。",
@@ -303,7 +359,9 @@ class ChaomoProvider(Provider):
     def generate_image(self, task: ImageTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 5, poll_timeout: int = 900) -> dict:
-        model = task.model or "gpt-image2-1K"
+        # 兜底和 default_model 是**两处**，只改一处的后果是页面显示新的、
+        # 实际发旧的。
+        model = task.model or "gpt-image-2.5-flare"
         ratio = _to_ratio(task.size)
         refs = list(task.refs or [])[:MAX_REFS]
 
