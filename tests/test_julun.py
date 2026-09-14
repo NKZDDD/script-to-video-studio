@@ -69,8 +69,17 @@ class RegistryTests(unittest.TestCase):
         """模型名带空格、中文和**全角括号**，手打必错。"""
         self.assertIn("grok-imagine-video-1.5（按次）", VIDEO_MODELS)   # 全角（）
         self.assertNotIn("grok-imagine-video-1.5(按次)", VIDEO_MODELS)  # 半角是错的
-        self.assertIn("Quality V4 · 480p/720p (可@图/视频/音频)", VIDEO_MODELS)
-        self.assertIn("SD2.0 1080P 933", VIDEO_MODELS)
+        # `Quality V4 · …` 2026-09-14 实拉确认已下线，从清单里撤了 ——
+        # 但它的规格还留在 SPEC 里（老项目的 tasks.json 可能存着这个名字）。
+        self.assertIn("Quality V4 · 480p/720p (可@图/视频/音频)", SPEC)
+        self.assertNotIn("Quality V4 · 480p/720p (可@图/视频/音频)", VIDEO_MODELS)
+        # 平台自己把 video 拼成了 vedio —— **照抄**，改对了就是 404
+        self.assertIn("wan3.0-vedio-deal", VIDEO_MODELS)
+        # `SD2.0 1080P 933`（无空格那个）也已下线 —— 注意它和实拉里活着的
+        # `SD 2.0-933`（**有空格**）不是一个东西，正是这种一字之差会回 404。
+        self.assertIn("SD2.0 1080P 933", SPEC)
+        self.assertNotIn("SD2.0 1080P 933", VIDEO_MODELS)
+        self.assertIn("SD 2.0-933", VIDEO_MODELS)
         self.assertEqual(IMAGE_MODELS, ["doubao-seedream-5-0-260128"])
 
     def test_ref_mode_is_url_for_everything(self):
@@ -86,8 +95,16 @@ class FormatDispatchTests(unittest.TestCase):
         # 加格式要同时加这里 —— 漏了的话新格式会落到 build_video_body 的
         # else 分支（simple），发去 /v1/video/generations，而那个端点不认它。
         known = {"metadata", "url_media", "openai_refs", "grok", "simple", "hm"}
+        # 清单里有一部分是**故意没规格的**（实拉里有、但我们没拿到它的约束）——
+        # 它们走 `_UNKNOWN`：照填的发、不校验。所以只检查有规格的那些。
+        from core.providers.julun import UNSPECED, is_known
         for m in VIDEO_MODELS:
+            if not is_known(m):
+                self.assertIn(m, UNSPECED, f"{m} 没规格，但也不在 UNSPECED 名单里")
+                continue
             self.assertIn(SPEC[m][0], known, m)
+        # 没规格的也得能发出去 —— 兜底给的形状
+        self.assertEqual(spec_of("SD 2.0 基础")[0], "url_media")
 
     def test_unknown_model_falls_back_not_crash(self):
         self.assertEqual(spec_of("以后新加的模型")[0], "url_media")
