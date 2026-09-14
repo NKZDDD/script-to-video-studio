@@ -59,7 +59,11 @@ class RegistryTests(unittest.TestCase):
         for k in ("id", "name", "supports", "image", "video"):
             self.assertIn(k, cap)
         self.assertEqual(cap["video"]["specs"]["sd2.5"]["format"], "openai_refs")
-        self.assertEqual(len(cap["video"]["models"]), 17)
+        # **别钉死条数。** 这家会加渠道（2026-09-14 加了 HM 的 seedance_v2.x
+        # 五个），钉死的话每加一批就红一次，而红的是测试不是代码。
+        # 钉「该有的都在」和「每个都有规格」就够了。
+        self.assertGreaterEqual(len(cap["video"]["models"]), 17)
+        self.assertEqual(len(cap["video"]["models"]), len(SPEC))
 
     def test_model_names_are_verbatim(self):
         """模型名带空格、中文和**全角括号**，手打必错。"""
@@ -79,7 +83,9 @@ class RegistryTests(unittest.TestCase):
 
 class FormatDispatchTests(unittest.TestCase):
     def test_every_model_maps_to_a_known_format(self):
-        known = {"metadata", "url_media", "openai_refs", "grok", "simple"}
+        # 加格式要同时加这里 —— 漏了的话新格式会落到 build_video_body 的
+        # else 分支（simple），发去 /v1/video/generations，而那个端点不认它。
+        known = {"metadata", "url_media", "openai_refs", "grok", "simple", "hm"}
         for m in VIDEO_MODELS:
             self.assertIn(SPEC[m][0], known, m)
 

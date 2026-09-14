@@ -14,6 +14,7 @@
 | `openai_refs` | `duration` + `aspect_ratio` + `image_refs[]` |
 | `grok` | `duration` + `extra:{aspect_ratio, resolution, reference_images[{url,role}]}` |
 | `simple` | `model` + `prompt` + `seconds`（h3，走 `/v1/video/generations`）|
+| `hm` | `seconds` + `ratio` + `resolution` + `images[]` / `videos[]` / `audios[]` |
 
 ⚠ 对着文档才知道的几个坑：
 
@@ -26,11 +27,35 @@
    状态**大写** `IN_PROGRESS`/`SUCCESS`/`FAILURE`，进度是字符串 `"100%"`。
 5. `SD2.0 1080P 933` **至少要 1 张参考图**。
 6. 上传的素材**只保留 72 小时**。
+
+## HM 渠道（`seedance_v2.x` 五个模型，`hm` 格式）
+
+依据《HM Studio（seedance_v2.x）对接文档》。接口地址、鉴权和全站一样，
+但有三件别处没有的事：
+
+1. **参考图必须在 prompt 里 `@Image1` 点名。** 不点名的话上游把图当"首帧/尾帧"，
+   **第 3 张之后直接忽略** —— 片子照出、少用几张图、一处不报错。
+   拼写也挑：`Image 1`（带空格）匹配不上，必须 `@Image1` 连写。
+   所以这里**发之前就检查正文点没点名**，缺哪张说哪张。
+   **不自动补** —— 材料的正文本来就用 `@Image1..N` 写好了身份映射，
+   再追加一遍就是同一个请求里两套编号（鹤那边的 `@图N` 就是这么坏的）。
+2. **分辨率只有 720p**，传 480p/1080p/2k 会被拒或忽略。
+3. **`seedance_v2.5` 三个有「肖像保护」** —— 只让生成"包含你自己的"人脸。
+   别人的脸会被上游拒。要真人脸参考就换 `sd2.5-9img` / `sd2-mini` /
+   `seedance_v2.0`（文档点名的三条出路）。这个在本地判不了（取决于图里是谁），
+   所以只在撞上那句报错时把出路接上去。
+
+`face` 字段（可选，走 `task.extra["face"]`）：不传=浅洗（轻磨皮+提亮）；
+`{"enabled": true, "mode": "heavy"}`=重风格；`{"enabled": false}`=原图不过脸；
+`{"enabled": true, "mode": "blur"}`=模糊打码。
+**⚠ 绝不能传 `"face": true`** —— 上游有个"旧抠脸"（T 形纯色打码）模式，很难看。
+所以这里只放行文档列的那几种形状，别的当场拒。
 """
 
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Callable, Optional
 
@@ -76,9 +101,81 @@ SPEC = {
     "minimax-h3 768p": ("simple", (6, 10, [6, 10]), ["768p"], [], 1, 0, 0,
                         "走 /v1/video/generations；参考图只 1 张"),
     "minimax-h3 2k": ("simple", (6, 10, [6, 10]), ["2k"], [], 1, 0, 0, "同上"),
+    # ---- HM 渠道（seedance_v2.x）。数字抄自文档第四节「各模型能力对照」----
+    # 分辨率只有 720p；时长 4–30 是**任意整数**（页面上的 5/10 是界面简化）。
+    # 比例文档没给封闭清单（示例里出现 16:9 和 9:16）—— 所以给常见那五个当候选，
+    # 不自造更窄的清单去拦人：拦错了报「不支持」而其实支持，比服务商回 400 难查。
+    "seedance_v2.0": ("hm", (4, 15), ["720p"], R5, 9, 0, 0,
+                      "无肖像保护；参考图要在正文里 @Image1 点名"),
+    "seedance_v2.0-933": ("hm", (4, 15), ["720p"], R5, 9, 3, 3,
+                          "无肖像保护；参考图要在正文里 @Image1 点名"),
+    "seedance_v2.5": ("hm", (4, 30), ["720p"], R5, 9, 0, 0,
+                      "**有肖像保护**：只能生成包含你自己的人脸"),
+    "seedance_v2.5-101010": ("hm", (4, 30), ["720p"], R5, 10, 10, 10,
+                             "**有肖像保护**：只能生成包含你自己的人脸"),
+    "seedance_v2.5-301010": ("hm", (4, 30), ["720p"], R5, 30, 10, 10,
+                             "**有肖像保护**：只能生成包含你自己的人脸"),
 }
+
+# 肖像保护：文档点名的三条出路。撞上那句报错时接给用户看。
+PORTRAIT_GUARDED = ("seedance_v2.5", "seedance_v2.5-101010", "seedance_v2.5-301010")
+PORTRAIT_ALTERNATIVES = ("sd2.5-9img", "sd2-mini", "seedance_v2.0")
+
+# `face` 只放行文档列的这几种形状。**`"face": true` 会走上游的"旧抠脸"
+# （T 形纯色打码），很难看** —— 文档专门标了千万别传，所以这里当场拒。
+FACE_MODES = ("heavy", "blur")
+# 报错里那段「可以怎么写」。**单独拎出来是因为它里面全是引号** ——
+# 直接写进 f-string 会把字符串提前收尾（改这个文件时踩过一次）。
+FACE_HELP = '可用写法：整个不传（默认浅洗：轻磨皮+提亮）、{"enabled": false}（原图不过脸）、{"enabled": true, "mode": "heavy"}（重风格）、{"enabled": true, "mode": "blur"}（模糊打码）。'
 VIDEO_MODELS = list(SPEC)
 IMAGE_MODELS = ["doubao-seedream-5-0-260128"]
+
+
+# `@Image1` 连写，后面不能再跟数字（`@Image1` 不许命中 `@Image12`）。
+# 文档明说带空格的 `Image 1` 匹配不上，所以这里也**不认**空格写法 ——
+# 认了等于告诉人"这样写行"，而上游并不认。
+_AT_IMAGE = re.compile(r"@Image(\d+)(?!\d)")
+
+
+def unnamed_images(prompt: str, count: int) -> list:
+    """正文里没被 `@ImageN` 点到名的是第几张。返回缺的编号列表。
+
+    这个渠道**不点名就丢图**：上游把图当"首帧/尾帧"，第 3 张之后直接忽略 ——
+    片子照出、少用几张参考图、一处不报错。所以发之前就查。
+
+    **只查缺、不自动补。** 自动补是鹤那边 `@图N` 的坑：材料的正文本来就用
+    `@Image1..N` 写好了身份映射，再追加一遍就是同一个请求里两套编号，
+    而画面会照着错的那套走。
+    """
+    if count <= 0:
+        return []
+    named = {int(n) for n in _AT_IMAGE.findall(prompt or "")}
+    return [i for i in range(1, count + 1) if i not in named]
+
+
+def face_field(value) -> dict:
+    """`face` 字段：只放行文档列的那几种形状，别的当场拒。
+
+    文档专门标了**千万别传 `"face": true`** —— 那会走上游的"旧抠脸"
+    （T 形纯色打码）模式，很难看。而 `True` 在 JSON 里是合法值、
+    上游也收，所以这一条只能我们来挡。
+    """
+    if value is None:
+        return {}                                  # 不传 = 默认浅洗
+    if not isinstance(value, dict):
+        raise ApiError(
+            f"巨轮的 face 只能是对象，收到 {type(value).__name__}：{value!r}。"
+            f"**特别不能传 `true`** —— 那会走上游的「旧抠脸」（T 形纯色打码），"
+            f"很难看，而且它是合法 JSON、上游照收，只能我们挡。" + FACE_HELP,
+            status=0, kind="task_fatal")
+    enabled = value.get("enabled")
+    if enabled is False:
+        return {"enabled": False}
+    mode = str(value.get("mode") or "").strip()
+    if enabled is True and mode in FACE_MODES:
+        return {"enabled": True, "mode": mode}
+    raise ApiError(f"巨轮的 face 写法不对：{value!r}。" + FACE_HELP,
+                   status=0, kind="task_fatal")
 
 
 def spec_of(model: str) -> tuple:
@@ -221,6 +318,16 @@ class JulunProvider(Provider):
             problems.append(f"比例只支持 {'、'.join(ratios)}，收到 {ratio}")
         if model == "SD2.0 1080P 933" and not refs:
             problems.append("这个模型至少要 1 张参考图")
+        if fmt == "hm":
+            # **这个渠道不点名就丢图**（第 3 张之后直接忽略，而且不报错）。
+            missing = unnamed_images(task.prompt or "", len(refs))
+            if missing:
+                problems.append(
+                    f"正文里没点名第 {'、'.join(map(str, missing))} 张参考图 —— "
+                    f"这个渠道要求逐张写 `@Image{missing[0]}` 这样的引用（连写，"
+                    f"`Image {missing[0]}` 带空格匹配不上）。不点名的话上游把图当"
+                    f"「首帧/尾帧」，**第 3 张之后直接忽略，而且不报错**。"
+                    f"这里不替你补 —— 补了就是同一个请求里两套编号")
         if problems:
             raise ApiError(
                 f"巨轮 {model} 的参数不符合规格表：" + "；".join(problems)
@@ -275,6 +382,21 @@ class JulunProvider(Provider):
                 else:
                     extra["reference_images"] = [
                         {"url": u, "role": "reference_image"} for u in refs]
+        elif fmt == "hm":
+            # 字段名和 url_media **不一样**：那边是 image_urls/video_urls/audio_urls，
+            # 这边是 images/videos/audios。名字给错不会报错，
+            # 上游只是收不到素材 —— 又是一条静默的。
+            body = {"model": model, "prompt": task.prompt, "seconds": sec,
+                    "ratio": ratio, "resolution": res}
+            if refs:
+                body["images"] = refs
+            if vids:
+                body["videos"] = vids
+            if auds:
+                body["audios"] = auds
+            face = face_field(task.extra.get("face"))
+            if face:
+                body["face"] = face
         else:                                        # simple（h3）
             path = "/v1/video/generations"           # 文档：h3 推荐这个端点
             body = {"model": model, "prompt": task.prompt, "seconds": sec}
@@ -291,7 +413,31 @@ class JulunProvider(Provider):
         path, body = self.build_video_body(task, log=log)
         fmt = spec_of(model)[0]
         log(f"巨轮 {model}（{fmt} 格式）→ POST {path}")
-        data = self.session.request("POST", path, json_body=body, retries=2, timeout=300)
+        try:
+            data = self.session.request("POST", path, json_body=body,
+                                        retries=2, timeout=300)
+        except ApiError as exc:
+            # 肖像保护在本地判不了（取决于图里是谁），只能撞上了再把出路接上。
+            # 上游那句话是中英混排的，只认「肖像保护」这四个字最稳。
+            if "肖像保护" in str(exc) or model in PORTRAIT_GUARDED:
+                exc.extra_fix.append(
+                    f"{model} 有**肖像保护**：只让生成「包含你自己的」人脸，"
+                    f"别人的脸会被上游拒。文档点名的三条出路："
+                    f"{' / '.join(PORTRAIT_ALTERNATIVES)} —— "
+                    f"其中 sd2.5-9img 原生过人脸、sd2-mini 不限人脸、"
+                    f"seedance_v2.0 没有这个限制。")
+            if "素材或参数不符合当前模型要求" in str(exc):
+                exc.extra_fix.append(
+                    f"文档：这句话 = 参考素材或参数不合这个模型的 caps。"
+                    f"这一条发的是 "
+                    f"{body.get('seconds') or body.get('duration') or '?'} 秒 / "
+                    f"{body.get('ratio') or body.get('aspect_ratio') or '?'} / "
+                    f"{body.get('resolution') or '?'}，"
+                    f"图{len(body.get('images') or body.get('image_urls') or [])}"
+                    f"、视频{len(body.get('videos') or body.get('video_urls') or [])}"
+                    f"、音频{len(body.get('audios') or body.get('audio_urls') or [])}。"
+                    f"HM 渠道分辨率**只有 720p**。")
+            raise
         task_id = ""
         if isinstance(data, dict):
             task_id = str(data.get("task_id") or data.get("id") or "")
