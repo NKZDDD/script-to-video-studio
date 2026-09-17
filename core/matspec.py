@@ -61,9 +61,24 @@ MATERIAL_FIELDS = {
          "现在遇到这种会直接停下，不会蒙一个。" + chr(10) +
          "  · 这一家没有你写的形状时程序会换最接近的**并且出声**，"
          "但形状确实变了。常见画幅命中率高。" + chr(10) +
-         "  · 故事板的形状和用它出片的那一段 `ratio` 不一致时，视频那一步"
+         "  · 交接板 A/B 区图的形状和用它出片的那一段 `ratio` 不一致时，视频那一步"
          "要裁或者加黑边，而那一步不会说话 —— 导入时会提醒一句，不拦。"),
         ("reference_images", False, "有序参考图，见下面「参考图怎么写」"),
+        # ---- 下面三个只有 ABC 交接板用（电影级 v7.0）----
+        ("region", False,
+         "**只有交接板的区域图写它**：`A` / `B` / `C`。写了就落 "
+         "`04_交接板/区域图/`，不写就按 key 的家族前缀算。" + chr(10) +
+         "  程序**按这个字段认区域图，不按 key 前缀** —— 整板和它的三张"
+         "区域图同属 ABC 家族、key 也长得像，靠前缀分不开，而分错的后果是"
+         "区域图落进整板目录，「视频该引哪张」从目录上就看不出来了。"),
+        ("board", False,
+         "**区域图专用**：它派生自哪张整板的 `key`。写 `parent` 也认。" + chr(10) +
+         "  区域图的**唯一图片输入就是这张整板** —— `reference_images` 里"
+         "有且只能有它一条。多投一张会重定空间或外观的图，派生就飘了，"
+         "而飘了不报错：图看着像那么回事，空间已经不对。"),
+        ("boundary", False,
+         "**整板专用**：这块板架在哪个交接边界上，比如 "
+         "`EP01_SEG01_TO_SEG02`。程序只是记下来给人看，不参与判定。"),
         ("name", False, "人看的名字，比如「林溪身份根」。写 `goal` 也认"),
         ("family", False, "家族标记。程序不读它（落点看 `key` 的前缀），"
                           "写着方便你自己核对"),
@@ -81,12 +96,22 @@ MATERIAL_FIELDS = {
         ("filename", True, "产物文件名（带后缀）。视频一律落 `05_分段视频/`，"
                            "不看 key 的前缀"),
         ("prompt", True, "完整可投喂的提示词正文"),
-        ("storyboard_refs", True,
-         "本段的**有序**故事板列表。程序按 `image_n` 的顺序上传给模型，"
-         "它就是模型看到的 Image 1..N 的前几张。"
-         "几张、选哪几张是你的判断 —— 程序只要求：非空、`image_n` 从 1 连续排、"
-         "引的 key 在本材料里存在。空的 → 视频那一层报「缺故事板」不出片。"),
-        ("reference_images", False, "骨架之后的补图，编号接着排"),
+        ("handoff_refs", False,
+         "本段引用的**交接板区域图**，按 `image_n` 顺序上传，"
+         "就是模型看到的 Image 1..N 的前几张。每项加一个 `role`：" + chr(10) +
+         "  · `IN_B` —— 入板的 B 区独立图，定本段**首镜**" + chr(10) +
+         "  · `IN_C` —— 入板的 C 区独立图，定本段**开场空间**" + chr(10) +
+         "  · `OUT_A` —— 出板的 A 区独立图，定本段**结尾**" + chr(10) +
+         "  **不是必填，可以一个都没有。** 交接板只给需要承接的边界做："
+         "首段没有入板、末段没有出板、天然转场两边都不做 —— "
+         "那些情况这里就是空的，**不算缺项**。" + chr(10) +
+         "  **引的必须是区域图，不是整板。** 整板只留在上游，不喂给视频。" + chr(10) +
+         "  三个 role 各自最多一个：它们是三个不同时刻，语义不能互换，"
+         "同一个 role 给两张的话程序分不出该信哪张。" + chr(10) +
+         "  老材料写 `storyboard_refs` 也照旧认（同义），"
+         "但新材料用 `handoff_refs`。"),
+        ("reference_images", False,
+         "交接板之后的补图（人物身份/服饰、道具外形等），编号接着排"),
         ("duration", False, "秒数。不写就用申报头里的 `seg_duration`"),
         ("ratio", False, "画幅。不写就用申报头里的 `ratio`"),
     ],
@@ -101,7 +126,7 @@ MATERIAL_FIELDS = {
     ],
 }
 
-# 参考图元素的字段（`reference_images` / `storyboard_refs` 里每一项）。
+# 参考图元素的字段（`reference_images` / `handoff_refs` 里每一项）。
 # **程序真读的只有两个。** 剩下五个（who / controls / not_controls /
 # scope / role）一个都不进任务 —— `role` 甚至被写成空串丢掉。
 # 它们是我们自己那套方法论的字段，留在必填表里等于要求 codex 按我们的框架
@@ -109,11 +134,16 @@ MATERIAL_FIELDS = {
 REF_FIELDS = [
     ("image_n", True, "**实际上传顺序**，从 1 连续排。跳号或重号会被拦"),
     ("key", True, "指向本材料里另一条的 `key`。写 `asset_id` 也认（同义）"),
+    # `role` 从「程序不读」升级成「handoff_refs 里必读」：
+    # IN_B / IN_C / OUT_A 是三个不同时刻，语义不能互换。
+    # 在 `reference_images` 里它仍然不读。
+    ("role", False, "**只有 `handoff_refs` 里读它**：`IN_B` / `IN_C` / `OUT_A`。"
+                    "放在 `reference_images` 里不读"),
 ]
 
 # 写着不报错，但**程序一个都不读**，也不影响出图出片。想自己核对就写，
 # 不想写就不写 —— 别为它们花时间。
-REF_FIELDS_IGNORED = ["who", "controls", "not_controls", "scope", "role"]
+REF_FIELDS_IGNORED = ["who", "controls", "not_controls", "scope"]
 
 # 程序把材料变成任务之后的字段（`core/produce.py` 里 `task.get` 的全集）。
 # **这一节是给你对号用的，不是让你写的。** 名字和上面那张表故意不一样：
@@ -130,7 +160,9 @@ TASK_FIELDS = {
     "video": [
         ("key", "照抄材料的 `key`（`EP01-SEG01`）"),
         ("prompt_ref", "同上"),
-        ("storyboard_refs[]", "从材料的 `storyboard_refs` 转来，带上算好的落点"),
+        ("handoff_refs[]", "从材料的 `handoff_refs` 转来，带上 role 和算好的落点"),
+        ("storyboard_refs[]", "同一份东西的老名字，值一样 —— 出片那一层"
+                              "和产物页还在读它"),
         ("output", "一律 `05_分段视频/<filename>`"),
         ("params.duration", "从材料的 `duration` 或申报头的 `seg_duration` 来"),
         ("params.ratio", "从材料的 `ratio` 或申报头来"),
@@ -146,6 +178,8 @@ NEEDS = TASK_FIELDS
 # 这套体系用不上的东西 —— 而且它占着参考图的名额。
 _ASSET_LINE = ("02_固定资产/<家族目录>/  提示词 → 03_提示词/资产生产提示词/")
 _SB_LINE = "04_故事板/  提示词 → 03_提示词/故事板提示词/"
+_BOARD_LINE = "04_交接板/  提示词 → 03_提示词/交接板提示词/"
+_REGION_LINE = "04_交接板/区域图/  提示词 → 03_提示词/交接板提示词/"
 _VIDEO_LINE = "05_分段视频/  提示词 → 03_提示词/视频提示词/"
 _SCSTATE_LINE = "03b_场景状态图/  提示词 → 03_提示词/场景状态提示词/"
 
@@ -156,7 +190,11 @@ _FAMILIES_V34 = [
     ("CT", "连续状态资产"), ("COST", "服饰资产"), ("LOC", "场景资产"),
     ("PROP", "道具资产"), ("VEH", "载具资产"), ("CRE", "生物资产"),
     ("GRP", "群体资产"), ("VFX", "特效资产"),
-    ("SBSHEET / SBPKG", "04_故事板"), ("SCSTATE / SCST", "03b_场景状态图"),
+    # v7.0：故事板整条换成 ABC 交接板。整板和区域图**分目录**：
+    # 一个是上游（不喂视频），一个是视频真正引用的 —— 混在一起，
+    # 「哪张能喂视频」只能靠文件名认，而认错不报错。
+    ("ABC（整板）", "04_交接板"), ("ABC + region 字段", "04_交接板/区域图"),
+    ("SCSTATE / SCST", "03b_场景状态图"),
 ]
 # 通用十二环节自己跑 LLM 时只建六个资产目录（core/stages._CAT_DIR）——
 # 这六个和下面这六个家族一一对上，所以导入的落点和它自己跑出来的一致。
@@ -169,7 +207,7 @@ _FAMILIES_V61 = [
 
 SYSTEMS = {
     "v34": {
-        "label": "电影级十七章",
+        "label": "电影级十七章（v7.0 老李）",
         # 中间产物的文件名按体系写。两套的环节号和产物名完全不同
         # （n1..n14 / s1..s12），写错的代价不是报错 —— 是 codex 拿着一份
         # 「看起来很具体」的说明去核对，发现对不上，然后不知道该信哪句。
@@ -178,10 +216,13 @@ SYSTEMS = {
         "dirs": {"资产（人物/造型/连续状态/服饰/场景/道具/载具/生物/群体/特效）":
                  _ASSET_LINE,
                  "场景状态图": _SCSTATE_LINE,
-                 "故事板": _SB_LINE,
+                 "交接板整板": _BOARD_LINE,
+                 "交接板区域图（A/B/C）": _REGION_LINE,
                  "分段视频": _VIDEO_LINE},
         "families": _FAMILIES_V34,
-        "note": "这套体系有场景状态图（同一个场景在不同剧情时刻的状态）。",
+        "note": "这套体系有场景状态图（同一个场景在不同剧情时刻的状态）。"
+                "**没有故事板** —— 段间承接由 ABC 交接板负责，"
+                "视频引的是交接板派生的区域图，不引故事板。",
     },
     "v61": {
         "label": "通用十二环节",
@@ -239,12 +280,31 @@ AUDIT = [
                        "都要和第一行的申报一致。**这是唯一能查出「少产了」的检查** —— "
                        "该 84 条只给 80 条时，剩下的内部完全自洽，"
                        "引用链、编号、段号全绿，没有任何一处会说话"),
-    ("视频必须有骨架", "每条视频要有 `storyboard_refs`。空的 → "
-                       "视频那一层报「缺故事板」直接不出片"),
-    ("骨架张数会报出来", "一段视频只给一张骨架 → **提醒**（不拦）。"
-                          "程序只是把数报出来 —— 一张够不够是你的判断，"
-                          "它不懂这一段的内容。报它是因为「本来想给多张、"
-                          "实际只落了一张」这种漏产从别处一点都看不出来"),
+    # ---- ABC 交接板（电影级 v7.0）。每一条都是**结构性**的：
+    #      程序能查、查出来的都是「导进去之后才发现」的那种。
+    #      「一段该不该有交接板」不查 —— 那是你按剧情定的。
+    ("区域图只能引一张整板", "写了 `region` 的那条，`reference_images` 里"
+                             "**有且只能有一条**，且必须是整板。"
+                             "多投一张会重定空间或外观的图，派生就飘了 —— "
+                             "而飘了不报错：图看着像那么回事，空间已经不对"),
+    ("整板不许引区域图", "整板的参考图里不能出现任何 `region` 图。"
+                         "整板是区域图的上游，反过来引就是让偏差逐板传递，"
+                         "而每一板都「看起来跟上一板一致」，没有一处会说话"),
+    ("board 要指到真整板", "区域图的 `board` 必须是本材料里一条**不带 region** "
+                           "的 ABC。指到别的东西 → 出图时报「参考图不存在」，"
+                           "而那张图压根没人做"),
+    ("视频只引区域图", "`handoff_refs` 引的必须是带 `region` 的那种。"
+                       "引到整板 → 一张三区图整个喂给视频模型，"
+                       "画面会去学那张板的分格排版，**片子出得来、构图是错的**"),
+    ("三个 role 各自最多一个", "`IN_B` / `IN_C` / `OUT_A` 是三个不同时刻，"
+                               "语义不能互换。同一个 role 给两张，程序分不出"
+                               "该信哪张 —— 而它不会挑，会两张都发"),
+    ("交接板引用会报出来", "每段引了哪几个 role → **提醒**（不拦）。"
+                            "一段有零个、一个、两个还是三个交接板引用，"
+                            "是你按剧情定的（首段没入板、末段没出板、"
+                            "天然转场两边都没有）—— 程序不懂内容，不判对错。"
+                            "报它是因为「本来要给、实际漏了」这种漏产"
+                            "从别处一点都看不出来"),
     ("kind 只认三个值", "`image` / `video` / `manifest`。认不出的**不建任务** —— "
                         "猜成图片的话，一条视频会被当资产图出掉，"
                         "任务标成功，成片里少一段而没人报错"),
@@ -285,7 +345,10 @@ _TYPES = {
     "segs_per_episode": {"type": ["integer", "object"]},
     "params": {"type": "object"},
     "reference_images": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+    "handoff_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
     "storyboard_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+    "region": {"type": "string", "enum": ["A", "B", "C"]},
+    "board": {"type": "string"}, "boundary": {"type": "string"},
 }
 
 
@@ -327,53 +390,121 @@ def json_schema() -> str:
     return json.dumps(sch, ensure_ascii=False, indent=2)
 
 
-def jsonl_schema() -> str:
-    """推荐格式：一行一条 JSON。
+def jsonl_schema(system: str = "v34") -> str:
+    """推荐格式：一行一条 JSON。**按体系两份。**
+
+    以前只有一份，两套体系共用 —— 而 v7.0 把电影级的故事板整条换成了
+    ABC 交接板，通用十二环节没这回事。共用一份的话，总有一套拿到的示例
+    在教它产一批本体系用不上的东西，**而示例是形状的唯一权威**：
+    codex 照它产，比照任何一段文字说明都准。
 
     这份样例是**一份完全合格的最小材料** —— 抄下来原样导入会 0 条问题。
     所以它同时是文档和自检：引用链闭合、编号连续、申报和实物对得上，
     三样都在这四行里演示了。示例自己不合格的话，照它产出来的也不会合格。
 
-    第四样：**画幅每张各写各的**。人物立绘 3:4、故事板 9:16 —— 全写同一个
+    第四样：**画幅每张各写各的**。人物立绘 3:4、空间母图和整板 16:9、
+    A/B 区图 9:16（成片画幅）、C 区图 16:9（要看清整个空间）—— 全写同一个
     值的话，codex 照样例产就是全剧一个数，而画幅本来该按这一张画什么定。
+
+    第五样：**交接板按需**。示例演示同一块板的两端 —— SEG01 用它的 A 区
+    定结尾，SEG02 用它的 B/C 区定开头和空间。SEG01 只有一条 `OUT_A`，
+    因为它前面没有段（首段无入板）。写死三条的话，codex 照样例产就会每段
+    都凑三条，而天然转场那些边界根本没有板可引。
     """
     man = {
         "kind": "manifest",
-        "total": 4, "image": 3, "video": 1,
-        "episodes": 1, "segs_per_episode": {"EP01": 1},
+        "total": 8, "image": 6, "video": 2,
+        # 两段 —— 因为这份示例要演示**同一块板的两端**：
+        # SEG01 用它的 A 区定结尾，SEG02 用它的 B/C 区定开头和空间。
+        "episodes": 1, "segs_per_episode": {"EP01": 2},
         "params": {"episode_seconds": 60, "seg_duration": 15,
                    "ratio": "9:16", "image_size": "9:16",
                    "pacing": "中速", "subtitle": True},
     }
-    def _sheet(letter, what):
+    # 共同空间母图。整板以它当空间上游 —— **不是凭空想一个场景**。
+    scstate = {
+        "kind": "image",
+        "key": "PRJ_X__SCSTATE_EP01_SEG02_W01_R01",
+        "family": "SCSTATE",
+        "name": "EP01-SEG02 开场空间状态",
+        "filename": "PRJ_X__SCSTATE_EP01_SEG02_W01_R01.png",
+        # 空间母图要看清全场，所以用横的；成片是 9:16。
+        # **画幅按这一张画什么定，不是全剧一个值。**
+        "size": "16:9",
+        "reference_images": [],
+        "prompt": "（完整可投喂提示词正文，一个字都不要省）",
+    }
+    BOARD = "PRJ_X__ABC_EP01_SEG01_TO_SEG02_R01"
+    # 整板：**一个交接边界一张**，A/B/C 三区一次生成。
+    # 不是每段一张 —— 只有需要承接的边界才做。
+    board = {
+        "kind": "image",
+        "key": BOARD,
+        "family": "ABC",
+        "boundary": "EP01_SEG01_TO_SEG02",
+        "name": "SEG01→SEG02 交接板（A前尾 / B后首 / C后段空间）",
+        "filename": f"{BOARD}.png",
+        # 整板是容器，按排版和清晰度选比例，不必等于成片。
+        "size": "16:9",
+        "reference_images": [
+            {"image_n": 1, "key": "PRJ_X__SCSTATE_EP01_SEG02_W01_R01"},
+            {"image_n": 2, "key": "PRJ_X__CHAR_001_R02"}],
+        "prompt": "（完整可投喂提示词正文，一个字都不要省）",
+    }
+
+    def _region(g, what):
+        """区域图：**唯一图片输入就是那张整板**，不补投别的。"""
         return {
             "kind": "image",
-            "key": f"PRJ_X__SBSHEET_EP01_SEG01_{letter}_R01",
-            "family": "SBSHEET",
-            "name": f"EP01-SEG01 故事板 {letter}（{what}）",
-            "filename": f"PRJ_X__SBSHEET_EP01_SEG01_{letter}_R01.png",
-            "size": "9:16",
-            "reference_images": [],
+            "key": f"PRJ_X__ABC_EP01_SEG01_TO_SEG02_{g}_R01",
+            "family": "ABC",
+            "region": g,
+            "board": BOARD,
+            "name": f"交接板 {g} 区独立图（{what}）",
+            "filename": f"PRJ_X__ABC_EP01_SEG01_TO_SEG02_{g}_R01.png",
+            # A/B 是成片构图，跟成片画幅；C 要看清整个空间，用横的。
+            "size": "9:16" if g in ("A", "B") else "16:9",
+            "reference_images": [{"image_n": 1, "key": BOARD}],
             "prompt": "（完整可投喂提示词正文，一个字都不要省）",
         }
-    # **两张，不是一张。** 样例给一张的话，codex 照样例的形状产就是一张，
-    # 而那正是「视频只有一个参考图」的来处 —— 样例本身在教它。
-    sb_a, sb_b = _sheet("A", "入场"), _sheet("B", "关键动作结果")
+
+    ra, rb, rc = (_region("A", "前段结尾"), _region("B", "后段开头"),
+                  _region("C", "后段空间"))
     img = {
         "kind": "image",
         "key": "PRJ_X__CHAR_001_R02",
         "family": "CHAR",
         "name": "林溪身份根",
         "filename": "PRJ_X__CHAR_001_R02.png",
-        # **故意和故事板的 9:16 不一样。** 样例全写同一个值的话，
-        # codex 照样例的形状产就是全剧一个值 —— 样例本身在教它「画幅是
-        # 全局设置」，而画幅本来就该按这一张画什么来定。
-        # 这里是人物立绘，竖幅但更窄；故事板是成片画幅 9:16。
+        # 人物立绘，竖幅但更窄 —— 和成片的 9:16 故意不一样。
         "size": "3:4",
         "reference_images": [],
         "prompt": "（完整可投喂提示词正文，一个字都不要省）",
     }
+    # 这一段（SEG02）**有入板、没出板** —— 它后面那个边界是天然转场。
+    # 所以只有 IN_B / IN_C 两条，没有 OUT_A。样例就该演示「按需」这件事：
+    # 写死三条的话，codex 照样例产就会每段都凑三条，
+    # 而天然转场那些边界根本没有板可引。
     vid = {
+        "kind": "video",
+        "key": "EP01-SEG02",
+        "episode": "EP01",
+        "seg": "SEG02",
+        "filename": "PRJ_X__VIDEO_EP01_SEG02_R01.mp4",
+        "duration": 15,
+        "ratio": "9:16",
+        "handoff_refs": [
+            {"image_n": 1, "key": "PRJ_X__ABC_EP01_SEG01_TO_SEG02_B_R01",
+             "role": "IN_B"},
+            {"image_n": 2, "key": "PRJ_X__ABC_EP01_SEG01_TO_SEG02_C_R01",
+             "role": "IN_C"}],
+        "reference_images": [
+            {"image_n": 3, "key": "PRJ_X__CHAR_001_R02"}],
+        "prompt": "（完整可投喂提示词正文）",
+    }
+    # 边界的**前一段**：它只有出板 A（定本段结尾）。
+    # 前面没有段，所以没有入板 —— 这就是「首段无入板」。
+    vid_prev = {
         "kind": "video",
         "key": "EP01-SEG01",
         "episode": "EP01",
@@ -381,22 +512,44 @@ def jsonl_schema() -> str:
         "filename": "PRJ_X__VIDEO_EP01_SEG01_R01.mp4",
         "duration": 15,
         "ratio": "9:16",
-        "storyboard_refs": [
-            {"image_n": 1, "key": "PRJ_X__SBSHEET_EP01_SEG01_A_R01",
-             "role": "ENTRY"},
-            {"image_n": 2, "key": "PRJ_X__SBSHEET_EP01_SEG01_B_R01",
-             "role": "KEY_ACTION_RESULT"}],
+        "handoff_refs": [
+            {"image_n": 1, "key": "PRJ_X__ABC_EP01_SEG01_TO_SEG02_A_R01",
+             "role": "OUT_A"}],
         "reference_images": [
-            {"image_n": 3, "key": "PRJ_X__CHAR_001_R02",
-             "who": "19岁林溪；校服脏湿、掌心烧伤",
-             "controls": "身份与当前 LOOK/CT",
-             "not_controls": "节奏、镜头顺序、站位",
-             "scope": "仅在该人物出现的时间窗"}],
+            {"image_n": 2, "key": "PRJ_X__CHAR_001_R02"}],
         "prompt": "（完整可投喂提示词正文）",
     }
     import json as _j
+    if system != "v34":
+        # 通用十二环节：没有场景状态图，也没有交接板 —— 故事板那套照旧。
+        sb = [{"kind": "image",
+               "key": f"PRJ_X__SBSHEET_EP01_SEG01_{g}_R01",
+               "family": "SBSHEET",
+               "name": f"EP01-SEG01 故事板 {g}",
+               "filename": f"PRJ_X__SBSHEET_EP01_SEG01_{g}_R01.png",
+               "size": "9:16", "reference_images": [],
+               "prompt": "（完整可投喂提示词正文，一个字都不要省）"}
+              # **两张，不是一张。** 样例给一张的话，codex 照样例产就是一张，
+              # 而那正是「视频只有一个参考图」的来处 —— 样例本身在教它。
+              for g in ("A", "B")]
+        man61 = dict(man, total=4, image=3, video=1,
+                     segs_per_episode={"EP01": 1})
+        vid61 = {
+            "kind": "video", "key": "EP01-SEG01",
+            "episode": "EP01", "seg": "SEG01",
+            "filename": "PRJ_X__VIDEO_EP01_SEG01_R01.mp4",
+            "duration": 15, "ratio": "9:16",
+            "storyboard_refs": [
+                {"image_n": 1, "key": "PRJ_X__SBSHEET_EP01_SEG01_A_R01"},
+                {"image_n": 2, "key": "PRJ_X__SBSHEET_EP01_SEG01_B_R01"}],
+            "reference_images": [{"image_n": 3, "key": "PRJ_X__CHAR_001_R02"}],
+            "prompt": "（完整可投喂提示词正文）",
+        }
+        return chr(10).join(_j.dumps(r, ensure_ascii=False)
+                            for r in (man61, img, *sb, vid61))
     return chr(10).join(_j.dumps(r, ensure_ascii=False)
-                        for r in (man, sb_a, sb_b, img, vid))
+                        for r in (man, scstate, img, board, ra, rb, rc,
+                                  vid_prev, vid))
 
 
 # 材料交到哪。**约定一个确定的名字**，别让人每次去翻文件对话框 ——
@@ -431,7 +584,7 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("**只管数据形状**：字段名、编号怎么排、引用指向谁、参数的合法取值 —— "
       "因为程序真的要读它们，读不对就发不出去或者发错。")
     a("")
-    a("**不管你怎么创作**：一段该几张故事板、补图补什么、画幅选竖还是横、"
+    a("**不管你怎么创作**：哪些边界要交接板、补图补什么、画幅选竖还是横、"
       "提示词怎么写 —— 那些是你的判断，程序不懂内容，也不该拿它的偏好当规矩。"
       "上一版里混进了一整套分镜方法论（「不许退化成一张起始图」"
       "「补图要证明有独有作用」之类），已经撤掉 —— 那是在替你做决定，"
@@ -460,12 +613,12 @@ def render(limits: Optional[dict] = None, project_name: str = "",
       "每一处猜错都是静默的（比如张数数成两倍，然后「超上限」全员误报）。"
       "JSONL 没有这些歧义，错在哪一行、哪个字段都能指出来。")
     a("")
-    a("下面这四行是**一份完全合格的最小材料** —— 原样导入 0 条问题，"
+    a("下面这几行是**一份完全合格的最小材料** —— 原样导入 0 条问题，"
       "有测试盯着这件事（示例自己不合格的话，照它产出来的也不会合格）。"
       "拿它当形状的唯一权威：")
     a("")
     a("```jsonl")
-    a(jsonl_schema())
+    a(jsonl_schema(system))
     a("```")
     a("")
     a("## 第一行：申报头（必须有）")
@@ -508,7 +661,7 @@ def render(limits: Optional[dict] = None, project_name: str = "",
         for f, need, why in rows:
             a(f"- `{f}`{'（必填）' if need else ''} —— {why}")
         a("")
-    a("### 参考图元素（`reference_images` / `storyboard_refs` 里每一项）")
+    a("### 参考图元素（`reference_images` / `handoff_refs` 里每一项）")
     a("")
     for f, need, why in REF_FIELDS:
         a(f"- `{f}`{'（必填）' if need else ''} —— {why}")
@@ -544,7 +697,8 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("## 参考图怎么写")
     a("")
     a("`image_n` **就是实际上传顺序**：第 1 个元素就是 Image 1。"
-      "视频的骨架排在前面（`storyboard_refs`），补图接着排（`reference_images`）。")
+      "视频的交接板区域图排在前面（`handoff_refs`），"
+      "补图接着排（`reference_images`）。")
     a("")
     a("提示词正文里**每张要有一句「这是谁」** —— 出图前那道检查查的就是它："
       "多人场景里只写编号、不写是谁，模型必然张冠李戴。")
@@ -568,7 +722,7 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("")
     a("## 视频的参考图：两个数组，一个编号序列")
     a("")
-    a("`storyboard_refs` 排在前面，`reference_images` 接着排 —— "
+    a("`handoff_refs` 排在前面，`reference_images` 接着排 —— "
       "两个数组拼起来就是模型看到的 Image 1..N，`image_n` 从 1 连续排。"
       "程序按这个顺序上传，不重排、不去重、不补号。")
     a("")

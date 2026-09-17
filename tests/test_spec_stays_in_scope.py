@@ -52,12 +52,17 @@ class SpecScopeTests(unittest.TestCase):
     def test_fields_the_program_ignores_are_marked(self):
         """★ 程序不读的字段要说明白。
 
-        `who` / `controls` / `not_controls` / `scope` / `role` 一个都不进任务
-        （`role` 甚至被写成空串丢掉）。留在必填表里等于要求 codex 按我们那套
-        方法论做一遍记账，而产出的东西哪儿都不去。
+        `who` / `controls` / `not_controls` / `scope` 一个都不进任务。
+        留在必填表里等于要求 codex 按我们那套方法论做一遍记账，
+        而产出的东西哪儿都不去。
+
+        **`role` 从这张表里毕业了**：v7.0 起它是 `IN_B` / `IN_C` / `OUT_A`，
+        程序真读（定首镜 / 定开场空间 / 定结尾是三件不同的事），
+        还有一条检查盯着「同一个 role 不许两张」。
         """
         self.assertEqual(matspec.REF_FIELDS_IGNORED,
-                         ["who", "controls", "not_controls", "scope", "role"])
+                         ["who", "controls", "not_controls", "scope"])
+        self.assertIn("role", [f for f, _n, _w in matspec.REF_FIELDS])
         for f, need, _why in matspec.REF_FIELDS:
             self.assertNotIn(f, matspec.REF_FIELDS_IGNORED)
         self.assertEqual([f for f, need, _ in matspec.REF_FIELDS if need],
@@ -77,11 +82,11 @@ class SpecScopeTests(unittest.TestCase):
              "reference_images": [], "prompt": "正文"},
             {"kind": "video", "key": "EP01-SEG01", "episode": "EP01", "seg": "SEG01",
              "filename": "v.mp4", "duration": 10, "ratio": "9:16", "prompt": "正文",
-             "storyboard_refs": [{"image_n": 1,
-                                  "key": "PRJ__SBSHEET_EP01_SEG01_A_R01",
-                                  "role": "ENTRY", "who": "谁",
-                                  "controls": "A", "not_controls": "B",
-                                  "scope": "C"}],
+             "handoff_refs": [{"image_n": 1,
+                               "key": "PRJ__SBSHEET_EP01_SEG01_A_R01",
+                               "role": "OUT_A", "who": "谁",
+                               "controls": "A", "not_controls": "B",
+                               "scope": "C"}],
              "reference_images": []},
         ]
         from core import matimport as M
@@ -90,8 +95,9 @@ class SpecScopeTests(unittest.TestCase):
         blob = json.dumps(t, ensure_ascii=False)
         for v in ("谁", '"A"', '"B"', '"C"'):
             self.assertNotIn(v, blob, f"{v} 居然进任务了 —— 文档说它不读")
-        # role 被写成空串丢掉，这就是「不读」的证据
-        self.assertEqual(t["storyboard_refs"][0]["spine_role"], "")
+        # role 反过来：它必须**原样到达**任务里 —— 出片那一层靠它分
+        # 「这张定首镜」还是「这张定结尾」。
+        self.assertEqual(t["handoff_refs"][0]["role"], "OUT_A")
 
     def test_the_hard_identity_rule_is_one_line(self):
         """身份映射只有一行是硬的，其余提醒级。

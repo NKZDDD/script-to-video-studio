@@ -240,7 +240,7 @@ def parse_jsonl(text: str) -> list:
         out.append({"no": i, "filename": "", "stem": "", "kind": "", "goal": "",
                     "canonical_id": "", "refs": [], "prompt": "",
                     "missing": [f"第 {i} 行 {why}"], "episode": "", "seg": "",
-                    "ratio": "", "seconds": 0, "src": "jsonl", "spine": []})
+                    "ratio": "", "seconds": 0, "src": "jsonl", "spine": [], "handoff": [], "boundary": "", "region": "", "board": ""})
     return out
 
 
@@ -249,7 +249,7 @@ def _blank(no: int, kind: str = "", **kw) -> dict:
     d = {"no": no, "filename": "", "stem": "", "kind": kind, "goal": "",
          "canonical_id": "", "refs": [], "prompt": "", "missing": [],
          "episode": "", "seg": "", "ratio": "", "seconds": 0,
-         "src": "jsonl", "spine": []}
+         "src": "jsonl", "spine": [], "handoff": [], "boundary": "", "region": "", "board": ""}
     d.update(kw)
     return d
 
@@ -296,7 +296,11 @@ def _from_json(no: int, r: dict) -> dict:
             elif str(x).strip():
                 got.append((0, str(x).strip()))
         return got
-    refs = _rows("storyboard_refs") + _rows("reference_images")
+    # `handoff_refs` 排在前面，`reference_images` 接着排 ——
+    # 两个数组拼起来就是模型看到的 Image 1..N。
+    # `storyboard_refs` 仍然收：老项目的材料里是那个名字，换名不该让老材料导不进。
+    refs = (_rows("handoff_refs") + _rows("storyboard_refs")
+            + _rows("reference_images"))
     # 没给编号的按出现顺序补 —— 给了的照它的
     seq, n = [], 0
     for num, aid in refs:
@@ -332,10 +336,28 @@ def _from_json(no: int, r: dict) -> dict:
         elif kind == "video":
             # 视频缺集号是硬伤：分集和拼接顺序全靠它。图缺了只是不参与按集。
             missing.append("episode / seg（视频要它来分集和排序，拼接靠这个）")
-    spine = [a for _n, a in _rows("storyboard_refs")]
-    if kind == "video" and not spine:
-        missing.append("storyboard_refs（本段的有序故事板骨架 —— "
-                       "视频那一层读这个字段，缺了报「缺故事板」直接不出片）")
+    # **交接板引用：按需，可以一个都没有。**
+    #
+    # v7.0 起视频的空间来源是 ABC 交接板派生的区域图（入板B 定首镜、
+    # 入板C 定开场空间、出板A 定结尾），而**交接板本身是按需的**：
+    # 只有需要承接的边界才做，天然转场免做，首段没有入板、末段没有出板。
+    # 所以这里**不再把「没有」当成缺项** —— 原来 `storyboard_refs` 是必填，
+    # 照搬过来会把所有天然转场的段都判成不合格。
+    spine = [a for _n, a in (_rows("handoff_refs") or _rows("storyboard_refs"))]
+    # `handoff` 只从 `handoff_refs` 收，**不兜底老字段**。
+    # 兜底的话，老材料（v61 那套 `storyboard_refs`，本来就没有 role 这回事）
+    # 会条条触发「一个 role 都没写」的提醒 —— 而假警报比漏报贵：
+    # 提醒一多就没人看了，真的漏 role 那次也跟着被划过去。
+    # 骨架本身不受影响：上面的 `spine` 两个字段都收，出片照旧。
+    handoff = []
+    for x in (r.get("handoff_refs") or []):
+        if not isinstance(x, dict):
+            continue
+        aid = str(x.get("key") or x.get("asset_id") or "").strip()
+        if aid:
+            handoff.append({"key": aid,
+                            "role": str(x.get("role") or "").strip().upper(),
+                            "image_n": int(x.get("image_n") or 0)})
     return {
         "no": no, "filename": fn,
         "stem": str(r.get("key") or fn.rsplit(".", 1)[0]),
@@ -345,7 +367,11 @@ def _from_json(no: int, r: dict) -> dict:
         "missing": missing, "episode": ep, "seg": seg,
         "ratio": str(r.get("ratio") or r.get("size") or ""),
         "seconds": int(r.get("duration") or 0),
-        "spine": spine, "src": "jsonl",
+        "spine": spine, "handoff": handoff, "src": "jsonl",
+        # 整板专属：这条板架在哪个交接边界上。区域图专属：region + board。
+        "boundary": str(r.get("boundary") or "").strip(),
+        "region": str(r.get("region") or "").strip().upper(),
+        "board": str(r.get("board") or r.get("parent") or "").strip(),
     }
 
 
@@ -437,18 +463,84 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
                                f"**模型按正文的说明去用图**，编号错位之后每条"
                                f"描述都套到别的图上，画面出得来而参考全是错的"})
 
-    # 骨架只有一张：V6.2 第 19 章要求覆盖完整关键时间推进。
-    # **只提醒不拦** —— 已经产出来的材料是一段一张（84 张故事板 : 84 段视频），
-    # 判 error 就是把它们全变成死路；而死路比漏检更糟。
+    # ---- ABC 交接板的结构检查。**每一条都是程序能查的**，
+    #      「这一段该不该有交接板」不查 —— 那是按剧情定的（首段没入板、
+    #      末段没出板、天然转场两边都没有），程序不懂内容。
+    boards = {u["stem"] for u in units
+              if u["kind"] == "image" and not u.get("region")
+              and "ABC" in str(u["stem"]).upper()}
+    regions = {u["stem"]: u for u in units if u.get("region")}
+
     for u in units:
-        if u["kind"] == "video" and len(u.get("spine") or []) == 1:
-            out.append({"level": "warn", "code": "VIDEO_SPINE_SINGLE",
-                        "msg": f"第 {u['no']:03d} 条（{u['filename']}）"
-                               f"只有 1 张故事板骨架 —— 一张只能说明某个瞬间，"
-                               f"模型不知道这一段先发生什么后发生什么，"
-                               f"**会把后段的画面当前段用而不报错**，"
-                               f"出来的片子时间顺序是乱的。"
-                               f"要覆盖完整关键时间推进的全部有序 Sheet"})
+        who = f"第 {u['no']:03d} 条（{u['filename'] or u['stem']}）"
+        if u.get("region"):
+            # 唯一图片输入就是那张整板。多投一张会重定空间或外观的图，
+            # 派生就飘了 —— 而飘了不报错：图看着像那么回事，空间已经不对。
+            refs = [a for _n, a in u["refs"]]
+            if len(refs) != 1:
+                out.append({"level": "error", "code": "REGION_NOT_SINGLE_PARENT",
+                            "msg": f"{who} 是交接板的 {u['region']} 区图，"
+                                   f"参考图应当**有且只有一张整板**，"
+                                   f"实际有 {len(refs)} 张。"
+                                   f"多投一张会重定空间或外观的图，派生就飘了 —— "
+                                   f"而飘了不报错：图看着像那么回事，空间已经不对"})
+            elif refs[0] not in boards:
+                out.append({"level": "error", "code": "REGION_PARENT_NOT_BOARD",
+                            "msg": f"{who} 引的 `{refs[0]}` 不是整板"
+                                   f"（整板 = 同为 ABC 家族但**不带 region**）。"
+                                   f"引错了出图时报「参考图不存在」，"
+                                   f"而那张图压根没人做"})
+            b = u.get("board")
+            if b and b not in boards:
+                out.append({"level": "error", "code": "REGION_BOARD_MISSING",
+                            "msg": f"{who} 的 `board` 指向 `{b}`，"
+                                   f"而本材料里没有这张整板"})
+            if u.get("region") not in ("A", "B", "C"):
+                out.append({"level": "error", "code": "REGION_BAD_VALUE",
+                            "msg": f"{who} 的 `region` 是 `{u.get('region')}` —— "
+                                   f"只能是 A / B / C"})
+        elif u["stem"] in boards:
+            # 整板不许引区域图：反过来引就是让偏差逐板传递，
+            # 而每一板都「看起来跟上一板一致」，没有一处会说话。
+            bad = [a for _n, a in u["refs"] if a in regions]
+            if bad:
+                out.append({"level": "error", "code": "BOARD_USES_REGION",
+                            "msg": f"{who} 是整板，却引了区域图"
+                                   f"（{'、'.join(bad[:3])}）。整板是区域图的上游，"
+                                   f"反过来引就是让偏差**逐板传递** —— "
+                                   f"而每一板都「看起来跟上一板一致」，"
+                                   f"没有一处会说话"})
+
+        if u["kind"] == "video":
+            hs = u.get("handoff") or []
+            # 引的必须是区域图，不是整板。一张三区图整个喂给视频模型，
+            # 画面会去学那张板的分格排版 —— 片子出得来、构图是错的。
+            for h in hs:
+                if h["key"] in boards:
+                    out.append({"level": "error", "code": "VIDEO_USES_BOARD",
+                                "msg": f"{who} 的 `handoff_refs` 引了整板 "
+                                       f"`{h['key']}`。**整板不喂视频** —— "
+                                       f"一张三区图整个发过去，画面会去学那张板的"
+                                       f"分格排版，片子出得来、构图是错的。"
+                                       f"该引的是它派生的 A/B/C 区域图"})
+            roles = [h.get("role") for h in hs if h.get("role")]
+            for r in set(roles):
+                if r not in ("IN_B", "IN_C", "OUT_A"):
+                    out.append({"level": "error", "code": "HANDOFF_BAD_ROLE",
+                                "msg": f"{who} 的 role `{r}` 不认识 —— "
+                                       f"只能是 IN_B（定首镜）/ IN_C（定开场空间）"
+                                       f"/ OUT_A（定结尾）"})
+                elif roles.count(r) > 1:
+                    out.append({"level": "error", "code": "HANDOFF_ROLE_DUP",
+                                "msg": f"{who} 有 {roles.count(r)} 个 `{r}` —— "
+                                       f"三个 role 是三个不同时刻，各自最多一个。"
+                                       f"给两张的话程序分不出该信哪张，"
+                                       f"而它不会挑，会两张都发"})
+            if hs and not roles:
+                out.append({"level": "warn", "code": "HANDOFF_NO_ROLE",
+                            "msg": f"{who} 的 `handoff_refs` 一个 `role` 都没写 —— "
+                                   f"程序照发，但 IN_B / IN_C / OUT_A 的语义就没了，"
+                                   f"排错时看不出哪张管首镜、哪张管空间"})
 
     # 段号连续：缺一段 = 成片短一截，而拼接不会说话
     byep: dict = {}
@@ -510,7 +602,15 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
         vr = _shape(u["ratio"] or str((decl.get("params") or {}).get("ratio") or ""))
         if not vr:
             continue
+        # **C 区不参与形状比较。** A/B 是成片构图（跟成片画幅），
+        # 而 C 是「完整空间覆盖」—— skill 明说它按信息覆盖选比例、
+        # 不为凑比例裁掉地标和站位。拿成片画幅去比 C，必然报一条假错配，
+        # 而假警报比漏报贵：人会学会忽略这一条。
+        in_c = {h["key"] for h in (u.get("handoff") or [])
+                if h.get("role") == "IN_C"}
         for aid in (u.get("spine") or []):
+            if aid in in_c:
+                continue
             sr = shape.get(aid)
             if sr and sr != vr:
                 bad.append(f"{u['stem'] or u['episode']} 要 {vr}，"
@@ -719,10 +819,19 @@ def episodes_stub(units: list) -> dict:
 
 # ID 家族 → 落哪个文件夹。沿用现有目录，**别另起一套** ——
 # 产物页、拼接、指纹注册表都按这几个目录找东西。
+# 目录：**整板和区域派生图分开放**。
+# 两者都是 ABC 家族，但一个是上游（不喂视频）、一个是视频真正引用的 ——
+# 混在一个目录里，「哪张能喂视频」只能靠文件名认，而认错不报错。
+BOARD_DIR = "04_交接板"
+REGION_DIR = "04_交接板/区域图"
+
 _DIRS = (
-    ("SBSHEET", "04_故事板"), ("SBPKG", "04_故事板"), ("STORYBOARD", "04_故事板"),
+    ("ABC", BOARD_DIR),
     ("SCSTATE", "03b_场景状态图"), ("SCST", "03b_场景状态图"),
     ("VIDEO", "05_分段视频"),
+    # v6.x 的故事板家族。**v7.0 起不再产**，但老项目的 tasks.json 里存着这些
+    # key —— 认得它们才不会把老产物落到「其它资产」里。
+    ("SBSHEET", "04_故事板"), ("SBPKG", "04_故事板"), ("STORYBOARD", "04_故事板"),
 )
 _ASSET_DIRS = (
     ("CHAR", "人物身份资产"), ("PH", "人物身份资产"),
@@ -749,6 +858,12 @@ def out_path(u: dict) -> str:
     up = stem.upper()
     if u.get("kind") == "video":
         return f"05_分段视频/{u['filename']}"
+    # **区域派生图按 `region` 字段认，不按 key 前缀。**
+    # 整板和它的三张派生图同属 ABC 家族、key 也长得像（派生的只是多个 `_A_`），
+    # 靠前缀分不开。而分错的后果是派生图落进整板目录 ——
+    # 「视频该引哪张」从目录上就看不出来了，而引错不报错。
+    if str(u.get("region") or "").strip():
+        return f"{REGION_DIR}/{u['filename']}"
     for key, folder in _DIRS:
         if key in up:
             return f"{folder}/{u['filename']}"
@@ -807,7 +922,8 @@ def build(units: list, size: str = "", ratio: str = "",
     duration = int(p.get("seg_duration") or 0) or duration
     units = units_of(units)        # 申报头不是任务，混进去就是一条永远做不完的活
     where = {u["stem"]: out_path(u) for u in units if u["stem"]}
-    assets, scstates, storyboards, videos, texts = [], [], [], [], {}
+    assets, scstates, boards, regions, videos, texts = [], [], [], [], [], {}
+    storyboards = []                       # v6.x 的故事板，v7.0 材料里恒为空
     skipped = []
     for u in units:
         if u["kind"] not in ("image", "video"):
@@ -834,17 +950,40 @@ def build(units: list, size: str = "", ratio: str = "",
             t["params"] = {"duration": u["seconds"] or duration,
                            "ratio": u["ratio"] or ratio or "9:16"}
             t["segment"] = u["seg"]
-            # 骨架就是它引的那几张故事板 —— 视频那一层读 storyboard_refs
-            # 契约明确给了 `storyboard_refs` 就用它的 —— **别去猜 ID**。
-            # 猜（按名字里有没有 SBSHEET）对 md 那条路是唯一办法，
-            # 但契约里这件事是说清了的，猜只会在命名不同时悄悄挑错。
-            named = set(u.get("spine") or [])
+            # 交接板引用：**契约给了 `handoff_refs` 就用它的，不猜 ID。**
+            # 猜（按名字里有没有 ABC）在这里尤其危险 —— 整板和它的三张区域图
+            # key 长得几乎一样，猜错就是把**整板**喂给视频，
+            # 而 skill 明写「不上传整板」。喂错不报错，空间直接飘。
+            role_of = {h["key"]: h.get("role", "")
+                       for h in (u.get("handoff") or [])}
+            # 谁是骨架，**按声明来**，三级：
+            #   1) v7.0 材料声明的 `handoff_refs`（带 role）
+            #   2) 老材料声明的 `storyboard_refs`（`spine`，没有 role）
+            #   3) 都没声明 —— 只有 md 散文那条路会走到这儿，那里压根没有
+            #      「哪几张是骨架」这个字段，只能按 key 里的家族名认。
+            #
+            # 第 3 条**不能省**：上一轮我把它删了，md 材料的 storyboard_refs
+            # 立刻整条变空 —— 而空的后果不是报错，是出片时「视频没有骨架」，
+            # 一段片子照样出得来、时间顺序是模型自己编的。
+            # 契约那条路绝不走猜：整板和它的三张区域图 key 长得几乎一样，
+            # 猜错就是把**整板**喂给视频，而 skill 明写「不上传整板」。
+            named = ({h["key"] for h in u["handoff"]} if u.get("handoff")
+                     else set(u.get("spine") or []))
             spine = ([r for r in refs if r["asset_id"] in named] if named
-                     else [r for r in refs if "SBSHEET" in r["asset_id"].upper()
+                     else [] if u.get("src") == "jsonl"
+                     else [r for r in refs
+                           if "SBSHEET" in r["asset_id"].upper()
                            or "STORYBOARD" in r["asset_id"].upper()])
-            t["storyboard_refs"] = [
-                {"order": i, "sheet_id": r["asset_id"], "spine_role": "",
+            t["handoff_refs"] = [
+                {"order": i, "sheet_id": r["asset_id"],
+                 # IN_B 定首镜 / IN_C 定开场空间 / OUT_A 定本段结尾。
+                 # 三者语义不能互换，所以角色要带过去，不像故事板那样留空。
+                 "role": role_of.get(r["asset_id"], ""),
                  "file_ref": r["file_ref"]} for i, r in enumerate(spine, 1)]
+            # 老字段留着：出片那一层和产物页还在读它，老项目的 tasks.json
+            # 里也是这个名字。v7.0 的材料两个键都写，值一样。
+            t["storyboard_refs"] = [
+                dict(x, spine_role=x["role"]) for x in t["handoff_refs"]]
             t["storyboard_ref"] = spine[0]["file_ref"] if spine else ""
             # **骨架要从 reference_images 里拿掉。**
             #
@@ -873,10 +1012,23 @@ def build(units: list, size: str = "", ratio: str = "",
             #     跨集只出一张），所以页面故意不按集筛它；而混进来的场景状态图
             #     是带集号的，于是选了 EP01，别的集的场景状态图照样跟着跑
             #   · relay 的批次也错：p1（资产）里混着场景状态，而 p2 永远是空的
-            if rel.startswith("04_故事板"):
-                storyboards.append(t)
+            # **先判区域图再判整板** —— 区域图的落点是整板目录的子目录，
+            # 顺序反了的话 `startswith("04_交接板")` 会把区域图也吞进整板那一批。
+            if rel.startswith(REGION_DIR):
+                t["region"] = str(u.get("region") or "").strip().upper()
+                t["board"] = str(u.get("board") or u.get("parent") or "").strip()
+                regions.append(t)
+            elif rel.startswith(BOARD_DIR):
+                t["boundary"] = str(u.get("boundary") or "").strip()
+                boards.append(t)
             elif rel.startswith("03b_场景状态图"):
                 scstates.append(t)
+            elif rel.startswith("04_故事板"):
+                # v7.0 不再产故事板，但**老材料还有**（v6.x 的项目、以及
+                # v7.0 之前导过的那些）。少了这一支它们会掉进 else 变成资产图 ——
+                # 而资产是全剧共享、不按集筛的，几百条故事板混进去之后
+                # 「只跑这一集」就再也筛不掉它们（改的时候撞过一次）。
+                storyboards.append(t)
             else:
                 assets.append(t)
     return {"skipped": skipped, "params": {"image_size": size, "ratio": ratio,
@@ -886,6 +1038,11 @@ def build(units: list, size: str = "", ratio: str = "",
             # 但写一个两套都不认的值，第一个来读它的人就会挑错。
             "tasks": {"system": system or "material",
                       "from_material": True, "asset_tasks": assets,
-                      "scstate_tasks": scstates, "storyboard_tasks": storyboards,
+                      "scstate_tasks": scstates,
+                      "board_tasks": boards, "region_tasks": regions,
+                      # v7.0 不再产故事板。这个键仍然写出来（空的）——
+                      # 读它的地方不少（explorer、relay、老项目的对账），
+                      # 缺键和空列表在那些地方不是一回事。
+                      "storyboard_tasks": storyboards,
                       "video_tasks": videos},
             "prompts": texts}

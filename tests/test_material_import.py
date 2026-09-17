@@ -16,6 +16,7 @@
 """
 import json
 import os
+import re
 import unittest
 
 from core import matimport as M
@@ -345,20 +346,51 @@ class SpecTests(unittest.TestCase):
         或者引了一个自己没产出的 key，都会教出同样的毛病来。
         """
         from core import matspec as S
-        raw = M.parse(S.jsonl_schema())
-        # 视频带**两张**骨架 —— 样例给一张的话，codex 照样例产就是一张，
-        # 而那正是「视频只有一个参考图」的来处（样例本身在教它）。
-        self.assertEqual([u["kind"] for u in raw],
-                         ["manifest", "image", "image", "image", "video"])
-        self.assertEqual(len(M.units_of(raw)[-1]["spine"]), 2)
-        for u in M.units_of(raw):
-            self.assertEqual(u["missing"], [], f"契约示例自己都不合格：{u}")
-        self.assertEqual(M.audit(raw, {"image": 6, "video": 7}), [],
-                         "契约示例过不了它自己声明的验收")
-        built = M.build(raw)
-        self.assertEqual(built["skipped"], [])
-        self.assertEqual(len(built["tasks"]["video_tasks"][0]
-                             ["storyboard_refs"]), 2)
+        # **两套体系各有一份示例**，两份都得吃得回来。
+        for sid in ("v34", "v61"):
+            raw = M.parse(S.jsonl_schema(sid))
+            for u in M.units_of(raw):
+                self.assertEqual(u["missing"], [],
+                                 f"{sid} 契约示例自己都不合格：{u}")
+            self.assertEqual(M.audit(raw, {"image": 6, "video": 7}), [],
+                             f"{sid} 契约示例过不了它自己声明的验收")
+            built = M.build(raw)
+            self.assertEqual(built["skipped"], [])
+            # 视频带**不止一张**骨架 —— 样例给一张的话，codex 照样例产就是
+            # 一张，而那正是「视频只有一个参考图」的来处（样例本身在教它）。
+            self.assertTrue(
+                max(len(v["storyboard_refs"])
+                    for v in built["tasks"]["video_tasks"]) >= 2,
+                f"{sid} 样例里没有一条视频带两张骨架")
+
+    def test_the_two_systems_get_different_examples(self):
+        """★ v7.0 的示例是 ABC 交接板，v61 的还是故事板 —— 不能共用一份。
+
+        共用的话，总有一套拿到的示例在教它产一批本体系用不上的东西，
+        **而示例是形状的唯一权威**：codex 照它产，比照任何一段文字说明都准。
+        """
+        from core import matspec as S
+        v34, v61 = S.jsonl_schema("v34"), S.jsonl_schema("v61")
+        self.assertIn("handoff_refs", v34)
+        self.assertIn('"region"', v34)
+        self.assertNotIn("SBSHEET", v34, "电影级示例里不该再有故事板")
+        self.assertIn("storyboard_refs", v61)
+        self.assertNotIn('"region"', v61, "通用版没有交接板这回事")
+        # 每张画幅各写各的 —— 全写一个值的话，codex 照样例产就是全剧一个数。
+        self.assertTrue(len(set(re.findall(r'"size": "([^"]+)"', v34))) >= 3)
+
+    def test_the_example_shows_handoff_is_optional(self):
+        """★ 交接板**按需**：首段没入板、末段没出板、天然转场两边都没有。
+
+        样例写死三条 role 的话，codex 照样例产就会每段都凑三条 ——
+        而那些边界根本没有板可引，凑出来的引用指向不存在的 key。
+        """
+        from core import matspec as S
+        vids = [u for u in M.units_of(M.parse(S.jsonl_schema("v34")))
+                if u["kind"] == "video"]
+        roles = [sorted(h["role"] for h in u["handoff"]) for u in vids]
+        self.assertIn(["OUT_A"], roles, "样例里没有演示「只有出板」的段")
+        self.assertIn(["IN_B", "IN_C"], roles, "样例里没有演示「只有入板」的段")
 
     def test_the_spec_states_no_reference_count_limit(self):
         """★ 契约里**不写**参考图张数上限。
@@ -501,13 +533,76 @@ class ContractComplianceTests(unittest.TestCase):
         self.assertIn("MANIFEST_MISMATCH", codes)
         self.assertNotIn("SEG_GAP", codes)
 
-    def test_a_video_without_a_spine_is_refused(self):
-        """★ 视频那一层读 storyboard_refs，空的话到出片才报「缺故事板」。"""
+    def test_a_video_without_a_handoff_is_accepted(self):
+        """★ v7.0：交接板**按需**，一条都没有是合法的。
+
+        原来 `storyboard_refs` 是必填（一段一张故事板，段段都有）。
+        交接板不是这个模型：只有需要承接的边界才做板，首段没有入板、
+        末段没有出板、天然转场两边都没有。照搬必填规则的话，
+        **每一个天然转场的段都会被判成不合格** —— 而那是假警报，
+        一多就没人看提醒了，真的漏板那次跟着被划过去。
+        """
         us = M.parse(self._rows(
             {"kind": "video", "key": "EP01-SEG01", "episode": "EP01",
              "seg": "SEG01", "filename": "v.mp4", "prompt": "正文"}))
-        self.assertTrue(any("storyboard_refs" in m
-                            for m in M.units_of(us)[0]["missing"]))
+        u = M.units_of(us)[0]
+        self.assertEqual(u["missing"], [])
+        self.assertEqual(u["handoff"], [])
+
+    def test_the_handoff_structure_checks_fire(self):
+        """★ 「不该不该有板」不查，**但形状错了必须响**。
+
+        这几条全是程序查得了的：区域图的唯一图片输入是整板、整板不许反向
+        引区域图、视频不许把整板整张喂进去、三个 role 各自最多一个。
+        每一条错法的后果都是**静默的** —— 图出得来、任务标成功、空间是错的。
+        """
+        def img(key, **kw):
+            return dict({"kind": "image", "key": key, "filename": key + ".png",
+                         "prompt": "正文"}, **kw)
+        board = "A__ABC_EP01_SEG01_TO_SEG02_R01"
+        rows = [img(board, family="ABC", boundary="EP01_SEG01_TO_SEG02"),
+                img("A__ABC_B", family="ABC", region="B", board=board,
+                    reference_images=[{"image_n": 1, "key": board}]),
+                img("A__CHAR_001", family="CHAR")]
+
+        def codes(*extra):
+            return self._codes(self._rows(*(rows + list(extra))))
+
+        # 区域图多投了一张 —— 空间会飘，而飘了不报错
+        bad = img("A__ABC_C", family="ABC", region="C", board=board,
+                  reference_images=[{"image_n": 1, "key": board},
+                                    {"image_n": 2, "key": "A__CHAR_001"}])
+        self.assertIn("REGION_NOT_SINGLE_PARENT", codes(bad))
+        # region 只能是 A / B / C
+        self.assertIn("REGION_BAD_VALUE", codes(
+            img("A__ABC_D", family="ABC", region="D", board=board,
+                reference_images=[{"image_n": 1, "key": board}])))
+        # board 指向一张本材料里没有的整板
+        self.assertIn("REGION_BOARD_MISSING", codes(
+            img("A__ABC_A", family="ABC", region="A", board="A__NOPE",
+                reference_images=[{"image_n": 1, "key": board}])))
+        # 视频引整板 —— 画面会去学那张板的分格排版
+        vid = {"kind": "video", "key": "EP01-SEG01", "episode": "EP01",
+               "seg": "SEG01", "filename": "v.mp4", "prompt": "正文",
+               "handoff_refs": [{"image_n": 1, "key": board, "role": "IN_B"}]}
+        self.assertIn("VIDEO_USES_BOARD", codes(vid))
+        # 同一个 role 两张 —— 程序分不出该信哪张，会两张都发
+        dup = dict(vid, handoff_refs=[
+            {"image_n": 1, "key": "A__ABC_B", "role": "IN_B"},
+            {"image_n": 2, "key": "A__ABC_B2", "role": "IN_B"}])
+        self.assertIn("HANDOFF_ROLE_DUP", codes(
+            dup, img("A__ABC_B2", family="ABC", region="B", board=board,
+                     reference_images=[{"image_n": 1, "key": board}])))
+        # 认不出的 role
+        self.assertIn("HANDOFF_BAD_ROLE", codes(dict(vid, handoff_refs=[
+            {"image_n": 1, "key": "A__ABC_B", "role": "ENTRY"}])))
+        # 形状都对的那一份，一条都不许响
+        ok = dict(vid, handoff_refs=[
+            {"image_n": 1, "key": "A__ABC_B", "role": "IN_B"}])
+        for c in codes(ok):
+            self.assertFalse(c.startswith(("REGION_", "HANDOFF_", "BOARD_",
+                                           "VIDEO_USES")),
+                             f"形状没问题的材料不该响 {c}")
 
     def test_an_unknown_kind_is_not_guessed_to_be_an_image(self):
         """★ 猜成图片的话，一条视频会被当资产图出掉 —— 出得来、标成功、成片少一段。"""
@@ -551,8 +646,15 @@ class ContractComplianceTests(unittest.TestCase):
         from core import matspec as S
         txt = S.render({"image": 6, "video": 7})
         for word in ("key 全局唯一", "filename 全局唯一", "和申报头对得上",
-                     "视频必须有骨架", "kind 只认三个值"):
+                     # v7.0 的四条结构检查，条条是静默失败（图出得来、
+                     # 任务标成功、空间是错的），所以条条要写进契约。
+                     "区域图只能引一张整板", "整板不许引区域图",
+                     "视频只引区域图", "三个 role 各自最多一个",
+                     "kind 只认三个值"):
             self.assertIn(word, txt, f"契约里没写「{word}」")
+        # 声明表里加了一条却没渲染出去，等于没声明。
+        for title, _why in S.AUDIT:
+            self.assertIn(title, txt, f"AUDIT 里有「{title}」但契约没渲染它")
 
 
 class PerSystemContractTests(unittest.TestCase):
@@ -586,9 +688,15 @@ class PerSystemContractTests(unittest.TestCase):
         from core import matspec as S
         for sid in ("v34", "v61"):
             for fam, where in S.SYSTEMS[sid]["families"]:
-                key = "PRJ__" + fam.split(" / ")[0] + "_001_R01"
+                # 表里那一行有两种写法：纯前缀（`CHAR / PH`），
+                # 和带条件的（`ABC（整板）`、`ABC + region 字段`）——
+                # 交接板的两类 key 前缀一样，分路靠的是 `region` 字段。
+                head = fam.split(" / ")[0].split(" + ")[0].split("（")[0]
+                key = "PRJ__" + head.strip() + "_001_R01"
                 u = {"stem": key, "canonical_id": key, "kind": "image",
                      "filename": key + ".png", "episode": "", "seg": ""}
+                if "region" in fam:
+                    u["region"] = "A"
                 got = M.out_path(u)
                 self.assertIn(where.split("/")[-1], got,
                               f"{sid} 契约说 {fam} → {where}，实际落 {got}")
