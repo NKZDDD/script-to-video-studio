@@ -102,10 +102,17 @@ class MaterialByEpisodeTests(unittest.TestCase):
             return {s["stage"]: len(PV._produce_todo(pj, s["task_key"], s["only"]))
                     for s in steps}
 
-        self.assertEqual(todo(), {"p1": 1, "p2": 0, "p3": 4, "p4": 2})
+        # v7.0 起生产链是五段：p3 交接板整板、p4 区域派生图、p5 视频，
+        # p3x 是旧版故事板那一段（留着，老项目的 tasks.json 里还有）。
+        # 这份材料是老形状，所以活全在 p3x —— **空的那几段也要在表里**：
+        # 漏一段不会报错，只是那一批永远没人跑。
+        self.assertEqual(todo(),
+                         {"p1": 1, "p2": 0, "p3": 0, "p3x": 4, "p4": 0, "p5": 2})
         for kw in ({"only_episodes": ["EP01"]}, {"produce_episodes": ["EP02"]}):
-            self.assertEqual(todo(**kw), {"p1": 1, "p2": 0, "p3": 2, "p4": 1},
-                             f"{kw} 没把范围收窄到一集")
+            self.assertEqual(
+                todo(**kw),
+                {"p1": 1, "p2": 0, "p3": 0, "p3x": 2, "p4": 0, "p5": 1},
+                f"{kw} 没把范围收窄到一集")
 
     def test_a_produce_range_outside_the_run_is_refused(self):
         """范围填了个不存在的集，要当场说，别静默出全剧。"""

@@ -71,11 +71,16 @@ class V34ExplorerTests(unittest.TestCase):
         self.assertIn("场景状态图", names)
         self.assertNotIn("段落划分", names, "还在用 V6.1 的环节名")
 
-    def test_task_detail_lists_four_kinds(self):
-        """★ 少列一类的话，那一层出了图、花了钱，页面上看不见。"""
+    def test_task_detail_lists_every_kind(self):
+        """★ 少列一类的话，那一层出了图、花了钱，页面上看不见。
+
+        v7.0 拆出了交接板整板和区域图两类，旧版故事板留着 ——
+        老项目的 tasks.json 里还是那个键，从表里拿掉它们就从页面上消失了。
+        """
         t = explorer.tasks(self.pj, EP1)
         labels = [g["label"] for g in t["groups"]]
-        self.assertEqual(labels, ["资产图", "场景状态图", "故事板", "分段视频"])
+        self.assertEqual(labels, ["资产图", "场景状态图", "交接板整板",
+                                  "交接板区域图", "故事板（旧版）", "分段视频"])
         self.assertTrue(t["has_tasks"])
 
     def test_view_does_not_crash_and_returns_both_panes(self):

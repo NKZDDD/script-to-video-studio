@@ -71,8 +71,13 @@ STAGES = [
     # ---- 逐段：编译层 ------------------------------------------------------
     {"id": "n11", "no": 11, "name": "场景状态图编译（SCSTATE）", "kind": "llm",
      "scope": "segment", "out": "n11_scstate"},
-    {"id": "n12", "no": 12, "name": "故事板包编译", "kind": "llm",
-     "scope": "segment", "out": "n12_storyboard"},
+    # ⚠ 名字先留着。v7.0 这一环应该产 ABC 交接板，但 LLM 那条路的生产者
+    # （`run_v34` 的 n12 装配 + `prompts/n12_storyboard.md`）**还没迁**。
+    # 只改产物名不改生产者，那条路就读不到自己的产物 —— 实际后果是
+    # 整条流水线在出图那一步找不到文件（改的时候撞过一次）。
+    # 迁移时两处一起动。
+    {"id": "n12", "no": 12, "name": "故事板包编译（待迁到 ABC 交接板）",
+     "kind": "llm", "scope": "segment", "out": "n12_storyboard"},
     {"id": "n13", "no": 13, "name": "视频执行计划与提示词", "kind": "llm",
      "scope": "segment", "out": "n13_video"},
 
@@ -82,10 +87,31 @@ STAGES = [
      "note": "资产库全剧共享，等所有集的 n4 齐了再出，按依赖分层"},
     {"id": "p2", "no": 11, "name": "场景状态图生产", "kind": "image",
      "scope": "episode", "out": "", "task_key": "scstate_tasks",
-     "note": "V6.1 没有这一层。故事板改成主要参考它，减少多张原子资产互相打架"},
-    {"id": "p3", "no": 12, "name": "故事板生产", "kind": "image",
+     "note": "V6.1 没有这一层。交接板整板以它当共同空间母图"},
+    # ---- v7.0：故事板整条换成 ABC 交接板 ----
+    #
+    # 生产链多了一段，因为 skill 的硬规则是**两步、不能合并**：
+    #   p3 一个交接边界一次生成**一张三区整板**（A 前段结尾 / B 后段开头 /
+    #      C 后段空间），禁止先分区创作再合成；
+    #   p4 以**同版整板为唯一图片参考**分别派生 A/B/C 三张独立放大图，
+    #      不补投任何会重定空间或外观的其他图片。
+    # 合成一步的话就没法保证「整板先验收、派生只参考它」——
+    # 而偏差是静默的：派生图看着像那么回事，空间已经飘了。
+    #
+    # **数量是 0～N−1 张，不是每段一张。** 只有需要承接的边界才做，
+    # 天然转场免做且**不算缺项**。
+    {"id": "p3", "no": 12, "name": "交接板整板生产", "kind": "image",
+     "scope": "episode", "out": "", "task_key": "board_tasks",
+     "note": "一个边界一张，A/B/C 三区一次生成；整板只留在上游，不喂给视频"},
+    {"id": "p4", "no": 12, "name": "交接板区域图生产", "kind": "image",
+     "scope": "episode", "out": "", "task_key": "region_tasks",
+     "note": "以同版整板为唯一图片参考派生 A/B/C；视频用的是这三张"},
+    # LLM 那条路暂时还产故事板（见 n12 的说明）。**材料导入这条路恒为空**，
+    # 所以 v7.0 的项目看不到这一档；不留的话 LLM 路跑出来的几百条
+    # storyboard_tasks 会没人生产 —— 而那是静默的：任务在、永远不出图。
+    {"id": "p3x", "no": 12, "name": "故事板生产（旧版·LLM 路）", "kind": "image",
      "scope": "episode", "out": "", "task_key": "storyboard_tasks"},
-    {"id": "p4", "no": 13, "name": "视频生产", "kind": "video",
+    {"id": "p5", "no": 13, "name": "视频生产", "kind": "video",
      "scope": "episode", "out": "", "task_key": "video_tasks"},
 
     # ---- 收尾 --------------------------------------------------------------
@@ -238,7 +264,7 @@ SERIES_STAGES = {s["id"] for s in STAGES
                  if s["kind"] == "llm" and s["scope"] == "series"}
 
 # 出图出片各步消费 tasks.json 里的哪个键，以及排在谁后面。
-PRODUCE_ORDER = ["p1", "p2", "p3", "p4"]
+PRODUCE_ORDER = ["p1", "p2", "p3", "p3x", "p4", "p5"]
 
 
 # 每个环节的模板里都能用的占位符，不用声明依赖。

@@ -392,7 +392,14 @@ _TASK_KINDS = [("asset_tasks", "asset", "资产图", "环节5b"),
 # 出了图、花了钱，页面上看不见。
 _TASK_KINDS_V34 = [("asset_tasks", "asset", "资产图", "第5环节"),
                    ("scstate_tasks", "storyboard", "场景状态图", "第11环节"),
-                   ("storyboard_tasks", "storyboard", "故事板", "第12环节"),
+                   # v7.0：故事板整条换成 ABC 交接板，**两步**：
+                   # 整板（一个边界一张、三区一次生成）→ 以它为唯一参考派生
+                   # A/B/C 三张区域图。视频用的是区域图，整板只留在上游。
+                   ("board_tasks", "storyboard", "交接板整板", "第12环节"),
+                   ("region_tasks", "storyboard", "交接板区域图", "第12环节"),
+                   # v6.x 的故事板。v7.0 项目里恒为空，这一组自然不显示 ——
+                   # 但老项目还要靠它把已有的几百条列出来。
+                   ("storyboard_tasks", "storyboard", "故事板（旧版）", "第12环节"),
                    ("video_tasks", "video", "分段视频", "第13环节")]
 
 

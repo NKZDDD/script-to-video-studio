@@ -193,7 +193,11 @@ def _worker_kind(stage_id: str) -> str:
     → 18:20:50~18:24:55 故事板才陆续落盘。故事板一张都没少。
     要「这一批活」的标识用 `_batch_kind()`。
     """
-    return {"p1": "asset", "p2": "storyboard", "p3": "storyboard", "p4": "video"}[stage_id]
+    # v7.0：p3 交接板整板、p4 区域派生图 —— 都是出图，和 p2 共用 worker。
+    # **共用 worker 不等于共用批次**：批次标识一律走 `_batch_kind()`
+    # （一步一个，理由见那边）。
+    return {"p1": "asset", "p2": "storyboard", "p3": "storyboard",
+            "p3x": "storyboard", "p4": "storyboard", "p5": "video"}[stage_id]
 
 
 def _batch_kind(stage_id: str) -> str:

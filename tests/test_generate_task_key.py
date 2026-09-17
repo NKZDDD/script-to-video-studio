@@ -37,16 +37,28 @@ class GenerateTaskKeyTests(unittest.TestCase):
                     and node.targets[0].id == "BATCH"):
                 table = ast.literal_eval(node.value)
         self.assertIsNotNone(table, "找不到 BATCH 那张表")
+        # v7.0：故事板整条换成 ABC 交接板，生产链从四段变五段 ——
+        # p3 整板（一个边界一张、三区一次生成）、p4 以它为唯一参考派生的
+        # A/B/C 区域图、p5 视频。
+        # `storyboard_tasks` 和 `board_tasks` **共用 p3**：一个项目里只会有
+        # 其中一种（v7.0 的材料不产故事板，老项目不产交接板），两个都登记
+        # 等于「这一批的活是两者之和」，空的那个不影响。
         self.assertEqual(table, {
             "asset_tasks": ("asset", "p1"),
             "scstate_tasks": ("storyboard", "p2"),
+            "board_tasks": ("storyboard", "p3"),
+            "region_tasks": ("storyboard", "p4"),
+            "video_tasks": ("video", "p5"),
             "storyboard_tasks": ("storyboard", "p3"),
-            "video_tasks": ("video", "p4"),
         })
         # p2 和 p3 的 worker 一样、批次必须不一样 —— 共用批次会让一步的完成
         # 信号提前解除另一步下游的等待（2026-08-20 实跑踩过：故事板还在跑，
         # 视频已经被判成「没人会做它了」而派出去撞空）。
-        self.assertNotEqual(table["scstate_tasks"][1], table["storyboard_tasks"][1])
+        self.assertNotEqual(table["scstate_tasks"][1], table["board_tasks"][1])
+        # ★ 整板和区域图**必须是两批**：区域图的唯一图片输入是整板，
+        # 共用批次号的话，整板刚跑完的信号会让还没派生的区域图被判成
+        # 「没人会做它了」，视频立刻开跑撞空（2026-08-20 那次一模一样）。
+        self.assertNotEqual(table["board_tasks"][1], table["region_tasks"][1])
 
     def test_kind_is_derived_from_task_key_not_taken_from_the_request(self):
         """kind 必须由 task_key 推出来，且要在**任何人用它之前**定死。

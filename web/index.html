@@ -2603,9 +2603,16 @@ async function watchStage(id) {
 // 四类，不是三类。**场景状态图以前没有自己这一行** —— 它被错分进
 // asset_tasks，于是明细页把它列在「资产图」下面，而这张表里根本没有它，
 // 按集也就选不到（实遇 2026-09-01）。第四项是 task_key，跑的时候按它派。
+// v7.0：故事板整条换成 ABC 交接板，**两步**：
+// 整板（一个交接边界一张、A/B/C 三区一次生成）→ 以它为唯一图片参考派生
+// 三张区域图。视频用的是区域图，整板只留在上游、不喂视频。
+// 故事板那一行留着是给老项目（通用十二环节、以及 v7.0 之前的电影级项目）——
+// 这一类没有任务时整行不摆，所以 v7.0 的新项目看不到它。
 const GEN_KINDS = [['asset','资产图','image','asset_tasks'],
                    ['scstate','场景状态图','image','scstate_tasks'],
-                   ['storyboard','故事板','image','storyboard_tasks'],
+                   ['board','交接板整板','image','board_tasks'],
+                   ['region','交接板区域图','image','region_tasks'],
+                   ['storyboard','故事板（旧版）','image','storyboard_tasks'],
                    ['video','分段视频','video','video_tasks']];
 // cur = 要预选的那家。**不给的话浏览器选列表第一个** —— 那就是「每次都默认」
 // 的来处：设置里把资产图的首选排成超模，生产页照样显示列表里排第一的那家，
@@ -2666,6 +2673,8 @@ function renderGen() {
       ? `${genEp()} 这一集没有「${label}」的任务（整个项目共 ${whole} 条）`
       : ({asset: '环节5 还没编出资产生产提示词',
           scstate: '第11环节还没编出场景状态提示词',
+          board: '第12环节还没编出交接板提示词',
+          region: '交接板整板还没出，区域图是从它派生的',
           storyboard: '环节8 还没编出故事板提示词',
           video: '环节8 还没编出视频提示词'}[k] || '前置环节还没产出');
     const empty = !s.total;

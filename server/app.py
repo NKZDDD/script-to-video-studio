@@ -776,7 +776,10 @@ def _task_index(pj: Project) -> dict:
     """
     data = pj.tasks() or {}
     out = {}
-    for kind in ("asset_tasks", "scstate_tasks", "storyboard_tasks", "video_tasks"):
+    # **类别从 tasks.json 自己数出来，不写死一张表。**
+    # 写死过：v7.0 加了 board_tasks / region_tasks，这里还是那四类 ——
+    # 手动放一张交接板的图会报「找不到这个 key」，而人会以为是 key 打错了。
+    for kind in [k for k in data if k.endswith("_tasks")]:
         rows = {}
         for r in (data.get(kind) or []):
             if isinstance(r, dict) and r.get("key") and r.get("output"):
@@ -962,6 +965,9 @@ def api_get(path: str, q: dict) -> dict:
         # v34 才有这一层（通用十二环节没有），没有就是 0 条，不占地方。
         for kind, key in (("asset_tasks", "asset"),
                           ("scstate_tasks", "scstate"),
+                          ("board_tasks", "board"),
+                          ("region_tasks", "region"),
+                          # v6.x 的故事板。v7.0 项目里是空的，那一行不摆。
                           ("storyboard_tasks", "storyboard"),
                           ("video_tasks", "video")):
             items = tasks.get(kind, [])
@@ -2257,8 +2263,17 @@ def api_post(path: str, body: dict) -> dict:
         # 有多少条都写着，但页面上没有任何一个按钮能跑它。
         # 给它一个按钮而不分开这两个概念的话，点下去跑的是故事板 —— 更糟。
         # task_key → (worker 用哪种, relay 的哪一批)。一张表，别在下面散着写。
-        BATCH = {"asset_tasks": ("asset", "p1"), "scstate_tasks": ("storyboard", "p2"),
-                 "storyboard_tasks": ("storyboard", "p3"), "video_tasks": ("video", "p4")}
+        # v7.0：p3 交接板整板、p4 区域派生图、p5 视频。
+        # 四个出图类的 worker 都是 image（kind 都写 storyboard），
+        # **只有批次号分得开** —— 共用批次号出过事（2026-08-20），见 _batch_kind。
+        BATCH = {"asset_tasks": ("asset", "p1"),
+                 "scstate_tasks": ("storyboard", "p2"),
+                 "board_tasks": ("storyboard", "p3"),
+                 "region_tasks": ("storyboard", "p4"),
+                 "video_tasks": ("video", "p5"),
+                 # v6.x 的故事板。v7.0 不再产，但老项目的 tasks.json 里有 ——
+                 # 从表里拿掉的话那些项目的这一类会报「不认识的任务类别」。
+                 "storyboard_tasks": ("storyboard", "p3")}
         key_map = {"asset": "asset_tasks", "storyboard": "storyboard_tasks",
                    "video": "video_tasks"}
         task_key = str(body.get("task_key") or "").strip() or key_map.get(body.get("kind"), "")
@@ -2352,17 +2367,24 @@ def api_post(path: str, body: dict) -> dict:
                 # 登记全四类：漏了哪一类，等它产物的下游会误判成
                 # 「没人会做它」而立刻开跑。
                 relay = _relay.Relay(pj)
+                # **每一批都要登记**：漏了哪一批，等它产物的下游会误判成
+                # 「没人会做它」而立刻开跑撞空。
+                # p3 同时登记 board_tasks 和老的 storyboard_tasks ——
+                # 一个项目里只会有其中一种，两个都登记等于「这一批的活
+                # 是两者之和」，空的那个不影响。
                 for _bk, _tk in (("p1", "asset_tasks"),
                                  ("p2", "scstate_tasks"),
+                                 ("p3", "board_tasks"),
                                  ("p3", "storyboard_tasks"),
-                                 ("p4", "video_tasks")):
+                                 ("p4", "region_tasks"),
+                                 ("p5", "video_tasks")):
                     relay.declare(_bk, tasks.get(_tk) or [])
                 # 别的三类这一趟不跑 —— 标成「那一批已经收摊」，
                 # 否则本类会一直等一个永远不会开始的批次。
                 # _mine 在上面按 task_key 定过了 —— 这里再按 kind 算一次的话，
                 # 场景状态图会被当成故事板那一批（两者 kind 都是 storyboard），
                 # 于是它自己那一批 p2 被标成「收摊」，等它的下游立刻开跑撞空。
-                for _bk in ("p1", "p2", "p3", "p4"):
+                for _bk in ("p1", "p2", "p3", "p4", "p5"):
                     if _bk != _mine:
                         relay.finished(_bk)
                 r = run_chain(
