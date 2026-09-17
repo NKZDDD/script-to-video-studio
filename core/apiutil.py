@@ -14,8 +14,29 @@ from typing import Any, Optional
 
 import requests
 
-DONE_STATES = ("completed", "succeeded", "success", "done", "finished", "complete", "generated")
+# 完成词。**多收几个同义词是有价值的**，不只是靠下面那支兜底：
+# 认出「完成」之后还有一步 —— 完成了但响应里没给地址时，会去打
+# `content_path_tpl` 那个下载端点；而走兜底那支是拿不到这一步的。
+DONE_STATES = ("completed", "succeeded", "success", "done", "finished", "complete",
+               "generated", "succeed", "successful", "finish")
 FAIL_STATES = ("failed", "cancelled", "canceled", "error", "fail")
+# 「还在跑」的说法。**这张表存在的理由是第四种情况：状态词我们不认识。**
+#
+# 原来只有完成和失败两张表，认不出的词一律当成「还没好」—— 于是
+# **结果地址已经拿在手里了，却接着睡到超时**：服务商平台上显示完成，
+# studio 这边还在等。而等满之后报的是「任务超时」，人会去查线路、查服务商，
+# 查不到任何东西，因为那条任务早就好了。
+#
+# 现在分三类：认识的「在跑」→ 接着等（哪怕响应里有地址，那多半是回显的
+# 输入图或预览）；认识的完成/失败 → 照旧；**认不出的 → 当作没有状态**，
+# 手上有结果就收下，并且在日志里点名那个词，好补进这张表。
+RUNNING_STATES = (
+    "queued", "pending", "processing", "in_progress", "in-progress", "inprogress",
+    "running", "waiting", "created", "submitted", "start", "starting",
+    "generating", "uploading", "preparing", "init", "initializing",
+    "progress", "incomplete", "not_start", "notstart", "doing", "active",
+    "accepted", "scheduled", "retrying",
+)
 MEDIA_VIDEO = (".mp4", ".mov", ".webm", ".m4v", ".mkv", ".avi")
 MEDIA_IMAGE = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 URL_KEYS = ("url", "video_url", "download_url", "file_url", "result_url", "image_url")
@@ -884,13 +905,28 @@ class HttpSession:
              timeout: int = 1800, content_path_tpl: str = "", log=print, cancel=None) -> Any:
         """轮询直到完成。picker(data) 提取结果；cancel() 返回 True 时中止。"""
         start, last_status = time.time(), ""
+        # 连续同样失败的计数。**查询一直报错时别拖满超时** ——
+        # 端点或参数不对是每次都一样的错，等 30 分钟不会等出不同结果，
+        # 而这段时间里那条任务在服务商那边可能早就跑完了。
+        # （Gate 那家单独写轮询时就踩过这一课，这里补给所有走通用器的家。）
+        fails, last_fail = 0, ""
         while time.time() - start < timeout:
             if cancel and cancel():
                 raise ApiError("用户已取消")
             try:
                 data = self.request("GET", path_tpl.format(id=task_id), retries=1, timeout=60)
+                fails, last_fail = 0, ""
             except ApiError as exc:
-                log(f"轮询错误(继续): {exc}")
+                fails += 1
+                if str(exc) == last_fail and fails >= 5:
+                    raise ApiError(
+                        f"查询任务连续 {fails} 次同样失败，不再等下去：{exc}"
+                        f"（任务 {task_id} 可能在服务商那边已经跑完了 —— "
+                        f"这类错每次都一样，多半是查询端点或参数不对，"
+                        f"等满 {timeout} 秒也不会变）",
+                        status=0, kind=TASK_FATAL) from exc
+                last_fail = str(exc)
+                log(f"轮询错误(继续，第 {fails} 次): {exc}")
                 time.sleep(interval)
                 continue
             status = extract_status(data)
@@ -901,7 +937,14 @@ class HttpSession:
             if status in FAIL_STATES:
                 raise task_failed(data)
             done = status in DONE_STATES
-            if got and (not status or done):
+            # 认不出的状态词**不算「还在跑」**，见 RUNNING_STATES 的注释。
+            unknown = bool(status) and not done and status not in RUNNING_STATES
+            if got and unknown:
+                log(f"⚠️ 状态词 `{status}` 我们不认识 —— 但结果已经拿到了，"
+                    f"按完成收下。（认不出就接着等的话，会一直等到超时，"
+                    f"而任务其实早就好了。把这个词补进 apiutil 的 "
+                    f"DONE_STATES / RUNNING_STATES，下次就不用靠这一支兜底。）")
+            if got and (not status or done or unknown):
                 return got
             if done and content_path_tpl:
                 got = picker(self.request("GET", content_path_tpl.format(id=task_id),
@@ -912,7 +955,20 @@ class HttpSession:
             if done:
                 raise ApiError(f"任务完成但未取到结果: {task_id}")
             time.sleep(interval)
-        raise ApiError(f"任务超时({timeout}s): {task_id}")
+        # **把最后看到的状态词写进报错。** 只说「超时」的话，
+        # 「服务商那边明明显示完成了」这种情况完全没有线索可查 ——
+        # 而状态词就是线索：它要么是个我们没收录的完成词，
+        # 要么说明查的根本不是同一条任务。
+        raise ApiError(
+            f"任务超时({timeout}s): {task_id}"
+            + (f"，最后一次查到的状态是 `{last_status}`" if last_status
+               else "，整个过程中一个状态字段都没读到")
+            + (f"（这个词不在已知的完成/失败/进行中里 —— "
+               f"服务商那边如果显示已完成，多半就是它没被认出来）"
+               if last_status and last_status not in DONE_STATES
+               and last_status not in FAIL_STATES
+               and last_status not in RUNNING_STATES else ""),
+            status=0, kind=RETRYABLE)
 
     def save_item(self, item: str, dest: str, retries: int = 3) -> str:
         """结果（http / data URI / 裸base64）落盘。落完必须验一遍大小。

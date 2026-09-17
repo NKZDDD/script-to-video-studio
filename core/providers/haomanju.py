@@ -30,8 +30,8 @@ import re
 import time
 from typing import Callable, Optional
 
-from ..apiutil import (ApiError, extract_image_items, extract_task_id,
-                       extract_video_url)
+from ..apiutil import (DONE_STATES, FAIL_STATES, RUNNING_STATES, ApiError,
+                       extract_image_items, extract_task_id, extract_video_url)
 from .base import ImageTask, Provider, VideoTask
 
 # --- 模型清单（文档名在前，pricing 实拉名在后）-----------------------------
@@ -314,13 +314,19 @@ class HaomanjuProvider(Provider):
             if status != last:
                 log(f"好漫剧 Omni {task_id}: {status} {inner.get('progress', '')}")
                 last = status
-            if status in ("failure", "failed", "error"):
+            if status in FAIL_STATES or status == "failure":
                 raise ApiError(f"任务失败：{inner.get('fail_reason') or str(data)[:300]}")
             url = extract_video_url(data)
-            if status in ("success", "completed", "succeeded"):
+            # 完成词走整家共用的那张表，别在这儿另写一份三个词的 ——
+            # 少收一个同义词就是「平台显示完成、我们等到超时」。
+            if status in DONE_STATES:
                 if url:
                     return url
                 raise ApiError(f"任务完成但没取到视频地址：{str(data)[:300]}")
+            if url and status and status not in RUNNING_STATES:
+                log(f"⚠️ 好漫剧的状态词 `{status}` 我们不认识，但地址已经回来了 ——"
+                    f"按完成收下。把这个词补进 apiutil 的 DONE_STATES。")
+                return url
             time.sleep(interval)
         raise ApiError(f"好漫剧 Omni 轮询超时：{task_id}", status=0, kind="retryable")
 

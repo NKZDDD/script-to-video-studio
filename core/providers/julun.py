@@ -59,7 +59,8 @@ import re
 import time
 from typing import Callable, Optional
 
-from ..apiutil import ApiError, extract_image_items
+from ..apiutil import (DONE_STATES, FAIL_STATES, RUNNING_STATES, ApiError,
+                       extract_image_items)
 from .base import ImageTask, Provider, VideoTask
 
 UPLOAD_MAX_MB = 210
@@ -556,19 +557,31 @@ class JulunProvider(Provider):
             data = self.session.request("GET", f"/v1/videos/{task_id}",
                                         retries=1, timeout=60)
             inner = (data or {}).get("data") or {}
-            status = str(inner.get("status") or "").upper()
+            status = str(inner.get("status") or "").strip()
+            low = status.lower()
             if status != last:
                 log(f"巨轮 {task_id}: {status} {inner.get('progress', '')}")
                 last = status
-            if status == "FAILURE":
+            if low in FAIL_STATES or low == "failure":
                 raise ApiError(
                     f"巨轮任务失败：{inner.get('fail_reason') or str(data)[:300]}"
                     f"（失败不扣费，平台自动原路退回）")
-            if status == "SUCCESS":
-                url = inner.get("result_url") or ""
+            url = inner.get("result_url") or ""
+            # **别只认 `SUCCESS` 这一个词。** 认死一个词的后果是：平台上
+            # 显示已完成、地址也回来了，而我们接着等到超时 ——
+            # 报出来的是「超时」，人会去查线路，查不到任何东西。
+            # 所以：认识的完成词收；认不出的词**只要地址已经到手就收**；
+            # 只有认识的「还在跑」才接着等。
+            done = low in DONE_STATES
+            unknown = bool(low) and not done and low not in RUNNING_STATES
+            if done:
                 if url:
                     return url
                 return f"{self.session.base_url.rstrip('/')}/v1/videos/{task_id}/content"
+            if url and unknown:
+                log(f"⚠️ 巨轮的状态词 `{status}` 我们不认识，但 result_url 已经"
+                    f"回来了 —— 按完成收下。把这个词补进 apiutil 的 DONE_STATES。")
+                return url
             time.sleep(interval)
         raise ApiError(f"巨轮任务超时：{task_id}（一般 1–3 分钟，高峰更久）",
                        status=0, kind="retryable")
