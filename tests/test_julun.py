@@ -14,8 +14,9 @@ import unittest
 from core.apiutil import ApiError, TASK_FATAL
 from core.providers import REGISTRY, resolve_id
 from core.providers.base import ImageTask, VideoTask
-from core.providers.julun import (IMAGE_MODELS, SPEC, VIDEO_MODELS,
-                                  JulunProvider, fit_duration, spec_of)
+from core.providers.julun import (IMAGE_MODELS, RETIRED, SPEC, UNSPECED,
+                                  VIDEO_MODELS, JulunProvider, fit_duration,
+                                  spec_of)
 
 URLS = ["https://cdn/a.jpg", "https://cdn/b.jpg"]
 
@@ -63,7 +64,12 @@ class RegistryTests(unittest.TestCase):
         # 五个），钉死的话每加一批就红一次，而红的是测试不是代码。
         # 钉「该有的都在」和「每个都有规格」就够了。
         self.assertGreaterEqual(len(cap["video"]["models"]), 17)
-        self.assertEqual(len(cap["video"]["models"]), len(SPEC))
+        # 清单 = 有规格的（去掉已下线的）+ 有名字没规格的。
+        # 原来这里等于 len(SPEC)，而那是「每个模型都得先有规格才能出现在
+        # 页面上」—— 平台上新时就得先改代码才选得到，正是用户点过名的那件事。
+        self.assertEqual(
+            len(cap["video"]["models"]),
+            len([m for m in SPEC if m not in RETIRED]) + len(UNSPECED))
 
     def test_model_names_are_verbatim(self):
         """模型名带空格、中文和**全角括号**，手打必错。"""
@@ -73,8 +79,17 @@ class RegistryTests(unittest.TestCase):
         # 但它的规格还留在 SPEC 里（老项目的 tasks.json 可能存着这个名字）。
         self.assertIn("Quality V4 · 480p/720p (可@图/视频/音频)", SPEC)
         self.assertNotIn("Quality V4 · 480p/720p (可@图/视频/音频)", VIDEO_MODELS)
-        # 平台自己把 video 拼成了 vedio —— **照抄**，改对了就是 404
-        self.assertIn("wan3.0-vedio-deal", VIDEO_MODELS)
+        # 平台自己把 video 拼成了 vedio —— 当时**照抄**了（改对了就是 404）。
+        # 2026-09-17 再拉时这两个 wan3.0 已经不在了，所以进了 RETIRED。
+        self.assertIn("wan3.0-vedio-deal", RETIRED)
+        self.assertNotIn("wan3.0-vedio-deal", VIDEO_MODELS)
+        # 2026-09-17 新冒出来的三个。这家的 /v1/models **只回 id**，
+        # 一个规格字段都没有 —— 所以它们进 UNSPECED（页面选得到、不校验），
+        # 不进 SPEC：往 SPEC 里填一套猜的时长/比例，就是拿编出来的数去夹
+        # 人要的参数，而夹是静默的。
+        for m in ("2.0 MX", "sd2.5_30", "seedance-2.0-fast-deal-720"):
+            self.assertIn(m, VIDEO_MODELS)
+            self.assertNotIn(m, SPEC, f"{m} 的规格我们没有，别编一套进去")
         # `SD2.0 1080P 933`（无空格那个）也已下线 —— 注意它和实拉里活着的
         # `SD 2.0-933`（**有空格**）不是一个东西，正是这种一字之差会回 404。
         self.assertIn("SD2.0 1080P 933", SPEC)

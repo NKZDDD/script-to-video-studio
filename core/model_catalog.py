@@ -179,6 +179,12 @@ def _from_schema(schema):
             out['durations'] = [int(x) for x in dur['values']]
         elif isinstance(dur.get('min'), int) and isinstance(dur.get('max'), int):
             out['durations'] = list(range(dur['min'], dur['max'] + 1))
+    # 2026-09-17 实拉：同一家还有第三种写法 —— `durations` 直接是个数组
+    # （无限画布的 `seedance2.5` 回的是 `"durations": [30]`）。
+    # 只认前两种的话，它**唯一合法的那个时长整份丢掉**：页面上不给候选、
+    # 校验也不拦，人填 15 秒发出去被平台拒，而拒绝来得比出图还晚。
+    if 'durations' not in out and isinstance(schema.get('durations'), list)             and schema['durations']:
+        out['durations'] = [int(x) for x in schema['durations']]
     for key in ('aspect_ratios', 'aspect_ratio'):        # 单复数都认
         v = schema.get(key)
         if isinstance(v, list) and v:
@@ -195,6 +201,17 @@ def _from_schema(schema):
                         ('max_prompt_chars', 'max_prompt_chars')):
         if isinstance(schema.get(key), int):
             out[target] = schema[key]
+    # 「这个模型收不收视频参考」也是它自己声明的。**只在明确写了 False
+    # 时记 0** —— 没写就是没声明，不是不允许（见 `_UNKNOWN` 那一课）。
+    if schema.get('videoReference') is False:
+        out['max_video_refs'] = 0
+    kinds = schema.get('reference_types')
+    if isinstance(kinds, list) and kinds:
+        up = {str(x).upper() for x in kinds}
+        for word, target in (('VIDEO', 'max_video_refs'),
+                             ('AUDIO', 'max_audio_refs')):
+            if word not in up:
+                out[target] = 0
     return out
 
 

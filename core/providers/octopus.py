@@ -16,12 +16,23 @@ from typing import Callable, Optional
 from ..apiutil import ApiError, extract_task_id, extract_video_url
 from .base import ImageTask, Provider, VideoTask
 
+# 2026-09-17 实拉 `GET /v1/models`。**视频那一栏整份换了名字**：
+# `veo_3_1` / `veo_3_1-fast*` / `sora-2-12s` 全下线，换成 `veo_3_1-lite*`
+# 和 `omni_flash*`。原来的默认模型 `veo_3_1-fast` 也在其中 ——
+# 不改的话「没动过模型就点开始」发出去的是个已经不存在的名字。
+#
+# 这家的 `/v1/models` **只回 id，一个规格字段都没有**，所以这里只有名字，
+# 时长/比例那些仍然按整家那份走（`_cap` 那条除外，它是接口上限）。
 IMAGE_MODELS = ["gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K",
-                "nano_banana_2", "nano_banana_pro-1K", "nano_banana_pro-2K",
+                # 09-17 新出的 2.5 两个系列（超模那边也是这两个名字）
+                "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
+                "nano_banana_2", "nano_banana_2-2K", "nano_banana_2-4K",
+                "nano_banana_pro-1K", "nano_banana_pro-2K",
                 "nano_banana_pro-4K"]
-VIDEO_MODELS = ["veo_3_1-fast", "veo_3_1-fast-fl", "veo_3_1-fast-hd",
-                "veo_3_1-fast-4K", "veo_3_1-lite", "veo_3_1",
-                "sora-2-12s", "omni_flash-10s"]
+VIDEO_MODELS = ["veo_3_1-lite", "veo_3_1-lite-fl",
+                "veo_3_1-lite-hd", "veo_3_1-lite-hd-fl",
+                "omni_flash-10s", "omni_flash-10s-fl",
+                "omni_flash-hd-10s", "omni_flash-hd-10s-fl"]
 IMAGE_ASPECTS = ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"]
 VIDEO_SIZES = ["720x1280", "1080x1920", "1280x720", "1920x1080", "1024x1024"]
 
@@ -55,7 +66,7 @@ class OctopusProvider(Provider):
             },
             "video": {
                 "models": VIDEO_MODELS,
-                "default_model": "veo_3_1-fast",
+                "default_model": "veo_3_1-lite",
                 "ratios": ["9:16", "16:9", "1:1"],
                 "durations": [0],
                 "default_duration": 0,
@@ -107,7 +118,7 @@ class OctopusProvider(Provider):
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
-        model = task.model or "veo_3_1-fast"
+        model = task.model or "veo_3_1-lite"
         # 这家的 size 要像素，不是比例。比例转成竖/横的常用尺寸。
         size = (task.resolution or "").strip()
         if not size:

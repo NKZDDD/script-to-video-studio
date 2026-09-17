@@ -21,12 +21,14 @@ class WuxianhuabuTests(unittest.TestCase):
         那是照文档写的两个，而 2026-09-01 实拉 `/v1/models` 是**五个**。
         把条数钉死等于「平台上新，测试红，然后人去改测试」，
         而该改的是清单（逐模型约束见 tests/test_wuxianhuabu_models.py）。
-        这里只钉「文档里那两个还在」和整家的接口上限。
+
+        **2026-09-17 那五个又整份下线了** —— 所以这里连「哪几个还在」都不钉，
+        只钉一件真正要紧的事：**默认模型必须在清单里**。
+        默认模型下线了不改的话，「没动过模型就点开始」发出去的是个死名字。
         """
         cap = WuxianhuabuProvider().capabilities()["video"]
-        for m in ("seedance-2.5-hf-720p", "seedance-2.5-hf"):
-            self.assertIn(m, cap["models"])
-        self.assertEqual(cap["default_model"], "seedance-2.5-hf-720p")
+        self.assertIn(cap["default_model"], cap["models"],
+                      "默认模型不在清单里 —— 「没动过模型就点开始」必然失败")
         self.assertEqual(cap["durations"], list(range(4, 31)))
         self.assertEqual(cap["max_refs"], MAX_IMAGES)
         self.assertEqual(cap["max_video_refs"], MAX_VIDEOS)
@@ -72,8 +74,8 @@ class WuxianhuabuTests(unittest.TestCase):
             captured.update(kwargs["json_body"]) or
             {"id": "j", "download_url": "https://cdn.example/o.mp4"})
         p.session.save_item = lambda *_: None
-        p.generate_video(VideoTask(prompt="x", duration=4, model="seedance-2.5-hf"),
-                         "out.mp4")
+        p.generate_video(VideoTask(prompt="x", duration=4,
+                                   model="seedance-2.0-nt-480"), "out.mp4")
         self.assertEqual(captured["resolution"], "480p")
 
 
