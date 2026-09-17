@@ -144,7 +144,7 @@ class PartialDownloadTests(unittest.TestCase):
                 pass
 
             def iter_content(self, chunk_size=0):
-                yield b"v" * (MIN_BYTES * 4)
+                yield bytes(4) + b"ftypisom" + b"v" * (MIN_BYTES * 4)
                 raise OSError("connection reset")
 
         old = A.requests.get
@@ -197,7 +197,7 @@ class AuthFallbackTests(unittest.TestCase):
                     raise AssertionError(f"HTTP {self.status_code}")
 
             def iter_content(self, chunk_size=0):
-                yield b"v" * (MIN_BYTES * 4)
+                yield bytes(4) + b"ftypisom" + b"v" * (MIN_BYTES * 4)
 
             def close(self):
                 pass

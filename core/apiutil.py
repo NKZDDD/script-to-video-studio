@@ -372,10 +372,37 @@ def task_failed(data: Any) -> "ApiError":
 
 
 def extract_video_url(data: Any) -> str:
-    """媒体后缀优先，API /content 端点垫底。"""
+    """响应里哪一个是**成片**。挑不出来就返回空 —— 空的意思是「还没有」。
+
+    ⚠ 这里**不是「随便挑一个 URL」**，那正是以前的写法，而它有一种很贵的
+    错法：服务商在任务还没跑完时**把我们传进去的参数原样回显**
+    （`inputs: [{"image_url": "…/ref_first_frame.png"}]` 是最常见的形状）。
+    于是「响应里有 URL」在还没出片时就已经成立了，而后面一路没人拦得住：
+    `save_item` 把那张 png 下载成 `out.mp4`，大小正常，
+    `_incomplete_image` 的结尾标记表里只有 .png/.jpg、**.mp4 直接放行** ——
+    一张参考图就这么被当成片收下、任务标 ok，到拼接那步才出事。
+
+    所以现在**图片样的一律不算成片**：后缀是图片的、或者键名是 `image_url`
+    这种明摆着是图的，直接排除。排除干净之后没剩下的就返回空，
+    轮询那边会接着等 —— 这比挑一个错的强得多。
+    """
     found: list = []
     _collect_urls(data, found)
     if not found:
+        return ""
+    # 图片键。**video 结果里出现它一定不是成片**，是回显的参考图。
+    picture_keys = ("image_url", "image", "images", "reference_image",
+                    "first_frame", "last_frame", "cover", "thumbnail",
+                    "preview", "poster", "snapshot")
+    ok = []
+    for key, url in found:
+        base = url.split("?", 1)[0].lower()
+        if base.endswith(MEDIA_IMAGE):
+            continue                       # 图片后缀：肯定不是成片
+        if str(key).lower() in picture_keys:
+            continue                       # 键名就写着是图 / 封面 / 预览
+        ok.append((key, url))
+    if not ok:
         return ""
 
     def rank(item):
@@ -390,8 +417,8 @@ def extract_video_url(data: Any) -> str:
             score += 50
         return score
 
-    found.sort(key=rank)
-    return found[0][1]
+    ok.sort(key=rank)
+    return ok[0][1]
 
 
 def data_array_images(data: Any) -> list:
@@ -673,6 +700,65 @@ _END_MARK = {".png": b"IEND" + bytes([0xAE, 0x42, 0x60, 0x82]),
              ".jpeg": bytes([0xFF, 0xD9])}
 
 
+# 文件头认种类。**这是最后一道，也是唯一不依赖任何一方说法的那道** ——
+# 前面每一道判断都建立在「服务商说的」之上（状态词、Content-Length、
+# 它自己声明的宽高），只有这一道看的是**真的拿到了什么**。
+#
+# 要防的那件事很具体：一张图被当成片存成 `out.mp4`。大小正常、
+# 结尾标记那道对 .mp4 不适用（表里只有 .png/.jpg），于是一路放行到拼接才炸。
+_ISO_BOXES = (b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide")
+_PNG_HEAD = bytes((0x89, 0x50, 0x4E, 0x47))
+_JPG_HEAD = bytes((0xFF, 0xD8, 0xFF))
+_EBML_HEAD = bytes((0x1A, 0x45, 0xDF, 0xA3))
+
+
+def _looks_like(head: bytes, ext: str) -> bool:
+    """文件头像不像这个扩展名该有的样子。认不出的扩展名一律放行。"""
+    if ext in (".mp4", ".mov", ".m4v"):
+        # ISO BMFF：第一个 box 的类型在 4..8。老文件也可能直接以 moov/mdat 开头，
+        # 所以在前 16 字节里找，别只认偏移 4。
+        return any(b in head[:16] for b in _ISO_BOXES)
+    if ext in (".webm", ".mkv"):
+        return head.startswith(_EBML_HEAD)
+    if ext == ".avi":
+        return head.startswith(b"RIFF") and b"AVI " in head[:16]
+    if ext == ".png":
+        return head.startswith(_PNG_HEAD)
+    if ext in (".jpg", ".jpeg"):
+        return head.startswith(_JPG_HEAD)
+    if ext == ".webp":
+        return head.startswith(b"RIFF") and b"WEBP" in head[:16]
+    if ext == ".gif":
+        return head.startswith(b"GIF8")
+    return True
+
+
+def _wrong_kind(dest: str) -> str:
+    """存下来的东西和扩展名对不上 → 一句人话；对得上返回空。"""
+    ext = os.path.splitext(dest)[1].lower()
+    try:
+        with open(dest, "rb") as f:
+            head = f.read(64)
+    except OSError:
+        return ""
+    if _looks_like(head, ext):
+        return ""
+    # 认出常见的几种「这根本不是媒体文件」，直接说是什么，别让人去猜
+    if head.startswith(_PNG_HEAD) or head.startswith(_JPG_HEAD):
+        what = "一张图片"
+    elif head[:1] in (b"{", b"["):
+        what = "一段 JSON（多半是服务商的错误响应）"
+    elif head[:1] == b"<":
+        what = "一个 HTML 页面（多半是登录页或错误页）"
+    else:
+        what = f"认不出的内容（开头是 {head[:16]!r}）"
+    return (f"存下来的东西不是 {ext} —— 实际是{what}。"
+            f"大小和下载过程都正常，所以前面每一道都放行了；"
+            f"**这一道看的是文件本身**。"
+            f"收下的话它会被当成做好了：视频那一格照样标 ok，"
+            f"到拼接成片那一步才炸，而那时已经隔了几十条任务。")
+
+
 def _incomplete_image(dest: str) -> str:
     """这个图片文件是不是只有一半。是的话返回一句人话，否则空字符串。
 
@@ -732,6 +818,10 @@ def _check_saved(dest: str, src: str) -> None:
     except OSError as exc:
         raise ApiError(f"结果文件没能落盘：{dest}（{exc}）") from exc
     if n >= MIN_BYTES:
+        wrong = _wrong_kind(dest)
+        if wrong:
+            os.remove(dest)     # 必须删：留着下次 isfile 为真，这一条永远被跳过
+            raise ApiError(wrong + chr(10) + f"来源：{src}", 0, RETRYABLE)
         bad = _incomplete_image(dest)
         if not bad:
             return

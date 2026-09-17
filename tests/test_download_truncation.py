@@ -60,6 +60,16 @@ class _Session:
         return None
 
 
+# 一个**长得像 mp4** 的占位内容。落盘那层最后一道查文件头（图被当成片
+# 存下来时就靠它拦），占位用全 0 的话会被那道拦掉 —— 而这个文件测的是
+# 「下载有没有下完」，两件事别混在一起。
+_MP4_HEAD = bytes(4) + b"ftypisom"
+
+
+def _mp4(n: int) -> bytes:
+    return (_MP4_HEAD + bytes(max(0, n - len(_MP4_HEAD))))[:n]
+
+
 def _save(body: bytes, declared, name="x.mp4"):
     """跑一遍真实的落盘路径，返回 (最终文件在不在, 异常)。"""
     import requests
@@ -95,44 +105,44 @@ class TruncationTests(unittest.TestCase):
 
     def test_a_short_body_against_a_declared_length_fails(self):
         """★ 这就是那个没人查的情况：连接正常关闭、只给了一半。"""
-        exists, exc = _save(b"\x00" * 5000, declared=20000)
+        exists, exc = _save(_mp4(5000), declared=20000)
         self.assertIsInstance(exc, ApiError)
         self.assertIn("下载没下完", str(exc))
         self.assertFalse(exists, "半截文件不许留在最终路径上")
 
     def test_it_says_why_there_was_no_network_error(self):
         """★ 不说清的话，人会去查网络 —— 而连接是正常关闭的。"""
-        _, exc = _save(b"\x00" * 5000, declared=20000)
+        _, exc = _save(_mp4(5000), declared=20000)
         self.assertIn("连接是正常关闭的", str(exc))
 
     def test_it_says_the_silent_consequence(self):
-        _, exc = _save(b"\x00" * 5000, declared=20000)
+        _, exc = _save(_mp4(5000), declared=20000)
         self.assertIn("成片会少一段", str(exc))
 
     def test_it_is_retryable(self):
         """★ 传输短一截多半是一次性的，重发经常就好 —— 别判成不可重试。"""
-        _, exc = _save(b"\x00" * 5000, declared=20000)
+        _, exc = _save(_mp4(5000), declared=20000)
         self.assertEqual(getattr(exc, "kind", None), RETRYABLE)
 
     def test_a_complete_body_is_kept(self):
-        exists, exc = _save(b"\x00" * 20000, declared=20000)
+        exists, exc = _save(_mp4(20000), declared=20000)
         self.assertIsNone(exc)
         self.assertTrue(exists)
 
     def test_more_than_declared_is_not_an_error(self):
         """有的家会把 Content-Length 报小（压缩、分块）。多给不算错。"""
-        exists, exc = _save(b"\x00" * 20000, declared=19000)
+        exists, exc = _save(_mp4(20000), declared=19000)
         self.assertIsNone(exc)
         self.assertTrue(exists)
 
     def test_no_declared_length_still_works(self):
         """★ 分块传输没有 Content-Length —— 那时候核不了，但不能因此失败。"""
-        exists, exc = _save(b"\x00" * 20000, declared=None)
+        exists, exc = _save(_mp4(20000), declared=None)
         self.assertIsNone(exc)
         self.assertTrue(exists)
 
     def test_a_garbage_header_is_ignored(self):
-        exists, exc = _save(b"\x00" * 20000, declared="不是数字")
+        exists, exc = _save(_mp4(20000), declared="不是数字")
         self.assertIsNone(exc)
         self.assertTrue(exists)
 
