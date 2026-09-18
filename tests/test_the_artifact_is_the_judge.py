@@ -27,6 +27,7 @@ import unittest
 
 from core import apiutil
 from core.apiutil import ApiError, extract_video_url
+from image_fixtures import png_bytes
 
 MP4 = bytes(4) + b"ftypisom"
 PNG = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
@@ -106,7 +107,7 @@ class FileKindTests(unittest.TestCase):
         self.assertTrue(os.path.exists(p))
 
     def test_a_real_image_passes(self):
-        p = self._write("C001.png", PNG + bytes(200000) + IEND)
+        p = self._write("C001.png", png_bytes())
         apiutil._check_saved(p, "https://cdn/a.png")
         self.assertTrue(os.path.exists(p))
 

@@ -21,6 +21,7 @@ import tempfile
 import unittest
 
 from core import apiutil, probe
+from image_fixtures import png_bytes
 
 
 class SaveGuardTests(unittest.TestCase):
@@ -68,9 +69,7 @@ class SaveGuardTests(unittest.TestCase):
         self.assertIn("https://example.com/x.png", str(cm.exception))
 
     def test_a_real_file_passes(self):
-        # 带 IEND 结尾 —— 落盘那一步会查图片的收尾标记（防残图）
-        self._save(b"\x89PNG\r\n\x1a\n" + b"\x00" * 2000
-                   + b"IEND" + bytes([0xAE, 0x42, 0x60, 0x82]))
+        self._save(png_bytes())
 
 
 class RetryTests(unittest.TestCase):
@@ -88,7 +87,7 @@ class RetryTests(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def _session(self, sizes):
-        """造一个 HttpSession，让第 N 次下载写 sizes[N] 个字节。"""
+        """造一个 HttpSession，sizes[N] 为零时返回空，否则返回完整图片。"""
         s = object.__new__(apiutil.HttpSession)
         calls = {"n": 0}
 
@@ -96,17 +95,7 @@ class RetryTests(unittest.TestCase):
             i = min(calls["n"], len(sizes) - 1)
             calls["n"] += 1
             with open(dest, "wb") as f:
-                # 落地是 .png，所以头也要是 PNG 的 —— 落盘最后一道查文件头
-                # （图被当成片存下来时就靠它拦），全 0 会被它拦掉，
-                # 而这几条测的是「取空了要重取」，两件事别混在一起。
-                if sizes[i]:
-                    f.write(bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)))
-                f.write(b"\x00" * sizes[i])
-                if sizes[i]:
-                    # 落盘那一步会查图片的收尾标记（防残图）。这几条测的是
-                    # 「取空了要重取」，不是图片完整性 —— 补上标记，
-                    # 免得两件事混在一起。
-                    f.write(b"IEND" + bytes([0xAE, 0x42, 0x60, 0x82]))
+                f.write(png_bytes() if sizes[i] else b"")
             apiutil._check_saved(dest, item)
             return dest
 

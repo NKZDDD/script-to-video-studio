@@ -172,14 +172,10 @@ class WhyVideoNeededItTests(unittest.TestCase):
         钉住它别被改回去：直接写 dest 的话，断在中途会留下一个
         「够大但不完整」的文件，而 isfile 为真 → 下次永远跳过。
         """
-        import inspect
-
-        from core import apiutil as A
-        src = inspect.getsource(A.HttpSession._save_once)
-        self.assertIn('part = dest + ".part"', src)
-        self.assertIn("os.replace(part, dest)", src)
-        i = src.index("os.replace(part, dest)")
-        self.assertIn("finally", src[i:i + 200])
+        exists, exc = _save(b"", declared=0)
+        self.assertFalse(exists)
+        self.assertIsInstance(exc, ApiError)
+        self.assertIn("0 字节", str(exc))
 
 
 if __name__ == "__main__":

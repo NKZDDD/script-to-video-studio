@@ -94,8 +94,9 @@ class TruncatedImageTests(unittest.TestCase):
     def test_a_good_image_still_saves(self):
         """★ 别拦过头。"""
         import base64
+        from image_fixtures import png_bytes
         s = A.HttpSession("k", "https://x")
-        raw = PNG_HEAD + b"x" * 50000 + PNG_END
+        raw = png_bytes()
         s.save_item(base64.b64encode(raw).decode(), self.dest)
         self.assertEqual(open(self.dest, "rb").read(), raw)
 

@@ -38,7 +38,7 @@ from urllib.parse import unquote, urlparse
 
 import requests
 
-from ..apiutil import ApiError
+from ..apiutil import ApiError, _atomic_output
 from .base import Provider, VideoTask
 
 API_PATH = "/dy/brush/fromApi"
@@ -477,19 +477,17 @@ class HvtaldProvider(Provider):
         那种文件能过大小检查、下次 isfile 为真被跳过，成片里就永远缺一段。"""
         os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
         r = requests.get(url, auth=self._auth(), stream=True, timeout=self._timeout)
-        if r.status_code >= 400:
-            raise ApiError(f"成片下载失败 HTTP {r.status_code}: {url}")
-        part = dest + ".part"
         try:
-            with open(part, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1 << 20):
-                    f.write(chunk)
-            if os.path.getsize(part) < 1024:
-                raise ApiError(f"成片只有 {os.path.getsize(part)} 字节，不是有效视频：{url}")
-            os.replace(part, dest)
+            if r.status_code >= 400:
+                raise ApiError(f"成片下载失败 HTTP {r.status_code}: {url}")
+            with _atomic_output(dest) as part:
+                with open(part, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+                if os.path.getsize(part) < 1024:
+                    raise ApiError(f"成片只有 {os.path.getsize(part)} 字节，不是有效视频：{url}")
         finally:
-            if os.path.exists(part):
-                os.remove(part)
+            r.close()
         return dest
 
     # ------------------------------------------------------------ 出片

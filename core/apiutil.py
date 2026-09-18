@@ -9,7 +9,9 @@ import json
 import mimetypes
 import os
 import re
+import tempfile
 import time
+from contextlib import contextmanager
 from typing import Any, Optional
 
 import requests
@@ -733,9 +735,9 @@ def _looks_like(head: bytes, ext: str) -> bool:
     return True
 
 
-def _wrong_kind(dest: str) -> str:
+def _wrong_kind(dest: str, *, extension: Optional[str] = None) -> str:
     """存下来的东西和扩展名对不上 → 一句人话；对得上返回空。"""
-    ext = os.path.splitext(dest)[1].lower()
+    ext = extension if extension is not None else os.path.splitext(dest)[1].lower()
     try:
         with open(dest, "rb") as f:
             head = f.read(64)
@@ -759,14 +761,14 @@ def _wrong_kind(dest: str) -> str:
             f"到拼接成片那一步才炸，而那时已经隔了几十条任务。")
 
 
-def _incomplete_image(dest: str) -> str:
+def _incomplete_image(dest: str, *, extension: Optional[str] = None) -> str:
     """这个图片文件是不是只有一半。是的话返回一句人话，否则空字符串。
 
-    只查收尾标记，不解码整张图 —— 一批几百张，每张都用 Pillow 打开太慢，
-    而截断的表现恰恰就是「结尾没了」，查标记足够准。
-    认不出的扩展名（视频、webp 等）一律放过：宁可漏，不可误杀。
+    这里只快速查收尾标记；中段损坏由 _check_saved 随后的完整解码拦住。
+    没有固定收尾标记的格式交给后续检查。
     """
-    mark = _END_MARK.get(os.path.splitext(dest)[1].lower())
+    ext = extension if extension is not None else os.path.splitext(dest)[1].lower()
+    mark = _END_MARK.get(ext)
     if not mark:
         return ""
     try:
@@ -803,7 +805,23 @@ def _field_cap(src: str) -> int:
     return 0
 
 
-def _check_saved(dest: str, src: str) -> None:
+@contextmanager
+def _atomic_output(dest: str):
+    """每个写入独占临时文件；调用方校验通过后才原子发布到最终路径。"""
+    folder = os.path.dirname(os.path.abspath(dest))
+    os.makedirs(folder, exist_ok=True)
+    # 不能共用 dest + '.part'：同名任务重叠时会互相截断、混写和删除。
+    fd, part = tempfile.mkstemp(prefix=".result-", suffix=".part", dir=folder)
+    os.close(fd)
+    try:
+        yield part
+        os.replace(part, dest)
+    finally:
+        if os.path.exists(part):
+            os.remove(part)
+
+
+def _check_saved(dest: str, src: str, *, extension: Optional[str] = None) -> None:
     """落盘之后验一遍。**0 字节的文件是最坏的一种失败。**
 
     它不报错：文件建出来了，注册表记成 generated，比例检查量不出尺寸
@@ -818,12 +836,30 @@ def _check_saved(dest: str, src: str) -> None:
     except OSError as exc:
         raise ApiError(f"结果文件没能落盘：{dest}（{exc}）") from exc
     if n >= MIN_BYTES:
-        wrong = _wrong_kind(dest)
+        ext = extension if extension is not None else os.path.splitext(dest)[1].lower()
+        wrong = _wrong_kind(dest, extension=ext)
         if wrong:
             os.remove(dest)     # 必须删：留着下次 isfile 为真，这一条永远被跳过
             raise ApiError(wrong + chr(10) + f"来源：{src}", 0, RETRYABLE)
-        bad = _incomplete_image(dest)
+        bad = _incomplete_image(dest, extension=ext)
         if not bad:
+            if ext in MEDIA_IMAGE:
+                from PIL import Image
+                try:
+                    # verify 检查 PNG 块校验和；load 检查压缩数据和全部像素。
+                    # 头尾和总字节数都正常的混写图片也必须拒收。
+                    with Image.open(dest) as im:
+                        im.verify()
+                    with Image.open(dest) as im:
+                        for frame in range(getattr(im, "n_frames", 1)):
+                            im.seek(frame)
+                            im.load()
+                except Exception as exc:
+                    os.remove(dest)
+                    raise ApiError(
+                        f"结果图片完整性检查失败（{n} 字节）：{exc}。"
+                        f"没有保存为完成结果。\n来源：{src}",
+                        kind=RETRYABLE, err_code="result_invalid") from exc
             return
         os.remove(dest)     # 同样必须删：留着下次会被当成「已经做过了」跳过
         # **内嵌数据被截在一个整数长度上 = 这条线路的字段上限，重试没有意义。**
@@ -1061,7 +1097,7 @@ class HttpSession:
             status=0, kind=RETRYABLE)
 
     def save_item(self, item: str, dest: str, retries: int = 3, *, log=None) -> str:
-        """结果（http / data URI / 裸base64）落盘。落完必须验一遍大小。
+        """结果（http / data URI / 裸base64）暂存、校验，再原子发布。
 
         **http 的取空了要重取。** 不少家的任务状态先翻成「成功」，
         文件才慢半拍写进他们的对象存储 —— 我们紧接着就去下载，
@@ -1083,7 +1119,8 @@ class HttpSession:
                 log("结果已保存并通过文件检查")
                 return result
             except ApiError as exc:
-                if exc.kind == TASK_FATAL or "字节" not in str(exc):
+                if exc.kind == TASK_FATAL or ("字节" not in str(exc)
+                                              and exc.err_code != "result_invalid"):
                     raise                       # 不是空文件，是别的错，别在这儿吞
                 last = exc
             except requests.RequestException as exc:
@@ -1096,12 +1133,14 @@ class HttpSession:
             if attempt < attempts - 1:
                 log(f"下载未成功，将重新下载同一结果，不重新生成：{str(last)[:180]}")
                 time.sleep(2 * (attempt + 1))
-        if isinstance(last, requests.RequestException):
+        if (isinstance(last, requests.RequestException)
+                or isinstance(last, ApiError) and last.err_code == "result_invalid"):
             exc = ApiError(
-                f"结果下载失败：已取得服务商结果地址，但下载未能完成（尝试 {attempt + 1} 次）。"
+                f"结果下载失败：已取得服务商结果，但取回或文件检查未能通过（尝试 {attempt + 1} 次）。"
                 f"已停止自动重试生成，避免重复计费。最后的下载错误：{last}",
                 kind=TASK_FATAL, err_code="result_download_failed")
-            exc.extra_fix = [f"已返回的结果地址：{item}", f"应保存到：{dest}"]
+            exc.extra_fix = ([f"已返回的结果地址：{item}"] if remote else
+                             ["服务商返回的是内嵌图片，请从该任务取回完整原图。"]) + [f"应保存到：{dest}"]
             raise exc from last
         raise last                              # type: ignore[misc]
 
@@ -1117,8 +1156,10 @@ class HttpSession:
             # 0KB 的「图」。实跑撞过：超模一批资产全是 0KB，报错只有
             # 一句 `Incorrect padding`，看不出是我们自己留下的空壳。
             raw = _b64_bytes(item.split(",", 1)[1], item)
-            with open(dest, "wb") as f:
-                f.write(raw)
+            with _atomic_output(dest) as part:
+                with open(part, "wb") as f:
+                    f.write(raw)
+                _check_saved(part, src, extension=os.path.splitext(dest)[1].lower())
         elif item.startswith("http"):
             src = item
             # 下载用 `_download_headers()`，**不是** `_headers()` ——
@@ -1160,7 +1201,6 @@ class HttpSession:
             # 直接写 dest 会留下一个**够大但不完整**的文件 ——
             # 大小检查放它过去，下次 isfile 为真于是永远跳过，
             # 成片里那一段是坏的。改名是原子的，要么完整要么没有。
-            part = dest + ".part"
             # 服务商自报的字节数。**拿来核对**，别只是收着 ——
             # `.part` + 原子改名防的是「断在中途」（那时会抛异常），
             # 防不住「干净地少给一半」：有些 CDN / 代理在长传输上会正常关闭连接，
@@ -1178,32 +1218,32 @@ class HttpSession:
             try:
                 log("下载连接已建立，正在接收结果")
                 last_report = time.monotonic()
-                with open(part, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=64 << 10):
-                        f.write(chunk)
-                        got += len(chunk)
-                        now = time.monotonic()
-                        if now - last_report >= 5:
-                            total = f" / {want / (1 << 20):.1f} MB" if want else " MB"
-                            log(f"正在下载结果：{got / (1 << 20):.1f}{total}")
-                            last_report = now
-                if want and got < want:
-                    raise ApiError(
-                        f"下载没下完：服务商说这个文件有 {want:,} 字节，"
-                        f"实际只收到 {got:,} 字节（缺 {want - got:,}）。"
-                        f"连接是正常关闭的，所以没有网络报错 —— "
-                        f"这种半截文件往往还能打开、只是短了一截，"
-                        f"收下的话成片会少一段而且不报错，所以这里判失败。\n"
-                        f"来源：{item[:200]}",
-                        status=0, kind=RETRYABLE)
-                os.replace(part, dest)
+                with _atomic_output(dest) as part:
+                    with open(part, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=64 << 10):
+                            f.write(chunk)
+                            got += len(chunk)
+                            now = time.monotonic()
+                            if now - last_report >= 5:
+                                total = f" / {want / (1 << 20):.1f} MB" if want else " MB"
+                                log(f"正在下载结果：{got / (1 << 20):.1f}{total}")
+                                last_report = now
+                    if want and got < want:
+                        raise ApiError(
+                            f"下载没下完：服务商说这个文件有 {want:,} 字节，"
+                            f"实际只收到 {got:,} 字节（缺 {want - got:,}）。"
+                            f"连接是正常关闭的，所以没有网络报错 —— "
+                            f"这种半截文件往往还能打开、只是短了一截，"
+                            f"收下的话成片会少一段而且不报错，所以这里判失败。\n"
+                            f"来源：{item[:200]}",
+                            status=0, kind=RETRYABLE)
+                    _check_saved(part, src, extension=os.path.splitext(dest)[1].lower())
             finally:
                 r.close()
-                if os.path.exists(part):
-                    os.remove(part)
         else:
             raw = _b64_bytes(item, item)
-            with open(dest, "wb") as f:
-                f.write(raw)
-        _check_saved(dest, src)
+            with _atomic_output(dest) as part:
+                with open(part, "wb") as f:
+                    f.write(raw)
+                _check_saved(part, src, extension=os.path.splitext(dest)[1].lower())
         return dest

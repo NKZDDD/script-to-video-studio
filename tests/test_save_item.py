@@ -24,11 +24,9 @@ import tempfile
 import unittest
 
 from core.apiutil import MIN_BYTES, ApiError, HttpSession
+from image_fixtures import png_bytes
 
-# 结尾要带 IEND —— 落盘那一步现在会查图片的收尾标记（防残图）。
-# 这几条用例测的是 base64 解码，不是图片完整性，补上标记让它们只测自己那件事。
-PNG = (b"\x89PNG\r\n\x1a\n" + b"x" * (MIN_BYTES * 2)
-       + b"IEND" + bytes([0xAE, 0x42, 0x60, 0x82]))
+PNG = png_bytes()
 B64 = base64.b64encode(PNG).decode()
 
 

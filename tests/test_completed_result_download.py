@@ -13,9 +13,10 @@ from core.apiutil import ApiError, HttpSession, TASK_FATAL
 from core.providers.base import ImageTask
 from core.providers.chaomo import ChaomoProvider
 from core.executor import Job, run_batch
+from image_fixtures import png_bytes
 
 
-PNG = bytes.fromhex("89504e470d0a1a0a") + bytes(2048) + bytes.fromhex("49454e44ae426082")
+PNG = png_bytes()
 
 
 class Response:
