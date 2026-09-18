@@ -46,7 +46,7 @@ _BUILTIN_ORDER = ["paisio", "lingganya", "zeroapi", "m86", "aicopy", "kunji",
                   # 只是我是在其他机器的 exe 我临时加的插件服务商」。
                   # **加了文件就必须加这里** —— 冻结环境（exe）里扫不到目录时会
                   # 退回按这张表挨个 import，不在表里就整家被漏掉（见 _load 的说明）。
-                  "yunhui"]
+                  "yunhui", "xmd"]
 
 REGISTRY: dict = {}          # id → 类
 ALIASES: dict = {}           # 别名 → id

@@ -60,8 +60,8 @@ def identity(pid, pc):
 
 def fetch(pid, pc):
     """仅 GET 模型端点；不跟随跨站跳转、不返回含凭据的原始错误。"""
-    if pid == 'hvtald':
-        return {'ok': False, 'msg': '该服务商使用固定账号模型，没有模型清单接口'}
+    if pid in ('hvtald', 'xmd'):
+        return {'ok': False, 'msg': '该服务商使用固定模型，没有模型清单接口'}
     prov = providers.build(pid, pc.get('api_key', ''), pc.get('base_url', ''),
                            pc.get('proxy') or 'direct', 20)
     endpoint = {'gate': '/public/model_group/info',
