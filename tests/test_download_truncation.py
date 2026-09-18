@@ -39,6 +39,9 @@ class _Resp:
     def raise_for_status(self):
         pass
 
+    def close(self):
+        pass
+
     def iter_content(self, chunk_size=1):
         for i in range(0, len(self._body), chunk_size):
             yield self._body[i:i + chunk_size]

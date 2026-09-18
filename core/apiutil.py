@@ -1060,7 +1060,7 @@ class HttpSession:
                and last_status not in RUNNING_STATES else ""),
             status=0, kind=RETRYABLE)
 
-    def save_item(self, item: str, dest: str, retries: int = 3) -> str:
+    def save_item(self, item: str, dest: str, retries: int = 3, *, log=None) -> str:
         """结果（http / data URI / 裸base64）落盘。落完必须验一遍大小。
 
         **http 的取空了要重取。** 不少家的任务状态先翻成「成功」，
@@ -1069,19 +1069,44 @@ class HttpSession:
         取不到才报错，那时候才是真的要去问服务商。
         （data URI 和 base64 是响应里带的，重取没有意义，不重试。）
         """
+        # completed 只结束生成，后面还有下载。下载断了只重取这个链接，
+        # 不能抛给外层重新提交生成（任务已完成，也已经计费）。
+        log = log or (lambda _: None)
+        remote = item.startswith("http")
+        attempts = max(1, retries) if remote else 1
         last = None
-        for attempt in range(max(1, retries) if item.startswith("http") else 1):
+        for attempt in range(attempts):
             try:
-                return self._save_once(item, dest)
+                if remote:
+                    log(f"已取得结果地址，开始下载（第 {attempt + 1}/{attempts} 次）")
+                result = self._save_once(item, dest, log=log)
+                log("结果已保存并通过文件检查")
+                return result
             except ApiError as exc:
-                if "字节" not in str(exc):
+                if exc.kind == TASK_FATAL or "字节" not in str(exc):
                     raise                       # 不是空文件，是别的错，别在这儿吞
                 last = exc
-                if attempt < retries - 1:
-                    time.sleep(2 * (attempt + 1))
+            except requests.RequestException as exc:
+                last = exc
+                # 鉴权回退已经试过。永久 HTTP 错误不必再请求同一个地址。
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", 0)
+                if 400 <= status < 500 and status not in (404, 408, 425, 429):
+                    break
+            if attempt < attempts - 1:
+                log(f"下载未成功，将重新下载同一结果，不重新生成：{str(last)[:180]}")
+                time.sleep(2 * (attempt + 1))
+        if isinstance(last, requests.RequestException):
+            exc = ApiError(
+                f"结果下载失败：已取得服务商结果地址，但下载未能完成（尝试 {attempt + 1} 次）。"
+                f"已停止自动重试生成，避免重复计费。最后的下载错误：{last}",
+                kind=TASK_FATAL, err_code="result_download_failed")
+            exc.extra_fix = [f"已返回的结果地址：{item}", f"应保存到：{dest}"]
+            raise exc from last
         raise last                              # type: ignore[misc]
 
-    def _save_once(self, item: str, dest: str) -> str:
+    def _save_once(self, item: str, dest: str, *, log=None) -> str:
+        log = log or (lambda _: None)
         os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
         # 内嵌数据也要能追溯：只写「内嵌数据」的话，大小检查报出来的那条
         # 完全看不出收到的是什么，跟服务商对不上话。
@@ -1100,12 +1125,15 @@ class HttpSession:
             # 后者带 JSON 的 Accept/Content-Type，对二进制下载是自相矛盾的，
             # 有网关会直接拒（见 _download_headers 的注释）。
             headers = self._download_headers() if item.startswith(self.base_url) else None
-            r = requests.get(item, headers=headers, timeout=self.timeout,
+            # 生成可以等很久，下载连接/停传不能沿用那 900 秒。
+            # read timeout 是「多久收不到数据」，不是整个大文件必须 30 秒下完。
+            timeout = (min(self.timeout, 15), min(self.timeout, 30))
+            r = requests.get(item, headers=headers, timeout=timeout,
                              proxies=self._proxies(), stream=True)
             if r.status_code >= 400 and headers is None:
                 r.close()
                 r = requests.get(item, headers=self._download_headers(),
-                                 timeout=self.timeout,
+                                 timeout=timeout,
                                  proxies=self._proxies(), stream=True)
             elif r.status_code >= 400 and headers is not None:
                 # 反方向也试一次：**带了鉴权反而被拒**。
@@ -1121,9 +1149,13 @@ class HttpSession:
                 r.close()
                 r = requests.get(item,
                                  headers={"User-Agent": "ScriptToVideoRunner/2.0"},
-                                 timeout=self.timeout, proxies=self._proxies(),
+                                 timeout=timeout, proxies=self._proxies(),
                                  stream=True)
-            r.raise_for_status()
+            try:
+                r.raise_for_status()
+            except requests.RequestException:
+                r.close()
+                raise
             # 先写 .part 再改名：下到一半断了（视频几十 MB，断过），
             # 直接写 dest 会留下一个**够大但不完整**的文件 ——
             # 大小检查放它过去，下次 isfile 为真于是永远跳过，
@@ -1144,10 +1176,17 @@ class HttpSession:
                 want = 0
             got = 0
             try:
+                log("下载连接已建立，正在接收结果")
+                last_report = time.monotonic()
                 with open(part, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1 << 20):
+                    for chunk in r.iter_content(chunk_size=64 << 10):
                         f.write(chunk)
                         got += len(chunk)
+                        now = time.monotonic()
+                        if now - last_report >= 5:
+                            total = f" / {want / (1 << 20):.1f} MB" if want else " MB"
+                            log(f"正在下载结果：{got / (1 << 20):.1f}{total}")
+                            last_report = now
                 if want and got < want:
                     raise ApiError(
                         f"下载没下完：服务商说这个文件有 {want:,} 字节，"
@@ -1159,6 +1198,7 @@ class HttpSession:
                         status=0, kind=RETRYABLE)
                 os.replace(part, dest)
             finally:
+                r.close()
                 if os.path.exists(part):
                     os.remove(part)
         else:

@@ -16,7 +16,7 @@ def _stub(provider, reply):
         return reply
 
     provider.session.request = fake
-    provider.session.save_item = lambda item, dest: dest
+    provider.session.save_item = lambda item, dest, **kw: dest
     return seen
 
 

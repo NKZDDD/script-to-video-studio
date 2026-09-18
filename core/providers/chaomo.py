@@ -415,9 +415,11 @@ class ChaomoProvider(Provider):
             data, "", log=log, poll_interval=poll_interval, poll_timeout=poll_timeout)
         if not items:
             raise ApiError(f"出图没返回可用结果: {str(data)[:300]}")
-        self.session.save_item(items[0], dest)
+        self.session.save_item(items[0], dest, log=log)
         # 核验放在落盘之后：URL 结果只有存下来才量得到真实宽高
+        log("超模 图片已下载，正在核验图片信息")
         self.check_meta(self.meta_of(final), items, dest=dest, log=log)
+        log("超模 图片结果已就绪")
         return {"task_id": extract_task_id(data), "source": items[0][:200],
                 "provider": self.id, "model": model}
 
@@ -460,5 +462,5 @@ class ChaomoProvider(Provider):
             url = self.session.poll("/v1/videos/{id}", task_id, picker=extract_video_url,
                                     interval=poll_interval, timeout=poll_timeout,
                                     log=log, cancel=cancel)
-        self.session.save_item(url, dest)
+        self.session.save_item(url, dest, log=log)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}

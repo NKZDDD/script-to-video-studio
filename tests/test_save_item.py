@@ -140,6 +140,9 @@ class PartialDownloadTests(unittest.TestCase):
             status_code = 200
             headers: dict = {}
 
+            def close(self):
+                pass
+
             def raise_for_status(self):
                 pass
 

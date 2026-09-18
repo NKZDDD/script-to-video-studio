@@ -92,7 +92,7 @@ class RetryTests(unittest.TestCase):
         s = object.__new__(apiutil.HttpSession)
         calls = {"n": 0}
 
-        def fake(item, dest):
+        def fake(item, dest, **kw):
             i = min(calls["n"], len(sizes) - 1)
             calls["n"] += 1
             with open(dest, "wb") as f:
