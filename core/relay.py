@@ -35,6 +35,7 @@ import threading
 from typing import Callable, Optional
 
 from . import diagnose, probe
+from .video_refs import primary_refs, ref_file
 
 # 一条任务最多等自己的输入多久。到点还没齐就照旧派出去 ——
 # 让现有的硬停报错，而不是无限挂着。
@@ -114,11 +115,11 @@ class Relay:
             # http 是外部链接，我们等不了也不该等。
             if f and not f.startswith("http"):
                 want.append(f)
-        for s in (task.get("storyboard_refs") or []):
-            f = str(s.get("file_ref") or "")
+        for s in primary_refs(task):
+            f = ref_file(s)
             if f and not f.startswith("http"):
                 want.append(f)
-        for key in ("storyboard_ref", "aux_reference"):
+        for key in (() if task.get("reference_images") else ("aux_reference",)):
             f = str(task.get(key) or "")
             if f and not f.startswith("http"):
                 want.append(f)

@@ -79,8 +79,8 @@ class V34ExplorerTests(unittest.TestCase):
         """
         t = explorer.tasks(self.pj, EP1)
         labels = [g["label"] for g in t["groups"]]
-        self.assertEqual(labels, ["资产图", "场景状态图", "交接板整板",
-                                  "交接板区域图", "故事板（旧版）", "分段视频"])
+        self.assertEqual(labels, ["资产图", "场景状态图", "故事板（旧版）", "分段视频"])
+        self.assertTrue(all(g["total"] for g in t["groups"]), "没有任务的类别不显示空组")
         self.assertTrue(t["has_tasks"])
 
     def test_view_does_not_crash_and_returns_both_panes(self):

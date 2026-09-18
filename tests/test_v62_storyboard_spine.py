@@ -158,11 +158,11 @@ class SpineDeliveryTests(unittest.TestCase):
     """③ 视频拿到的必须是整条有序骨架。"""
 
     def test_the_worker_reads_the_whole_ordered_spine(self):
-        import inspect
-        src = inspect.getsource(P.make_video_worker)
-        self.assertIn('task.get("storyboard_refs")', src)
-        self.assertIn('key=lambda s: s.get("order") or 0', src,
-                      "没按 order 排 —— 顺序靠字典顺序是碰运气")
+        from core.video_refs import primary_refs
+        task = {"storyboard_refs": [{"order": 2, "file_ref": "b.png"},
+                                     {"order": 1, "file_ref": "a.png"}]}
+        self.assertEqual([r["file_ref"] for r in primary_refs(task)], ["a.png", "b.png"])
+        self.assertEqual(task["storyboard_refs"][0]["file_ref"], "b.png", "读取不改原任务")
 
     def test_a_missing_middle_sheet_stops_it(self):
         """★ 缺中间那张也要停。只检查第一张的话，骨架断了照样出片 ——

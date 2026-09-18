@@ -84,11 +84,11 @@ class VideoMappingCheckTests(unittest.TestCase):
     def test_the_video_worker_checks_the_mapping(self):
         """★ 出图那层一直有这道校验，出片这层以前完全没有。"""
         self.assertIn("_IMAGE_MAP.findall", self.src)
-        self.assertIn("if len(spine) > 1:", self.src)
+        self.assertIn("if not handoff and len(spine) > 1:", self.src)
 
     def test_it_only_checks_when_there_is_more_than_one_sheet(self):
         """一张的时候顺序上没有歧义，别刷没用的提醒。"""
-        i = self.src.index("if len(spine) > 1:")
+        i = self.src.index("if not handoff and len(spine) > 1:")
         self.assertLess(i, self.src.index("_IMAGE_MAP.findall"))
 
     def test_it_names_which_sheets_are_missing(self):
@@ -97,14 +97,14 @@ class VideoMappingCheckTests(unittest.TestCase):
 
     def test_it_spells_out_the_silent_consequence(self):
         """★ 这个项目的规矩：说清它**不报错**，只是做出来是错的。"""
-        i = self.src.index("if len(spine) > 1:")
+        i = self.src.index("if not handoff and len(spine) > 1:")
         blk = self.src[i:i + 1400]
         self.assertIn("不报错", blk)
         self.assertIn("把后段当前段用", blk)
 
     def test_it_warns_instead_of_stopping(self):
         """★ 出片是最贵的一步，为一句措辞把整段拦住不值得。"""
-        i = self.src.index("if len(spine) > 1:")
+        i = self.src.index("if not handoff and len(spine) > 1:")
         blk = self.src[i:i + 1400]
         self.assertIn("log(", blk)
         self.assertNotIn("raise", blk)

@@ -19,6 +19,7 @@ from typing import Optional
 
 from . import diagnose, episodes as _eps, ledger, promptfile, stages as S
 from .store import Project
+from .video_refs import primary_refs, ref_file, uses_handoff
 
 _CAT_CN = {
     "identity": "人物身份", "environment": "场景", "prop": "道具",
@@ -403,8 +404,12 @@ _TASK_KINDS_V34 = [("asset_tasks", "asset", "资产图", "第5环节"),
                    ("video_tasks", "video", "分段视频", "第13环节")]
 
 
-def _task_kinds(pj: Project) -> list:
-    return _TASK_KINDS_V34 if system_of(pj) == "v34" else _TASK_KINDS
+def _task_kinds(pj: Project, task_data: Optional[dict] = None) -> list:
+    t = pj.tasks() if task_data is None else task_data
+    # 材料项目可能保留旧的 meta.system；生产表按实际任务列，明细也必须如此。
+    extended = (any(t.get(k) for k in ("scstate_tasks", "board_tasks", "region_tasks"))
+                or any(uses_handoff(v) for v in (t.get("video_tasks") or [])))
+    return _TASK_KINDS_V34 if system_of(pj) == "v34" or extended else _TASK_KINDS
 
 
 def tasks(pj: Project, episode: str = "") -> dict:
@@ -442,7 +447,10 @@ def tasks(pj: Project, episode: str = "") -> dict:
                     logs[str(e["id"])] = e        # 同一个 id 取最后一次
 
     groups = []
-    for key, kind, label, stage in _task_kinds(pj):
+    for key, kind, label, stage in _task_kinds(pj, t):
+        # 和生产表一致：项目里没有这一类任务就不摆空组；按集筛选仍保留实际类目。
+        if not t.get(key):
+            continue
         reg = {str(r.get("id")): r for r in pj.registry(kind)}
         rows = []
         for it in (t.get(key) or []):
@@ -453,46 +461,37 @@ def tasks(pj: Project, episode: str = "") -> dict:
             out = _file(pj, it.get("output", ""))
             r, lg = reg.get(k, {}), logs.get(k, {})
             if kind == "video":
-                # **按 produce 实际的上传顺序列：整条骨架，然后补图。**
-                #
-                # 这里原来只读 `storyboard_ref` / `aux_reference`（都是单数）——
-                # 那是 V6.1 的形状。V6.2 之后一段有 1..N 张有序故事板
-                # （`storyboard_refs`），补图在 `reference_images` 里，
-                # 而这两个字段面板一个都没读。
-                #
-                # 后果不是显示得少一点：用户看着「参 1/1　本段固定故事板」，
-                # 而提示词里映射了 Image 1..5，于是判断「视频只吃了一张参考图」，
-                # 去查生产链 —— **面板在说谎，人按谎去修另一处**。
-                # 顺序必须和 produce 一致（produce.py 的视频那一段），
-                # 否则编号对不上，看着更像 bug。
+                # 与出片、依赖调度共用主参考的协议选择。handoff_refs=[] 是没有
+                # 交接板依赖，不是「退回一个缺失的故事板」；旧字段只用于老任务。
                 display_refs = []
-                spine = sorted((it.get("storyboard_refs") or []),
-                               key=lambda s: s.get("order") or 0)
+                spine = primary_refs(it)
                 for i, s in enumerate(spine, 1):
+                    label_ref = ("交接板区域图" if uses_handoff(it) else "故事板")
+                    role = s.get("role") if uses_handoff(it) else s.get("spine_role")
                     display_refs.append({
                         "image_n": i,
-                        "asset_id": str(s.get("sheet_id") or "故事板")
-                        + (f"（{s['spine_role']}）" if s.get("spine_role") else ""),
-                        "file": _file(pj, str(s.get("file_ref") or "")),
+                        "asset_id": str(s.get("sheet_id") or s.get("asset_id")
+                                        or s.get("key") or label_ref)
+                        + (f"（{role}）" if role else ""),
+                        "file": _file(pj, ref_file(s)),
                     })
+                seen = {ref_file(s) for s in spine if ref_file(s)}
                 aux_rows = sorted((it.get("reference_images") or []),
                                   key=lambda r: r.get("image_n") or 0)
-                for j, r in enumerate(aux_rows, len(display_refs) + 1):
+                for r in aux_rows:
+                    f = ref_file(r)
+                    if f and f in seen:
+                        continue
+                    if f:
+                        seen.add(f)
                     display_refs.append({
-                        "image_n": r.get("image_n") or j,
+                        "image_n": len(display_refs) + 1,
                         "asset_id": str(r.get("asset_id") or "补图"),
-                        "file": _file(pj, str(r.get("file_ref") or "")),
+                        "file": _file(pj, f),
                     })
-                # 老 tasks.json 的单数字段：**只在上面两样都空的时候**才用。
-                # 两边都列的话，同一张图会出现两次，而 image_n 是上传顺序 ——
-                # 看着就是「编号重了」。
-                if not display_refs:
-                    sb = str(it.get("storyboard_ref") or "")
+                # 旧版单张补图也与 produce 一致：只有没有 reference_images 才追加。
+                if not aux_rows:
                     ax = str(it.get("aux_reference") or "")
-                    if sb:
-                        display_refs.append({
-                            "image_n": 1, "asset_id": "本段固定故事板",
-                            "file": _file(pj, sb)})
                     if ax:
                         display_refs.append({
                             "image_n": len(display_refs) + 1,

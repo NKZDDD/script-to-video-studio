@@ -980,8 +980,8 @@ def build(units: list, size: str = "", ratio: str = "",
                  # 三者语义不能互换，所以角色要带过去，不像故事板那样留空。
                  "role": role_of.get(r["asset_id"], ""),
                  "file_ref": r["file_ref"]} for i, r in enumerate(spine, 1)]
-            # 老字段留着：出片那一层和产物页还在读它，老项目的 tasks.json
-            # 里也是这个名字。v7.0 的材料两个键都写，值一样。
+            # 老字段留给旧 exe；新版出片、调度和明细优先读 handoff_refs，
+            # 即使它为空也不退回故事板。空列表表示本段没有交接板依赖。
             t["storyboard_refs"] = [
                 dict(x, spine_role=x["role"]) for x in t["handoff_refs"]]
             t["storyboard_ref"] = spine[0]["file_ref"] if spine else ""

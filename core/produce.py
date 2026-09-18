@@ -20,6 +20,7 @@ from typing import Callable, Optional
 
 from . import accounts, diagnose, ledger, probe, soften, uploader
 from .apiutil import TASK_FATAL, ApiError, resolve_ref
+from .video_refs import primary_refs, ref_file, uses_handoff
 from .providers import ImageTask, VideoTask, build as build_provider
 from .store import Project, read_text, write_text
 
@@ -582,8 +583,8 @@ def _check_video_ref_map(prompt: str, task: dict, spine: list,
                for r in (task.get("no_image_refs") or [])
                if isinstance(r, dict)}
     stems = {os.path.splitext(os.path.basename(s))[0] for s in spine or []}
-    sheet_ids = [str(s.get("sheet_id") or "")
-                 for s in (task.get("storyboard_refs") or [])]
+    sheet_ids = [str(s.get("sheet_id") or s.get("asset_id") or s.get("key") or "")
+                 for s in primary_refs(task)]
 
     def _sent(aid: str) -> bool:
         if aid in sent_aux or aid in skipped:
@@ -597,6 +598,13 @@ def _check_video_ref_map(prompt: str, task: dict, spine: list,
     ghost = [f"Image {n} = {aid}" for n, aid in mapped if not _sent(aid)]
     if not ghost:
         return
+    if uses_handoff(task):
+        raise ApiError(
+            f"{task.get('key') or '这一段'} 的视频提示词引用了未上传的参考图："
+            f"{'、'.join(ghost[:6])}。实际会上传 {len(refs)} 张。"
+            "请在任务明细中核对交接板区域图和资产参考图，使 Image 编号与上传顺序一致；"
+            "材料导入的项目修正引用后重新导入。", kind=TASK_FATAL,
+            err_code="invalid_prompt")
     raise RuntimeError(
         f"{task.get('key') or '这一段'} 的视频提示词声明的参考图没有全部上传："
         f"{len(mapped)} 个编号里有 {len(ghost)} 个指不到任何会上传的图 —— "
@@ -888,20 +896,27 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                     "warn": _ratio_warn(pj, out, want, "video", task["key"],
                                         provider_cfg, model, "video",
                                         str(p.get("ratio") or ""))}
-        # V6.2 第 19 章：视频必须带覆盖**完整关键时间推进**的有序故事板骨架。
-        # 所以这里传的是整条，不是一张。老产物只有一张，那就是一条长度 1 的骨架。
-        spine = [str(s.get("file_ref") or "")
-                 for s in sorted(task.get("storyboard_refs") or [],
-                                 key=lambda s: s.get("order") or 0)
-                 if s.get("file_ref")] or [task.get("storyboard_ref") or ""]
+        # v7 的交接板按需，允许一张都没有；字段存在时绝不回退到旧故事板。
+        # 老任务没有 handoff_refs，仍按它原有的故事板要求校验。
+        handoff = uses_handoff(task)
+        main_refs = primary_refs(task)
+        spine = [ref_file(r) for r in main_refs]
         # **不能用 isfile。** 0 字节和下了一半的文件都是「文件存在」，
         # 而出片是最贵的一步：拿一张空图当参考发出去，模型等于没有参考，
         # 出来的人不是本人 —— 任务还标 ok。配了对象存储的话更彻底：
         # 那个 0 字节文件会被原样传上去再给服务商，连解码失败都不会有。
         bad = [s for s in spine
-               if not (s.startswith("http")
+               if not s or not (s.startswith("http")
                        or probe.have_output(pj.p(*s.split("/"))))]
-        if bad or not spine[0]:
+        if handoff and bad:
+            missing = [str(r.get("sheet_id") or r.get("asset_id") or r.get("key")
+                           or ref_file(r) or "未指定文件的引用")
+                       for r in main_refs if ref_file(r) in bad]
+            raise ApiError("交接板区域参考图不存在或者是空文件："
+                           + "、".join(missing)
+                           + "。请在生产页补齐这些区域图；区域图依赖的整板也需先完成。",
+                           kind=TASK_FATAL, err_code="reference_missing")
+        if not handoff and (bad or not spine):
             raise RuntimeError(
                 f"固定故事板不存在或者是个空文件，出不了片："
                 f"{'、'.join(bad) or '这一段一张故事板都没有'}。"
@@ -919,7 +934,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         #
         # 只提醒不硬停：出片是最贵的一步，为一句措辞把整段拦住不值得 ——
         # 而这条提醒足够让人看出该回去改哪个环节。
-        if len(spine) > 1:
+        if not handoff and len(spine) > 1:
             mapped = {a for _, a in _IMAGE_MAP.findall(prompt or "")}
             miss = [os.path.splitext(os.path.basename(s))[0]
                     for s in spine
@@ -957,6 +972,10 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         for r in aux:
             f = str(r.get("url") or r.get("file_ref") or "")
             if not f:
+                if handoff:
+                    raise ApiError(f"参考图指不到文件：{r.get('asset_id') or '未命名参考图'}。"
+                                   "请核对材料引用并重新导入，不能遗漏已声明的参考图出片。",
+                                   kind=TASK_FATAL, err_code="reference_missing")
                 continue
             if f in seen:
                 dup += 1
@@ -964,10 +983,9 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             seen.add(f)
             refs.append(to_ref(f, log))
         if dup:
-            log(f"⚠️ 补图里有 {dup} 张就是骨架本身，已去重 —— "
+            log(f"⚠️ 补图里有 {dup} 张重复参考，已去重 —— "
                 f"同一张传两次会让后面每张图的编号整体错位（画面出得来、"
-                f"参考全是错的）。装配那一层应该已经剔过了，"
-                f"这条日志出现说明有一处漏剔，去看 run_v34 的视频装配。")
+                f"参考全是错的）。请核对任务材料中的参考图清单。")
         # V6.1 的老字段照旧认 —— **但只在没有 reference_images 的时候。**
         #
         # 通用版的视频补图从「一个」改成「一组」之后，两个字段都会有值：
@@ -987,8 +1005,9 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         # 错位，每条描述都套到别的图上 —— 片子出来看着正常，参考全是错的。
         # V6.1 不受影响：它的视频提示词不写 `Image N = 英文ID` 映射。
         _check_video_ref_map(prompt, task, spine, aux, refs)
+        main_label = "交接板区域图" if handoff else "故事板骨架"
         log(f"{_who_line(provider_cfg, model)}　{p.get('duration', 15)}s {want} "
-            f"故事板骨架×{len(spine)} 补图×{len(refs) - len(spine)} "
+            f"{main_label}×{len(spine)} 补图×{len(refs) - len(spine)} "
             f"参考图共×{len(refs)}")
 
         def _go(use, pr):
@@ -1028,8 +1047,9 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         pj.upsert_registry("video", {"id": task["key"], "file_ref": task["output"],
                                      # 整条骨架都入台账 —— 事后要能查出这一段
                                      # 是拿哪几张、按什么顺序做出来的。
-                                     "storyboard_ref": spine[0],
-                                     "storyboard_spine": list(spine),
+                                     **({"handoff_refs": main_refs} if handoff else
+                                        {"storyboard_ref": spine[0],
+                                         "storyboard_spine": list(spine)}),
                                      "status": "generated", **meta})
         pj.log_event({"stage": "video", "id": task["key"], "result": "ok", **meta})
         # 出片是最贵的一步，必须入账。带上时长——按秒计价的家要用
