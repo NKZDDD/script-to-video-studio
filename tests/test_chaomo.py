@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
+import base64
+import io
 import unittest
+
+from PIL import Image
 
 from core.apiutil import ApiError, TASK_FATAL
 from core.providers import REGISTRY, resolve_id
@@ -18,6 +22,12 @@ def _stub(provider, reply):
     provider.session.request = fake
     provider.session.save_item = lambda item, dest, **kw: dest
     return seen
+
+
+def _valid_ref():
+    out = io.BytesIO()
+    Image.new("RGB", (8, 8), "blue").save(out, "PNG")
+    return "data:image/png;base64," + base64.b64encode(out.getvalue()).decode("ascii")
 
 
 class ChaomoTests(unittest.TestCase):
@@ -95,7 +105,7 @@ class ChaomoTests(unittest.TestCase):
         """
         p = ChaomoProvider(api_key="k")
         seen = _stub(p, {"data": [{"url": "https://x/i.png"}]})
-        p.generate_image(ImageTask(prompt="改背景", refs=["data:image/png;base64,iVBORw0KGgo="],
+        p.generate_image(ImageTask(prompt="改背景", refs=[_valid_ref()],
                                    model="gpt-image2-1K"), "out.png")
         fields = {name: payload[1] for name, payload in seen["files"] if payload[0] is None}
         self.assertEqual(fields["async"], "true")
@@ -118,7 +128,7 @@ class ChaomoTests(unittest.TestCase):
         """有参考图必须走 /v1/images/edits，字段名是 image[]（不是 image / images）。"""
         p = ChaomoProvider(api_key="k")
         seen = _stub(p, {"data": [{"url": "https://x/i.png"}]})
-        tiny = "data:image/png;base64,iVBORw0KGgo="
+        tiny = _valid_ref()
         p.generate_image(ImageTask(prompt="改背景", refs=[tiny], size="1:1",
                                    model="gpt-image2-1K"), "out.png")
         self.assertEqual(seen["path"], "/v1/images/edits")

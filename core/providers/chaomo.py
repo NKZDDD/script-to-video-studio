@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import os
 from typing import Callable, Optional
 
@@ -190,6 +191,11 @@ class ChaomoProvider(Provider):
         # 图片反过来只能上传文件，所以这里只对视频声明。
         return media == "video"
 
+    def accepts_url(self, model: str = "", media: str = "image") -> bool:
+        # 图生图最终必须上传字节。本地图不要先传 R2 又下载回来：
+        # 这会多一次下载失败/读到错误页的机会。显式 URL 仍由 _ref_bytes 读取。
+        return media == "video"
+
     def capabilities(self) -> dict:
         return {
             "id": self.id,
@@ -232,28 +238,65 @@ class ChaomoProvider(Provider):
         }
 
     # ---------------------------------------------------------------- 内部
-    def _ref_bytes(self, ref: str, idx: int) -> tuple:
-        """参考图 → (bytes, filename, content_type)。data URI 解码；http 链接先下载。"""
+    def _ref_bytes(self, ref: str, idx: int, *, log: Callable = print) -> tuple:
+        """完整解码核验后原样上传；文件名和 MIME 以实际内容为准。"""
+        def invalid(reason: str) -> ApiError:
+            return ApiError(
+                f"超模参考图第 {idx} 张无法使用：{reason}。尚未提交生成。"
+                "请在「任务明细」按参考图顺序找到这张图，"
+                "用完整的 PNG/JPEG/WebP 替换后重跑；仅改文件后缀不能修复图片。",
+                kind="task_fatal", err_code="reference_invalid")
+
         if ref.startswith("data:"):
-            head, _, payload = ref.partition(",")
-            ctype = head[5:].split(";")[0] or "image/png"
-            ext = {"image/jpeg": "jpg", "image/webp": "webp"}.get(ctype, "png")
+            head, sep, payload = ref.partition(",")
+            if not sep or ";base64" not in head.lower():
+                raise invalid("图片数据不是有效的 Base64 图片")
+            ctype = head[5:].split(";")[0].strip().lower()
             try:
-                return (base64.b64decode(payload), f"ref_{idx}.{ext}", ctype)
-            except Exception:                               # noqa: BLE001
-                return ()
-        if ref.startswith(("http://", "https://")):
+                raw = base64.b64decode("".join(payload.split()), validate=True)
+            except ValueError as exc:
+                raise invalid("Base64 图片数据不完整或编码无效") from exc
+        elif ref.startswith(("http://", "https://")):
             # 文档：URL 不能直传，必须先下载到本地再上传
             try:
-                r = requests.get(ref, timeout=self.session.timeout,
-                                 proxies=self.session._proxies())
-                r.raise_for_status()
+                with requests.get(ref, timeout=self.session.timeout,
+                                  proxies=self.session._proxies()) as r:
+                    r.raise_for_status()
+                    ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    raw = r.content
             except Exception as exc:                        # noqa: BLE001
-                raise ApiError(f"超模图生图要求上传文件，下载参考图失败: {ref[:80]} ({exc})")
-            ctype = (r.headers.get("Content-Type") or "image/png").split(";")[0]
-            ext = {"image/jpeg": "jpg", "image/webp": "webp"}.get(ctype, "png")
-            return (r.content, f"ref_{idx}.{ext}", ctype)
-        return ()
+                raise ApiError(f"超模图生图要求上传文件，下载参考图第 {idx} 张失败: {exc}") from exc
+        else:
+            raise invalid("引用没有解析成图片数据或可下载的链接")
+
+        if not raw:
+            raise invalid("图片内容为空")
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise ApiError("超模参考图检查需要 Pillow，请补齐运行库或使用完整版本。",
+                           kind="task_fatal") from exc
+        try:
+            with Image.open(io.BytesIO(raw)) as im:
+                fmt, (width, height) = im.format, im.size
+                im.verify()
+            # verify() 对 JPEG 等格式不解像素，只看头部还会漏掉截断文件。
+            with Image.open(io.BytesIO(raw)) as im:
+                for frame in range(getattr(im, "n_frames", 1)):
+                    im.seek(frame)
+                    im.load()
+        except Exception as exc:                            # noqa: BLE001
+            raise invalid("内容不是可完整解码的图片，可能是错误网页或下载不完整") from exc
+        formats = {"PNG": ("png", "image/png"), "JPEG": ("jpg", "image/jpeg"),
+                   "WEBP": ("webp", "image/webp")}
+        if fmt not in formats:
+            raise invalid(f"实际格式为 {fmt}，服务商只支持 PNG/JPEG/WebP")
+        ext, mime = formats[fmt]
+        note = f"超模 参考图第 {idx} 张：{fmt} {width}x{height}，{len(raw):,} 字节，完整解码通过"
+        if ctype != mime:
+            note += f"；上传格式声明已按真实内容修正为 {mime}"
+        log(note + "；原图字节未改")
+        return raw, f"ref_{idx}.{ext}", mime
 
     @staticmethod
     def meta_of(data) -> dict:
@@ -384,7 +427,7 @@ class ChaomoProvider(Provider):
                      ("include_metadata", (None, "true"))]
             attached = 0
             for i, ref in enumerate(refs, start=1):
-                got = self._ref_bytes(ref, i)
+                got = self._ref_bytes(ref, i, log=log)
                 if got:
                     files.append(("image[]", (got[1], got[0], got[2])))
                     attached += 1

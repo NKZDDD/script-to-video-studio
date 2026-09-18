@@ -372,6 +372,18 @@ CATALOG = {
         "resume": "换完模型点「开始」",
         "resumable": True, "scope": "batch", "level": "error",
     },
+    "REF_INVALID": {
+        "title": "参考图内容或格式无法读取",
+        "why": "参考图可能下载不完整、链接返回了错误网页，或声明格式与实际内容不一致。"
+               "本地检查通过后服务商仍报同样错误时，也可能是服务商的图片解析异常。",
+        "where": "「生产」→「任务明细」→这条任务的参考图列表，按报错中的第几张查看",
+        "fix": ["打开对应参考图，确认能完整显示；换成完整的 PNG/JPEG/WebP，不能只改后缀",
+                "若使用图片链接，确认下载到的是图片而非登录页或错误页",
+                "若日志中每张图都已完整解码通过，把任务号和原始报错交给服务商核查"],
+        "resume": "修复对应参考图后重跑失败任务。本地检查拦截时尚未提交生成；"
+                  "已取得服务商任务号的失败任务，重跑前先核对原单计费。",
+        "resumable": True, "scope": "task", "level": "error",
+    },
     "REF_MISSING": {
         "title": "要当参考的那张图还没生成",
         "why": "这一步声明了上游图片作为参考，但对应文件现在缺失或不完整。"
@@ -874,6 +886,7 @@ _PATTERNS = [
     # 为什么只认平台判词、不认「暴力/血腥」这类内容名词，见那边的注释。
     ("CONTENT_REJECTED", _CONTENT_RE.pattern),
     ("PROMPT_INVALID", r"prompt too long|too long|invalid (prompt|param|size|request)|参数错误|不支持的?(尺寸|时长|比例)"),
+    ("REF_INVALID", r"参考图无法解码|参考图[^。\n]{0,24}无法使用|reference image[^.\n]{0,32}(cannot|unable to|failed to) decode"),
     # 这两条要排在 REF_MISSING 前面：都跟参考图有关，但原因和改法完全不同
     ("REF_URL_ONLY", r"只收公网|只收 ?HTTPS|must be a (public )?url|不接受本地图片"
                      r"|传不上去|没能传上去|上传到对象存储失败|还没配对象存储"
@@ -943,6 +956,7 @@ _PATTERNS = [
 # 措辞会变、会翻译、会本地化；码是给程序看的。
 # 只有拿不到码，或者拿到的是 upstream_error 这种通用值时才退回读文案。
 _BY_CODE = {
+    "reference_invalid": "REF_INVALID",
     "reference_missing": "REF_MISSING",
     "result_download_failed": "RESULT_DOWNLOAD",
     # **服务商自己抛的码也走这张表。** 我们在 provider 里 raise 时给的
@@ -1090,6 +1104,7 @@ FAILOVER_CODES = {
 
 # 换家也一样的 —— 得改内容或改流程，自动切换只会把同一个错误重复一遍
 NO_FAILOVER_CODES = {
+    "REF_INVALID",         # 同一份坏参考图不应自动交给下一家重复提交
     "RESULT_DOWNLOAD",     # 已经生成；换家只会把完成的任务再付费做一遍
     "CONTENT_REJECTED",     # 提示词本身要改。换家碰运气有可能过，但那是在赌，
                             # 而且各家审核尺度不同会导致同一部剧风格不一致
