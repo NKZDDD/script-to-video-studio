@@ -2,7 +2,7 @@
 (() => {
 const $ = (s, p=document) => p.querySelector(s), $$ = (s,p=document) => [...p.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const S = {boot:null, root:'', data:null, page:'projects', tab:'providers', provider:'', detail:'', wizard:null, step:0, plan:null, treeMode:'family', filters:{}, groupKeys:{}, open:new Set(), runtime:null, job:'', request:0};
+const S = {boot:null, root:'', data:null, page:'projects', tab:'providers', provider:'', detail:'', wizard:null, step:0, plan:null, treeMode:'family', filters:{}, groupKeys:{}, folders:new Map(), planRequest:0, runtime:null, job:'', request:0};
 const main = $('#main');
 const btn = (text, action, extra='', primary=false) => `<button type="button" class="rv-button ${primary?'rv-primary':''}" data-action="${action}" ${extra}>${text}</button>`;
 const option = (value, text, selected) => `<option value="${esc(value)}" ${value===selected?'selected':''}>${esc(text)}</option>`;
@@ -27,18 +27,43 @@ function closeDialog() {$('#dialog').close();S.job='';S.editor=null;}
 function safe(fn) {return (...a)=>Promise.resolve().then(()=>fn(...a)).catch(e=>notice(e.message,true));}
 async function reloadBoot() {S.boot=await api('bootstrap');S.provider ||= S.boot.capabilities[0]?.id||'';picker();}
 function picker() {$('#project-picker').innerHTML=option('','选择项目',S.root)+S.boot.projects.map(p=>option(p.root,p.title,S.root)).join('');}
-async function loadProject(root=S.root,paint=true) {
+async function loadProject(root=S.root,paint=true,background=false) {
  if(!root)return; const seq=++S.request;const data=await get('project',{root});
  if(seq!==S.request || root!==S.root)return;
- S.data=data;S.plan=null;
+ if(background&&($('#dialog').open||document.activeElement?.matches('input,select,textarea')||!['production','handoff','outputs'].includes(S.page)))return;
+ const previous=S.data;
+ S.data=data;
+ if(previous?.root!==data.root||productionStamp(previous)!==productionStamp(data))invalidatePlan();
  if(paint)render();
+ return previous;
 }
-function show(page) {if(['production','outputs','handoff'].includes(page)&&!S.root){notice('先选择或创建项目');page='projects';}S.page=page;render();}
+function updateHTML(element,html) {
+ if(element._html===html)return false;
+ element.innerHTML=html;element._html=html;return true;
+}
+const productionStamp = d => JSON.stringify([d?.publication,d?.tasks,d?.production]);
+function invalidatePlan() {
+ S.plan=null;S.planRequest++;
+ if(S.page==='production'&&$('#production-plan'))renderPlan();
+}
+function refreshProjectView(previous) {
+ if(S.page==='production') {
+  renderTree();renderDetail();renderJobs();renderPlan();
+  if(JSON.stringify(previous?.production)!==JSON.stringify(S.data.production))renderServices();
+  renderPublication();
+ } else if(S.page==='outputs') {outputList();loadMasters();}
+ else if(S.page==='handoff'&&JSON.stringify(previous)!==JSON.stringify(S.data))handoff();
+}
+function show(page) {if(['production','outputs','handoff'].includes(page)&&!S.root){notice('先选择或创建项目');page='projects';}if(page!==S.page)invalidatePlan();S.page=page;render();}
 function render() {
+ const retain=main.dataset.projectRoot===S.root&&main.dataset.viewPage===S.page;
+ const position=retain?{tree:$('#resource-tree')?.scrollTop||0,detail:$('#resource-detail')?.scrollTop||0,x:scrollX,y:scrollY}:null;
  $$('[data-page]').forEach(b=>b.setAttribute('aria-current',b.dataset.page===S.page?'page':'false'));
  if(!S.boot)return;
  if(S.page==='projects')projects();else if(S.page==='wizard')wizard();else if(S.page==='settings')settings();
  else if(!S.data)main.innerHTML='<p>正在读取项目…</p>';else if(S.page==='handoff')handoff();else if(S.page==='production')production();else outputs();
+ main.dataset.projectRoot=S.root;main.dataset.viewPage=S.page;
+ if(position){if($('#resource-tree'))$('#resource-tree').scrollTop=position.tree;if($('#resource-detail'))$('#resource-detail').scrollTop=position.detail;scrollTo(position.x,position.y);}
 }
 function projects() {
  main.innerHTML=heading('项目工作区','从一个项目，开始制作','锁定设定与本机路径，让 Agent 把材料直接交到这里。',
@@ -83,16 +108,25 @@ function handoff() {
 }
 function production() {
  const d=S.data;const cats={...S.boot.kinds};if(d.tasks.some(t=>t.kind==='storyboard'))cats.storyboard='旧项目故事板';
- const active=d.jobs.filter(j=>!['done','error','cancelled','aborted','interrupted'].includes(j.status));
  main.innerHTML=heading(d.meta.title,'选择这次要生产什么','资产和分集任务在同一棵树中管理，有效成品自动复用。',btn('Agent 契约','handoff')+btn('刷新','refresh'))+
- d.publication.errors.map(e=>`<p class="rv-notice is-error">新发布 ${esc(e.revision)} 未接收：${esc(e.message)}。当前已接收版本保持不变。</p>`).join('')+
- `<div class="rv-panel"><div class="rv-row"><h3>本次服务商与并发</h3>${btn('填写 / 管理密钥','providers')}</div><div class="rv-service-head"><span>生产类型</span><span>服务商</span><span>模型</span><span>并发</span></div><div id="production-services">${Object.entries(cats).map(([k,n])=>serviceRow(k,n)).join('')}</div><p class="rv-caption">各行共享全局总上限与服务商上限；批内并发不能相加当作可用额度。设置变更只影响下次开始的批次。</p></div>
+ `<div class="rv-panel rv-production-actions"><div><strong id="plan-summary"></strong><small id="production-version"></small></div><div class="rv-actions">${btn('查看生产计划','preview')}${btn('开始生产','start','disabled',true)}</div><small>勾选后先查看生产计划，确认后开始；筛选不清除隐藏勾选。</small></div><div id="production-plan"></div><div id="publication-errors"></div>
+ <div class="rv-panel"><div class="rv-row"><h3>本次服务商与并发</h3>${btn('填写 / 管理密钥','providers')}</div><div class="rv-service-head"><span>生产类型</span><span>服务商</span><span>模型</span><span>并发</span></div><div id="production-services"></div><p class="rv-caption">各行共享全局总上限与服务商上限；批内并发不能相加当作可用额度。设置变更只影响下次开始的批次。</p></div>
+ <div id="jobs"></div>
  <div class="rv-toolbar"><select id="tree-mode" aria-label="树形分组">${[['family','按资源分类'],['episode','按集查看'],['disk','按磁盘目录']].map(([v,n])=>option(v,n,S.treeMode)).join('')}</select><label class="rv-search"><input id="asset-search" type="search" aria-label="搜索资源" placeholder="搜索人物、场景、任务 ID、文件名" value="${esc(S.filters.asset||'')}"></label><select id="asset-status" aria-label="资源状态">${choices(['全部状态','待生产','已完成','失败','选择有阻塞'],S.filters.assetStatus||'全部状态')}</select><select id="asset-type" aria-label="资源类型">${option('','全部类型',S.filters.assetType||'')}${Object.entries(cats).map(([k,v])=>option(k,v,S.filters.assetType)).join('')}</select></div>
- <div class="rv-row rv-selection"><span id="selection-count"></span><div class="rv-actions">${btn('选中当前结果','select-visible')}${btn('取消当前结果','clear-visible')}${btn('全项目全选','select-all')}${btn('补选依赖','dependencies')}</div></div>
- <div id="jobs">${d.jobs.slice(0,8).map(j=>`<div class="rv-notice rv-row"><div><strong>${esc(j.kind==='production'?'生产批次':j.kind)} · ${esc(j.status)}</strong> ${j.finished}/${j.total} · 已用 ${j.elapsed} 秒</div><div>${btn('任务明细','job',`data-id="${esc(j.id)}"`)}${active.includes(j)?btn('停止','cancel',`data-id="${esc(j.id)}"`):''}</div></div>`).join('')}</div>
- <div class="rv-production-grid"><div class="rv-panel rv-tree-panel"><div id="resource-tree"></div></div><aside class="rv-panel rv-detail" id="resource-detail"></aside></div><div id="dependency-alert"></div>
- <div class="rv-production-foot"><div><strong id="plan-summary"></strong><small>材料版本 ${esc(d.publication.revision||'等待 Agent 发布')} · 勾选自动保存，筛选不清除隐藏勾选</small></div>${btn('查看生产计划 →','preview','',true)}</div><div id="production-plan"></div>`;
- renderTree();renderDetail();
+ <div class="rv-row rv-selection"><span id="selection-count"></span><div class="rv-actions">${btn('选中当前结果','select-visible')}${btn('取消当前结果','clear-visible')}${btn('全项目全选','select-all')}${btn('补选依赖','dependencies')}</div></div><div id="dependency-alert"></div>
+ <div class="rv-production-grid"><div class="rv-panel rv-tree-panel"><div id="resource-tree" role="region" aria-label="生产资源列表" tabindex="0"></div></div><aside class="rv-panel rv-detail" id="resource-detail" aria-label="资源详情" tabindex="0"></aside></div>`;
+ renderServices();renderPublication();renderTree();renderDetail();renderJobs();renderPlan();
+}
+function renderServices() {
+ const cats={...S.boot.kinds};if(S.data.tasks.some(t=>t.kind==='storyboard'))cats.storyboard='旧项目故事板';
+ updateHTML($('#production-services'),Object.entries(cats).map(([k,n])=>serviceRow(k,n)).join(''));
+}
+function renderPublication() {
+ $('#production-version').textContent='材料版本 '+(S.data.publication.revision||'等待 Agent 发布');
+ updateHTML($('#publication-errors'),S.data.publication.errors.map(e=>`<p class="rv-notice is-error">新发布 ${esc(e.revision)} 未接收：${esc(e.message)}。当前已接收版本保持不变。</p>`).join(''));
+}
+function renderJobs() {
+ updateHTML($('#jobs'),S.data.jobs.slice(0,8).map(j=>`<div class="rv-notice rv-row"><div><strong>${esc(j.kind==='production'?'生产批次':j.kind)} · ${esc(j.status)}</strong> ${j.finished}/${j.total} · 已用 ${j.elapsed} 秒</div><div>${btn('任务明细','job',`data-id="${esc(j.id)}"`)}${!['done','error','cancelled','aborted','interrupted'].includes(j.status)?btn('停止','cancel',`data-id="${esc(j.id)}"`):''}</div></div>`).join(''));
 }
 function serviceRow(kind,label) {
  const row=S.data.production[kind],media=kind==='video'?'video':'image';if(!row)return '';
@@ -112,7 +146,7 @@ function renderTree() {
  const rs=matchedResources(),tasks=new Map(S.data.tasks.map(t=>[t.key,t])),all=new Map(S.data.resources.map(r=>[r.id,r]));
  S.visibleKeys=rs.map(r=>r.task_key).filter(Boolean);S.groupKeys={};let gi=0;
  const leaf = r => {const t=tasks.get(r.task_key);return `<div class="rv-leaf ${S.detail===r.id?'active':''}">${t?`<input type="checkbox" data-key="${esc(t.key)}" aria-label="选择 ${esc(r.name)}" ${t.selected?'checked':''}>`:'<span>♪</span>'}<button class="rv-leaf-name" data-action="detail" data-id="${esc(r.id)}"><strong>${esc(r.name)}</strong><small>${esc(r.id)}</small></button><span class="rv-badge ${t?.done?'rv-good':''}">${!t?'元数据':t.done?'已完成':t.missing_selection.length?'待依赖':'待生产'}</span></div>`;};
- const folder = (name,key,children,resources) => {const id='g'+gi++;const keys=[...new Set(resources.map(r=>r.task_key).filter(Boolean))];S.groupKeys[id]=keys;const selected=keys.filter(k=>tasks.get(k)?.selected).length;return `<details class="rv-folder" data-folder="${esc(key)}" ${S.open.has(key)||!!S.filters.asset?'open':''}><summary><input type="checkbox" data-group="${id}" aria-label="选择 ${esc(name)} 当前结果" ${keys.length&&selected===keys.length?'checked':''} ${!keys.length?'disabled':''} data-partial="${selected>0&&selected<keys.length}"><strong>${esc(name)}</strong><small>${selected}/${keys.length}</small></summary><div class="rv-folderbody">${children}</div></details>`;};
+ const folder = (name,key,children,resources) => {const id='g'+gi++;const keys=[...new Set(resources.map(r=>r.task_key).filter(Boolean))];S.groupKeys[id]=keys;const selected=keys.filter(k=>tasks.get(k)?.selected).length,state=JSON.stringify([S.root,S.treeMode,S.filters.asset||'',key]),open=S.folders.get(state)??!!S.filters.asset;return `<details class="rv-folder" data-folder="${esc(key)}" ${open?'open':''} data-folder-state="${esc(state)}"><summary data-folder-toggle><input type="checkbox" data-group="${id}" aria-label="选择 ${esc(name)} 当前结果" ${keys.length&&selected===keys.length?'checked':''} ${!keys.length?'disabled':''} data-partial="${selected>0&&selected<keys.length}"><strong>${esc(name)}</strong><small>${selected}/${keys.length}</small></summary><div class="rv-folderbody">${children}</div></details>`;};
  let html='';
  if(S.treeMode==='family') {
  const children=new Map();S.data.resources.forEach(r=>{const parent=all.has(r.parent_id)?r.parent_id:null;if(!children.has(parent))children.set(parent,[]);children.get(parent).push(r);});
@@ -125,23 +159,25 @@ function renderTree() {
  const groups=new Map();rs.forEach(r=>{const t=tasks.get(r.task_key),labels=S.treeMode==='episode'?(r.episodes.length?r.episodes:['全剧共享']):[(t?.output||'声音元数据').split('/').slice(0,-1).join('/')||'声音元数据'];labels.forEach(l=>{if(!groups.has(l))groups.set(l,[]);groups.get(l).push(r);});});
  html=[...groups].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>folder(k,S.treeMode+':'+k,v.map(leaf).join(''),v)).join('');
  }
- $('#resource-tree').innerHTML=html||'<p class="rv-empty">没有匹配资源。等待 Agent 发布材料，或调整筛选。</p>';
+ const tree=$('#resource-tree'),scroll=tree.scrollTop;
+ if(updateHTML(tree,html||'<p class="rv-empty">没有匹配资源。等待 Agent 发布材料，或调整筛选。</p>'))tree.scrollTop=scroll;
  $$('[data-partial="true"]',main).forEach(e=>e.indeterminate=true);
- $$('details[data-folder]',main).forEach(e=>e.addEventListener('toggle',()=>e.open?S.open.add(e.dataset.folder):S.open.delete(e.dataset.folder)));
+
  const selected=S.data.tasks.filter(t=>t.selected),missing=selected.filter(t=>t.missing_selection.length&&!t.done);
  $('#selection-count').textContent=`全项目选中 ${selected.length}/${S.data.tasks.length} 项 · 当前结果 ${S.visibleKeys.length} 项`;
  $('#plan-summary').textContent=`${selected.filter(t=>!t.done).length} 项待生产 · ${selected.filter(t=>t.done).length} 项可复用`;
  $('#dependency-alert').innerHTML=missing.length?`<div class="rv-notice is-error">${missing.length} 项缺少已勾选的上游，生产前会阻止提交。点“补选依赖”可以补齐。</div>`:'';
 }
 function renderDetail() {
- const r=S.data.resources.find(r=>r.id===S.detail);if(!r){$('#resource-detail').innerHTML='<h3>资源详情</h3><p>点选树中的资源，查看来源、参考图、提示词和输出位置。</p>';return;}
+ const r=S.data.resources.find(r=>r.id===S.detail);if(!r){updateHTML($('#resource-detail'),'<h3>资源详情</h3><p>点选树中的资源，查看来源、参考图、提示词和输出位置。</p>');return;}
  const t=S.data.tasks.find(t=>t.key===r.task_key);
- $('#resource-detail').innerHTML=`<h3>${esc(r.name)}</h3><p class="rv-caption">${esc(r.id)}</p><dl><dt>分类</dt><dd>${esc(S.boot.semantics[r.semantic]||r.semantic)}</dd><dt>使用范围</dt><dd>${esc(r.episodes.join('、')||'全剧共享')}</dd></dl>${t?`<dl><dt>输出</dt><dd><code>${esc(t.output)}</code></dd><dt>参数</dt><dd>${esc(JSON.stringify(t.params))}</dd><dt>依赖</dt><dd>${esc(t.dependencies.join('、')||'无')}</dd></dl>${t.done?(t.kind==='video'?`<video controls preload="metadata" src="${esc(fileURL(t.output))}"></video>`:`<img loading="lazy" alt="${esc(r.name)}" src="${esc(fileURL(t.output))}">`)+fileLink(t.output,'查看原文件'):''}<div class="rv-actions">${btn('查看 / 编辑提示词','prompt',`data-key="${esc(t.key)}"`)}${btn('交给 Agent 修订','revision',`data-key="${esc(t.key)}"`)}</div><h4>参考图（上传顺序）</h4>${[...(t.handoff_refs||t.storyboard_refs||[]),...(t.reference_images||[])].map(x=>`<p>${esc(x.image_n||x.order||'')} · ${esc(x.asset_id||x.sheet_id||'')}<small>${esc(x.file_ref||x.url||'')}</small></p>`).join('')||'<p>无参考图</p>'}${t.kind!=='video'?`<label>手动放图<input type="file" id="manual-file" accept="image/png,image/jpeg,image/webp" data-key="${esc(t.key)}" data-kind="${esc(t.kind)}"></label><small>空位置可补图；已有产物的修改请发起新版本修订。</small>`:''}${S.data.failures.filter(f=>f.target===t.key).map(f=>`<p class="rv-notice is-error">${esc(f.raw||f.title)}</p>`).join('')}`:'<p>声音身份与连续性元数据，无独立收费任务。</p>'}`;
+ const detail=$('#resource-detail'),scroll=detail.scrollTop;
+ if(updateHTML(detail,`<h3>${esc(r.name)}</h3><p class="rv-caption">${esc(r.id)}</p><dl><dt>分类</dt><dd>${esc(S.boot.semantics[r.semantic]||r.semantic)}</dd><dt>使用范围</dt><dd>${esc(r.episodes.join('、')||'全剧共享')}</dd></dl>${t?`<dl><dt>输出</dt><dd><code>${esc(t.output)}</code></dd><dt>参数</dt><dd>${esc(JSON.stringify(t.params))}</dd><dt>依赖</dt><dd>${esc(t.dependencies.join('、')||'无')}</dd></dl>${t.done?(t.kind==='video'?`<video controls preload="metadata" src="${esc(fileURL(t.output))}"></video>`:`<img loading="lazy" alt="${esc(r.name)}" src="${esc(fileURL(t.output))}">`)+fileLink(t.output,'查看原文件'):''}<div class="rv-actions">${btn('查看 / 编辑提示词','prompt',`data-key="${esc(t.key)}"`)}${btn('交给 Agent 修订','revision',`data-key="${esc(t.key)}"`)}</div><h4>参考图（上传顺序）</h4>${[...(t.handoff_refs||t.storyboard_refs||[]),...(t.reference_images||[])].map(x=>`<p>${esc(x.image_n||x.order||'')} · ${esc(x.asset_id||x.sheet_id||'')}<small>${esc(x.file_ref||x.url||'')}</small></p>`).join('')||'<p>无参考图</p>'}${t.kind!=='video'?`<label>手动放图<input type="file" id="manual-file" accept="image/png,image/jpeg,image/webp" data-key="${esc(t.key)}" data-kind="${esc(t.kind)}"></label><small>空位置可补图；已有产物的修改请发起新版本修订。</small>`:''}${S.data.failures.filter(f=>f.target===t.key).map(f=>`<p class="rv-notice is-error">${esc(f.raw||f.title)}</p>`).join('')}`:'<p>声音身份与连续性元数据，无独立收费任务。</p>'}`))detail.scrollTop=scroll;
 }
 let selectionQueue=Promise.resolve();
 async function setSelection(keys,value) {
  const root=S.root,changes=Object.fromEntries(keys.map(k=>[k,value]));
- S.plan=null;
+ invalidatePlan();
  selectionQueue=selectionQueue.catch(()=>{}).then(()=>api('selections',{root,changes}));
  await selectionQueue;
  if(S.root===root)await loadProject();
@@ -165,26 +201,50 @@ async function savePrompt() {
  try {
   const result=await api('prompt-edit',{root:editor.root,key:editor.key,version:editor.version,text});
   if(S.editor!==editor)return;
-  S.plan=null;closeDialog();
+  invalidatePlan();closeDialog();
   if(S.root===editor.root)await loadProject(editor.root);
   notice(result.changed?`已保存 ${result.revision}，${result.affected.length} 项任务使用新版本；下次生产生效。`:'提示词没有变化，无需新建版本。');
  } catch(e) {if(S.editor===editor){error.textContent=e.message;error.hidden=false;}}
 }
 async function preview() {
- const root=S.root;await selectionQueue;
- const data=await api('preview',{root});if(root!==S.root||S.page!=='production')return;S.plan=data;
- $('#production-plan').innerHTML=`<div class="rv-panel rv-plan"><h3>生产计划</h3><p>已选 ${data.selected} · 复用 ${data.reuse} · 新生成 ${data.todo} · 材料 ${esc(data.revision||'未发布')}</p>${data.rows.map(r=>`<p>${esc(S.boot.kinds[r.kind]||r.kind)}：${esc(r.provider)} / ${esc(r.model)} · ${r.count} 项 · 批内 ${r.concurrency}，服务商 ${r.provider_limit??'未设'}，全局 ${r.global_limit}</p>`).join('')}${data.blocked.map(b=>`<p class="rv-notice is-error"><strong>${esc(b.key)}</strong>：${esc(b.reason)}</p>`).join('')}${btn(data.todo?'开始生产':'全部复用，无需生成','start',data.blocked.length||!data.todo?'disabled':'',true)}<p class="rv-caption">开始后保存本批任务、参数和提示词快照。未生成的必要上游会先生产；上游失败时下游不会提交。</p></div>`;
- $('#production-plan').scrollIntoView({behavior:'smooth',block:'nearest'});
+ const root=S.root,request=++S.planRequest;await selectionQueue;
+ if(root!==S.root||request!==S.planRequest)return;
+ const data=await api('preview',{root});if(root!==S.root||S.page!=='production'||request!==S.planRequest)return;S.plan=data;
+ renderPlan();$('.rv-production-actions').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function renderPlan() {
+ const data=S.plan,start=$('[data-action="start"]',main);
+ if(!start)return;
+ start.disabled=!data||!!data.blocked.length||!data.todo;
+ start.textContent=data&&!data.todo?'全部复用，无需生成':'开始生产';
+ start.title=!data?'请先查看生产计划':data.blocked.length?'请先处理生产计划中的阻塞':'';
+ updateHTML($('#production-plan'),data?`<div class="rv-panel rv-plan"><h3>生产计划</h3><p>已选 ${data.selected} · 复用 ${data.reuse} · 新生成 ${data.todo} · 材料 ${esc(data.revision||'未发布')}</p>${data.rows.map(r=>`<p>${esc(S.boot.kinds[r.kind]||r.kind)}：${esc(r.provider)} / ${esc(r.model)} · ${r.count} 项 · 批内 ${r.concurrency}，服务商 ${r.provider_limit??'未设'}，全局 ${r.global_limit}</p>`).join('')}${data.blocked.map(b=>`<p class="rv-notice is-error"><strong>${esc(b.key)}</strong>：${esc(b.reason)}</p>`).join('')}<p class="rv-caption">开始后保存本批任务、参数和提示词快照。未生成的必要上游会先生产；上游失败时下游不会提交。</p></div>`:'');
 }
 function outputs() {
- const rows=S.data.tasks.filter(t=>t.done);
  main.innerHTML=heading(S.data.meta.title,'产物与验收','查看实际文件；文件校验通过后仍需检查画面、连续性与声音。',btn('回到生产树','production'))+
- `<div class="rv-toolbar"><input id="output-search" type="search" aria-label="搜索产物" placeholder="搜索文件名或任务编号"><select id="output-kind" aria-label="产物类型">${choices(['全部产物','图片','视频'],'全部产物')}</select>${S.boot.features.post?btn('逐集合成成片','assemble')+btn('字幕识别与烧录','subtitle'):''}${S.boot.features.legacy_import&&S.data.publication.legacy?btn('旧材料导入','import'):''}</div><div class="output-grid" id="output-list"></div><div id="master-list"></div>`;
- outputList(rows);
- get('files',{root:S.root,sub:'06_成片'}).then(d=>{if(S.page==='outputs')$('#master-list').innerHTML='<h3>成片目录</h3>'+d.items.filter(x=>!x.dir).map(x=>`<p>${fileLink('06_成片/'+x.name,x.name)}</p>`).join('');}).catch(e=>notice(e.message,true));
+ `<div class="rv-toolbar"><input id="output-search" type="search" aria-label="搜索产物" placeholder="搜索文件名或任务编号" value="${esc(S.filters.output||'')}"><select id="output-kind" aria-label="产物类型">${choices(['全部产物','图片','视频'],S.filters.outputKind||'全部产物')}</select>${S.boot.features.post?btn('逐集合成成片','assemble')+btn('字幕识别与烧录','subtitle'):''}${S.boot.features.legacy_import&&S.data.publication.legacy?btn('旧材料导入','import'):''}</div><div class="output-grid" id="output-list"></div><div id="master-list"></div>`;
+ outputList();loadMasters();
 }
-function outputList() {const q=($('#output-search')?.value||'').toLowerCase(),type=$('#output-kind')?.value;const rows=S.data.tasks.filter(t=>t.done&&`${t.key} ${t.output}`.toLowerCase().includes(q)&&(!type||type==='全部产物'||(type==='视频')===(t.kind==='video')));
- $('#output-list').innerHTML=rows.map(t=>`<article class="rv-panel">${t.kind==='video'?`<video controls preload="none" src="${esc(fileURL(t.output))}"></video>`:`<a href="${esc(fileURL(t.output))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(fileURL(t.output))}" alt="${esc(t.key)}"></a>`}<strong>${esc(t.key)}</strong><small>${esc(t.output)}</small>${fileLink(t.output,'查看原文件')}</article>`).join('')||'<p>尚无匹配的有效产物。生成成功后会自动出现。</p>';
+async function loadMasters() {
+ const root=S.root,target=$('#master-list');
+ try {const d=await get('files',{root,sub:'06_成片'});if(root!==S.root||target!==$('#master-list'))return;
+ updateHTML(target,'<h3>成片目录</h3>'+d.items.filter(x=>!x.dir).map(x=>`<p>${fileLink('06_成片/'+x.name,x.name)}</p>`).join(''));
+ }catch(e){if(root===S.root&&target===$('#master-list'))notice(e.message,true);}
+}
+function outputList() {
+ const q=(S.filters.output||'').toLowerCase(),type=S.filters.outputKind;
+ const rows=S.data.tasks.filter(t=>t.done&&`${t.key} ${t.output}`.toLowerCase().includes(q)&&(!type||type==='全部产物'||(type==='视频')===(t.kind==='video'))),list=$('#output-list');
+ const existing=new Map([...list.children].map(e=>[e.dataset.output,e])),wanted=new Set(rows.map(t=>t.output));
+ for(const child of [...list.children])if(!wanted.has(child.dataset.output))child.remove();
+ rows.forEach((t,i)=>{
+  let item=existing.get(t.output);
+  if(!item){item=document.createElement('article');item.className='rv-panel';item.dataset.output=t.output;
+   item.innerHTML=`${t.kind==='video'?`<video controls preload="none" src="${esc(fileURL(t.output))}"></video>`:`<a href="${esc(fileURL(t.output))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(fileURL(t.output))}" alt="${esc(t.key)}"></a>`}<strong></strong><small></small>${fileLink(t.output,'查看原文件')}`;
+  }
+  $('strong',item).textContent=t.key;$('small',item).textContent=t.output;
+  if(list.children[i]!==item)list.insertBefore(item,list.children[i]||null);
+ });
+ if(!rows.length&&!list.children.length)list.innerHTML='<p>尚无匹配的有效产物。生成成功后会自动出现。</p>';
 }
 function settings() {
  main.innerHTML=heading('工作台设置','生产必需配置，始终可见','所有已接入服务商继续可用。设置中只保留图片、视频与本机生产能力。')+
@@ -251,9 +311,15 @@ const actions={
  'import':()=>dialog('旧材料导入',`<p>仅影响当前旧项目，Agent 项目使用自动发布。</p><textarea id="import-text" rows="14" placeholder="粘贴完整材料"></textarea>${btn('导入旧材料','import-run','',true)}`),
  'import-run':async()=>{const d=await post('import',{text:$('#import-text').value});if(d.ok===false)throw Error(d.msg||JSON.stringify(d.issues));closeDialog();await loadProject();notice('已导入旧材料。');}
 };
+main.addEventListener('click',event=>{
+ const summary=event.target.closest('summary[data-folder-toggle]');
+ if(!summary||event.target.closest('input'))return;
+ event.preventDefault();const folder=summary.parentElement;folder.open=!folder.open;
+ S.folders.set(folder.dataset.folderState,folder.open);
+});
 document.addEventListener('click',safe(async event=>{const page=event.target.closest('[data-page]');if(page){show(page.dataset.page);return;}const button=event.target.closest('[data-action]');if(!button||button.disabled)return;const fn=actions[button.dataset.action];if(fn){button.disabled=true;try{await fn(button);}finally{if(button.isConnected)button.disabled=false;}}}));
 document.addEventListener('submit',e=>e.preventDefault());
-document.addEventListener('input',safe(e=>{const el=e.target;const map={'project-search':'project','asset-search':'asset'};if(map[el.id]){S.filters[map[el.id]]=el.value;el.id==='project-search'?projectList():renderTree();}if(el.id==='output-search')outputList();}));
+document.addEventListener('input',safe(e=>{const el=e.target;const map={'project-search':'project','asset-search':'asset'};if(map[el.id]){S.filters[map[el.id]]=el.value;el.id==='project-search'?projectList():renderTree();}if(el.id==='output-search'){S.filters.output=el.value;outputList();}}));
 document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.id==='project-picker'){S.root=el.value;S.data=null;S.detail='';if(S.root){await loadProject(S.root,false);show('production');}else show('projects');return;}
  const filters={'project-status':'status','project-type':'type','project-sort':'sort','asset-status':'assetStatus','asset-type':'assetType'};
@@ -263,16 +329,17 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.dataset.group){await setSelection(S.groupKeys[el.dataset.group],el.checked);return;}
  if(el.id==='provider-picker'){S.provider=el.value;providerForm();return;}
  if(el.dataset.feature){await api('settings',{agent_features:{[el.dataset.feature]:el.checked}});await reloadBoot();notice('功能入口已更新，基础生产功能始终保留。');return;}
- if(el.dataset.setting||el.dataset.override){const currentRoot=S.root;S.plan=null;$('#production-plan').innerHTML='';const row=el.closest('[data-kind]'),kind=row.dataset.kind,setting={...S.data.production[kind],override:{...S.data.production[kind].override}};if(el.dataset.override)setting.override[el.dataset.override]=el.dataset.override==='duration'?(el.value?+el.value:''):el.value;else setting[el.dataset.setting]=el.dataset.setting==='concurrency'?+el.value:el.value;
+ if(el.dataset.setting||el.dataset.override){const currentRoot=S.root;invalidatePlan();const row=el.closest('[data-kind]'),kind=row.dataset.kind,setting={...S.data.production[kind],override:{...S.data.production[kind].override}};if(el.dataset.override)setting.override[el.dataset.override]=el.dataset.override==='duration'?(el.value?+el.value:''):el.value;else setting[el.dataset.setting]=el.dataset.setting==='concurrency'?+el.value:el.value;
  if(el.dataset.setting==='provider'){const cap=S.boot.capabilities.find(c=>c.id===el.value),media=kind==='video'?'video':'image';setting.model=cap?.[media]?.default_model||'';}
- await post('production-settings',{settings:{[kind]:setting}});if(currentRoot!==S.root||S.page!=='production')return;S.data.production[kind]=setting;S.plan=null;if(el.dataset.setting==='provider')production();else $('#production-plan').innerHTML='';return;}
+ await post('production-settings',{settings:{[kind]:setting}});if(currentRoot!==S.root||S.page!=='production')return;S.data.production[kind]=setting;invalidatePlan();if(el.dataset.setting==='provider')renderServices();return;}
  if(el.id==='source-file'&&el.files[0]){const d=await api('parse',{filename:el.files[0].name,content_b64:await readFile(el.files[0])});$('[name=source]').value=d.text;return;}
  if(el.id==='manual-file'&&el.files[0]){await post('manual',{kind:el.dataset.kind,key:el.dataset.key,content_b64:await readFile(el.files[0])});await loadProject();notice('参考图已保存。');return;}
- if(el.id==='output-kind'){outputList();return;}
+ if(el.id==='output-kind'){S.filters.outputKind=el.value;outputList();return;}
  if(S.page==='wizard'&&['image_provider','video_provider'].includes(el.name)){const media=el.name.split('_')[0],cap=S.boot.capabilities.find(c=>c.id===el.value);$(`[name=${media}_model]`).value=cap?.[media]?.default_model||'';}
 }));
 $('#dialog-close').addEventListener('click',closeDialog);$('#dialog').addEventListener('close',()=>{S.job='';S.editor=null;});
 $('#apply-advice').addEventListener('click',safe(()=>{const n=S.runtime?.advice?.limit;if(n==null||n<1)throw Error('当前样本不足，暂不能给出可用建议');S.tab='limits';show('settings');$('[name=global]').value=Math.min(512,n);notice('建议已填入，检查各服务商额度后点击保存。');}));
-async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page;await loadProject(S.root,false);if(page===S.page)render();}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
+async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
+new ResizeObserver(()=>document.documentElement.style.setProperty('--studio-header-height',$('#sticky-header').offsetHeight+'px')).observe($('#sticky-header'));
 safe(async()=>{await reloadBoot();render();tick();})();
 })();

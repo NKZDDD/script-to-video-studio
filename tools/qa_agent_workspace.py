@@ -61,7 +61,12 @@ def main():
             assert page.locator('[data-action="open"]').count()==0
             page.locator('#project-search').fill('浏览器')
             page.locator('[data-action="open"]').click()
-            page.locator('#resource-tree').wait_for()
+            try:
+                page.locator('#resource-tree').wait_for()
+            except Exception:
+                page.screenshot(path=str(out/'failure.png'),full_page=True)
+                print(json.dumps({"page_errors":errors,"message":page.locator('#message').inner_text()},ensure_ascii=False))
+                raise
             page.locator('#tree-mode').select_option('episode')
             page.locator('details[data-folder] summary').click(position={"x":260,"y":15})
             page.locator('input[data-key="asset0"]').wait_for(state='visible')
