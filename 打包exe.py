@@ -101,11 +101,11 @@ REQUIRED = {
     # **缺了不是报缺模块，是 videocaptioner 一上来就崩在 import 上。**
     "audioop": "Python 3.13 删掉的标准库模块，pydub 要它 —— "
                "装 audioop-lts 提供（缺了 videocaptioner 直接崩）",
+    "psutil": "当前线程、CPU / 内存与并发建议，Agent 工作台必备",
 }
 
 # 这几个缺了只是少一点体验，不挡功能。
 OPTIONAL = {
-    "psutil": "CPU / 内存占用统计和并发建议（缺了页面上显示「占用未知」）",
 }
 
 # 这些包 PyInstaller 有时扫不出来（运行时才 import 的），显式点名
@@ -136,7 +136,7 @@ EXCLUDE = ["PyQt5", "qfluentwidgets", "qframelesswindow", "PyQt5.QtWebEngine"]
 #
 # 「打包机器上装了」和「进了包」是两件事：PyInstaller 扫不到的运行时
 # import 会被漏掉，而漏掉不报错。所以必须让 exe 自己回答。
-MUST_IMPORT = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore",
+MUST_IMPORT = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore", "psutil",
                # 这两个是「打包漏了不会报错、只会缺」的典型：
                # 字幕那条路平时不走，缺了要到有人点字幕才发现
                "videocaptioner.cli.main", "audioop"]
@@ -157,8 +157,7 @@ def check_page() -> bool:
     """
     sys.path.insert(0, HERE)
     from core import pagecheck                             # noqa: PLC0415
-    with io.open(os.path.join(HERE, "web", "index.html"), encoding="utf-8") as f:
-        ok, why = pagecheck.check(f.read())
+    ok, why = pagecheck.check_file(os.path.join(HERE, "web", "agent.html"))
     print(f"  {'✓' if ok else '✗'} 页面 JS：{why}")
     if not ok:
         print("     打包中止 —— 页面坏了打出去，用户看到的是"
@@ -200,6 +199,13 @@ def selfcheck(exe: str) -> bool:
         print(f"  ✗ exe 内部运行库自检失败，退出码 {dep.returncode}")
         return False
 
+    try:
+        line = next(line for line in dep.stdout.splitlines() if line.startswith("PACKAGE_SELFCHECK_JSON="))
+        report = json.loads(line.split("=", 1)[1])
+    except (StopIteration, ValueError):
+        print("  ✗ exe 未返回可核对的运行库与资源报告")
+        return False
+
     sys.path.insert(0, HERE)
     from core import providers as P                       # noqa: PLC0415
     # **只比内置的那些。** 插件（数据目录 `providers/*.py`）按设计不打进 exe ——
@@ -213,8 +219,8 @@ def selfcheck(exe: str) -> bool:
     # **假警报比漏报贵**：这一条会挡住每一次打包，然后人学会忽略它。
     want_prov = sorted(p["id"] for p in P.status()["providers"] if p.get("builtin"))
     plugins = sorted(p["id"] for p in P.status()["providers"] if not p.get("builtin"))
-    want_tpl = sorted(os.path.splitext(f)[0] for f in os.listdir(os.path.join(HERE, "prompts"))
-                      if f.endswith(".md") and not f.endswith("_adapter.md"))
+    from core.packagecheck import resource_inventory
+    expected_resources = resource_inventory()
 
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -241,7 +247,8 @@ def selfcheck(exe: str) -> bool:
                 print((proc.stdout.read() or "")[-2000:])
                 return False
             try:
-                got_prov = sorted(p["id"] for p in json.loads(get("/api/providers/status"))["providers"])
+                boot = json.loads(get("/api/agent/bootstrap"))
+                got_prov = sorted(p["id"] for p in boot["capabilities"])
                 break
             except Exception:                            # noqa: BLE001, PERF203
                 if time.time() > deadline:
@@ -268,12 +275,7 @@ def selfcheck(exe: str) -> bool:
         #    PyInstaller 扫不到的运行时 import 会被漏掉，而漏掉不报错 ——
         #    只在用到的那一刻失败（一份包里没有 pypdf，传 PDF 直接失败，
         #    而当时自检是绿的）。所以让 exe 自己 import 一次。
-        try:
-            mods = json.loads(get("/api/modules?names="
-                                  + ",".join(MUST_IMPORT)))["modules"]
-        except Exception as exc:                         # noqa: BLE001
-            print(f"  ✗ 问不到模块清单（{exc}）—— 这个包连自检都做不了")
-            return False
+        mods = report["modules"]
         gone = [m for m in MUST_IMPORT if not mods.get(m)]
         print(f"  {'✓' if not gone else '✗'} 功能模块 "
               f"{len(MUST_IMPORT) - len(gone)}/{len(MUST_IMPORT)}"
@@ -286,24 +288,37 @@ def selfcheck(exe: str) -> bool:
             print("     → 先确认这台机器 pip 装了它们，再看 HIDDEN 里有没有点名。")
             ok = False
 
-        st = json.loads(get("/api/providers/status"))
-        for w in st.get("warnings", []):
-            print(f"  ⚠ {w.get('id')}：{'；'.join(w.get('problems', []))}")
-        for e in st.get("errors", []):
-            print(f"  ✗ {e.get('file')} 加载失败")
-            ok = False
+        # Hash equality catches a stale asset as well as a missing one.
+        matched = report.get("resources") == expected_resources
+        print(f"  {'✓' if matched else '✗'} 页面、技能、模板、字幕样式资源 {len(expected_resources)} 份与源码逐字节核对")
+        ok = ok and matched
+        for url, filename in (("/", "agent.html"), ("/agent.js", "agent.js"), ("/agent.css", "agent.css")):
+            with io.open(os.path.join(HERE, "web", filename), encoding="utf-8") as f:
+                matched = get(url).replace("\r\n", "\n") == f.read()
+            print(f"  {'✓' if matched else '✗'} 新工作台 HTTP 资源 {filename}")
+            ok = ok and matched
 
-        # 2. 提示词模板：当资源打进去的，--add-data 漏了就是空列表
-        got_tpl = sorted(t["name"] for t in json.loads(get("/api/prompts"))["items"])
-        miss = [x for x in want_tpl if x not in got_tpl]
-        print(f"  {'✓' if not miss else '✗'} 提示词模板 {len(got_tpl)}/{len(want_tpl)} 份"
-              + (f"　缺：{', '.join(miss)}" if miss else ""))
-        ok = ok and not miss
+        usage = json.loads(get("/api/agent/runtime"))["usage"]
+        measured = usage.get("has_psutil") and usage.get("threads", 0) > 0
+        print(f"  {'✓' if measured else '✗'} 当前线程与资源统计：{usage.get('threads', '不可用')}")
+        ok = ok and bool(measured)
 
-        # 3. 页面：同上
-        html = get("/")
-        print(f"  {'✓' if len(html) > 10000 else '✗'} 页面 {len(html):,} 字符")
-        ok = ok and len(html) > 10000
+        # Exercise project creation inside the frozen app, including the full skill snapshot.
+        body = json.dumps({"title": "打包自检项目", "source": "仅用于离线发布验证的原文。"}, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/agent/create", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as response:
+            created = json.load(response)
+        from pathlib import Path
+        root = Path(created["root"]).resolve()
+        if not root.is_relative_to(Path(data).resolve()):
+            raise ValueError("自检项目没有写入隔离目录")
+        template = (root / "00_项目说明" / "AGENT_TASK.md").read_text(encoding="utf-8")
+        from core.agent_projects import file_manifest, skill_source
+        copied = file_manifest(root / "00_项目说明" / "skill" / "production-skill")
+        matched = str(root) in template and copied == file_manifest(skill_source())
+        print(f"  {'✓' if matched else '✗'} 新建项目、绝对路径契约、完整技能快照 {len(copied)} 份")
+        ok = ok and matched
 
         # 4b. 自带字幕样式：打进去了没有。**漏了不报错** ——
         #     字幕照出，只是用的是 videocaptioner 的默认样子。
@@ -473,6 +488,8 @@ def main() -> int:
     ]
     for package in COLLECT_ALL:
         cmd += ["--collect-all", package]
+    for module in HIDDEN:
+        cmd += ["--hidden-import", module]
     # 服务商是运行时按目录扫出来 import 的，没有任何一处静态 import ——
     # PyInstaller 的静态分析看不见它们，不点名就一个都不打进去。
     # 后果不是报错，是 exe 里「一家服务商都没有」，页面下拉框空白。
@@ -491,10 +508,10 @@ def main() -> int:
 
     # 把手册一起放进 dist，拿到的人不用回来找文档
     out = os.path.join(HERE, "dist")
-    for doc in ("使用手册.md", "FRAMEWORK.md"):
+    for doc in ("docs/Agent工作台使用说明.md",):
         src = os.path.join(HERE, doc)
         if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(out, doc))
+            shutil.copy2(src, os.path.join(out, os.path.basename(doc)))
 
     exe = os.path.join(out, name + (".exe" if os.name == "nt" else ""))
     if onedir:

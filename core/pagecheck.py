@@ -29,6 +29,8 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from html.parser import HTMLParser
+from pathlib import Path
 
 SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.S)
 
@@ -53,3 +55,35 @@ def check(html: str) -> tuple:
         if r.returncode:
             return False, f"第 {i} 段 <script> 语法错：\n" + (r.stderr or "").strip()
     return True, f"{len(blocks)} 段脚本都能解析"
+
+
+def check_file(filename: str) -> tuple:
+    """Check both inline and local external scripts used by the shipped entry page."""
+    class Sources(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.files = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "script" and dict(attrs).get("src"):
+                self.files.append(dict(attrs)["src"])
+
+    page = Path(filename)
+    html = page.read_text(encoding="utf-8")
+    sources = Sources()
+    sources.feed(html)
+    ok, why = check(html)
+    if not ok:
+        return ok, why
+    for src in sources.files:
+        relative = src.lstrip("/")
+        if ":" in src or "\\" in src or ".." in relative.split("/") or src.startswith("//"):
+            return False, f"不能检查非本地页面脚本：{src}"
+        path = page.parent / relative
+        if not path.is_file():
+            return False, f"页面脚本缺失：{src}"
+        # Use the same syntax checker; do not count an empty external tag as verified JS.
+        ok, detail = check("<script>" + path.read_text(encoding="utf-8") + "</script>")
+        if not ok:
+            return False, f"{src}：{detail}"
+    return True, why + f"；外部脚本 {len(sources.files)} 份已检查"

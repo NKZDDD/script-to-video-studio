@@ -11,7 +11,28 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+import importlib
+import hashlib
+from pathlib import Path
 from typing import Callable
+
+RUNTIME_MODULES = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore",
+                   "videocaptioner.cli.main", "audioop", "psutil",
+                   "core.agent_projects", "core.agent_runtime", "core.agent_post",
+                   "server.agent_api"]
+
+
+def resource_inventory() -> dict:
+    """Hashes from the actual source/bundle, never from the user's data directory."""
+    from . import paths
+    base = Path(paths.BUNDLE_DIR)
+    files = [base / "web" / name for name in ("agent.html", "agent.js", "agent.css")]
+    files += list((base / "prompts").glob("*.md"))
+    files += list((base / "字幕样式").glob("*.txt"))
+    files += [p for p in (base / "skills" / "production-skill").rglob("*")
+              if p.is_file() and "__pycache__" not in p.parts]
+    return {p.relative_to(base).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(files)}
 
 
 def _try(name: str, fn: Callable[[], str]) -> dict:
@@ -133,4 +154,15 @@ def run_package_check() -> dict:
         _try("PDF 库", _check_pdf),
         _try("视频拼接库", _check_ffmpeg),
     ]
-    return {"ok": all(x["ok"] for x in checks), "checks": checks}
+    modules = {}
+    for name in RUNTIME_MODULES:
+        item = _try(name, lambda name=name: (importlib.import_module(name), "可导入")[1])
+        modules[name] = item["ok"]
+        checks.append(item)
+    inventory = {}
+    try:
+        inventory = resource_inventory()
+    except Exception as exc:
+        checks.append({"name": "发布资源校验和", "ok": False, "detail": str(exc)})
+    return {"ok": all(x["ok"] for x in checks), "checks": checks,
+            "modules": modules, "resources": inventory}

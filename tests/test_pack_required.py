@@ -47,10 +47,12 @@ class RequiredListTests(unittest.TestCase):
         self.assertIn("传 PDF 直接失败", head)
         self.assertIn("撞网关体积上限", head)
 
-    def test_psutil_stays_optional(self):
-        """缺了只是页面显示「占用未知」—— 不该挡打包。"""
+    def test_psutil_is_required_for_agent_runtime_metrics(self):
+        """Agent 原型已确认线程与建议并发必备，不能发缺这些能力的包。"""
+        required = PACK.split("REQUIRED = {")[1].split("OPTIONAL = {")[0]
         opt = PACK.split("OPTIONAL = {")[1].split("}")[0]
-        self.assertIn("psutil", opt)
+        self.assertIn('"psutil"', required)
+        self.assertNotIn('"psutil"', opt)
 
     def test_every_required_module_is_also_a_hidden_import(self):
         """★ 装了但 PyInstaller 扫不到 = 照样不进包。"""
@@ -91,7 +93,8 @@ class SelfcheckWiringTests(unittest.TestCase):
 
     def test_the_selfcheck_asks_the_exe(self):
         """★ 不问的话，缺 pypdf 的包照样是绿灯（上次就是这样）。"""
-        self.assertIn("/api/modules?names=", PACK)
+        self.assertIn('"--package-selfcheck"', PACK)
+        self.assertIn('report["modules"]', PACK)
         self.assertIn("MUST_IMPORT", PACK)
 
     def test_a_missing_module_fails_the_build(self):

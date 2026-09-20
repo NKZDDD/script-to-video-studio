@@ -95,5 +95,28 @@ class PackerTests(unittest.TestCase):
         self.assertNotIn("<script", src, "打包脚本里又自己写了一份提取正则")
 
 
+def test_agent_entry_and_external_script_parse():
+    ok, why = pagecheck.check_file(os.path.join(ROOT, "web", "agent.html"))
+    assert ok, why
+
+
+def test_external_script_syntax_error_is_not_hidden_by_empty_tag(tmp_path):
+    if not shutil.which("node"):
+        import pytest
+        pytest.skip("需要 Node 验证脚本语法")
+    page = tmp_path / "agent.html"
+    page.write_text('<script src="/agent.js"></script>', encoding="utf-8")
+    (tmp_path / "agent.js").write_text("const broken = 'a\nb';", encoding="utf-8")
+    ok, why = pagecheck.check_file(str(page))
+    assert not ok and "agent.js" in why and "语法错" in why
+
+
+def test_missing_external_script_fails_package_check(tmp_path):
+    page = tmp_path / "agent.html"
+    page.write_text('<script src="/absent.js"></script>', encoding="utf-8")
+    ok, why = pagecheck.check_file(str(page))
+    assert not ok and "缺失" in why
+
+
 if __name__ == "__main__":
     unittest.main()
