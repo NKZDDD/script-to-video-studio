@@ -41,6 +41,23 @@ function updateHTML(element,html) {
  if(element._html===html)return false;
  element.innerHTML=html;element._html=html;return true;
 }
+let observedDock=null;
+function updateStickyOffsets() {
+ const style=document.documentElement.style;
+ style.setProperty('--studio-header-height',$('#sticky-header').offsetHeight+'px');
+ style.setProperty('--studio-dock-height',($('.rv-production-dock')?.offsetHeight||0)+'px');
+}
+const stickyObserver=new ResizeObserver(updateStickyOffsets);
+function observeProductionDock() {
+ const dock=$('.rv-production-dock');
+ if(dock!==observedDock){if(observedDock)stickyObserver.unobserve(observedDock);if(dock)stickyObserver.observe(dock);observedDock=dock;}
+ updateStickyOffsets();
+}
+function backToTop() {
+ const behavior=matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth';
+ for(const el of $$('#resource-tree,#resource-detail,#production-plan',main))el.scrollTo({top:0,behavior});
+ window.scrollTo({top:0,behavior});
+}
 const productionStamp = d => JSON.stringify([d?.publication,d?.tasks,d?.production]);
 function invalidatePlan() {
  S.plan=null;S.planRequest++;
@@ -63,6 +80,7 @@ function render() {
  if(S.page==='projects')projects();else if(S.page==='wizard')wizard();else if(S.page==='settings')settings();
  else if(!S.data)main.innerHTML='<p>正在读取项目…</p>';else if(S.page==='handoff')handoff();else if(S.page==='production')production();else outputs();
  main.dataset.projectRoot=S.root;main.dataset.viewPage=S.page;
+ observeProductionDock();
  if(position){if($('#resource-tree'))$('#resource-tree').scrollTop=position.tree;if($('#resource-detail'))$('#resource-detail').scrollTop=position.detail;scrollTo(position.x,position.y);}
 }
 function projects() {
@@ -108,8 +126,9 @@ function handoff() {
 }
 function production() {
  const d=S.data;const cats={...S.boot.kinds};if(d.tasks.some(t=>t.kind==='storyboard'))cats.storyboard='旧项目故事板';
- main.innerHTML=heading(d.meta.title,'选择这次要生产什么','资产和分集任务在同一棵树中管理，有效成品自动复用。',btn('Agent 契约','handoff')+btn('刷新','refresh'))+
- `<div class="rv-panel rv-production-actions"><div><strong id="plan-summary"></strong><small id="production-version"></small></div><div class="rv-actions">${btn('查看生产计划','preview')}${btn('开始生产','start','disabled',true)}</div><small>勾选后先查看生产计划，确认后开始；筛选不清除隐藏勾选。</small></div><div id="production-plan"></div><div id="publication-errors"></div>
+ main.innerHTML=`<section class="rv-production-dock" aria-label="生产操作与计划"><div class="rv-panel rv-production-actions"><div><strong id="plan-summary"></strong><small id="production-version"></small></div><div class="rv-actions">${btn('查看生产计划','preview')}${btn('开始生产','start','disabled',true)}</div><small>勾选后先查看生产计划，确认后开始；筛选不清除隐藏勾选。</small></div><div id="production-plan" tabindex="0" aria-label="生产计划详情"></div></section>`+
+ heading(d.meta.title,'选择这次要生产什么','资产和分集任务在同一棵树中管理，有效成品自动复用。',btn('Agent 契约','handoff')+btn('刷新','refresh'))+
+ `<div id="publication-errors"></div>
  <div class="rv-panel"><div class="rv-row"><h3>本次服务商与并发</h3>${btn('填写 / 管理密钥','providers')}</div><div class="rv-service-head"><span>生产类型</span><span>服务商</span><span>模型</span><span>并发</span></div><div id="production-services"></div><p class="rv-caption">各行共享全局总上限与服务商上限；批内并发不能相加当作可用额度。设置变更只影响下次开始的批次。</p></div>
  <div id="jobs"></div>
  <div class="rv-toolbar"><select id="tree-mode" aria-label="树形分组">${[['family','按资源分类'],['episode','按集查看'],['disk','按磁盘目录']].map(([v,n])=>option(v,n,S.treeMode)).join('')}</select><label class="rv-search"><input id="asset-search" type="search" aria-label="搜索资源" placeholder="搜索人物、场景、任务 ID、文件名" value="${esc(S.filters.asset||'')}"></label><select id="asset-status" aria-label="资源状态">${choices(['全部状态','待生产','已完成','失败','选择有阻塞'],S.filters.assetStatus||'全部状态')}</select><select id="asset-type" aria-label="资源类型">${option('','全部类型',S.filters.assetType||'')}${Object.entries(cats).map(([k,v])=>option(k,v,S.filters.assetType)).join('')}</select></div>
@@ -210,7 +229,7 @@ async function preview() {
  const root=S.root,request=++S.planRequest;await selectionQueue;
  if(root!==S.root||request!==S.planRequest)return;
  const data=await api('preview',{root});if(root!==S.root||S.page!=='production'||request!==S.planRequest)return;S.plan=data;
- renderPlan();$('.rv-production-actions').scrollIntoView({behavior:'smooth',block:'start'});
+ renderPlan();
 }
 function renderPlan() {
  const data=S.plan,start=$('[data-action="start"]',main);
@@ -273,6 +292,7 @@ async function refreshRuntime() {S.runtime=await api('runtime');const d=S.runtim
 async function jobDetail(id) {const root=S.root;const d=await get('job',{root,id});if(root!==S.root)return;const table=`<table><thead><tr><th>任务</th><th>状态</th><th>说明</th></tr></thead><tbody>${Object.entries(d.items).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v.state)}</td><td>${esc(v.msg)}</td></tr>`).join('')}</tbody></table>${S.boot.features.logs?`<pre class="job-log">${esc(d.logs.join('\n'))}</pre>`:''}`;if(S.job===id){$('#dialog-body').innerHTML=table;}else{dialog('任务明细 · '+d.status,table);S.job=id;}}
 async function readFile(file) {if(file.size>40*1024*1024)throw Error('文件超过 40MB');const data=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('读取文件失败'));r.readAsDataURL(file);});return data.split(',')[1];}
 const actions={
+ 'back-top':backToTop,
  'new':()=>beginWizard(), 'batch':()=>{beginWizard();S.wizard.batch='项目一\n项目二';wizard();},
  'back-projects':()=>show('projects'), 'production':()=>show('production'),'handoff':()=>show('handoff'),
  'open':async e=>{S.root=e.dataset.root;S.data=null;S.detail='';picker();await loadProject(S.root,false);show(S.data.tasks.length?'production':'handoff');},
@@ -340,6 +360,8 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
 $('#dialog-close').addEventListener('click',closeDialog);$('#dialog').addEventListener('close',()=>{S.job='';S.editor=null;});
 $('#apply-advice').addEventListener('click',safe(()=>{const n=S.runtime?.advice?.limit;if(n==null||n<1)throw Error('当前样本不足，暂不能给出可用建议');S.tab='limits';show('settings');$('[name=global]').value=Math.min(512,n);notice('建议已填入，检查各服务商额度后点击保存。');}));
 async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
-new ResizeObserver(()=>document.documentElement.style.setProperty('--studio-header-height',$('#sticky-header').offsetHeight+'px')).observe($('#sticky-header'));
+document.addEventListener('click',event=>{if(!$('#runtime').contains(event.target))$('#runtime').open=false;});
+document.addEventListener('keydown',event=>{if(event.key==='Escape')$('#runtime').open=false;});
+stickyObserver.observe($('#sticky-header'));
 safe(async()=>{await reloadBoot();render();tick();})();
 })();

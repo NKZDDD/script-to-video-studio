@@ -50,6 +50,8 @@ def main():
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.on("request", lambda r: external.append(r.url) if not r.url.startswith(url) and not r.url.startswith("data:") else None)
             page.goto(url)
+            assert page.locator('.rv-top #runtime').count() == 1
+            assert page.locator('#sticky-header').bounding_box()['height'] < 100
             page.locator('[data-action="open"]').click()
             page.locator('#tree-mode').select_option('episode')
             folder = page.locator('[data-folder="episode:EP01"]')
@@ -97,10 +99,13 @@ def main():
             page.evaluate('document.activeElement.blur()')
             page.wait_for_timeout(4500)
             assert page.locator('[data-action="start"]').is_enabled()
+            page.evaluate('scrollTo(0,document.documentElement.scrollHeight)')
             pos = page.evaluate("""() => ({start:document.querySelector('[data-action=start]').getBoundingClientRect().top,
-              services:document.querySelector('#production-services').getBoundingClientRect().top,
+              dock:document.querySelector('.rv-production-dock').getBoundingClientRect().top,
+              bottom:document.querySelector('.rv-production-dock').getBoundingClientRect().bottom,
               header:document.querySelector('#sticky-header').getBoundingClientRect().bottom})""")
-            assert pos['header'] <= pos['start'] < pos['services'], pos
+            assert pos['header'] <= pos['dock'] <= pos['header'] + 13 and pos['start'] < pos['bottom'] < 1050, pos
+            assert page.locator('#main > :first-child').get_attribute('class') == 'rv-production-dock'
             page.screenshot(path=str(out / 'production-top.png'), full_page=True)
             page.evaluate('scrollTo(0,document.documentElement.scrollHeight)')
             assert abs(page.locator('#sticky-header').bounding_box()['y']) < 1
@@ -109,7 +114,14 @@ def main():
             assert page.locator('#live-usage').is_visible()
             page.screenshot(path=str(out / 'sticky-runtime.png'))
             page.locator('#runtime summary').click()
-            checks.append('开始按钮与生产计划位于顶部 / 自动刷新保留有效计划 / 运行状态吸顶')
+            # Hundreds of blocking messages scroll inside the floating card.
+            write_text(pj.p('03_提示词', 'image.txt'), '')
+            page.locator('[data-action="preview"]').click()
+            page.wait_for_function("document.querySelector('#production-plan').textContent.includes('提示词为空')")
+            assert page.locator('[data-action="start"]').is_disabled()
+            assert page.locator('#production-plan').evaluate('(e)=>e.scrollHeight>e.clientHeight && e.clientHeight<=innerHeight*.3+1')
+            write_text(pj.p('03_提示词', 'image.txt'), '离线布局验收，不提交生产')
+            checks.append('标题栏单行运行状态 / 生产卡片随滚动悬浮 / 长计划内部滚动 / 刷新保留有效计划')
 
             # A different selection invalidates the displayed plan immediately.
             page.locator('[data-action="select-all"]').click()
@@ -150,11 +162,39 @@ def main():
                 page.evaluate('scrollTo(0,document.documentElement.scrollHeight)')
                 layout = page.evaluate("""() => ({w:innerWidth,doc:document.documentElement.scrollWidth,
                   header:document.querySelector('#sticky-header').getBoundingClientRect().top,
+                  headerBottom:document.querySelector('#sticky-header').getBoundingClientRect().bottom,
+                  dock:document.querySelector('.rv-production-dock').getBoundingClientRect().top,
+                  dockBottom:document.querySelector('.rv-production-dock').getBoundingClientRect().bottom,
                   tree:document.querySelector('#resource-tree').clientHeight})""")
                 assert layout['doc'] <= width + 1 and abs(layout['header']) < 1 and layout['tree'] <= 620, layout
+                assert layout['headerBottom'] <= layout['dock'] <= layout['headerBottom'] + 13 and layout['dockBottom'] < 900, layout
                 if width == 360:
                     page.screenshot(path=str(out / 'mobile-tree.png'))
             checks.append('五种宽度下长列表与固定状态栏不溢出')
+
+            page.set_viewport_size({"width": 1440, "height": 800})
+            for name in ('projects', 'production', 'outputs', 'settings', 'handoff', 'wizard'):
+                if name == 'handoff':
+                    page.locator('[data-page="production"]').click()
+                    page.locator('[data-action="handoff"]').click()
+                elif name == 'wizard':
+                    page.locator('[data-page="projects"]').click()
+                    page.locator('[data-action="new"]').click()
+                else:
+                    page.locator(f'[data-page="{name}"]').click()
+                page.evaluate("document.querySelector('#resource-tree')?.scrollTo(0,1000);scrollTo(0,document.documentElement.scrollHeight)")
+                top_button = page.locator('#back-top')
+                box = top_button.bounding_box()
+                assert top_button.is_visible() and box['y'] + box['height'] <= 800
+                top_button.click()
+                page.wait_for_function("scrollY===0 && (!document.querySelector('#resource-tree') || document.querySelector('#resource-tree').scrollTop===0)")
+            page.emulate_media(reduced_motion='reduce')
+            page.locator('[data-page="production"]').click()
+            page.evaluate('scrollTo(0,900)')
+            page.locator('#back-top').click()
+            assert page.evaluate('scrollY') == 0
+            page.screenshot(path=str(out / 'header-and-floating-card.png'))
+            checks.append('项目、生产、产物、设置、交接、创建向导均可一键回顶 / 列表同步回顶 / 尊重减少动画设置')
             assert not errors, errors
             assert not external, external
             browser.close()
