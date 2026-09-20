@@ -357,7 +357,7 @@ def validate_release(pj: Project, revision: str) -> tuple:
 
 def scan(pj: Project) -> dict:
     if pj.meta().get("workflow") != "agent":
-        return {"legacy": True, "revision": "legacy", "errors": []}
+        return {"legacy": True, "revision": pj.tasks().get("studio_prompt_revision", "legacy"), "errors": []}
     with LOCK:
         active = read_json(pj.p("07_检查与记录", "active-plan.json"), {})
         errors = []

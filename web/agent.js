@@ -22,8 +22,8 @@ async function api(path, body) {
 const get = (path,args={}) => api(path+'?'+new URLSearchParams(args));
 const post = (path,data={}) => api(path,{root:S.root,...data});
 function notice(text,error=false) {const e=$('#message'); e.hidden=false; e.className='rv-notice '+(error?'is-error':'');e.textContent=text;clearTimeout(notice.timer);notice.timer=setTimeout(()=>e.hidden=true,error?15000:6000);}
-function dialog(title,body) {$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;S.job='';if(!$('#dialog').open)$('#dialog').showModal();}
-function closeDialog() {$('#dialog').close();S.job='';}
+function dialog(title,body) {$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;S.job='';S.editor=null;if(!$('#dialog').open)$('#dialog').showModal();}
+function closeDialog() {$('#dialog').close();S.job='';S.editor=null;}
 function safe(fn) {return (...a)=>Promise.resolve().then(()=>fn(...a)).catch(e=>notice(e.message,true));}
 async function reloadBoot() {S.boot=await api('bootstrap');S.provider ||= S.boot.capabilities[0]?.id||'';picker();}
 function picker() {$('#project-picker').innerHTML=option('','选择项目',S.root)+S.boot.projects.map(p=>option(p.root,p.title,S.root)).join('');}
@@ -136,7 +136,7 @@ function renderTree() {
 function renderDetail() {
  const r=S.data.resources.find(r=>r.id===S.detail);if(!r){$('#resource-detail').innerHTML='<h3>资源详情</h3><p>点选树中的资源，查看来源、参考图、提示词和输出位置。</p>';return;}
  const t=S.data.tasks.find(t=>t.key===r.task_key);
- $('#resource-detail').innerHTML=`<h3>${esc(r.name)}</h3><p class="rv-caption">${esc(r.id)}</p><dl><dt>分类</dt><dd>${esc(S.boot.semantics[r.semantic]||r.semantic)}</dd><dt>使用范围</dt><dd>${esc(r.episodes.join('、')||'全剧共享')}</dd></dl>${t?`<dl><dt>输出</dt><dd><code>${esc(t.output)}</code></dd><dt>参数</dt><dd>${esc(JSON.stringify(t.params))}</dd><dt>依赖</dt><dd>${esc(t.dependencies.join('、')||'无')}</dd></dl>${t.done?(t.kind==='video'?`<video controls preload="metadata" src="${esc(fileURL(t.output))}"></video>`:`<img loading="lazy" alt="${esc(r.name)}" src="${esc(fileURL(t.output))}">`)+fileLink(t.output,'查看原文件'):''}<div class="rv-actions">${btn('查看提示词','prompt',`data-rel="${esc(t.prompt_ref)}"`)}${btn('交给 Agent 修订','revision',`data-key="${esc(t.key)}"`)}</div><h4>参考图（上传顺序）</h4>${[...(t.handoff_refs||t.storyboard_refs||[]),...(t.reference_images||[])].map(x=>`<p>${esc(x.image_n||x.order||'')} · ${esc(x.asset_id||x.sheet_id||'')}<small>${esc(x.file_ref||x.url||'')}</small></p>`).join('')||'<p>无参考图</p>'}${t.kind!=='video'?`<label>手动放图<input type="file" id="manual-file" accept="image/png,image/jpeg,image/webp" data-key="${esc(t.key)}" data-kind="${esc(t.kind)}"></label><small>空位置可补图；已有产物的修改请发起新版本修订。</small>`:''}${S.data.failures.filter(f=>f.target===t.key).map(f=>`<p class="rv-notice is-error">${esc(f.raw||f.title)}</p>`).join('')}`:'<p>声音身份与连续性元数据，无独立收费任务。</p>'}`;
+ $('#resource-detail').innerHTML=`<h3>${esc(r.name)}</h3><p class="rv-caption">${esc(r.id)}</p><dl><dt>分类</dt><dd>${esc(S.boot.semantics[r.semantic]||r.semantic)}</dd><dt>使用范围</dt><dd>${esc(r.episodes.join('、')||'全剧共享')}</dd></dl>${t?`<dl><dt>输出</dt><dd><code>${esc(t.output)}</code></dd><dt>参数</dt><dd>${esc(JSON.stringify(t.params))}</dd><dt>依赖</dt><dd>${esc(t.dependencies.join('、')||'无')}</dd></dl>${t.done?(t.kind==='video'?`<video controls preload="metadata" src="${esc(fileURL(t.output))}"></video>`:`<img loading="lazy" alt="${esc(r.name)}" src="${esc(fileURL(t.output))}">`)+fileLink(t.output,'查看原文件'):''}<div class="rv-actions">${btn('查看 / 编辑提示词','prompt',`data-key="${esc(t.key)}"`)}${btn('交给 Agent 修订','revision',`data-key="${esc(t.key)}"`)}</div><h4>参考图（上传顺序）</h4>${[...(t.handoff_refs||t.storyboard_refs||[]),...(t.reference_images||[])].map(x=>`<p>${esc(x.image_n||x.order||'')} · ${esc(x.asset_id||x.sheet_id||'')}<small>${esc(x.file_ref||x.url||'')}</small></p>`).join('')||'<p>无参考图</p>'}${t.kind!=='video'?`<label>手动放图<input type="file" id="manual-file" accept="image/png,image/jpeg,image/webp" data-key="${esc(t.key)}" data-kind="${esc(t.kind)}"></label><small>空位置可补图；已有产物的修改请发起新版本修订。</small>`:''}${S.data.failures.filter(f=>f.target===t.key).map(f=>`<p class="rv-notice is-error">${esc(f.raw||f.title)}</p>`).join('')}`:'<p>声音身份与连续性元数据，无独立收费任务。</p>'}`;
 }
 let selectionQueue=Promise.resolve();
 async function setSelection(keys,value) {
@@ -145,6 +145,30 @@ async function setSelection(keys,value) {
  selectionQueue=selectionQueue.catch(()=>{}).then(()=>api('selections',{root,changes}));
  await selectionQueue;
  if(S.root===root)await loadProject();
+}
+async function editPrompt(key) {
+ dialog('编辑任务提示词','<p>正在读取当前版本…</p>');
+ const editor={root:S.root,key};S.editor=editor;
+ try {
+  const data=await get('prompt-edit',editor);
+  if(S.editor!==editor||S.root!==editor.root||!$('#dialog').open)return;
+  Object.assign(editor,data);
+  $('#dialog-body').innerHTML=`<p><strong>${esc(key)}</strong> · 当前版本 ${esc(data.revision)}</p><label>任务提示词<textarea id="prompt-edit" rows="16" spellcheck="false">${esc(data.text)}</textarea></label><div id="prompt-edit-error" class="rv-notice is-error" role="alert" hidden></div><p class="rv-notice">保存后，本任务${data.affected.length>1?`及依赖它的 ${data.affected.length-1} 项下游`:''}使用新产物版本。旧产物保留，正在运行的批次不受影响；保存不会自动开始生产。</p><details><summary>查看受影响的 ${data.affected.length} 项任务</summary>${data.affected.map(t=>`<p>${esc(S.boot.kinds[t.kind]||t.kind)} · ${esc(t.key)}</p>`).join('')}</details><div class="rv-actions">${btn('保存新版本','save-prompt','',true)}</div>`;
+  $('#prompt-edit').focus();
+ } catch(e) {if(S.editor===editor)$('#dialog-body').textContent=e.message;}
+}
+async function savePrompt() {
+ const editor=S.editor;if(!editor)return;
+ const error=$('#prompt-edit-error');error.hidden=true;
+ const text=$('#prompt-edit').value;
+ if(!text.trim()){error.textContent='提示词不能为空';error.hidden=false;return;}
+ try {
+  const result=await api('prompt-edit',{root:editor.root,key:editor.key,version:editor.version,text});
+  if(S.editor!==editor)return;
+  S.plan=null;closeDialog();
+  if(S.root===editor.root)await loadProject(editor.root);
+  notice(result.changed?`已保存 ${result.revision}，${result.affected.length} 项任务使用新版本；下次生产生效。`:'提示词没有变化，无需新建版本。');
+ } catch(e) {if(S.editor===editor){error.textContent=e.message;error.hidden=false;}}
 }
 async function preview() {
  const root=S.root;await selectionQueue;
@@ -212,7 +236,8 @@ const actions={
  'detail':e=>{S.detail=e.dataset.id;renderDetail();},
  'select-visible':()=>setSelection(S.visibleKeys,true),'clear-visible':()=>setSelection(S.visibleKeys,false),'select-all':()=>setSelection(S.data.tasks.map(t=>t.key),true),
  'dependencies':async()=>{await post('dependencies');await loadProject();notice('已补选必要上游；有效成品继续复用。');},
- 'prompt':async e=>{const d=await get('prompt',{root:S.root,rel:e.dataset.rel});dialog('任务提示词',`<pre>${esc(d.text)}</pre>`);},
+ 'prompt':e=>editPrompt(e.dataset.key),
+ 'save-prompt':savePrompt,
  'revision':e=>dialog('交给 Agent 定向修订',`<p>${esc(e.dataset.key)}</p><textarea id="revision-note" rows="5" placeholder="说明实际问题、服务商反馈和希望修改的地方"></textarea>${btn('生成修订请求','save-revision',`data-key="${esc(e.dataset.key)}"`,true)}`),
  'save-revision':async e=>{const d=await post('revision',{keys:[e.dataset.key],note:$('#revision-note').value});dialog('Agent 修订请求',`<textarea id="revision-result" readonly rows="14">${esc(d.text)}</textarea>${fileLink(d.rel,'打开修订请求')}`);},
  'preview':preview,
@@ -246,7 +271,7 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.id==='output-kind'){outputList();return;}
  if(S.page==='wizard'&&['image_provider','video_provider'].includes(el.name)){const media=el.name.split('_')[0],cap=S.boot.capabilities.find(c=>c.id===el.value);$(`[name=${media}_model]`).value=cap?.[media]?.default_model||'';}
 }));
-$('#dialog-close').addEventListener('click',closeDialog);$('#dialog').addEventListener('close',()=>S.job='');
+$('#dialog-close').addEventListener('click',closeDialog);$('#dialog').addEventListener('close',()=>{S.job='';S.editor=null;});
 $('#apply-advice').addEventListener('click',safe(()=>{const n=S.runtime?.advice?.limit;if(n==null||n<1)throw Error('当前样本不足，暂不能给出可用建议');S.tab='limits';show('settings');$('[name=global]').value=Math.min(512,n);notice('建议已填入，检查各服务商额度后点击保存。');}));
 async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page;await loadProject(S.root,false);if(page===S.page)render();}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
 safe(async()=>{await reloadBoot();render();tick();})();

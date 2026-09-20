@@ -100,6 +100,9 @@ def get(app, path, q):
     if path == "/api/agent/prompt":
         from core.store import read_text
         return {"text": read_text(str(A.inside(pj.root, (q.get("rel") or [""])[0])))}
+    if path == "/api/agent/prompt-edit":
+        from core import prompt_edits
+        return prompt_edits.read(pj, (q.get("key") or [""])[0])
     if path == "/api/agent/post-options":
         from core import agent_post, subtitle
         if not cfg.get("agent_features", {}).get("post"):
@@ -197,6 +200,9 @@ def post(app, path, body):
         return {"ok": True}
     if path == "/api/agent/revision":
         return dict(A.revision_request(pj, body.get("keys") or [], str(body.get("note", ""))), ok=True)
+    if path == "/api/agent/prompt-edit":
+        from core import prompt_edits
+        return prompt_edits.save(pj, body.get("key"), body.get("text"), body.get("version"))
     if path == "/api/agent/manual":
         if app.JOBS.list(project_root=pj.root, active_only=True):
             raise ValueError("请先停止生产再替换参考图")

@@ -33,10 +33,12 @@ def main():
                          "options": {"image_provider": "chaomo", "image_model": cap["image"]["default_model"]}}, caps)
     publish(pj, plan_for(pj));A.scan(pj)
     calls=[]
+    prompts={}
     def make_worker(project, pc, kind, llm_factory=None):
         assert pc.get("agent_mode") and llm_factory is None
         def worker(task, log, cancel):
             calls.append(task["key"])
+            prompts[task["key"]]=A.inside(project.root,task["prompt_ref"]).read_text(encoding="utf-8")
             image(str(A.inside(project.root, task["output"])))
             log("本地验收生成，不请求服务商")
             return {"output":task["output"]}
@@ -70,6 +72,23 @@ def main():
             assert page.locator('[data-action="start"]').is_disabled()
             page.locator('[data-action="dependencies"]').click()
             page.wait_for_function("document.querySelector('#selection-count').textContent.includes('2/2')")
+            page.locator('[data-action="detail"][data-id="asset0"]').click()
+            page.locator('[data-action="prompt"]').click()
+            page.locator('#prompt-edit').wait_for()
+            assert page.locator('#prompt-edit').input_value()=='生成测试图片'
+            page.locator('#prompt-edit').fill('   ')
+            page.locator('[data-action="save-prompt"]').click()
+            assert page.locator('#prompt-edit-error').inner_text()=='提示词不能为空'
+            edited='人物站在窗边，保持面部与服装一致。\n背景改为黄昏的暖色光线。'
+            page.locator('#prompt-edit').fill(edited)
+            page.locator('#dialog details').click()
+            page.screenshot(path=str(out/'prompt-editor.png'),full_page=True)
+            page.locator('[data-action="save-prompt"]').click()
+            page.locator('#prompt-edit').wait_for(state='hidden')
+            assert A.scan(pj)['revision']=='r0002'
+            assert not calls
+            assert Path(pj.p('03_提示词','releases','r0001','images','asset0.txt')).read_text(encoding='utf-8')=='生成测试图片'
+            checks.append('直接编辑 / 空值拦截 / 影响范围 / 新版本保存 / 原稿保留 / 保存不生成')
             page.locator('[data-action="preview"]').click()
             page.locator('[data-action="start"]:enabled').wait_for()
             page.evaluate('scrollTo(0,0)');page.wait_for_timeout(250)
@@ -77,6 +96,7 @@ def main():
             page.locator('[data-action="start"]').click()
             page.wait_for_function("document.querySelector('#jobs').textContent.includes('done')",timeout=15000)
             assert calls==['asset0','asset1'],calls
+            assert prompts['asset0']==edited and prompts['asset1']=='生成测试图片',prompts
             checks.append('依赖补选 / 生产前阻塞 / 真实队列与快照 / 成品复用')
             page.locator('[data-page="outputs"]').click()
             page.locator('#output-list img').first.wait_for()
