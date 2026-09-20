@@ -115,6 +115,11 @@ class Project:
         return self.p("03_提示词", "tasks.json")
 
     def tasks(self) -> dict:
+        if self.meta().get("workflow") == "agent":
+            from .agent_projects import inside
+            active = read_json(self.p("07_检查与记录", "active-plan.json"), {}) or {}
+            rel = active.get("tasks_path")
+            return read_json(str(inside(self.root, rel)), {}) if rel else {}
         return read_json(self.tasks_path, {}) or {}
 
     def save_tasks(self, data: dict) -> None:

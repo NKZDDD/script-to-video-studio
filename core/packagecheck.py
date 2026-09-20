@@ -112,9 +112,21 @@ def _check_ffmpeg() -> str:
     return f"{version}; {size / 1024 / 1024:.1f} MB"
 
 
+def _check_agent_assets() -> str:
+    from . import paths, agent_projects
+    for name in ("agent.html", "agent.js", "agent.css"):
+        if not os.path.isfile(paths.res("web", name)):
+            raise FileNotFoundError(f"Agent 页面资源缺失：{name}")
+    manifest = agent_projects.file_manifest(agent_projects.skill_source())
+    if len(manifest) < 51 or "SKILL.md" not in manifest:
+        raise FileNotFoundError("完整生产技能包缺失")
+    return f"Agent 页面资源齐全；完整技能包 {len(manifest)} 文件"
+
+
 def run_package_check() -> dict:
     """返回适合命令行和打包脚本消费的完整检查结果。"""
     checks = [
+        _try("Agent 工作台资源", _check_agent_assets),
         _try("HTTP 请求库", _check_requests),
         _try("对象存储库", _check_object_storage),
         _try("图片库", _check_pillow),

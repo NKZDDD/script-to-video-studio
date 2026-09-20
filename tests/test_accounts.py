@@ -317,7 +317,9 @@ class WiringTests(unittest.TestCase):
         import inspect
         from core import produce as P
         src = inspect.getsource(P.make_video_worker)
-        i = src.index("meta = soften.run_with_softening(\n                    lambda pr: _go(mine")
+        # generate dispatches either direct Agent production or legacy rewriting;
+        # the account counter must still run only after generation succeeds.
+        i = src.index("meta = generate(\n                    lambda pr: _go(mine")
         self.assertLess(i, src.index("accounts.bump(pid"))
 
     def test_the_ledger_records_which_account_paid(self):

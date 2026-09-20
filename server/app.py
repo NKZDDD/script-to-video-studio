@@ -2611,18 +2611,25 @@ class Handler(BaseHTTPRequestHandler):
         path, q = unquote(u.path), parse_qs(u.query)
         try:
             if path.startswith("/api/"):
-                return self._json(api_get(path, q))
+                from server import agent_api
+                import sys
+                if not path.startswith("/api/agent/"):
+                    return self._json({"error": "此版本已转为 Agent 工作台，请使用新页面"}, 410)
+                return self._json(agent_api.get(sys.modules[__name__], path, q))
             if path.startswith("/file"):                  # 产物预览
                 root, rel = q["root"][0], q["rel"][0]
-                full = os.path.join(root, *rel.split("/"))
-                if not os.path.abspath(full).startswith(os.path.abspath(root)):
-                    return self._json({"error": "越界"}, 403)
+                from server import agent_api
+                from core.agent_projects import inside
+                root = agent_api.project(root, load_config()).root
+                full = str(inside(root, rel))
                 if not os.path.isfile(full):
                     return self._json({"error": "不存在"}, 404)
                 ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
                 with open(full, "rb") as f:
                     return self._send(200, f.read(), ctype)
-            name = "index.html" if path in ("/", "") else path.lstrip("/")
+            name = "agent.html" if path in ("/", "", "/index.html") else path.lstrip("/")
+            if name not in ("agent.html", "agent.css", "agent.js", "favicon.ico"):
+                return self._json({"error": "404"}, 404)
             full = os.path.join(WEB_DIR, name)
             if os.path.isfile(full):
                 ctype = mimetypes.guess_type(full)[0] or "text/plain"
@@ -2647,7 +2654,12 @@ class Handler(BaseHTTPRequestHandler):
                     f"请求体不是 UTF-8 编码（第 {exc.start} 字节 0x{raw[exc.start]:02x} 解不开）。"
                     f"如果你是用脚本调这个接口，把 body 显式编成 UTF-8 再发；"
                     f"网页端不会出这个问题。") from exc
-            return self._json(api_post(unquote(u.path), body))
+            from server import agent_api
+            import sys
+            path = unquote(u.path)
+            if not path.startswith("/api/agent/"):
+                return self._json({"error": "内部分析接口已停用，请把修订要求交给 Agent"}, 410)
+            return self._json(agent_api.post(sys.modules[__name__], path, body))
         except Exception as exc:                          # noqa: BLE001
             traceback.print_exc()
             return self._json({"error": str(exc)}, 500)
@@ -2672,5 +2684,14 @@ def serve(host: str = "127.0.0.1", port: int = 0, tries: int = 20):
             last = exc
             continue
         srv.daemon_threads = True
+        from server import agent_api
+        import sys
+        stop = threading.Event()
+        original_close = srv.server_close
+        def close():
+            stop.set()
+            original_close()
+        srv.server_close = close
+        threading.Thread(target=agent_api.watch, args=(sys.modules[__name__], stop), daemon=True).start()
         return srv, port + i
     raise OSError(f"{port}–{port + tries - 1} 都被占了，用 --port 指一个空的") from last

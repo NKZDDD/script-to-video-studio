@@ -146,7 +146,9 @@ def advise(inflight_peak: int = 0, recent_429: int = 0,
             basis.append(f"最近 {recent_calls} 次调用里 {recent_429} 次被限流"
                          f"（{rate:.0%}）—— **服务商已经接不住了，"
                          f"本机还有余量也别再往上加**")
-            limit = max(1, int(inflight_peak * 0.7)) if inflight_peak else limit
+            if inflight_peak:
+                by_rate = max(1, int(inflight_peak * 0.7))
+                limit = min(limit, by_rate) if limit is not None else by_rate
         else:
             basis.append(f"最近 {recent_calls} 次调用里限流 {recent_429} 次"
                          f"（{rate:.0%}），服务商这边还有空间")

@@ -696,6 +696,8 @@ def _fit_size(provider_cfg: dict, model: str, media: str,
     拿不到这一家的清单时**原样发**，不自己发明 —— 清单是服务商自己声明的，
     没声明就说明我们不知道它收什么，猜一个只会换一种错法。
     """
+    if provider_cfg.get("agent_mode"):
+        return want  # Agent 队列已按当前模型能力校验，不能再按旧静态列表挑近似比例。
     from . import providers as _P
     from . import sizes as _sz
     try:
@@ -755,6 +757,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
     ref_side, ref_fmt = _ref_rules(provider_cfg, "image")
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="image", ref_fmt=ref_fmt)
     _llm = _lazy_llm(llm_factory)
+    generate = (lambda gen, prompt, **kw: gen(prompt)) if provider_cfg.get("agent_mode") else soften.run_with_softening
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -810,7 +813,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
                 log(f"⚠️ {map_warn}")
         refs = [to_ref(s, log) for _, s in srcs]
         log(f"{_who_line(provider_cfg, model)}　参考图×{len(refs)}")
-        meta = soften.run_with_softening(
+        meta = generate(
             lambda p: prov.generate_image(
                 ImageTask(prompt=p, refs=refs, size=want, model=model),
                 out, log=log, cancel=cancel,
@@ -867,6 +870,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
     ref_side, ref_fmt = _ref_rules(provider_cfg, "video")
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video", ref_fmt=ref_fmt)
     _llm = _lazy_llm(llm_factory)
+    generate = (lambda gen, prompt, **kw: gen(prompt)) if provider_cfg.get("agent_mode") else soften.run_with_softening
     # 按账号计费、一个账号只能同时跑一条的家（HVTALD）：按账号排队。
     # 声明在服务商自己身上，这里只问一句。别家 pool 是 None，走老路。
     pid = provider_cfg["provider"]
@@ -1014,13 +1018,13 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             return use.generate_video(
                 VideoTask(prompt=pr, refs=refs, duration=int(p.get("duration", 15)),
                           ratio=want, model=model,
-                          resolution=provider_cfg.get("resolution", "")),
+                          resolution=p.get("resolution") or provider_cfg.get("resolution", "")),
                 out, log=log, cancel=cancel,
                 poll_interval=interval, poll_timeout=timeout)
 
         acct_label = ""
         if pool is None:
-            meta = soften.run_with_softening(
+            meta = generate(
                 lambda pr: _go(prov, pr),
                 prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
                 rounds=_soften_rounds(provider_cfg), log=log)
@@ -1034,7 +1038,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                 mine = build_provider(pid, acct.api_key,
                                       provider_cfg.get("base_url", ""),
                                       provider_cfg.get("proxy", ""))
-                meta = soften.run_with_softening(
+                meta = generate(
                     lambda pr: _go(mine, pr),
                     prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
                     rounds=_soften_rounds(provider_cfg), log=log)

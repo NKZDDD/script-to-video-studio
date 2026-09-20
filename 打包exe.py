@@ -456,6 +456,7 @@ def main() -> int:
         "--specpath", os.path.join(HERE, "build"),
         # 运行时读的资源，必须打进去
         "--add-data", f"{os.path.join(HERE, 'web')}{sep}web",
+        "--add-data", f"{os.path.join(HERE, 'skills', 'production-skill')}{sep}skills/production-skill",
         "--add-data", f"{os.path.join(HERE, 'prompts')}{sep}prompts",
         # 自带字幕样式（ASS V4+ 块）。**必须打进去** —— 目标机器上
         # videocaptioner 的样式目录第一次跑才建，里面一份都没有，

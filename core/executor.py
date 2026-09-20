@@ -8,9 +8,9 @@
 
 并发三层（多剧并行时防止把服务商打爆）：
   1. 批内并发    ThreadPoolExecutor(max_workers=job.concurrency)
-  2. 服务商配额  每个 provider 一个信号量（跨项目、跨 job 共享）
+  2. 服务商配额  每个 provider 的在途计数（跨项目、跨 job 共享）
   3. 全局总闸    所有在途 API 调用的总上限
-真正发请求前依次获取 [服务商配额 → 全局总闸]，拿不到就排队等待。
+真正发请求前同时核对 [服务商配额 + 全局总闸]，拿不到就排队等待。
 """
 
 from __future__ import annotations
@@ -31,24 +31,30 @@ class Gate:
     def __init__(self, global_limit: int = 8, per_provider: Optional[dict] = None):
         self._lock = threading.RLock()
         self._global_limit = max(1, global_limit)
-        self._global = threading.BoundedSemaphore(self._global_limit)
         self._per_conf = dict(per_provider or {})
+        self._configured_per = dict(per_provider or {})
+        self._dynamic_conf: dict = {}
         self._sems: dict = {}
         self._inflight: dict = {}
         self._inflight_total = 0
+        self._changed = threading.Condition(self._lock)
+        self._peak = 0
 
     def configure(self, global_limit: int, per_provider: dict) -> None:
-        """上限变化时重建信号量；在途任务不受影响，新任务按新上限。"""
+        """共享计数保持不变；降低上限后等在途数降到新上限再放行。"""
         with self._lock:
             gl = max(1, int(global_limit or 1))
             if gl != self._global_limit:
                 self._global_limit = gl
-                self._global = threading.BoundedSemaphore(gl)
             new_conf = {k: int(v) for k, v in (per_provider or {}).items() if v}
+            self._configured_per = dict(new_conf)
+            for k, n in self._dynamic_conf.items():
+                new_conf[k] = min(new_conf.get(k, n), n)
             for k, v in list(self._sems.items()):
                 if new_conf.get(k) != getattr(v, "limit", None):
                     self._sems.pop(k, None)
             self._per_conf = new_conf
+            self._changed.notify_all()
 
     def set_provider_limit(self, provider: str, limit: int) -> None:
         """单独改某一家的并发上限，不动别家。
@@ -64,10 +70,13 @@ class Gate:
         """
         n = max(1, int(limit or 1))
         with self._lock:
+            self._dynamic_conf[provider] = n
+            n = min(n, self._configured_per.get(provider, n))
             if self._per_conf.get(provider) == n:
                 return
             self._per_conf[provider] = n
             self._sems.pop(provider, None)     # 下一个任务按新上限重建
+            self._changed.notify_all()
 
     def _sem_for(self, provider: str):
         limit = self._per_conf.get(provider)
@@ -82,27 +91,31 @@ class Gate:
             return sem
 
     @contextmanager
-    def slot(self, provider: str):
-        sem = self._sem_for(provider)
-        if sem:
-            sem.acquire()
-        self._global.acquire()
-        with self._lock:
-            self._inflight[provider] = self._inflight.get(provider, 0) + 1
-            self._inflight_total += 1
+    def slot(self, provider: str, cancel=None):
+        with self._changed:
+            while self._inflight_total >= self._global_limit or (
+                    self._per_conf.get(provider) and self._inflight.get(provider, 0) >= self._per_conf[provider]):
+                if cancel and cancel():
+                    break
+                self._changed.wait(.2)
+            acquired = not (cancel and cancel())
+            if acquired:
+                self._inflight[provider] = self._inflight.get(provider, 0) + 1
+                self._inflight_total += 1
+                self._peak = max(self._peak, self._inflight_total)
         try:
-            yield
+            yield acquired
         finally:
-            with self._lock:
-                self._inflight[provider] = max(0, self._inflight.get(provider, 1) - 1)
-                self._inflight_total = max(0, self._inflight_total - 1)
-            self._global.release()
-            if sem:
-                sem.release()
+            if acquired:
+                with self._lock:
+                    self._inflight[provider] = max(0, self._inflight.get(provider, 1) - 1)
+                    self._inflight_total = max(0, self._inflight_total - 1)
+                    self._changed.notify_all()
 
     def snapshot(self) -> dict:
         with self._lock:
             return {"global_limit": self._global_limit,
+                    "production_peak": self._peak,
                     "global_inflight": self._inflight_total,
                     "per_provider_limit": dict(self._per_conf),
                     "per_provider_inflight": {k: v for k, v in self._inflight.items() if v}}
@@ -412,7 +425,7 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
         def log(msg):
             job.log(key, msg)
 
-        with GATE.slot(provider):                      # ← 并发闸门
+        with GATE.slot(provider, cancel=lambda: job.cancelled):  # ← 并发闸门
             if job.cancelled:
                 job.set_item(key, state="aborted" if job.aborted else "cancelled")
                 return
