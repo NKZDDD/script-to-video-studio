@@ -1,5 +1,6 @@
 """Julun's live video endpoint returns both flat and data-wrapped task results."""
 import json
+import sys
 
 import pytest
 
@@ -7,6 +8,12 @@ from core.apiutil import ApiError, RETRYABLE, TASK_FATAL
 from core.executor import Job, run_batch
 from core.providers.base import VideoTask
 from core.providers.julun import JulunProvider
+from provider_patches.julun_result_hotfix import JulunResultHotfix
+
+
+@pytest.fixture(autouse=True, params=[JulunProvider, JulunResultHotfix], ids=["builtin", "hotfix"])
+def implementation(request, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "JulunProvider", request.param)
 
 
 GENERATION_ERROR = {"message": "video generation failed", "code": "video_generation_failed"}
