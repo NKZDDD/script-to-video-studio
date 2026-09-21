@@ -23,8 +23,9 @@
 2. **grok 不认 `seconds`**，只认 `duration`；比例分辨率必须在 `extra` 里。
 3. `sd2.5` 和 `dubai_sd25_170` 都固定 30 秒，但**行为不同**：前者传别的会被
    平台悄悄覆盖，后者**直接 400**。所以一律先纠正到 30。
-4. **查询响应套一层**：`{"code":"success","data":{status,progress,result_url}}`，
-   状态**大写** `IN_PROGRESS`/`SUCCESS`/`FAILURE`，进度是字符串 `"100%"`。
+4. **查询响应有两种**：旧接口 `{"code":"success","data":{status,progress,result_url}}`，
+   新接口直接在顶层返回 `status` / `result_url` / `error`。
+   状态既有 `IN_PROGRESS`/`SUCCESS`/`FAILURE`，也有 `completed`/`failed`；完成时进度仍可能是 95。
 5. `SD2.0 1080P 933` **至少要 1 张参考图**。
 6. 上传的素材**只保留 72 小时**。
 
@@ -59,8 +60,8 @@ import re
 import time
 from typing import Callable, Optional
 
-from ..apiutil import (DONE_STATES, FAIL_STATES, RUNNING_STATES, ApiError,
-                       extract_image_items)
+from ..apiutil import (DONE_STATES, FAIL_STATES, RUNNING_STATES, TASK_FATAL, ApiError,
+                       extract_image_items, task_failed)
 from .base import ImageTask, Provider, VideoTask
 
 UPLOAD_MAX_MB = 210
@@ -545,27 +546,38 @@ class JulunProvider(Provider):
             raise ApiError(f"提交没返回任务 ID：{str(data)[:300]}")
 
         url = self._poll(task_id, poll_interval, poll_timeout, log=log, cancel=cancel)
-        self.session.save_item(url, dest)
+        self.session.save_item(url, dest, log=log)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
 
     def _poll(self, task_id: str, interval: int, timeout: int, *, log, cancel=None) -> str:
-        """查询响应**套一层**、状态**大写**、进度是字符串 —— 通用轮询器认不出，单独写。"""
+        """兼容顶层和 data 包装；终态以 status 为准，不等待 progress 到 100。"""
         start, last = time.time(), ""
         while time.time() - start < timeout:
             if cancel and cancel():
                 raise ApiError("用户已取消")
             data = self.session.request("GET", f"/v1/videos/{task_id}",
                                         retries=1, timeout=60)
-            inner = (data or {}).get("data") or {}
+            inner = (data or {}).get("data")
+            if not isinstance(inner, dict) or not inner.get("status"):
+                inner = data or {}
             status = str(inner.get("status") or "").strip()
             low = status.lower()
             if status != last:
                 log(f"巨轮 {task_id}: {status} {inner.get('progress', '')}")
                 last = status
             if low in FAIL_STATES or low == "failure":
-                raise ApiError(
-                    f"巨轮任务失败：{inner.get('fail_reason') or str(data)[:300]}"
-                    f"（失败不扣费，平台自动原路退回）")
+                detail = inner.get("error")
+                if not isinstance(detail, dict):
+                    detail = {"message": inner.get("fail_reason") or detail or
+                              inner.get("message") or "服务商未提供失败原因",
+                              "code": inner.get("error_code") or ""}
+                exc = task_failed(detail)
+                exc.args = (f"巨轮 {task_id}：{exc}",)
+                # 原样重发不能解决素材肖像要求；只停此任务，不影响其他任务。
+                if re.search(r"肖像(?:权)?保护|likeness protection", str(exc), re.I):
+                    exc.kind = TASK_FATAL
+                    exc.extra_fix.append("按服务商的肖像要求检查参考素材与账号条件，处理后再手动重试。")
+                raise exc
             url = inner.get("result_url") or ""
             # **别只认 `SUCCESS` 这一个词。** 认死一个词的后果是：平台上
             # 显示已完成、地址也回来了，而我们接着等到超时 ——
