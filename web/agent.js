@@ -354,7 +354,9 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.dataset.setting||el.dataset.override){const currentRoot=S.root;invalidatePlan();const row=el.closest('[data-kind]'),kind=row.dataset.kind,setting={...S.data.production[kind],override:{...S.data.production[kind].override}};if(el.dataset.override)setting.override[el.dataset.override]=el.dataset.override==='duration'?(el.value?+el.value:''):el.value;else setting[el.dataset.setting]=el.dataset.setting==='concurrency'?+el.value:el.value;
  if(el.dataset.setting==='provider'){const cap=S.boot.capabilities.find(c=>c.id===el.value),media=kind==='video'?'video':'image';setting.model=cap?.[media]?.default_model||'';setting.image_resolution='';}
  if(el.dataset.setting==='model')setting.image_resolution='';
- await post('production-settings',{settings:{[kind]:setting}});if(currentRoot!==S.root||S.page!=='production')return;S.data.production[kind]=setting;invalidatePlan();if(['provider','model'].includes(el.dataset.setting))renderServices();return;}
+ const controls=[...row.querySelectorAll('input,select')];controls.forEach(control=>control.disabled=true);
+ try{await post('production-settings',{settings:{[kind]:setting}});if(currentRoot!==S.root||S.page!=='production')return;S.data.production[kind]=setting;invalidatePlan();if(['provider','model'].includes(el.dataset.setting))renderServices();}
+ finally{controls.forEach(control=>control.disabled=false);}return;}
  if(el.id==='source-file'&&el.files[0]){const d=await api('parse',{filename:el.files[0].name,content_b64:await readFile(el.files[0])});$('[name=source]').value=d.text;return;}
  if(el.id==='manual-file'&&el.files[0]){await post('manual',{kind:el.dataset.kind,key:el.dataset.key,content_b64:await readFile(el.files[0])});await loadProject();notice('参考图已保存。');return;}
  if(el.id==='output-kind'){S.filters.outputKind=el.value;outputList();return;}

@@ -5,7 +5,8 @@ import subprocess
 import sys
 
 ROOT=Path(__file__).resolve().parents[1]
-stage=ROOT/'build/subtitle-standalone'
+# Studio's packer cleans ROOT/build. Keep the independent build outside it.
+stage=ROOT/'outputs/subtitle-build'
 (stage/'core').mkdir(parents=True,exist_ok=True)
 (stage/'core/__init__.py').write_text('',encoding='utf-8')
 for name in ('subtitle.py','captions.py','paths.py','probe.py','store.py'):
