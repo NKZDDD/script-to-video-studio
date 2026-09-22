@@ -64,7 +64,7 @@ HORSE_MODELS = ["happyhorse-1.1-t2v-720p", "happyhorse-1.1-t2v-1080p",
 H3_MODELS = ["开源h3-480p", "开源h3-720p", "开源h3-1080p", "开源h3-2k"]
 VOLC_MODELS = ["火山官方2.5-480p", "火山官方2.5-720p",
                "火山官方2.0-480p-mini", "火山官方2.0-720p-mini"]
-SD25_MODELS = ["sd-2.5-480p不卡脸(按秒)", "sd-2.5-720p不卡脸(按秒)",
+SD25_MODELS = ["sd2.5-720均衡版", "sd-2.5-480p不卡脸(按秒)", "sd-2.5-720p不卡脸(按秒)",
                "sd-2.5-480p不卡脸(按秒)-备用", "sd-2.5-720p不卡脸(按秒)-备用"]
 SD2FULL_MODELS = ["sd2.0-720mini-不卡脸（按秒）", "sd2.0-720fast-不卡脸（按秒）",
                   "sd2.0-720满血-不卡脸（按秒）", "sd2.0-720满血（按次）不卡脸",
@@ -213,6 +213,9 @@ class AicopyProvider(Provider):
                 "durations": [4, 5, 6, 8, 10, 12, 15, 20, 29],
                 "default_duration": 10,
                 "resolutions": [""],
+                "model_options": {"sd2.5-720均衡版": {
+                    "durations": list(range(4, 30)), "max_refs": 30,
+                    "max_video_refs": 10, "resolutions": ["720p"]}},
                 "max_refs": 30,
                 "ref_mode": "url",
                 "notes": "统一视频接口（2026-08-19）：所有模型同一套 /v1/videos，"

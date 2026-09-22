@@ -53,6 +53,7 @@ IMAGE_25 = [
     "gpt-image-2.5-sunburst-4K-Native",
 ]
 IMAGE_MODELS = [
+    "gpt-image-2-th", "gpt-image-2.5-th", "gpt-image-2.5-flare-th", "gpt-image-2.5-sunburst-th",
     *IMAGE_25,
     # Native 三档：实拉确认还在。`gpt-image2-4K` 是 4K-Native 的 legacy_aliases，
     # 接口自己声明的，所以留着 —— 老项目的 tasks.json 里可能存着这个名字。
@@ -78,6 +79,18 @@ IMAGE_MODEL_OPTIONS = {
         "quality": ["auto", "low", "medium", "high"]}
     for m in IMAGE_25
 }
+
+# 2026-09-22 /v1/models：TH 使用 size=1K/2K/4K，ratio 仍为画幅。
+TH_SIZED_MODELS = ("gpt-image-2-th", "gpt-image-2.5-th", "gpt-image-2.5-flare-th", "gpt-image-2.5-sunburst-th")
+for _model in TH_SIZED_MODELS:
+    IMAGE_MODEL_OPTIONS[_model] = {"resolutions": ["1K", "2K", "4K"], "default_resolution": "1K"}
+IMAGE_MODEL_OPTIONS["gpt-image-1k-th"] = {"resolutions": ["1K"]}
+for _model in IMAGE_MODELS:
+    if _model in TH_SIZED_MODELS or _model == "gpt-image-1k-th":
+        continue
+    if _model in IMAGE_25 or _model.endswith("-Native"):
+        IMAGE_MODEL_OPTIONS.setdefault(_model, {})["resolutions"] = [
+            "4K" if "4K" in _model else "2K" if "2K" in _model else "1K"]
 
 # 实拉的 `supported_aspect_ratios`，十个。**`5:4` 和 `4:5` 以前没有** ——
 # 少列两个的后果是页面上选不到，人只会以为这家不支持。
@@ -406,6 +419,10 @@ class ChaomoProvider(Provider):
         # 实际发旧的。
         model = task.model or "gpt-image-2.5-flare"
         ratio = _to_ratio(task.size)
+        resolution = str(task.extra.get("resolution") or "").upper()
+        allowed = IMAGE_MODEL_OPTIONS.get(model, {}).get("resolutions", [])
+        if resolution and resolution not in allowed:
+            raise ApiError(f"{model} 不支持图片清晰度 {resolution}，请选择对应档位的模型。", kind="task_fatal")
         refs = list(task.refs or [])[:MAX_REFS]
 
         if refs:
@@ -426,6 +443,8 @@ class ChaomoProvider(Provider):
                      # 返回可核验的实际宽高/格式/**字节数**，用来核对有没有传丢
                      ("include_metadata", (None, "true"))]
             attached = 0
+            if model in TH_SIZED_MODELS:
+                files.append(("size", (None, resolution or "1K")))
             for i, ref in enumerate(refs, start=1):
                 got = self._ref_bytes(ref, i, log=log)
                 if got:
@@ -450,6 +469,8 @@ class ChaomoProvider(Provider):
                     "include_metadata": True}
             if task.extra.get("quality"):
                 body["quality"] = str(task.extra["quality"])
+            if model in TH_SIZED_MODELS:
+                body["size"] = resolution or "1K"
             log(f"超模 文生图 {model}: ratio={ratio}")
             data = self.session.request("POST", "/v1/images/generations", json_body=body,
                                         retries=2, timeout=600)

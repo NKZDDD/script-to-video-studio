@@ -104,8 +104,8 @@ class ChaomoNewHostTests(unittest.TestCase):
             self.assertEqual(o["n_max"], 4, m)
             self.assertEqual(o["quality"], ["auto", "low", "medium", "high"], m)
         for m in ("gpt-image2-1K-Native", "gpt-image2-4K-Native"):
-            self.assertNotIn(m, IMAGE_MODEL_OPTIONS,
-                             f"{m} 没声明这些数，不该替它填")
+            self.assertNotIn("max_refs", IMAGE_MODEL_OPTIONS.get(m, {}),
+                             f"{m} 没声明参考图张数，不该替它填")
 
     def test_the_notes_record_that_three_field_names_all_work(self):
         """实测：`ratio` / `size` / `aspect_ratio` 三个名字都被同一套校验读。

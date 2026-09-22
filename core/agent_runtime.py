@@ -71,6 +71,11 @@ def validate_settings(value: dict, caps: list) -> dict:
         if pid not in byid or media not in byid[pid].get("supports", []):
             raise ValueError(f"服务商不支持该类别：{kind}")
         out[kind] = {"provider": pid, "model": str(row.get("model", "")), "concurrency": conc}
+        resolution = str(row.get("image_resolution") or "").upper()
+        if resolution and resolution not in ("1K", "2K", "4K"):
+            raise ValueError("图片清晰度须为 1K、2K 或 4K")
+        if media == "image":
+            out[kind]["image_resolution"] = resolution
         override = row.get("override") or {}
         if not isinstance(override, dict) or set(override) - {"size", "ratio", "duration", "resolution"}:
             raise ValueError("不支持的生产参数覆盖")
@@ -117,6 +122,10 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
             p = dict(t.get("params") or {})
             if cfg.get("agent_features", {}).get("advanced"):
                 p.update(row.get("override") or {})
+            if media == "image" and row.get("image_resolution"):
+                p["resolution"] = row["image_resolution"]
+            if media == "image" and p.get("resolution") and p["resolution"] not in effective.get("resolutions", []):
+                raise ValueError("当前图片模型不支持所选清晰度，请选择对应档位模型或恢复跟随任务")
             sizefield = "ratio" if media == "video" else "size"
             supported = effective.get("ratios" if media == "video" else "sizes")
             if not supported:

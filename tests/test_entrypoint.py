@@ -19,7 +19,7 @@ class SyntaxTests(unittest.TestCase):
     """每个 .py 都过一遍 ast.parse。"""
 
     def _files(self):
-        skip = {"build", "dist", "__pycache__", ".git", "projects", ".venv"}
+        skip = {"build", "dist", "outputs", "__pycache__", ".git", "projects", ".venv", ".pytest_cache"}
         for base, dirs, names in os.walk(ROOT):
             dirs[:] = [d for d in dirs if d not in skip]
             for n in names:

@@ -231,9 +231,9 @@ def _from_toplevel(row):
     v = row.get('supported_aspect_ratios')
     if isinstance(v, list) and v:
         out['ratios'] = [str(x) for x in v]
-    v = row.get('resolution_mode') or row.get('supported_image_sizes')
+    v = row.get('supported_image_sizes') or row.get('resolution_mode')
     if isinstance(v, str) and v:
-        out['resolutions'] = [v]
+        out['resolutions'] = [s.strip() for s in v.split('/') if s.strip()]
     elif isinstance(v, list) and v:
         out['resolutions'] = [str(x) for x in v]
     for key, target in (('max_reference_images', 'max_refs'),

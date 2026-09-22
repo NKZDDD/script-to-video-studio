@@ -815,7 +815,8 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
         log(f"{_who_line(provider_cfg, model)}　参考图×{len(refs)}")
         meta = generate(
             lambda p: prov.generate_image(
-                ImageTask(prompt=p, refs=refs, size=want, model=model),
+                ImageTask(prompt=p, refs=refs, size=want, model=model,
+                          extra={"resolution": (task.get("params") or {}).get("resolution", "")}),
                 out, log=log, cancel=cancel,
                 poll_interval=interval, poll_timeout=timeout),
             prompt, pj=pj, llm=_llm(), kind=kind, key=task["key"],
