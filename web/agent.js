@@ -2,7 +2,7 @@
 (() => {
 const $ = (s, p=document) => p.querySelector(s), $$ = (s,p=document) => [...p.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const S = {boot:null, root:'', data:null, page:'projects', tab:'providers', provider:'', detail:'', wizard:null, step:0, plan:null, treeMode:'family', filters:{}, groupKeys:{}, folders:new Map(), planRequest:0, runtime:null, job:'', request:0};
+const S = {boot:null, root:'', data:null, page:'projects', tab:'providers', provider:'', detail:'', wizard:null, step:0, plan:null, treeMode:'family', filters:{}, groupKeys:{}, folders:new Map(), planRequest:0, runtime:null, job:'', jobRoot:'', jobRequest:0, request:0};
 const main = $('#main');
 const btn = (text, action, extra='', primary=false) => `<button type="button" class="rv-button ${primary?'rv-primary':''}" data-action="${action}" ${extra}>${text}</button>`;
 const option = (value, text, selected) => `<option value="${esc(value)}" ${value===selected?'selected':''}>${esc(text)}</option>`;
@@ -22,8 +22,8 @@ async function api(path, body) {
 const get = (path,args={}) => api(path+'?'+new URLSearchParams(args));
 const post = (path,data={}) => api(path,{root:S.root,...data});
 function notice(text,error=false) {const e=$('#message'); e.hidden=false; e.className='rv-notice '+(error?'is-error':'');e.textContent=text;clearTimeout(notice.timer);notice.timer=setTimeout(()=>e.hidden=true,error?15000:6000);}
-function dialog(title,body) {$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;S.job='';S.editor=null;if(!$('#dialog').open)$('#dialog').showModal();}
-function closeDialog() {$('#dialog').close();S.job='';S.editor=null;}
+function dialog(title,body) {$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;S.job='';S.jobRequest++;S.editor=null;if(!$('#dialog').open)$('#dialog').showModal();}
+function closeDialog() {$('#dialog').close();S.job='';S.jobRequest++;S.editor=null;}
 function safe(fn) {return (...a)=>Promise.resolve().then(()=>fn(...a)).catch(e=>notice(e.message,true));}
 async function reloadBoot() {S.boot=await api('bootstrap');S.provider ||= S.boot.capabilities[0]?.id||'';picker();}
 function picker() {$('#project-picker').innerHTML=option('','选择项目',S.root)+S.boot.projects.map(p=>option(p.root,p.title,S.root)).join('');}
@@ -145,7 +145,7 @@ function renderPublication() {
  updateHTML($('#publication-errors'),S.data.publication.errors.map(e=>`<p class="rv-notice is-error">新发布 ${esc(e.revision)} 未接收：${esc(e.message)}。当前已接收版本保持不变。</p>`).join(''));
 }
 function renderJobs() {
- updateHTML($('#jobs'),S.data.jobs.slice(0,8).map(j=>`<div class="rv-notice rv-row"><div><strong>${esc(j.kind==='production'?'生产批次':j.kind)} · ${esc(j.status)}</strong> ${j.finished}/${j.total} · 已用 ${j.elapsed} 秒</div><div>${btn('任务明细','job',`data-id="${esc(j.id)}"`)}${!['done','error','cancelled','aborted','interrupted'].includes(j.status)?btn('停止','cancel',`data-id="${esc(j.id)}"`):''}</div></div>`).join(''));
+ updateHTML($('#jobs'),S.data.jobs.slice(0,8).map(j=>`<div class="rv-notice rv-row"><div><strong>${esc(j.project_name||S.data.meta.title)} · ${esc(j.kind==='production'?'生产批次':j.kind)} · ${esc(j.status)}</strong> ${j.finished}/${j.total} · 已用 ${j.elapsed} 秒</div><div>${btn('任务明细','job',`data-id="${esc(j.id)}"`)}${!['done','error','cancelled','aborted','interrupted'].includes(j.status)?btn('停止','cancel',`data-id="${esc(j.id)}"`):''}</div></div>`).join(''));
 }
 function serviceRow(kind,label) {
  const row=S.data.production[kind],media=kind==='video'?'video':'image';if(!row)return '';
@@ -290,8 +290,23 @@ function limitForm() {$('#settings-content').innerHTML=`<form id="limits-form" c
 function uploadForm() {const u=S.boot.upload;$('#settings-content').innerHTML=`<form id="upload-form" class="rv-panel"><h3>参考图对象存储</h3><p>仅收公网图片地址的服务商使用这里的配置；沿用原程序的上传缓存与图片检查。</p><div class="rv-fields">${[['endpoint','S3 Endpoint'],['bucket','Bucket'],['public_base_url','公开访问域名'],['region','Region'],['prefix','对象路径前缀']].map(([k,l])=>field(l,input(k,u[k]||''))).join('')}${field('Access Key · '+(u.access_key_set?'已配置':'未配置'),input('access_key','','password','autocomplete="new-password" placeholder="留空不改"'))}${field('Secret Key · '+(u.secret_key_set?'已配置':'未配置'),input('secret_key','','password','autocomplete="new-password" placeholder="留空不改"'))}</div>${btn('保存上传设置','save-upload','',true)}</form>`;}
 function featureForm() {$('#settings-content').innerHTML=`<div class="rv-panel"><h3>功能包</h3><p>密钥、基础并发、当前线程、建议并发、开始 / 停止、核心报错和产物查看固定保留。</p>${Object.entries(S.boot.feature_labels).map(([k,l])=>`<div class="rv-feature"><strong>${esc(l)}</strong><label><input type="checkbox" data-feature="${k}" ${S.boot.features[k]?'checked':''}> 显示页面入口</label></div>`).join('')}<h3>数据与路径</h3><dl>${Object.entries(S.boot.paths).filter(([k,v])=>typeof v==='string'&&/dir|path/.test(k)).map(([k,v])=>`<dt>${esc(k)}</dt><dd><code>${esc(v)}</code></dd>`).join('')}</dl><p class="rv-caption">新项目可在向导指定生产父目录。更新程序时保留配置和项目目录；功能包只控制入口，不删除已有项目文件。</p></div>`;}
 async function saveProvider() {const f=$('#provider-form');if(!f.reportValidity())return;const data=Object.fromEntries(new FormData(f)),cap=S.boot.capabilities.find(c=>c.id===S.provider);if(cap.account_form?.per?.length){data.account_form={shared:{},accounts:[]};Object.keys(data).forEach(k=>{if(k.startsWith('shared.')){data.account_form.shared[k.slice(7)]=data[k];delete data[k];}else if(k.startsWith('account.')){const [,i,field]=k.split('.');data.account_form.accounts[i]||={};data.account_form.accounts[i][field]=data[k];delete data[k];}});}await api('settings',{providers:{[S.provider]:data}});f.reset();await reloadBoot();settings();notice('已保存服务商设置，密钥未回显。');}
-async function refreshRuntime() {S.runtime=await api('runtime');const d=S.runtime,u=d.usage,g=d.gates;$('#live-inflight').textContent=`${g.global_inflight} / ${g.global_limit}`;$('#live-jobs').textContent=d.active_jobs+' 批';$('#live-threads').textContent=u.threads??'未知';$('#live-advice').textContent=d.advice.limit==null?'待采样':'≤ '+d.advice.limit;const gb=v=>v==null?'未知':(v/1073741824).toFixed(1)+' GB';$('#live-usage').textContent=`CPU ${u.cpu_percent??'未知'}% · 系统内存 ${gb(u.mem_used)} / ${gb(u.mem_total)} · 本程序 ${u.proc_rss==null?'未知':(u.proc_rss/1048576).toFixed(0)+' MB'}`;$('#live-basis').textContent=d.advice.basis.join('；');}
-async function jobDetail(id) {const root=S.root;const d=await get('job',{root,id});if(root!==S.root)return;const table=`<table><thead><tr><th>任务</th><th>状态</th><th>说明</th></tr></thead><tbody>${Object.entries(d.items).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v.state)}</td><td>${esc(v.msg)}</td></tr>`).join('')}</tbody></table>${S.boot.features.logs?`<pre class="job-log">${esc(d.logs.join('\n'))}</pre>`:''}`;if(S.job===id){$('#dialog-body').innerHTML=table;}else{dialog('任务明细 · '+d.status,table);S.job=id;}}
+const activeJob = j => !['done','error','cancelled','aborted','interrupted'].includes(j.status);
+const jobProject = j => j.project_name||S.boot.projects.find(p=>p.root===j.project_root)?.title||j.project_root?.split(/[\\/]/).pop()||'未命名项目';
+function renderGlobalJobs() {
+ const jobs=S.runtime.jobs||[],active=jobs.filter(activeJob),names=[...new Set(active.map(jobProject))];
+ const label=$('#live-projects');label.textContent=names.length?names.slice(0,2).join('、')+(names.length>2?` 等 ${names.length} 个项目`:''):'暂无运行项目';label.title=names.join('\n');
+ $('#global-job-count').textContent=`运行 ${active.length} 批 · 本次启动记录 ${jobs.length} 批`;
+ updateHTML($('#global-jobs'),jobs.map(j=>`<div class="rv-global-job" data-job-id="${esc(j.id)}"><div><strong>${esc(jobProject(j))}</strong><small title="${esc(j.project_root)}">${esc(j.project_root||'项目路径未记录')}</small><span>${esc(j.kind==='production'?'生产批次':j.kind)} · ${esc(j.status)} · ${j.finished}/${j.total} · 已用 ${j.elapsed} 秒</span></div><div class="rv-actions">${j.project_root?btn('任务明细','global-job',`data-id="${esc(j.id)}" data-root="${esc(j.project_root)}"`)+btn('打开项目','job-project',`data-root="${esc(j.project_root)}"`):''}</div></div>`).join('')||'<p class="rv-caption">本次启动暂无任务。各项目的历史记录仍在生产页查看。</p>');
+}
+async function refreshRuntime() {S.runtime=await api('runtime');const d=S.runtime,u=d.usage,g=d.gates;$('#live-inflight').textContent=`${g.global_inflight} / ${g.global_limit}`;$('#live-jobs').textContent=d.active_jobs+' 批';$('#live-threads').textContent=u.threads??'未知';$('#live-advice').textContent=d.advice.limit==null?'待采样':'≤ '+d.advice.limit;const gb=v=>v==null?'未知':(v/1073741824).toFixed(1)+' GB';$('#live-usage').textContent=`CPU ${u.cpu_percent??'未知'}% · 系统内存 ${gb(u.mem_used)} / ${gb(u.mem_total)} · 本程序 ${u.proc_rss==null?'未知':(u.proc_rss/1048576).toFixed(0)+' MB'}`;$('#live-basis').textContent=d.advice.basis.join('；');renderGlobalJobs();}
+async function jobDetail(id,root=S.root,refresh=false) {
+ const request=++S.jobRequest,d=await get('job',{root,id});
+ if(request!==S.jobRequest||(refresh&&(!$('#dialog').open||S.job!==id||S.jobRoot!==root)))return;
+ const name=jobProject({...d,project_root:root}),title=`任务明细 · ${name} · ${d.status}`;
+ const table=`<p class="rv-caption">${esc(root)} · ${esc(id)}</p><table><thead><tr><th>任务</th><th>状态</th><th>说明</th></tr></thead><tbody>${Object.entries(d.items).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v.state)}</td><td>${esc(v.msg)}</td></tr>`).join('')}</tbody></table>${S.boot.features.logs?`<pre class="job-log">${esc(d.logs.join('\n'))}</pre>`:''}`;
+ if(refresh){$('#dialog-title').textContent=title;const logTop=$('.job-log')?.scrollTop||0;$('#dialog-body').innerHTML=table;if($('.job-log'))$('.job-log').scrollTop=logTop;}
+ else{dialog(title,table);S.job=id;S.jobRoot=root;}
+}
 async function readFile(file) {if(file.size>40*1024*1024)throw Error('文件超过 40MB');const data=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('读取文件失败'));r.readAsDataURL(file);});return data.split(',')[1];}
 const actions={
  'back-top':backToTop,
@@ -326,6 +341,8 @@ const actions={
  'start':async()=>{if(!S.plan)throw Error('先查看生产计划');const d=await post('start',{revision:S.plan.revision,only:S.plan.keys});if(!d.ok)throw Error(d.blocked.map(x=>x.key+'：'+x.reason).join('\n'));await loadProject();notice(d.message||'生产批次已启动。');},
  'cancel':async e=>{await post('cancel',{id:e.dataset.id});await loadProject();notice('已请求停止，等待在途调用退出。');},
  'job':e=>jobDetail(e.dataset.id),
+ 'global-job':e=>jobDetail(e.dataset.id,e.dataset.root),
+ 'job-project':async e=>{$('#runtime').open=false;await actions.open(e);show('production');},
  'assemble':()=>{const eps=[...new Set(S.data.tasks.filter(t=>t.kind==='video').map(t=>t.episode||''))];dialog('按集顺序合成',`<label>选择集<select id="assemble-episode">${eps.map(e=>option(e,e||'未指定集','')).join('')}</select></label><p>只在该集所有视频有效时合成，按任务清单顺序拼接，不调用文字模型。</p>${btn('开始合成','assemble-run','',true)}`);},
  'subtitle':async()=>{const d=await get('post-options',{root:S.root});const o=d.options;dialog('字幕识别与烧录',`<form id="subtitle-form"><div class="rv-fields">${field('成片',`<select name="file">${d.files.map(f=>option(f,f,'')).join('')}</select>`)}${field('识别引擎',select('asr',['bijian','jianying','faster-whisper','whisper-cpp'],o.asr))}${field('识别语言',input('language',o.language))}${field('字幕模式',select('subtitle_mode',['hard','soft'],o.subtitle_mode))}${field('字幕样式',`<select name="style">${option('','默认样式',o.style)}${d.styles.map(s=>option(s.name,s.name,o.style)).join('')}</select>`)}</div><p>已有同名 SRT 时直接复用，可先交给 Agent 修订；否则先识别再合成。hard 为烧录字幕，soft 为软字幕轨。保留原成片，生成带字幕的新文件。</p><p class="rv-caption">必剪 / 剪映使用相应识别服务；faster-whisper / whisper-cpp 使用本机模型。文字优化和翻译交给 Agent。</p>${btn('开始字幕处理','subtitle-run',d.files.length?'':'disabled',true)}</form>`);},
  'subtitle-run':async()=>{const d=await post('subtitle',Object.fromEntries(new FormData($('#subtitle-form'))));closeDialog();await loadProject(S.root,false);show('production');notice('字幕后期已启动，可在任务明细查看或停止。');},
@@ -362,9 +379,9 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.id==='output-kind'){S.filters.outputKind=el.value;outputList();return;}
  if(S.page==='wizard'&&['image_provider','video_provider'].includes(el.name)){const media=el.name.split('_')[0],cap=S.boot.capabilities.find(c=>c.id===el.value);$(`[name=${media}_model]`).value=cap?.[media]?.default_model||'';}
 }));
-$('#dialog-close').addEventListener('click',closeDialog);$('#dialog').addEventListener('close',()=>{S.job='';S.editor=null;});
+$('#dialog-close').addEventListener('click',closeDialog);$('#dialog').addEventListener('close',()=>{S.job='';S.jobRequest++;S.editor=null;});
 $('#apply-advice').addEventListener('click',safe(()=>{const n=S.runtime?.advice?.limit;if(n==null||n<1)throw Error('当前样本不足，暂不能给出可用建议');S.tab='limits';show('settings');$('[name=global]').value=Math.min(512,n);notice('建议已填入，检查各服务商额度后点击保存。');}));
-async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
+async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job,S.jobRoot,true);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
 document.addEventListener('click',event=>{if(!$('#runtime').contains(event.target))$('#runtime').open=false;});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')$('#runtime').open=false;});
 stickyObserver.observe($('#sticky-header'));

@@ -307,7 +307,7 @@ class JobManager:
     def get(self, job_id: str) -> Optional[Job]:
         return self.jobs.get(job_id)
 
-    def list(self, project_root: str = "", active_only: bool = False, limit: int = 40) -> list:
+    def list(self, project_root: str = "", active_only: bool = False, limit: Optional[int] = 40) -> list:
         with self._lock:
             out = []
             for j in sorted(self.jobs.values(), key=lambda x: x.started_at, reverse=True):
@@ -316,7 +316,7 @@ class JobManager:
                 if active_only and _is_final(j):
                     continue
                 out.append(j.brief())
-                if len(out) >= limit:
+                if limit is not None and len(out) >= limit:
                     break
             return out
 

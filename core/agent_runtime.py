@@ -276,5 +276,8 @@ def runtime(jobs) -> dict:
         samples.extend(it for it in job.snapshot()["items"].values() if it.get("state") in ("ok", "failed"))
     recent = samples[-200:]
     limited = sum((it.get("diag") or {}).get("code") == "RATE_LIMITED" for it in recent)
-    return {"usage": resources.snapshot(), "gates": gate, "active_jobs": jobs.active_count(),
+    # Keep all running batches visible, even when newer finished batches fill the default list limit.
+    batches = jobs.list(limit=None)
+    batches.sort(key=lambda j: j["status"] in ("done", "error", "cancelled", "aborted"))
+    return {"usage": resources.snapshot(), "gates": gate, "active_jobs": jobs.active_count(), "jobs": batches,
             "advice": resources.advise(gate["production_peak"], limited, len(recent))}

@@ -21,7 +21,11 @@ body{margin:0;background:light-dark(#f5f7fb,#161c27);color-scheme:light dark}
 #studio-agent-prototype #runtime{grid-area:runtime;position:relative;min-width:0;padding:0;border:0}
 #studio-agent-prototype #runtime>summary{gap:6px 12px}
 #studio-agent-prototype #runtime>summary>span{white-space:nowrap}
-#studio-agent-prototype #runtime .rv-runtime-body{position:absolute;top:calc(100% + 14px);left:0;width:min(650px,calc(100vw - 36px));max-height:40vh;overflow:auto;padding:18px;background:var(--rs-surface);border:1px solid var(--rs-line);border-radius:12px;box-shadow:0 12px 32px #00000020}
+#studio-agent-prototype #runtime .rv-runtime-body{position:absolute;top:calc(100% + 14px);left:0;width:min(720px,calc(100vw - 36px));max-height:min(65vh,680px);overflow:auto;padding:18px;background:var(--rs-surface);border:1px solid var(--rs-line);border-radius:12px;box-shadow:0 12px 32px #00000020}
+#studio-agent-prototype #live-projects{max-width:220px;overflow:hidden;text-overflow:ellipsis;color:var(--rs-muted)}
+#studio-agent-prototype .rv-global-job{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--rs-line);font-size:12px}
+#studio-agent-prototype .rv-global-job>div:first-child{min-width:0;flex:1}#studio-agent-prototype .rv-global-job strong{display:block;overflow-wrap:anywhere}#studio-agent-prototype .rv-global-job small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--rs-muted)}#studio-agent-prototype .rv-global-job .rv-actions{flex-shrink:0;gap:6px}
+@media(max-width:760px){#studio-agent-prototype .rv-global-job{align-items:flex-start;flex-direction:column}#studio-agent-prototype .rv-global-job>div:first-child{width:100%}#studio-agent-prototype #live-projects{max-width:160px}}
 html{scroll-padding-top:calc(var(--studio-header-height,90px) + var(--studio-dock-height,0px) + 24px)}
 #studio-agent-prototype #message{position:sticky;top:calc(var(--studio-header-height,90px) + var(--studio-dock-height,0px) + 20px);z-index:3;margin:10px 24px;white-space:pre-wrap}
 #studio-agent-prototype .is-error{background:var(--rs-redbg);color:var(--rs-red);border:1px solid var(--rs-red)}
