@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from . import paths
@@ -27,6 +29,33 @@ DIR_NAME = "字幕样式"
 
 
 _EXT = (".txt", ".json")
+
+
+@contextmanager
+def utf8_subprocess_logs():
+    """字幕 CLI 子进程内统一外部工具的文本编码，不改变二进制管道。
+
+    VideoCaptioner 的分辨率探测、ASS 压制等调用仍有 text=True 未指定
+    编码的情况；只改本程序的 stdout 不会影响它们。此适配仅包住独立
+    caption 命令，退出后恢复，不能用在 Studio 服务端的工作线程里。
+    """
+    original = subprocess.Popen
+
+    class CaptionPopen(original):
+        def __init__(self, *args, **kwargs):
+            if any(kwargs.get(k) for k in
+                   ("text", "universal_newlines", "encoding", "errors")):
+                if kwargs.get("encoding") is None:
+                    kwargs["encoding"] = "utf-8"
+                if kwargs.get("errors") is None:
+                    kwargs["errors"] = "replace"
+            super().__init__(*args, **kwargs)
+
+    subprocess.Popen = CaptionPopen
+    try:
+        yield
+    finally:
+        subprocess.Popen = original
 
 
 def _styles_in(d: str) -> list:

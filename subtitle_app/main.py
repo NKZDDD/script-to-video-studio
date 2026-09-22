@@ -28,7 +28,8 @@ def caption_cli(argv):
     captions.install()
     from videocaptioner.cli.main import main
     sys.argv = ['videocaptioner'] + argv
-    return main() or 0
+    with captions.utf8_subprocess_logs():
+        return main() or 0
 
 
 def cli_command():

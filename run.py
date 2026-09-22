@@ -63,7 +63,8 @@ def _caption(argv: list) -> int:
     # 它按 sys.argv 解析，所以这里替它铺好 —— 直接传参数它不认
     sys.argv = ["videocaptioner"] + list(argv)
     try:
-        return int(vc_main() or 0)
+        with captions.utf8_subprocess_logs():
+            return int(vc_main() or 0)
     except SystemExit as e:            # argparse 的正常退出路径
         return int(e.code or 0)
 
