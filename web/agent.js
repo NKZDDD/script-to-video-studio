@@ -22,7 +22,7 @@ async function api(path, body) {
 const get = (path,args={}) => api(path+'?'+new URLSearchParams(args));
 const post = (path,data={}) => api(path,{root:S.root,...data});
 function notice(text,error=false) {const e=$('#message'); e.hidden=false; e.className='rv-notice '+(error?'is-error':'');e.textContent=text;clearTimeout(notice.timer);notice.timer=setTimeout(()=>e.hidden=true,error?15000:6000);}
-function dialog(title,body) {$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;S.job='';S.jobRequest++;S.editor=null;if(!$('#dialog').open)$('#dialog').showModal();}
+function dialog(title,body) {$('#dialog').classList.remove('rv-job-dialog');$('#dialog-close').textContent='关闭';$('#dialog-close').setAttribute('aria-label','关闭对话框');$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;$('#dialog-body').scrollTop=0;$('#dialog-body').scrollLeft=0;S.job='';S.jobRequest++;S.editor=null;if(!$('#dialog').open)$('#dialog').showModal();}
 function closeDialog() {$('#dialog').close();S.job='';S.jobRequest++;S.editor=null;}
 function safe(fn) {return (...a)=>Promise.resolve().then(()=>fn(...a)).catch(e=>notice(e.message,true));}
 async function reloadBoot() {S.boot=await api('bootstrap');S.provider ||= S.boot.capabilities[0]?.id||'';picker();}
@@ -303,9 +303,9 @@ async function jobDetail(id,root=S.root,refresh=false) {
  const request=++S.jobRequest,d=await get('job',{root,id});
  if(request!==S.jobRequest||(refresh&&(!$('#dialog').open||S.job!==id||S.jobRoot!==root)))return;
  const name=jobProject({...d,project_root:root}),title=`任务明细 · ${name} · ${d.status}`;
- const table=`<p class="rv-caption">${esc(root)} · ${esc(id)}</p><table><thead><tr><th>任务</th><th>状态</th><th>说明</th></tr></thead><tbody>${Object.entries(d.items).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v.state)}</td><td>${esc(v.msg)}</td></tr>`).join('')}</tbody></table>${S.boot.features.logs?`<pre class="job-log">${esc(d.logs.join('\n'))}</pre>`:''}`;
- if(refresh){$('#dialog-title').textContent=title;const logTop=$('.job-log')?.scrollTop||0;$('#dialog-body').innerHTML=table;if($('.job-log'))$('.job-log').scrollTop=logTop;}
- else{dialog(title,table);S.job=id;S.jobRoot=root;}
+ const table=`<p class="rv-caption">${esc(root)} · ${esc(id)}<br>收起仅关闭明细，不会停止任务。</p><table><thead><tr><th>任务</th><th>状态</th><th>说明</th></tr></thead><tbody>${Object.entries(d.items).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v.state)}</td><td>${esc(v.msg)}</td></tr>`).join('')}</tbody></table>${S.boot.features.logs?`<pre class="job-log">${esc(d.logs.join('\n'))}</pre>`:''}`;
+ if(refresh){$('#dialog-title').textContent=title;const body=$('#dialog-body'),top=body.scrollTop,left=body.scrollLeft,logTop=$('.job-log')?.scrollTop||0;body.innerHTML=table;body.scrollTop=top;body.scrollLeft=left;if($('.job-log'))$('.job-log').scrollTop=logTop;}
+ else{dialog(title,table);$('#dialog').classList.add('rv-job-dialog');$('#dialog-close').textContent='收起明细';$('#dialog-close').setAttribute('aria-label','收起任务明细');$('#dialog-body').scrollTop=0;$('#dialog-body').scrollLeft=0;S.job=id;S.jobRoot=root;}
 }
 async function readFile(file) {if(file.size>40*1024*1024)throw Error('文件超过 40MB');const data=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('读取文件失败'));r.readAsDataURL(file);});return data.split(',')[1];}
 const actions={

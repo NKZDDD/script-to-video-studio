@@ -31,6 +31,12 @@ html{scroll-padding-top:calc(var(--studio-header-height,90px) + var(--studio-doc
 #studio-agent-prototype .is-error{background:var(--rs-redbg);color:var(--rs-red);border:1px solid var(--rs-red)}
 #studio-agent-prototype dialog{background:var(--rs-surface);color:var(--rs-ink);border:1px solid var(--rs-line);border-radius:16px;padding:24px;width:min(980px,94vw);max-height:88vh}
 #studio-agent-prototype dialog::backdrop{background:#0a193680}
+#studio-agent-prototype #dialog.rv-job-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
+#studio-agent-prototype #dialog.rv-job-dialog>.rv-row{flex-shrink:0;flex-wrap:nowrap;align-items:flex-start}
+#studio-agent-prototype #dialog.rv-job-dialog #dialog-title{min-width:0;overflow-wrap:anywhere;margin-top:0}
+#studio-agent-prototype #dialog.rv-job-dialog #dialog-close{flex-shrink:0}
+#studio-agent-prototype #dialog.rv-job-dialog #dialog-body{min-height:0;overflow:auto;overscroll-behavior:contain}
+#studio-agent-prototype #dialog.rv-job-dialog .rv-caption{overflow-wrap:anywhere}
 #studio-agent-prototype dialog textarea{width:100%;margin:12px 0}
 #studio-agent-prototype pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:55vh;overflow:auto;font-size:12px}
 #studio-agent-prototype .job-log{background:#111a2b;color:#dce6f6;padding:16px}
