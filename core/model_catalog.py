@@ -99,6 +99,8 @@ def fetch(pid, pc):
                 failures.append(f'HTTP {response.status_code}'); continue
             data = response.json()
             data = data if isinstance(data, list) else data.get('data')
+            if pid == 'hongniao' and isinstance(data, dict):
+                data = data.get('models')
             if not isinstance(data, list):
                 failures.append('接口未返回模型数组'); continue
             for row in data:
@@ -110,6 +112,9 @@ def fetch(pid, pc):
                 mid = str(mid).strip()
                 # 只保留模型字段，不把响应中的账号、调试信息打包或传给页面。
                 item = {'id': mid}
+                if pid == 'hongniao':
+                    from .providers.hongniao import catalog_schema
+                    item['capability_schema'] = catalog_schema(row)
                 # `capability_schema` 是无限画布那家给的**逐模型约束**
                 # （duration.min/max、aspect_ratio(s)、resolutions、
                 # max_reference_images 这些）—— 比任何文档都准，而字段名和
