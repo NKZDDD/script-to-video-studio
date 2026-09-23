@@ -1,13 +1,15 @@
 """HTTP surface for the Agent workspace. Legacy analysis APIs are not exposed."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 from pathlib import Path
 import threading
 import time
 
-from core import agent_projects as A, agent_runtime as R, diagnose
+from core import agent_projects as A, agent_runtime as R, diagnose, paths
 from core.store import Project, list_projects, read_json, write_json, write_text
 
 
@@ -34,6 +36,47 @@ def project(root, cfg):
     if key not in {os.path.normcase(os.path.abspath(r["root"])) for r in projects(cfg)}:
         raise ValueError("项目未登记，请从项目列表打开")
     return Project(root)
+
+
+def import_provider(app, body):
+    """把页面选中的服务商 .py 放进数据目录的 providers，重新扫描。
+
+    要么新文件加载成功，要么目录回到导入前的样子：加载失败的文件留在目录里，
+    每次扫描都会报错；覆盖掉的还是一家本来能用的服务商。
+    """
+    name = str(body.get("filename") or "").strip()
+    if (os.path.basename(name) != name or not name.lower().endswith(".py")
+            or name.startswith(("_", "."))):
+        raise ValueError("请选择服务商的 .py 文件（文件名不能以下划线或点开头）")
+    try:
+        raw = base64.b64decode(body.get("content_b64") or "", validate=True)
+        raw.decode("utf-8")
+    except (binascii.Error, ValueError):
+        raise ValueError("文件不是 UTF-8 文本的 Python 源码")
+    if not raw.strip() or len(raw) > 2 * 1024 * 1024:
+        raise ValueError("文件为空或超过 2MB，不像服务商适配文件")
+    folder = paths.plugins_dir()
+    os.makedirs(folder, exist_ok=True)
+    dest = os.path.join(folder, name)
+    backup = f"{dest}.{time.strftime('%Y%m%d-%H%M%S')}.bak" if os.path.isfile(dest) else ""
+    if backup:
+        os.replace(dest, backup)
+    tmp = dest + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(raw)
+    os.replace(tmp, dest)
+    same = lambda p: os.path.normcase(os.path.abspath(p or "")) == os.path.normcase(dest)
+    st = app.api_post("/api/providers/reload", {})
+    errors = [e for e in st["errors"] if same(e.get("file"))]
+    warnings = [w for w in st["warnings"] if same(w.get("source"))]
+    loaded = [p for p in st["providers"] if same(p.get("source"))]
+    if errors:
+        os.remove(dest)
+        if backup:
+            os.replace(backup, dest)
+        app.api_post("/api/providers/reload", {})
+        return {"ok": False, "file": dest, "restored": bool(backup), "errors": errors}
+    return {"ok": True, "file": dest, "backup": backup, "providers": loaded, "warnings": warnings}
 
 
 def bootstrap(app, cfg):
@@ -147,6 +190,8 @@ def post(app, path, body):
         return app.api_post("/api/models/refresh", body)
     if path == "/api/agent/providers/reload":
         return app.api_post("/api/providers/reload", {})
+    if path == "/api/agent/providers/import":
+        return import_provider(app, body)
     if path == "/api/agent/parse":
         return app.api_post("/api/script/parse", body)
     pj = project(body.get("root"), cfg)

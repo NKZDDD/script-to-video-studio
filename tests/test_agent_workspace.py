@@ -373,3 +373,74 @@ def test_subtitles_never_inherit_old_text_model_configuration(pj,monkeypatch):
 def test_packaged_agent_resources_are_complete():
     from core.packagecheck import _check_agent_assets
     assert "51" in _check_agent_assets()
+
+
+def _video_reason(pj, cfg, caps):
+    return next(b["reason"] for b in R.preview(pj, cfg, caps, resolve)["blocked"] if b["key"] == "video")
+
+
+def test_duration_block_says_which_model_where_from_and_what_to_do(pj):
+    plan = board_plan(pj);plan["video_tasks"][0]["params"]["duration"] = 30
+    publish(pj, plan);A.scan(pj)
+    caps = copy.deepcopy(CAPS);caps[0]["video"]["durations"] = list(range(4, 13))
+    reason = _video_reason(pj, {}, caps)
+    assert "要 30 秒" in reason and "「图片服务商 / test-video」" in reason
+    assert "4–12 秒" in reason and "服务商的模型能力声明" in reason and "重新切段" in reason
+    reason = _video_reason(pj, {"providers": {"chaomo": {"durations": "test-video=5,10"}}}, caps)
+    assert "5、10 秒" in reason and "手填" in reason
+
+
+PLUGIN = '''from core.providers.base import Provider
+class QaImport(Provider):
+    id = "qa_import"
+    name = "导入测试"
+    supports = ("video",)
+    def capabilities(self):
+        return {"id": self.id, "name": self.name, "supports": ["video"], "video": {"models": ["m"]}}
+    def generate_video(self, task, dest, **kw):
+        raise RuntimeError("qa only")
+'''
+
+
+@pytest.fixture
+def plugin_home(tmp_path):
+    from core import paths, providers
+    before = paths._forced["data"]
+    paths.set_data_dir(str(tmp_path / "data"))
+    try:
+        yield Path(paths.plugins_dir())
+    finally:
+        paths._forced["data"] = before
+        providers.reload_all()
+
+
+def _upload(name, text):
+    import base64
+    return agent_api.import_provider(app, {"filename": name, "content_b64": base64.b64encode(text.encode()).decode()})
+
+
+def test_provider_file_import_loads_it_and_backs_up_same_name(plugin_home):
+    from core import providers
+    d = _upload("qa_import.py", PLUGIN)
+    assert d["ok"] and [p["name"] for p in d["providers"]] == ["导入测试"] and not d["backup"]
+    assert "qa_import" in providers.REGISTRY
+    d = _upload("qa_import.py", PLUGIN.replace("导入测试", "导入测试二"))
+    assert d["ok"] and d["backup"] and Path(d["backup"]).read_text(encoding="utf-8") == PLUGIN
+    assert providers.REGISTRY["qa_import"].name == "导入测试二"
+
+
+def test_broken_provider_file_restores_previous_one(plugin_home):
+    from core import providers
+    assert _upload("qa_import.py", PLUGIN)["ok"]
+    d = _upload("qa_import.py", "import not_a_module_here\n")
+    assert not d["ok"] and d["restored"] and d["errors"]
+    assert (plugin_home / "qa_import.py").read_text(encoding="utf-8") == PLUGIN
+    assert providers.REGISTRY["qa_import"].name == "导入测试"
+    d = _upload("fresh_broken.py", "import not_a_module_here\n")
+    assert not d["ok"] and not d["restored"] and not (plugin_home / "fresh_broken.py").exists()
+
+
+@pytest.mark.parametrize("name", ["_hidden.py", "a.txt", "../x.py", "sub/x.py", ".x.py"])
+def test_provider_import_rejects_bad_names(plugin_home, name):
+    with pytest.raises(ValueError):
+        _upload(name, PLUGIN)

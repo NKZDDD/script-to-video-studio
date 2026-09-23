@@ -29,6 +29,14 @@ def _checked(path: str, size: int, modified: int) -> bool:
         return False
 
 
+def _seconds(values) -> str:
+    """[4, 5, …, 12] → 「4–12 秒」；[5, 10, 30] → 「5、10、30 秒」。"""
+    nums = sorted({float(v) for v in values})
+    if len(nums) > 2 and all(n.is_integer() for n in nums) and nums == [float(n) for n in range(int(nums[0]), int(nums[-1]) + 1)]:
+        return f"{nums[0]:g}–{nums[-1]:g} 秒"
+    return "、".join(f"{n:g}" for n in nums) + " 秒"
+
+
 def valid_output(path: str) -> bool:
     try:
         p = Path(path)
@@ -150,9 +158,15 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
                     if "=" in rule:
                         model, seconds = rule.split("=", 1)
                         rules[model.strip()] = [int(s) for s in re.split(r"[,，\s]+", seconds.strip()) if s.isdigit() and int(s) > 0]
-                durations = rules.get(row["model"]) or rules.get("*") or effective.get("durations")
+                manual = rules.get(row["model"]) or rules.get("*")
+                durations = manual or effective.get("durations")
                 if not durations or float(p.get("duration", 0)) not in [float(d) for d in durations]:
-                    raise ValueError(f"时长 {p.get('duration')} 秒不在当前模型能力 {durations or '未知'} 中")
+                    who = f"「{capmap.get(row['provider'], {}).get('name') or row['provider']} / {row['model']}」"
+                    source = "设置里手填的「已实测的模型时长档位」" if manual else "服务商的模型能力声明"
+                    can = f"只支持 {_seconds(durations)}（来自{source}）" if durations else "没有声明支持哪些时长"
+                    raise ValueError(f"这一段要 {p.get('duration')} 秒，但视频模型{who}{can}。"
+                                     "处理办法：换一个支持这个时长的视频模型；或者让 Agent 按不超过上限的时长重新切段；"
+                                     "如果确认服务商实际支持，到设置 → 服务商里补上「已实测的模型时长档位」。")
             t["params"] = p
             if kind not in pcs:
                 pc = resolve_cfg(cfg, {"provider": row["provider"], "model": row["model"]}, "video" if media == "video" else "asset")
