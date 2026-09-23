@@ -134,17 +134,21 @@ def create_project(base: str, body: dict, capabilities: list) -> Project:
     return pj
 
 
-def contract(pj: Project, lock: dict) -> str:
-    return f"""# 本机生产契约
+def contract(pj: Project, lock: dict, remote: bool = False) -> str:
+    root = ("交接包解压后的根目录（Studio 在另一台机器上，下文路径都相对它）" if remote
+            else f"`{pj.root}`")
+    where = ("在交接包根目录下产出；完成后把新的发布目录打包成 zip 交给用户导入 Studio。" if remote
+             else "请直接在此本机项目下产出，不要产出到临时对话目录再要求用户导入。")
+    return f"""# {'交接包' if remote else '本机'}生产契约
 
 项目：{lock['project_id']}
-唯一项目根目录：`{pj.root}`
+唯一项目根目录：{root}
 协议：{SCHEMA}；选项散列：{lock['options_hash']}；技能包散列：{lock['skill_hash']}。
 
 先读 project-lock.json、production.schema.json 和 skill/production-skill/SKILL.md；按需路由完整 references/，保留 scripts/。
 生产步骤：锁定配置 → 剧本分段 → 身份/造型/状态等固定资产 → 空间状态与按需交接板 → 七段式视频提示词 → 分层审计。
 原始素材：01_剧本与分段/原始素材.txt；缺原文时请求补齐，禁止凭空创建剧本。
-Studio 不执行文本分析。请直接在此本机项目下产出，不要产出到临时对话目录再要求用户导入。
+Studio 不执行文本分析。{where}
 
 ## 发布
 每次用新目录 03_提示词/releases/r0001（后续递增 r0002…），写 tasks.json、images/*.txt、videos/*.txt。

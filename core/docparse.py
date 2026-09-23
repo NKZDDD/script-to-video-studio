@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""剧本文档解析：txt / md / docx / pdf → 纯文本。
+"""剧本文档解析：txt / md / jsonl / docx / pdf → 纯文本。
 
-- txt/md：多编码探测（utf-8-sig → utf-8 → gbk → gb18030 → latin-1）
+- txt/md/jsonl：多编码探测（utf-8-sig → utf-8 → gbk → gb18030 → latin-1），jsonl 原样当文本
 - docx  ：stdlib zipfile 解 word/document.xml，无第三方依赖
 - pdf   ：pypdf 优先，PyMuPDF(fitz) 兜底；两者都没有时给出明确提示
 - doc   ：老二进制格式不支持，提示另存为 docx
@@ -14,7 +14,7 @@ import os
 import re
 import zipfile
 
-SUPPORTED = (".txt", ".md", ".markdown", ".docx", ".pdf")
+SUPPORTED = (".txt", ".md", ".markdown", ".jsonl", ".docx", ".pdf")
 
 _ENT = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'", "nbsp": " "}
 
@@ -98,7 +98,7 @@ def parse_pdf(raw: bytes) -> str:
 def parse_bytes(filename: str, raw: bytes) -> str:
     """按扩展名分派。返回纯文本，失败抛 ParseError。"""
     ext = os.path.splitext(filename or "")[1].lower()
-    if ext in (".txt", ".md", ".markdown"):
+    if ext in (".txt", ".md", ".markdown", ".jsonl"):
         return _read_text_bytes(raw).strip()
     if ext == ".docx":
         return parse_docx(raw)

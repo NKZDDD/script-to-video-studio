@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 import time
 
-from core import agent_projects as A, agent_runtime as R, diagnose, paths
+from core import agent_handoff as H, agent_projects as A, agent_runtime as R, diagnose, paths
 from core.store import Project, list_projects, read_json, write_json, write_text
 
 
@@ -195,6 +195,14 @@ def post(app, path, body):
     if path == "/api/agent/parse":
         return app.api_post("/api/script/parse", body)
     pj = project(body.get("root"), cfg)
+    if path == "/api/agent/handoff/export":
+        return H.export_package(pj)
+    if path == "/api/agent/handoff/import":
+        try:
+            raw = base64.b64decode(body.get("content_b64") or "", validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("上传的文件内容损坏，请重新选择")
+        return H.import_package(pj, raw)
     if path == "/api/agent/source":
         if pj.meta().get("workflow") != "agent":
             raise ValueError("仅 Agent 项目支持在此更新原文")
@@ -251,7 +259,6 @@ def post(app, path, body):
     if path == "/api/agent/manual":
         if app.JOBS.list(project_root=pj.root, active_only=True):
             raise ValueError("请先停止生产再替换参考图")
-        import base64
         from io import BytesIO
         from PIL import Image
         from core.apiutil import _atomic_output, _check_saved

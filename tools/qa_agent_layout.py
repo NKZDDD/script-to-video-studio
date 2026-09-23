@@ -114,14 +114,17 @@ def main():
             assert page.locator('#live-usage').is_visible()
             page.screenshot(path=str(out / 'sticky-runtime.png'))
             page.locator('#runtime summary').click()
-            # Hundreds of blocking messages scroll inside the floating card.
+            # Hundreds of blocking messages scroll inside the plan, which stays in the page flow.
             write_text(pj.p('03_提示词', 'image.txt'), '')
             page.locator('[data-action="preview"]').click()
             page.wait_for_function("document.querySelector('#production-plan').textContent.includes('提示词为空')")
             assert page.locator('[data-action="start"]').is_disabled()
-            assert page.locator('#production-plan').evaluate('(e)=>e.scrollHeight>e.clientHeight && e.clientHeight<=innerHeight*.3+1')
+            assert page.locator('#production-plan').evaluate('(e)=>e.scrollHeight>e.clientHeight && e.clientHeight<=Math.min(innerHeight*.45,520)+1')
+            assert page.evaluate("!document.querySelector('.rv-production-dock').contains(document.querySelector('#production-plan'))")
+            page.evaluate('scrollTo(0,document.documentElement.scrollHeight)')
+            assert page.locator('.rv-production-dock').bounding_box()['height'] < 140
             write_text(pj.p('03_提示词', 'image.txt'), '离线布局验收，不提交生产')
-            checks.append('标题栏单行运行状态 / 生产卡片随滚动悬浮 / 长计划内部滚动 / 刷新保留有效计划')
+            checks.append('标题栏单行运行状态 / 只有按钮栏悬浮、计划留在正文 / 长计划内部滚动 / 刷新保留有效计划')
 
             # A different selection invalidates the displayed plan immediately.
             page.locator('[data-action="select-all"]').click()

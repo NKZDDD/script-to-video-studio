@@ -106,7 +106,7 @@ function wizard() {
  const w=S.wizard; if(!w)return show('projects');
  const steps=['项目与原文','创作边界','视频与语言','技能与资产','确认创建'];
  let html='';
- if(S.step===0)html=`<h3>项目放在哪里，原文从哪里来</h3><div class="rv-fields">${field('项目名称',input('title',w.title,'text','required maxlength="100"'),'编号自动生成，避免跨项目冲突。')}${field('标签',input('tags',w.tags),'用逗号分隔，用于项目搜索。')}${field('生产父目录',input('base',w.base,'text','required'),'将自动建立“名称_项目编号”子目录；确认后显示实际绝对路径。')}${field('原文类型',select('source_type',['剧本','小说','大纲','已有资产'],w.source_type))}${field('集数策略',select('episode_strategy',['按原文','指定集数'],w.episode_strategy))}${field('指定集数',input('episode_count',w.episode_count,'number','min="1" max="999"'),'仅在选择指定集数时采用。')}<label class="rv-span">原文<textarea name="source" rows="7" placeholder="粘贴原始剧本或选择文件；留空可先创建，后续补齐原文。">${esc(w.source)}</textarea></label><div class="rv-file-field"><span>读取原文文件</span>${fileButton('source-file','选择文件…','.txt,.md,.docx,.pdf')}<small>支持 txt、md、docx、pdf，读出的文字会填进上面的原文框。</small></div>${w.batch!==undefined&&w.batch!==false&&w.batch!==''?field('批量项目名（每行一个）',`<textarea name="batch" rows="5">${esc(w.batch)}</textarea>`):''}</div>`;
+ if(S.step===0)html=`<h3>项目放在哪里，原文从哪里来</h3><div class="rv-fields">${field('项目名称',input('title',w.title,'text','required maxlength="100"'),'编号自动生成，避免跨项目冲突。')}${field('标签',input('tags',w.tags),'用逗号分隔，用于项目搜索。')}${field('生产父目录',input('base',w.base,'text','required'),'将自动建立“名称_项目编号”子目录；确认后显示实际绝对路径。')}${field('原文类型',select('source_type',['剧本','小说','大纲','已有资产'],w.source_type))}${field('集数策略',select('episode_strategy',['按原文','指定集数'],w.episode_strategy))}${field('指定集数',input('episode_count',w.episode_count,'number','min="1" max="999"'),'仅在选择指定集数时采用。')}<label class="rv-span">原文<textarea name="source" rows="7" placeholder="粘贴原始剧本或选择文件；留空可先创建，后续补齐原文。">${esc(w.source)}</textarea></label><div class="rv-file-field"><span>读取原文文件</span>${fileButton('source-file','选择文件…','.txt,.md,.jsonl,.docx,.pdf')}<small>支持 txt、md、jsonl、docx、pdf，读出的文字会填进上面的原文框。</small></div>${w.batch!==undefined&&w.batch!==false&&w.batch!==''?field('批量项目名（每行一个）',`<textarea name="batch" rows="5">${esc(w.batch)}</textarea>`):''}</div>`;
  if(S.step===1)html=`<h3>画面和创作边界</h3><div class="rv-fields">${field('拍成什么形式',select('medium',['真人影视','3D 漫剧','二维动画','混合形式'],w.medium))}${field('视觉风格',input('style',w.style))}${field('文化与地域',input('culture',w.culture))}${field('剧情改编',select('adaptation',['忠于原文','保留事实，优化节奏与镜头','允许适度改编'],w.adaptation))}<label class="rv-span">额外要求<textarea name="notes" rows="5">${esc(w.notes)}</textarea></label></div>`;
  if(S.step===2)html=`<h3>视频、声音与语言</h3><div class="rv-fields">${field('图片服务商',providerSelect('image','image_provider',w.image_provider))}${field('图片模型',input('image_model',w.image_model))}${field('视频服务商',providerSelect('video','video_provider',w.video_provider))}${field('视频模型',input('video_model',w.video_model))}${field('成片比例',select('ratio',['16:9','9:16','1:1','4:3','3:4','21:9'],w.ratio))}${field('每段目标时长（秒）',input('duration',w.duration,'number','min="1" max="600"'),'目标值，生产前会按具体模型校验，不能静默截短。')}${field('声音',select('audio',['模型原生音频','无声视频','外部后期配音'],w.audio))}${field('对白语言',input('dialogue_language',w.dialogue_language))}${field('提示词语言',input('prompt_language',w.prompt_language))}<label class="rv-inline"><input name="subtitles" type="checkbox" ${w.subtitles?'checked':''}> 需要后期字幕</label></div><p class="rv-notice">这里锁定创作目标，不发生成请求。密钥在设置中填写；未知或不兼容的模型会在生产前阻止提交。</p>`;
  if(S.step===3)html=`<h3>完整技能包与资产范围</h3><div class="rv-skill"><strong>完整生产技能包</strong><span class="rv-badge rv-good">创建时固定文件与校验和</span></div><p>身份 → 造型 / 连续状态；场景 → 场景状态；按需交接板 → A / B / C 独立区域图 → 分段视频。共享资产在所有集里复用。</p><div class="rv-fields">${field('服装规划',select('costume',['按剧情需要','独立服装资产','直接完整造型'],w.costume))}${field('交接策略',select('handoff',['按边界需要','逐边界人工复核'],w.handoff))}${[['reuse','规划时复用匹配的共享资产'],['atlas','增加资产图册'],['offline_board','增加离线画面草图'],['emotion_curve','增加情绪曲线'],['report','增加审计报告']].map(([k,l])=>`<label class="rv-inline"><input type="checkbox" name="${k}" ${w[k]?'checked':''}> ${l}</label>`).join('')}</div><p class="rv-caption">核心人物、场景、道具等按剧情需要规划；声音身份作为元数据。完整规则、脚本和许可一起复制进项目，不只复制入口文件。</p>`;
@@ -123,11 +123,22 @@ async function wizardCreate() {
 function handoff() {
  const d=S.data,p=d.publication;
  main.innerHTML=heading(d.meta.title,'Agent 项目交接','材料直接写进本机项目，Studio 每隔数秒检查完整发布。',btn('刷新发布','refresh')+btn('进入生产','production','',true))+
- `<div class="rv-handoff-grid"><div class="rv-panel"><h3>交接内容已经明确</h3><dl><dt>项目编号</dt><dd>${esc(d.meta.project_code)}</dd><dt>生产路径</dt><dd><code>${esc(d.root)}</code></dd><dt>当前发布</dt><dd>${esc(p.revision||'等待 Agent')}</dd><dt>结构状态</dt><dd>${p.revision?'已接收，视觉验收仍需检查':'等待完整材料'}</dd></dl>${p.errors.map(e=>`<p class="rv-notice is-error">${esc(e.revision)}：${esc(e.message)}</p>`).join('')}${btn('补充 / 更新原文','source')}${d.template?fileLink('00_项目说明/production-contract.md','查看生产契约'):''}<p class="rv-caption">${p.legacy?'旧项目可继续查看和生产现有任务，不调用内部文字分析。':'Agent 先读取完整技能与锁定选项，最后写 READY.json；新版本不会修改已排队批次。'}</p></div><div class="rv-panel"><div class="rv-row"><h3>AGENT_TASK.md</h3>${d.template?btn('复制完整模板','copy-template','',true):''}</div><textarea id="agent-template" readonly rows="16">${esc(d.template||'这是旧项目。原来的任务和成品已保留；可在生产页查看、勾选和继续生成。')}</textarea>${d.template?fileLink('00_项目说明/AGENT_TASK.md','打开 / 下载模板'):''}</div></div>`;
+ `<div class="rv-handoff-grid"><div class="rv-panel"><h3>交接内容已经明确</h3><dl><dt>项目编号</dt><dd>${esc(d.meta.project_code)}</dd><dt>生产路径</dt><dd><code>${esc(d.root)}</code></dd><dt>当前发布</dt><dd>${esc(p.revision||'等待 Agent')}</dd><dt>结构状态</dt><dd>${p.revision?'已接收，视觉验收仍需检查':'等待完整材料'}</dd></dl>${p.errors.map(e=>`<p class="rv-notice is-error">${esc(e.revision)}：${esc(e.message)}</p>`).join('')}${btn('补充 / 更新原文','source')}${d.template?fileLink('00_项目说明/production-contract.md','查看生产契约'):''}<p class="rv-caption">${p.legacy?'旧项目可继续查看和生产现有任务，不调用内部文字分析。':'Agent 先读取完整技能与锁定选项，最后写 READY.json；新版本不会修改已排队批次。'}</p></div><div class="rv-panel"><div class="rv-row"><h3>AGENT_TASK.md</h3>${d.template?btn('复制完整模板','copy-template','',true):''}</div><textarea id="agent-template" readonly rows="16">${esc(d.template||'这是旧项目。原来的任务和成品已保留；可在生产页查看、勾选和继续生成。')}</textarea>${d.template?fileLink('00_项目说明/AGENT_TASK.md','打开 / 下载模板'):''}</div></div>${d.template?remotePanel():''}`;
+}
+function remotePanel() {
+ const r=S.remote?.root===S.root?S.remote:null;
+ return `<div class="rv-panel"><div class="rv-row"><h3>Codex 不在这台机器上</h3><div class="rv-actions">${btn('导出交接包','handoff-export')}${fileButton('release-file','导入 Agent 发布包…','.zip','',false)}</div></div><p class="rv-caption">交接包只含文字材料：契约、项目锁、结构定义、完整技能包、原文、已有版本和定向修订要求，不含图片和视频。把它交给另一台机器上的 Codex；Codex 把新的发布目录打包成 zip 交回后，在这里导入，校验和本机发布完全一样。</p>${r?`<div class="rv-notice ${r.error?'is-error':''}">${r.html}</div>`:''}</div>`;
+}
+async function importRelease(file) {
+ const d=await post('handoff/import',{filename:file.name,content_b64:await readFile(file)});
+ const lines=[...d.imported.map(v=>`${esc(v)} 已导入并通过校验`),...d.unchanged.map(v=>`${esc(v)} 之前已导入过，内容相同，跳过`),...d.rejected.map(x=>`${esc(x.revision)} 没有通过校验，已撤回：${esc(x.message)}`)];
+ S.remote={root:S.root,error:d.rejected.length>0,html:lines.join('<br>')+`<br>当前已接收版本：${esc(d.active||'无')}`};
+ await loadProject(S.root,false);handoff();
+ if(d.rejected.length)notice('发布包里有版本没通过校验，详情见「Codex 不在这台机器上」一栏。',true);
 }
 function production() {
  const d=S.data;const cats={...S.boot.kinds};if(d.tasks.some(t=>t.kind==='storyboard'))cats.storyboard='旧项目故事板';
- main.innerHTML=`<section class="rv-production-dock" aria-label="生产操作与计划"><div class="rv-panel rv-production-actions"><div><strong id="plan-summary"></strong><small id="production-version"></small></div><div class="rv-actions">${btn('查看生产计划','preview')}${btn('开始生产','start','disabled',true)}</div><small>勾选后先查看生产计划，确认后开始；筛选不清除隐藏勾选。</small></div><div id="production-plan" tabindex="0" aria-label="生产计划详情"></div></section>`+
+ main.innerHTML=`<section class="rv-production-dock" aria-label="生产操作与计划"><div class="rv-panel rv-production-actions"><div><strong id="plan-summary"></strong><small id="production-version"></small></div><div class="rv-actions">${btn('查看生产计划','preview')}${btn('开始生产','start','disabled',true)}</div><small>勾选后先查看生产计划，确认后开始；筛选不清除隐藏勾选。</small></div></section><div id="production-plan" tabindex="0" aria-label="生产计划详情"></div>`+
  heading(d.meta.title,'选择这次要生产什么','资产和分集任务在同一棵树中管理，有效成品自动复用。',btn('Agent 契约','handoff')+btn('刷新','refresh'))+
  `<div id="publication-errors"></div>
  <div class="rv-panel"><div class="rv-row"><h3>本次服务商与并发</h3>${btn('填写 / 管理密钥','providers')}</div><div class="rv-service-head"><span>生产类型</span><span>服务商</span><span>模型</span><span>图片清晰度</span><span>并发</span></div><div id="production-services"></div><p class="rv-caption">各行共享全局总上限与服务商上限；批内并发不能相加当作可用额度。设置变更只影响下次开始的批次。</p></div>
@@ -233,6 +244,7 @@ async function preview() {
  if(root!==S.root||request!==S.planRequest)return;
  const data=await api('preview',{root});if(root!==S.root||S.page!=='production'||request!==S.planRequest)return;S.plan=data;
  renderPlan();
+ $('#production-plan')?.scrollIntoView({block:'nearest',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});
 }
 function renderPlan() {
  const data=S.plan,start=$('[data-action="start"]',main);
@@ -326,6 +338,7 @@ const actions={
  'wizard-prev':()=>{wizardSave();S.step=Math.max(0,S.step-1);wizard();},
  'wizard-next':()=>{if(!$('#wizard-form').reportValidity())return;wizardSave();S.step++;wizard();},
  'wizard-create':wizardCreate, 'refresh':()=>loadProject(),
+ 'handoff-export':async()=>{const d=await post('handoff/export');S.remote={root:S.root,html:`交接包已生成：${d.files} 个文件，${Math.max(1,Math.round(d.bytes/1024))} KB，本次新版本号从 ${esc(d.next_revision)} 开始。${fileLink(d.rel,'下载交接包')}<br><code>${esc(d.file)}</code>`};handoff();},
  'copy-template':async()=>{await navigator.clipboard.writeText(S.data.template);notice('已复制完整 Agent 模板。');},
  'source':async()=>{const root=S.root;const d=await get('prompt',{root,rel:'01_剧本与分段/原始素材.txt'});if(root!==S.root)return;dialog('项目原文',`<textarea id="source-edit" rows="16">${esc(d.text)}</textarea>${btn('保存原文','save-source','',true)}`);},
  'save-source':async()=>{await post('source',{source:$('#source-edit').value});closeDialog();notice('已保存原文，Agent 可直接读取。');},
@@ -370,6 +383,7 @@ document.addEventListener('input',safe(e=>{const el=e.target;const map={'project
 document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.type==='file'){const shown=$(`[data-file-for="${el.id}"]`);if(shown)shown.textContent=el.files[0]?.name||'未选择文件';}
  if(el.id==='provider-file'&&el.files[0]){const file=el.files[0];el.value='';await importProvider(file);return;}
+ if(el.id==='release-file'&&el.files[0]){const file=el.files[0];el.value='';await importRelease(file);return;}
  if(el.id==='project-picker'){S.root=el.value;S.data=null;S.detail='';if(S.root){await loadProject(S.root,false);show('production');}else show('projects');return;}
  const filters={'project-status':'status','project-type':'type','project-sort':'sort','asset-status':'assetStatus','asset-type':'assetType'};
  if(filters[el.id]){S.filters[filters[el.id]]=el.value;el.id.startsWith('project')?projectList():renderTree();return;}

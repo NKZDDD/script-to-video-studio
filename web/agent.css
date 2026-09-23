@@ -59,8 +59,8 @@ html{scroll-padding-top:calc(var(--studio-header-height,90px) + var(--studio-doc
 #studio-agent-prototype .rv-production-actions>small{flex-basis:100%}
 #studio-agent-prototype .rv-production-dock{position:sticky;top:calc(var(--studio-header-height,90px) + 12px);z-index:3;background:var(--rs-surface);border:1px solid var(--rs-line);border-radius:12px;box-shadow:0 5px 20px #00000012;margin-bottom:24px}
 #studio-agent-prototype .rv-production-dock .rv-panel{border:0;background:transparent;margin:0}
-#studio-agent-prototype #production-plan{max-height:min(30vh,calc(100dvh - var(--studio-header-height,90px) - 180px));overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-radius:0 0 12px 12px}
-#studio-agent-prototype .rv-production-dock .rv-plan{border-top:1px solid var(--rs-line);border-radius:0;padding-top:12px}
+#studio-agent-prototype #production-plan{max-height:min(45vh,520px);overflow:auto;overscroll-behavior:contain;border-radius:9px;margin-bottom:8px}
+#studio-agent-prototype #production-plan .rv-plan{margin:0}
 #studio-agent-prototype .rv-back-top{position:fixed;right:max(20px,env(safe-area-inset-right));bottom:max(20px,env(safe-area-inset-bottom));z-index:5;box-shadow:0 4px 18px #00000018;min-height:42px}
 #studio-agent-prototype .rv-main{padding-bottom:88px}
 #studio-agent-prototype #resource-tree{height:clamp(280px,58vh,620px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
