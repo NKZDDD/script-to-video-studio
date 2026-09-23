@@ -29,7 +29,7 @@ function safe(fn) {return (...a)=>Promise.resolve().then(()=>fn(...a)).catch(e=>
 async function reloadBoot() {S.boot=await api('bootstrap');S.provider ||= S.boot.capabilities[0]?.id||'';picker();}
 function picker() {$('#project-picker').innerHTML=option('','选择项目',S.root)+S.boot.projects.map(p=>option(p.root,p.title,S.root)).join('');}
 async function loadProject(root=S.root,paint=true,background=false) {
- if(!root)return; const seq=++S.request;const data=await get('project',{root});
+ if(!root)return; const seq=background?S.request:++S.request;const data=await get('project',{root});
  if(seq!==S.request || root!==S.root)return;
  if(background&&($('#dialog').open||document.activeElement?.matches('input,select,textarea')||!['production','handoff','outputs'].includes(S.page)))return;
  const previous=S.data;
@@ -65,6 +65,7 @@ function invalidatePlan() {
  if(S.page==='production'&&$('#production-plan'))renderPlan();
 }
 function refreshProjectView(previous) {
+ if((S.page==='production'&&!$('#resource-tree',main))||(S.page==='outputs'&&!$('#output-list',main)))return render();
  if(S.page==='production') {
   renderTree();renderDetail();renderJobs();renderPlan();
   if(JSON.stringify(previous?.production)!==JSON.stringify(S.data.production))renderServices();
@@ -405,7 +406,7 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
 }));
 $('#dialog-close').addEventListener('click',closeDialog);$('#dialog').addEventListener('close',()=>{S.job='';S.jobRequest++;S.editor=null;});
 $('#apply-advice').addEventListener('click',safe(()=>{const n=S.runtime?.advice?.limit;if(n==null||n<1)throw Error('当前样本不足，暂不能给出可用建议');S.tab='limits';show('settings');$('[name=global]').value=Math.min(512,n);notice('建议已填入，检查各服务商额度后点击保存。');}));
-async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job,S.jobRoot,true);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
+async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job,S.jobRoot,true);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous!==undefined)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
 document.addEventListener('click',event=>{if(!$('#runtime').contains(event.target))$('#runtime').open=false;});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')$('#runtime').open=false;});
 stickyObserver.observe($('#sticky-header'));
