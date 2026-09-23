@@ -189,6 +189,76 @@ def test_cancel_before_submit(provider, monkeypatch):
     request.assert_not_called()
 
 
+def _project(tmp_path, raw):
+    (tmp_path / '03_提示词').mkdir()
+    (tmp_path / '07_检查与记录').mkdir()
+    (tmp_path / '05_分段视频').mkdir()
+    (tmp_path / '03_提示词' / 'tasks.json').write_text(json.dumps({'video_tasks': [
+        {'key': 'EP01-SEG002', 'output': '05_分段视频/EP01-SEG002.mp4'},
+        {'key': 'EP01-SEG003', 'output': '05_分段视频/EP01-SEG003.mp4'}]}), encoding='utf-8')
+    (tmp_path / '07_检查与记录' / 'failures.json').write_text(json.dumps([
+        {'stage': 'video', 'target': 'EP01-SEG002', 'code': 'RESULT_DOWNLOAD', 'raw': raw}],
+        ensure_ascii=False), encoding='utf-8')
+    return tmp_path / '05_分段视频'
+
+
+def _raised(provider, dest, **kw):
+    with pytest.raises(ApiError) as caught:
+        provider.generate_video(VideoTask('cat', duration=30), str(dest), **kw)
+    return str(caught.value)
+
+
+@pytest.mark.parametrize('raw', [
+    '红鸟任务 task_1790_ab_video_generation 查询超过 2400 秒，请先核对服务商结果再重试',
+    '红鸟任务 task_1790_ab_video_generation 已完成，视频下载未成功：连接被重置',
+    '红鸟任务 task_1790_ab_video_generation 查询已取消，服务商那边的任务不受影响；重跑这一段会继续查询它',
+    '红鸟任务 task_1790_ab_video_generation 查询中断：红鸟接口错误：余额不足'])
+def test_rerun_follows_recorded_task_instead_of_paying_again(provider, monkeypatch, tmp_path, raw):
+    videos = _project(tmp_path, raw)
+    request = Mock(return_value={'status': 'completed', 'video_url': 'https://cdn/r.mp4'})
+    monkeypatch.setattr(provider, '_request', request)
+    save = Mock()
+    monkeypatch.setattr(provider.session, 'save_item', save)
+    result = provider.generate_video(VideoTask('cat', duration=30),
+                                     str(videos / 'EP01-SEG002.mp4'), log=lambda _: None)
+    assert [c.args[:2] for c in request.call_args_list] == [
+        ('GET', '/v1/videos/task_1790_ab_video_generation')]
+    assert result['task_id'] == 'task_1790_ab_video_generation'
+    assert save.call_args.args == ('https://cdn/r.mp4', str(videos / 'EP01-SEG002.mp4'))
+
+
+@pytest.mark.parametrize('raw,seg', [
+    ('红鸟任务 task_x 失败：参考图不可用', 'EP01-SEG002'),
+    ('红鸟任务 task_x 查询超过 2400 秒', 'EP01-SEG003'),
+    ('红鸟查询不到原任务 task_x（红鸟接口错误：not found），重跑这一段将重新提交', 'EP01-SEG002')])
+def test_rerun_submits_when_no_task_is_pending_for_this_segment(provider, monkeypatch, tmp_path, raw, seg):
+    videos = _project(tmp_path, raw)
+    request = Mock(return_value={'id': 'task_new', 'status': 'completed', 'video_url': 'https://cdn/r.mp4'})
+    monkeypatch.setattr(provider, '_request', request)
+    monkeypatch.setattr(provider.session, 'save_item', Mock())
+    provider.generate_video(VideoTask('cat', duration=30), str(videos / f'{seg}.mp4'))
+    assert request.call_args_list[0].args[:2] == ('POST', '/v1/videos')
+
+
+def test_interrupted_follow_keeps_task_id_for_next_rerun(provider, monkeypatch, tmp_path):
+    videos = _project(tmp_path, '红鸟任务 task_old 查询超过 2400 秒')
+    dest = videos / 'EP01-SEG002.mp4'
+    monkeypatch.setattr(hongniao, '_wait', lambda *a: None)
+    monkeypatch.setattr(provider, '_request', Mock(return_value={'status': 'processing'}))
+    cancelled = iter([False, False, True])
+    message = _raised(provider, dest, cancel=lambda: next(cancelled, True))
+    assert hongniao._PENDING.search(message).group(1) == 'task_old'
+
+    monkeypatch.setattr(provider, '_request', Mock(side_effect=ApiError('红鸟接口错误：余额不足',
+                                                                     status=402, kind=BATCH_FATAL)))
+    message = _raised(provider, dest)
+    assert hongniao._PENDING.search(message).group(1) == 'task_old'
+
+    monkeypatch.setattr(provider, '_request', Mock(side_effect=ApiError('红鸟接口错误：not found',
+                                                                     status=404, kind=TASK_FATAL)))
+    assert not hongniao._PENDING.search(_raised(provider, dest))
+
+
 def test_provider_file_can_load_as_old_exe_plugin():
     path = Path(hongniao.__file__)
     spec = importlib.util.spec_from_file_location('test_hongniao_plugin', path)

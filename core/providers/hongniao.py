@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
+import re
 import time
 import uuid
 from urllib.parse import quote
@@ -57,6 +60,55 @@ def catalog_schema(row):
 def _cancelled(cancel):
     if cancel and cancel():
         raise ApiError("用户已取消", kind=TASK_FATAL)
+
+
+# 只认「已提交、结果没落盘」的几种报错；「失败：」不在内，那一条重跑就该重新提交。
+_PENDING = re.compile(r"红鸟任务 (\S+) (?:查询超过|查询已取消|查询中断|已完成|返回未知状态)")
+
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _task_lists(root):
+    tasks = _read_json(os.path.join(root, "03_提示词", "tasks.json"))
+    plan = _read_json(os.path.join(root, "07_检查与记录", "active-plan.json"))
+    if isinstance(plan, dict) and plan.get("tasks_path"):
+        tasks = [tasks, _read_json(os.path.join(root, *str(plan["tasks_path"]).split("/")))]
+    for doc in tasks if isinstance(tasks, list) else [tasks]:
+        for rows in (doc.values() if isinstance(doc, dict) else ()):
+            if isinstance(rows, list):
+                yield from (r for r in rows if isinstance(r, dict))
+
+
+def pending_task_id(dest):
+    """这一段上次已经在红鸟建过任务、只是没取回时，返回那个任务 ID。
+
+    Studio 判断「做过没有」只看文件在不在，没落盘的段重跑会重新提交、再扣一次费；
+    任务号只留在项目的 failures.json 里（raw 原文），按 dest 反查段落 key 取出来。
+    """
+    target = os.path.normcase(os.path.abspath(dest))
+    root = os.path.dirname(target)
+    while True:
+        failures = os.path.join(root, "07_检查与记录", "failures.json")
+        if os.path.isfile(failures):
+            break
+        parent = os.path.dirname(root)
+        if parent == root:
+            return ""
+        root = parent
+    keys = {r.get("key") for r in _task_lists(root)
+            if r.get("key") and isinstance(r.get("output"), str)
+            and os.path.normcase(os.path.join(root, *r["output"].split("/"))) == target}
+    for item in reversed(_read_json(failures) or []):
+        if isinstance(item, dict) and item.get("target") in keys:
+            found = _PENDING.search(str(item.get("raw") or ""))
+            return found.group(1) if found else ""
+    return ""
 
 
 def _wait(seconds, cancel):
@@ -180,6 +232,11 @@ class HongniaoProvider(Provider):
                        poll_interval=5, poll_timeout=2400):
         _cancelled(cancel)
         body = self.build_body(task)
+        old = pending_task_id(dest)
+        if old:
+            log(f"红鸟：这一段上次已提交任务 {old}，结果还没取回 —— 继续查询这个任务，不重新提交")
+            return self._follow(old, None, dest, body["model"], log, cancel,
+                                poll_interval, poll_timeout)
         log(f"红鸟 / {body['model']} / {body['seconds']}秒 / 参考图×{len(task.refs)}")
         try:
             data = self._request("POST", "/v1/videos", body)
@@ -195,9 +252,43 @@ class HongniaoProvider(Provider):
             raise ApiError(f"红鸟提交未返回任务 ID，请核对订单 {body['metadata']['order_id']}",
                            kind=TASK_FATAL, err_code="result_download_failed")
         log(f"红鸟任务 {task_id} 已提交，开始查询")
+        return self._follow(task_id, data, dest, body["model"], log, cancel,
+                            poll_interval, poll_timeout)
+
+    def _follow(self, task_id, data, dest, model, log, cancel, poll_interval, poll_timeout):
+        """查询同一个任务直到落盘。data 为 None 时先查一次（续查旧任务）。
+
+        会中断查询的报错都带上「红鸟任务 <ID>」原文：failures.json 只留这一句，
+        丢了任务号，下次重跑就会重新提交、再扣一次费。
+        """
+        try:
+            return self._poll(task_id, data, dest, model, log, cancel,
+                              poll_interval, poll_timeout)
+        except ApiError as exc:
+            if task_id in str(exc):
+                raise
+            if str(exc) == "用户已取消":
+                raise ApiError(f"红鸟任务 {task_id} 查询已取消，服务商那边的任务不受影响；"
+                               "重跑这一段会继续查询它", kind=TASK_FATAL) from exc
+            status, code = getattr(exc, "status", 0), getattr(exc, "err_code", "")
+            if status == 404:
+                raise ApiError(f"红鸟查询不到原任务 {task_id}（{exc}），重跑这一段将重新提交",
+                               kind=TASK_FATAL, err_code=code) from exc
+            raise ApiError(f"红鸟任务 {task_id} 查询中断：{exc}", status=status,
+                           kind=exc.kind, err_code=code) from exc
+
+    def _poll(self, task_id, data, dest, model, log, cancel, poll_interval, poll_timeout):
         deadline, last = time.monotonic() + poll_timeout, ""
         while time.monotonic() < deadline:
             _cancelled(cancel)
+            if data is None:
+                try:
+                    data = self._request("GET", "/v1/videos/" + quote(task_id, safe=""))
+                except ApiError as exc:
+                    if exc.kind != RETRYABLE:
+                        raise
+                    log(f"红鸟任务 {task_id} 查询暂时失败，继续查询同一任务：{exc}")
+                    data = {}
             status = str(data.get("status") or "").lower()
             if status != last:
                 log(f"红鸟 {task_id} 状态: {status}")
@@ -221,7 +312,7 @@ class HongniaoProvider(Provider):
                 except Exception as exc:
                     raise ApiError(f"红鸟任务 {task_id} 已完成，视频下载未成功：{exc}",
                                    kind=TASK_FATAL, err_code="result_download_failed") from exc
-                return {"task_id": task_id, "source": url, "provider": self.id, "model": body["model"]}
+                return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
             if status not in ("", "queued", "processing"):
                 raise ApiError(f"红鸟任务 {task_id} 返回未知状态 {status!r}，请核对服务商任务页",
                                kind=TASK_FATAL, err_code="result_download_failed")
