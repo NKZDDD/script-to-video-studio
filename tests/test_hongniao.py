@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock
@@ -189,15 +190,19 @@ def test_cancel_before_submit(provider, monkeypatch):
     request.assert_not_called()
 
 
-def _project(tmp_path, raw):
-    (tmp_path / '03_提示词').mkdir()
+def _project(tmp_path, raw, failed_after_prompt=60):
+    (tmp_path / '03_提示词' / '视频提示词').mkdir(parents=True)
     (tmp_path / '07_检查与记录').mkdir()
     (tmp_path / '05_分段视频').mkdir()
-    (tmp_path / '03_提示词' / 'tasks.json').write_text(json.dumps({'video_tasks': [
-        {'key': 'EP01-SEG002', 'output': '05_分段视频/EP01-SEG002.mp4'},
-        {'key': 'EP01-SEG003', 'output': '05_分段视频/EP01-SEG003.mp4'}]}), encoding='utf-8')
+    rows = []
+    for seg in ('EP01-SEG002', 'EP01-SEG003'):
+        (tmp_path / '03_提示词' / '视频提示词' / f'{seg}.txt').write_text('prompt', encoding='utf-8')
+        rows.append({'key': seg, 'output': f'05_分段视频/{seg}.mp4',
+                     'prompt_ref': f'03_提示词/视频提示词/{seg}.txt'})
+    (tmp_path / '03_提示词' / 'tasks.json').write_text(json.dumps({'video_tasks': rows}), encoding='utf-8')
+    at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + failed_after_prompt))
     (tmp_path / '07_检查与记录' / 'failures.json').write_text(json.dumps([
-        {'stage': 'video', 'target': 'EP01-SEG002', 'code': 'RESULT_DOWNLOAD', 'raw': raw}],
+        {'stage': 'video', 'target': 'EP01-SEG002', 'code': 'RESULT_DOWNLOAD', 'raw': raw, 'at': at}],
         ensure_ascii=False), encoding='utf-8')
     return tmp_path / '05_分段视频'
 
@@ -238,6 +243,30 @@ def test_rerun_submits_when_no_task_is_pending_for_this_segment(provider, monkey
     monkeypatch.setattr(provider.session, 'save_item', Mock())
     provider.generate_video(VideoTask('cat', duration=30), str(videos / f'{seg}.mp4'))
     assert request.call_args_list[0].args[:2] == ('POST', '/v1/videos')
+
+
+def test_prompt_changed_after_failure_submits_new_task_and_says_why(provider, monkeypatch, tmp_path):
+    videos = _project(tmp_path, '红鸟任务 task_old 查询超过 2400 秒', failed_after_prompt=-3600)
+    request = Mock(return_value={'id': 'task_new', 'status': 'completed', 'video_url': 'https://cdn/r.mp4'})
+    monkeypatch.setattr(provider, '_request', request)
+    monkeypatch.setattr(provider.session, 'save_item', Mock())
+    logs = []
+    provider.generate_video(VideoTask('cat', duration=30), str(videos / 'EP01-SEG002.mp4'), log=logs.append)
+    assert request.call_args_list[0].args[:2] == ('POST', '/v1/videos')
+    assert any('task_old' in line and '重新提交' in line for line in logs)
+
+
+def test_agent_release_task_list_is_used_for_lookup(provider, monkeypatch, tmp_path):
+    videos = _project(tmp_path, '红鸟任务 task_old 查询超过 2400 秒')
+    frozen = tmp_path / '07_检查与记录' / 'accepted' / 'r0002'
+    frozen.mkdir(parents=True)
+    (frozen / 'p.txt').write_text('prompt', encoding='utf-8')
+    (frozen / 'tasks.json').write_text(json.dumps({'video_tasks': [
+        {'key': 'EP01-SEG002', 'output': '05_分段视频/EP01-SEG002_r2.mp4',
+         'prompt_ref': '07_检查与记录/accepted/r0002/p.txt'}]}), encoding='utf-8')
+    (tmp_path / '07_检查与记录' / 'active-plan.json').write_text(json.dumps(
+        {'tasks_path': '07_检查与记录/accepted/r0002/tasks.json'}), encoding='utf-8')
+    assert hongniao.pending_task(str(videos / 'EP01-SEG002_r2.mp4'))[0] == 'task_old'
 
 
 def test_interrupted_follow_keeps_task_id_for_next_rerun(provider, monkeypatch, tmp_path):

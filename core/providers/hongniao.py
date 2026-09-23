@@ -85,11 +85,13 @@ def _task_lists(root):
                 yield from (r for r in rows if isinstance(r, dict))
 
 
-def pending_task_id(dest):
-    """这一段上次已经在红鸟建过任务、只是没取回时，返回那个任务 ID。
+def pending_task(dest):
+    """这一段上次已经在红鸟建过任务、只是没取回时，返回 (任务 ID, "")。
 
     Studio 判断「做过没有」只看文件在不在，没落盘的段重跑会重新提交、再扣一次费；
     任务号只留在项目的 failures.json 里（raw 原文），按 dest 反查段落 key 取出来。
+    失败之后提示词改过（重跑环节、改提示词、新发布），旧任务的成片不再对应这一段，
+    返回 ("", 原因)，照常重新提交。
     """
     target = os.path.normcase(os.path.abspath(dest))
     root = os.path.dirname(target)
@@ -99,16 +101,28 @@ def pending_task_id(dest):
             break
         parent = os.path.dirname(root)
         if parent == root:
-            return ""
+            return "", ""
         root = parent
-    keys = {r.get("key") for r in _task_lists(root)
+    rows = {r["key"]: r for r in _task_lists(root)
             if r.get("key") and isinstance(r.get("output"), str)
             and os.path.normcase(os.path.join(root, *r["output"].split("/"))) == target}
     for item in reversed(_read_json(failures) or []):
-        if isinstance(item, dict) and item.get("target") in keys:
-            found = _PENDING.search(str(item.get("raw") or ""))
-            return found.group(1) if found else ""
-    return ""
+        if not isinstance(item, dict) or item.get("target") not in rows:
+            continue
+        found = _PENDING.search(str(item.get("raw") or ""))
+        if not found:
+            return "", ""
+        prompt = str(rows[item["target"]].get("prompt_ref") or "")
+        try:
+            failed_at = time.mktime(time.strptime(str(item.get("at")), "%Y-%m-%d %H:%M:%S"))
+            changed = os.path.getmtime(os.path.join(root, *prompt.split("/"))) > failed_at + 1
+        except (OSError, ValueError, OverflowError):
+            changed = True
+        if changed:
+            return "", (f"红鸟：失败记录里有未取回的任务 {found.group(1)}，但这一段的提示词"
+                        f"在那之后改过（或无法核对），旧任务的成片不对应现在的内容 —— 按现在的提示词重新提交")
+        return found.group(1), ""
+    return "", ""
 
 
 def _wait(seconds, cancel):
@@ -232,11 +246,13 @@ class HongniaoProvider(Provider):
                        poll_interval=5, poll_timeout=2400):
         _cancelled(cancel)
         body = self.build_body(task)
-        old = pending_task_id(dest)
+        old, note = pending_task(dest)
         if old:
             log(f"红鸟：这一段上次已提交任务 {old}，结果还没取回 —— 继续查询这个任务，不重新提交")
             return self._follow(old, None, dest, body["model"], log, cancel,
                                 poll_interval, poll_timeout)
+        if note:
+            log(note)
         log(f"红鸟 / {body['model']} / {body['seconds']}秒 / 参考图×{len(task.refs)}")
         try:
             data = self._request("POST", "/v1/videos", body)
