@@ -18,7 +18,7 @@ import os
 import re
 from typing import Callable, Optional
 
-from . import accounts, diagnose, ledger, probe, soften, uploader
+from . import accounts, diagnose, ledger, probe, soften, submitted, uploader
 from .apiutil import TASK_FATAL, ApiError, resolve_ref
 from .video_refs import primary_refs, ref_file, uses_handoff
 from .providers import ImageTask, VideoTask, build as build_provider
@@ -743,6 +743,38 @@ def _who_line(provider_cfg: dict, model: str) -> str:
     return " / ".join(bits)
 
 
+def _pending(pj: Project, task: dict, ident: str, log: Callable) -> Optional[dict]:
+    """这一段已提交、还没取回的任务。内容改过的旧任务直接放弃（它的结果不再对应这一段）。"""
+    rec = submitted.load(pj.root, task["output"])
+    if rec and rec.get("identity") != ident:
+        log(f"这一段上次在「{rec.get('provider')}」提交过任务 {rec['task_id']}"
+            f"（{rec.get('submitted_at', '')}），之后提示词、参考图、参数或服务商 / 模型改过，"
+            f"旧任务的结果不再对应这一段 —— 放弃它，按现在的内容重新提交")
+        submitted.clear(pj.root, task["output"])
+        return None
+    return rec
+
+
+def _deliver(pj: Project, task: dict, out: str, prov, rec: Optional[dict], *, meta: dict,
+             run: Callable, log: Callable, cancel: Callable, interval: int, timeout: int) -> dict:
+    """生成，或者续查上次已提交的任务。只有服务商给了结论（失败 / 查不到）才丢掉任务号。"""
+    with submitted.tracking(pj.root, task["output"], key=task["key"], **meta):
+        try:
+            if rec:
+                log(f"这一段上次已提交任务 {rec['task_id']}（{rec.get('submitted_at', '')}），"
+                    f"结果还没取回 —— 继续查询这个任务，不重新提交")
+                got = prov.resume(rec, out, log=log, cancel=cancel,
+                                  poll_interval=interval, poll_timeout=timeout)
+            else:
+                got = run()
+        except Exception as exc:
+            if submitted.finished(exc):
+                submitted.clear(pj.root, task["output"])
+            raise
+    submitted.clear(pj.root, task["output"])
+    return got
+
+
 def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
                       llm_factory: Optional[Callable] = None) -> Callable:
     """kind: asset | storyboard。返回 worker(task, log, cancel)。
@@ -764,6 +796,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
         want = _fit_size(provider_cfg, model, "image",
                          (task.get("params") or {}).get("size", "1024x1536"), log)
         if probe.have_output(out):
+            submitted.clear(pj.root, task["output"])
             # 跳过也要重新量一遍：不然「比例不对」的提醒会被这次跳过悄悄清掉，
             # 而文件其实还是那个躺倒的文件。以磁盘上的东西为准。
             return {"skipped": True, "msg": "已经有了，跳过（做出来的就不再动）",
@@ -811,16 +844,23 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
                 raise RuntimeError(bad_map)
             if map_warn:
                 log(f"⚠️ {map_warn}")
-        refs = [to_ref(s, log) for _, s in srcs]
-        log(f"{_who_line(provider_cfg, model)}　参考图×{len(refs)}")
-        meta = generate(
-            lambda p: prov.generate_image(
-                ImageTask(prompt=p, refs=refs, size=want, model=model,
-                          extra={"resolution": (task.get("params") or {}).get("resolution", "")}),
-                out, log=log, cancel=cancel,
-                poll_interval=interval, poll_timeout=timeout),
-            prompt, pj=pj, llm=_llm(), kind=kind, key=task["key"],
-            rounds=_soften_rounds(provider_cfg), log=log)
+        resolution = (task.get("params") or {}).get("resolution", "")
+        ident = submitted.identity(prompt=prompt, refs=[s for _, s in srcs], size=want,
+                                   resolution=resolution, provider=provider_cfg["provider"], model=model)
+        rec = _pending(pj, task, ident, log)
+        refs = [] if rec else [to_ref(s, log) for _, s in srcs]
+        log(f"{_who_line(provider_cfg, model)}　参考图×{len(srcs)}")
+        meta = _deliver(
+            pj, task, out, prov, rec, log=log, cancel=cancel, interval=interval, timeout=timeout,
+            meta={"provider": provider_cfg["provider"], "model": model, "identity": ident},
+            run=lambda: generate(
+                lambda p: prov.generate_image(
+                    ImageTask(prompt=p, refs=refs, size=want, model=model,
+                              extra={"resolution": resolution}),
+                    out, log=log, cancel=cancel,
+                    poll_interval=interval, poll_timeout=timeout),
+                prompt, pj=pj, llm=_llm(), kind=kind, key=task["key"],
+                rounds=_soften_rounds(provider_cfg), log=log))
         # **记下本次实际请求的尺寸。** 面板上「参数」显示的是 tasks.json 里
         # 装配时烧进去的值，而实际请求可能被「生产页那一行」或「一键跑到底」
         # 的覆盖改过 —— 两个数并排出现（参数 9:16 / 要的是 16:9）看着像程序
@@ -896,6 +936,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         want = _fit_size(provider_cfg, model, "video",
                          p.get("ratio", "9:16"), log)
         if probe.have_output(out):
+            submitted.clear(pj.root, task["output"])
             # 同上：跳过时也重新量，别把「比例不对」的提醒清没了
             return {"skipped": True, "msg": "已经有了，跳过",
                     "warn": _ratio_warn(pj, out, want, "video", task["key"],
@@ -1023,26 +1064,46 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                 out, log=log, cancel=cancel,
                 poll_interval=interval, poll_timeout=timeout)
 
+        resolution = p.get("resolution") or provider_cfg.get("resolution", "")
+        ident = submitted.identity(
+            prompt=prompt, spine=spine, aux=[str(r.get("url") or r.get("file_ref") or "") for r in aux],
+            aux_reference=task.get("aux_reference") or "", duration=int(p.get("duration", 15)),
+            ratio=want, resolution=resolution, provider=pid, model=model)
+        rec = _pending(pj, task, ident, log)
+        if rec and pool is not None and rec.get("account") not in pool.labels():
+            log(f"上次提交任务 {rec['task_id']} 的账号「{rec.get('account')}」已不在账号列表里，"
+                f"查不到它的结果 —— 放弃这个任务，重新提交")
+            submitted.clear(pj.root, task["output"])
+            rec = None
+        track = {"provider": pid, "model": model, "identity": ident}
+
         acct_label = ""
         if pool is None:
-            meta = generate(
-                lambda pr: _go(prov, pr),
-                prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
-                rounds=_soften_rounds(provider_cfg), log=log)
+            meta = _deliver(
+                pj, task, out, prov, rec, meta=track, log=log, cancel=cancel,
+                interval=interval, timeout=timeout,
+                run=lambda: generate(
+                    lambda pr: _go(prov, pr),
+                    prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
+                    rounds=_soften_rounds(provider_cfg), log=log))
         else:
             # 占一个空账号，占着期间这个账号不会被别的任务用。
             # **每个账号一个独立的 provider 实例** —— 改共享那个的凭据
             # 是竞态：两条并发任务会互相把对方的账号改掉，
             # 于是两条都打到同一个账号上，而这正是要防的事。
-            with pool.slot(log=log, cancel=cancel) as acct:
+            # 续查必须回到提交时那个账号：结果只在那个账号名下。
+            with pool.slot(log=log, cancel=cancel, prefer=(rec or {}).get("account")) as acct:
                 acct_label = acct.label
                 mine = build_provider(pid, acct.api_key,
                                       provider_cfg.get("base_url", ""),
                                       provider_cfg.get("proxy", ""))
-                meta = generate(
-                    lambda pr: _go(mine, pr),
-                    prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
-                    rounds=_soften_rounds(provider_cfg), log=log)
+                meta = _deliver(
+                    pj, task, out, mine, rec, meta=dict(track, account=acct.label), log=log,
+                    cancel=cancel, interval=interval, timeout=timeout,
+                    run=lambda: generate(
+                        lambda pr: _go(mine, pr),
+                        prompt, pj=pj, llm=_llm(), kind="video", key=task["key"],
+                        rounds=_soften_rounds(provider_cfg), log=log))
                 # 做成了才记 —— 计数是「这个账号今天做出了多少条」，
                 # 不是「试了多少次」。失败的那次没扣次数也不该占计数。
                 accounts.bump(pid, acct.label)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from ..apiutil import ApiError, HttpSession
+from ..apiutil import TASK_FATAL, ApiError, HttpSession, extract_image_items, extract_video_url
 
 
 class ImageTask:
@@ -157,3 +157,28 @@ class Provider:
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
         raise NotImplementedError("该服务商不支持出视频")
+
+    def resume(self, record: dict, dest: str, *, log: Callable = print,
+               cancel: Optional[Callable] = None,
+               poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
+        """续查已提交的任务并落盘到 dest，不重新提交。
+
+        默认重放公共轮询：按提交时记下的查询路径和解析方式再查一次，
+        再像生成时一样 save_item。自己写轮询、或用自定义解析的服务商要覆盖。
+        """
+        info = record.get("resume") or {}
+        picker = {"extract_video_url": extract_video_url,
+                  "extract_image_items": extract_image_items}.get(info.get("picker"))
+        if not picker or not info.get("path"):
+            raise ApiError(f"「{self.name or self.id}」的任务 {record.get('task_id')} 已提交，"
+                           f"但这家暂不支持自动续查。请到服务商后台取回结果放到输出位置，"
+                           f"或在生产页放弃这个任务后重新提交", kind=TASK_FATAL,
+                           err_code="resume_unsupported")
+        got = self.session.poll(info["path"], record["task_id"], picker=picker,
+                                content_path_tpl=info.get("content") or "",
+                                interval=poll_interval, timeout=poll_timeout,
+                                log=log, cancel=cancel)
+        source = got[0] if isinstance(got, list) else got
+        self.session.save_item(source, dest, log=log)
+        return {"task_id": record["task_id"], "source": str(source)[:200],
+                "provider": self.id, "model": record.get("model", ""), "resumed": True}

@@ -173,10 +173,16 @@ class _Pool:
     def busy(self) -> int:
         return max(0, len(self.accounts) - self._free.qsize())
 
+    def labels(self) -> list:
+        return [a.label for a in self.accounts]
+
     @contextmanager
     def slot(self, log: Optional[Callable] = None,
-             cancel: Optional[Callable] = None):
-        """占一个空账号。全忙就等 —— 这就是「一个账号只能跑一条」的实现。"""
+             cancel: Optional[Callable] = None, prefer: Optional[str] = None):
+        """占一个空账号。全忙就等 —— 这就是「一个账号只能跑一条」的实现。
+
+        `prefer` 给了就只等那个账号（续查已提交的任务，结果只在提交它的账号名下）。
+        """
         waited = 0.0
         told = False
         while True:
@@ -184,6 +190,11 @@ class _Pool:
                 raise RuntimeError("等空账号的时候被取消了")
             try:
                 acct = self._free.get(timeout=2)
+                if prefer and acct.label != prefer:
+                    self._free.put(acct)
+                    time.sleep(0.5)
+                    waited += 0.5
+                    continue
                 break
             except queue.Empty:
                 waited += 2

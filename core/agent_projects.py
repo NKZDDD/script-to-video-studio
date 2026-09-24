@@ -15,7 +15,7 @@ import shutil
 import time
 import uuid
 
-from . import paths, probe
+from . import paths, probe, submitted
 from .store import LOCK, Project, read_json, read_text, write_json, write_text
 
 SCHEMA = "studio.production-plan/v1"
@@ -434,9 +434,12 @@ def view(pj: Project) -> dict:
     rows = task_rows(plan, legacy=True)
     chosen = selections(pj, rows)
     by_output = {t["output"]: t["key"] for t in rows}
+    waiting = submitted.pending(pj.root)
     for t in rows:
         t["selected"] = chosen.get(t["key"], True)
         t["done"] = probe.have_output(str(inside(pj.root, t["output"])))
+        rec = None if t["done"] else waiting.get(t["output"])
+        t["submitted"] = {k: rec.get(k, "") for k in ("task_id", "provider", "submitted_at")} if rec else None
         t["dependencies"] = list(dict.fromkeys(by_output[r["file_ref"]] for r in references(t) if r.get("file_ref") in by_output))
     done = {t["key"] for t in rows if t["done"]}
     for t in rows:

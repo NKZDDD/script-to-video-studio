@@ -178,6 +178,7 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
     return {"revision": data["publication"].get("revision", ""), "selected": len(selected),
             "keys": [t["key"] for t in selected],
             "reuse": len(selected) - len(todo), "todo": len(todo), "blocked": blocked,
+            "resuming": sum(1 for t in todo if t.get("submitted")),
             "rows": [{"kind": k, **saved[k], "count": sum(t["kind"] == k for t in todo),
                       "global_limit": GATE.snapshot()["global_limit"],
                       "provider_limit": GATE.snapshot()["per_provider_limit"].get(saved[k]["provider"])}

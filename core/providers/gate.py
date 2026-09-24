@@ -17,6 +17,7 @@ from __future__ import annotations
 import time
 from typing import Callable, Optional
 
+from .. import submitted
 from ..apiutil import ApiError, extract_image_items, extract_task_id
 from .base import ImageTask, Provider, VideoTask
 
@@ -346,11 +347,23 @@ class GateProvider(Provider):
         task_id = str((data or {}).get("task_id") or "")
         if not task_id:
             raise ApiError(f"Gate 创建任务没返回 task_id: {str(data)[:300]}")
+        submitted.remember(task_id, custom="gate", model=model)
 
         url = self._poll_result(model, task_id, poll_interval, poll_timeout,
                                 log=log, cancel=cancel)
         self.session.save_item(url, dest)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
+
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=5, poll_timeout=2400):
+        info = record.get("resume") or {}
+        if info.get("custom") != "gate":
+            return super().resume(record, dest, log=log, cancel=cancel,
+                                  poll_interval=poll_interval, poll_timeout=poll_timeout)
+        url = self._poll_result(info["model"], record["task_id"], poll_interval, poll_timeout,
+                                log=log, cancel=cancel)
+        self.session.save_item(url, dest)
+        return {"task_id": record["task_id"], "source": url, "provider": self.id,
+                "model": info["model"], "resumed": True}
 
     def _poll_result(self, model: str, task_id: str, interval: int, timeout: int,
                      *, log, cancel=None) -> str:
@@ -393,8 +406,10 @@ class GateProvider(Provider):
                 log(f"Gate {task_id}: {status or '(无状态字段)'}")
                 last = status
             if status in GATE_FAIL:
-                raise ApiError(f"Gate 任务失败：{(data or {}).get('error') or str(data)[:300]}",
-                               status=0, kind="task_fatal")
+                failed = ApiError(f"Gate 任务失败：{(data or {}).get('error') or str(data)[:300]}",
+                                  status=0, kind="task_fatal")
+                failed.task_finished = True
+                raise failed
             url = _gate_result_url(data)
             if url:
                 return url

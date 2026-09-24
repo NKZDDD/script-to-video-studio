@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 import time
 
-from core import agent_handoff as H, agent_projects as A, agent_runtime as R, diagnose, paths
+from core import agent_handoff as H, agent_projects as A, agent_runtime as R, diagnose, paths, submitted
 from core.store import Project, list_projects, read_json, write_json, write_text
 
 
@@ -195,6 +195,13 @@ def post(app, path, body):
     if path == "/api/agent/parse":
         return app.api_post("/api/script/parse", body)
     pj = project(body.get("root"), cfg)
+    if path == "/api/agent/submitted/clear":
+        if app.JOBS.list(project_root=pj.root, active_only=True):
+            raise ValueError("本项目正在生产，请先停止再放弃已提交的任务")
+        row = next((t for t in A.task_rows(pj.tasks(), legacy=True) if t["key"] == body.get("key")), None)
+        if not row:
+            raise ValueError("任务不存在，请刷新")
+        return {"ok": submitted.clear(pj.root, row["output"])}
     if path == "/api/agent/handoff/export":
         return H.export_package(pj)
     if path == "/api/agent/handoff/import":

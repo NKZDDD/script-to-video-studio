@@ -151,6 +151,10 @@ class KunjiProvider(Provider):
         if key and key != self.session.api_key:
             self.session.api_key = key
 
+    def resume(self, record, dest, **kw):
+        self._with_key(self.keys.get("default", ""))
+        return super().resume(record, dest, **kw)
+
     def accepts_url(self, model: str = "", media: str = "image") -> bool:
         # 香蕉的 file_data 收公网 URL；gpt-image-2 的 edits 只收字节；视频收 URL
         return media == "video" or (model or "") in BANANA_MODELS

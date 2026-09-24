@@ -23,6 +23,11 @@ from PIL import Image, ImageOps
 from core.apiutil import ApiError, BATCH_FATAL, HttpSession, RETRYABLE, TASK_FATAL
 from core.providers.base import Provider, VideoTask
 
+try:
+    from core import submitted
+except ImportError:  # 作为外挂装进没有任务号记录的旧版 Studio
+    submitted = None
+
 MODEL = "seedance_2.5"
 RATIOS = ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
 # 文档没有说明 MB/MiB，按较小的十进制上限保证不超过任一种解释。
@@ -298,7 +303,18 @@ class XmdProvider(Provider):
         task_id = data.get("job_id")
         if not isinstance(task_id, str) or not task_id:
             raise ApiError("XMD 提交后未返回 job_id，请先到服务商网页核对是否已建单", kind=TASK_FATAL)
+        if submitted:
+            submitted.remember(task_id, custom="xmd")
         log(f"XMD 视频任务 {task_id} 已提交，开始轮询")
+        return self._follow(task_id, dest, log=log, cancel=cancel,
+                            poll_interval=poll_interval, poll_timeout=poll_timeout)
+
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=15, poll_timeout=2400):
+        got = self._follow(record["task_id"], dest, log=log, cancel=cancel,
+                           poll_interval=poll_interval, poll_timeout=poll_timeout)
+        return dict(got, resumed=True)
+
+    def _follow(self, task_id, dest, *, log, cancel, poll_interval, poll_timeout):
         deadline, last_status = time.monotonic() + poll_timeout, ""
         while time.monotonic() < deadline:
             _check_cancel(cancel)
@@ -318,7 +334,9 @@ class XmdProvider(Provider):
                 last_status = status
             if status == "failed":
                 error = data.get("error") or {}
-                raise self._error(error if isinstance(error, dict) else {"message": str(error)}, task=True)
+                failed = self._error(error if isinstance(error, dict) else {"message": str(error)}, task=True)
+                failed.task_finished = True
+                raise failed
             if status == "success":
                 url = data.get("video_url")
                 if not isinstance(url, str) or not url.startswith(("https://", "http://")):

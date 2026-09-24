@@ -411,6 +411,19 @@ class ChaomoProvider(Provider):
                                 interval=poll_interval, timeout=poll_timeout, log=log)
         return (got if isinstance(got, list) else [got]), last.get("data") or data
 
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=5, poll_timeout=900):
+        if (record.get("resume") or {}).get("path") != "/v1/images/{id}":
+            return super().resume(record, dest, log=log, cancel=cancel,
+                                  poll_interval=poll_interval, poll_timeout=poll_timeout)
+        items, final = self._pick_images({}, record["task_id"], log=log,
+                                         poll_interval=poll_interval, poll_timeout=poll_timeout)
+        if not items:
+            raise ApiError(f"超模图片任务 {record['task_id']} 没返回可用结果")
+        self.session.save_item(items[0], dest, log=log)
+        self.check_meta(self.meta_of(final), items, dest=dest, log=log)
+        return {"task_id": record["task_id"], "source": items[0][:200], "provider": self.id,
+                "model": record.get("model", ""), "resumed": True}
+
     # ---------------------------------------------------------------- image
     def generate_image(self, task: ImageTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,

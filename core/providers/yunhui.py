@@ -285,7 +285,16 @@ class YunhuiProvider(Provider):
 
         task_id = extract_task_id(data)
         url = extract_video_url(data)
+        return self._collect(task_id, url, dest, model, log=log, cancel=cancel,
+                             poll_interval=poll_interval, poll_timeout=poll_timeout)
 
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=5, poll_timeout=2400):
+        got = self._collect(record["task_id"], "", dest, record.get("model", ""), log=log,
+                            cancel=cancel, poll_interval=poll_interval, poll_timeout=poll_timeout)
+        return dict(got, resumed=True)
+
+    def _collect(self, task_id, url, dest, model, *, log, cancel, poll_interval, poll_timeout):
+        """查询（必要时走 /content）并下载。生成和续查共用。"""
         if not url:
             if not task_id:
                 raise ApiError(f"提交没返回任务 ID: {str(data)[:300]}")

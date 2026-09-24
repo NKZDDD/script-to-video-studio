@@ -302,7 +302,7 @@ class WiringTests(unittest.TestCase):
         from core import produce as P
         src = inspect.getsource(P.make_video_worker)
         self.assertIn("accounts.configure(pid", src)
-        self.assertIn("pool.slot(log=log, cancel=cancel)", src)
+        self.assertIn("pool.slot(log=log, cancel=cancel", src)
         self.assertIn("accounts.bump(pid", src)
 
     def test_each_task_builds_its_own_provider(self):
@@ -319,7 +319,7 @@ class WiringTests(unittest.TestCase):
         src = inspect.getsource(P.make_video_worker)
         # generate dispatches either direct Agent production or legacy rewriting;
         # the account counter must still run only after generation succeeds.
-        i = src.index("meta = generate(\n                    lambda pr: _go(mine")
+        i = src.index("meta = _deliver(\n                    pj, task, out, mine")
         self.assertLess(i, src.index("accounts.bump(pid"))
 
     def test_the_ledger_records_which_account_paid(self):

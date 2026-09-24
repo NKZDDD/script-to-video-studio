@@ -62,6 +62,7 @@ from typing import Callable, Optional
 
 from ..apiutil import (DONE_STATES, FAIL_STATES, RUNNING_STATES, TASK_FATAL, ApiError,
                        extract_image_items, task_failed)
+from .. import submitted
 from .base import ImageTask, Provider, VideoTask
 
 UPLOAD_MAX_MB = 210
@@ -544,10 +545,20 @@ class JulunProvider(Provider):
             task_id = str(data.get("task_id") or data.get("id") or "")
         if not task_id:
             raise ApiError(f"提交没返回任务 ID：{str(data)[:300]}")
+        submitted.remember(task_id, custom="julun")
 
         url = self._poll(task_id, poll_interval, poll_timeout, log=log, cancel=cancel)
         self.session.save_item(url, dest, log=log)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
+
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=6, poll_timeout=1800):
+        if (record.get("resume") or {}).get("custom") != "julun":
+            return super().resume(record, dest, log=log, cancel=cancel,
+                                  poll_interval=poll_interval, poll_timeout=poll_timeout)
+        url = self._poll(record["task_id"], poll_interval, poll_timeout, log=log, cancel=cancel)
+        self.session.save_item(url, dest, log=log)
+        return {"task_id": record["task_id"], "source": url, "provider": self.id,
+                "model": record.get("model", ""), "resumed": True}
 
     def _poll(self, task_id: str, interval: int, timeout: int, *, log, cancel=None) -> str:
         """兼容顶层和 data 包装；终态以 status 为准，不等待 progress 到 100。"""

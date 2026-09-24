@@ -38,6 +38,7 @@ from urllib.parse import unquote, urlparse
 
 import requests
 
+from .. import submitted
 from ..apiutil import ApiError, _atomic_output
 from .base import Provider, VideoTask
 
@@ -571,10 +572,17 @@ class HvtaldProvider(Provider):
                            f"（检查 deviceId/token，以及线路是否还有余量）")
         aid = str(data.get("actionId") or aid)
         log(f"HVTALD 已插入任务：{data.get('msg', '')} actionId={aid}")
+        submitted.remember(aid, custom="hvtald")
 
         got = self._wait(aid, poll_interval, poll_timeout, log=log, cancel=cancel)
         self._download(got, dest)
         return {"task_id": aid, "source": got, "provider": self.id, "model": "即梦国际版"}
+
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=30, poll_timeout=1800):
+        got = self._wait(record["task_id"], poll_interval, poll_timeout, log=log, cancel=cancel)
+        self._download(got, dest)
+        return {"task_id": record["task_id"], "source": got, "provider": self.id,
+                "model": "即梦国际版", "resumed": True}
 
     def _wait(self, aid: str, interval: int, timeout: int, *, log, cancel=None) -> str:
         """回调用不上时的取片方式：轮询 outs/ 找以 actionId 开头的 mp4。

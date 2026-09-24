@@ -18,6 +18,11 @@ import requests
 from core.apiutil import ApiError, BATCH_FATAL, HttpSession, RETRYABLE, TASK_FATAL, classify
 from core.providers.base import Provider
 
+try:
+    from core import submitted
+except ImportError:  # 作为外挂装进没有任务号记录的旧版 Studio，只用 failures.json 那条路
+    submitted = None
+
 RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]
 MODEL_OPTIONS = {
     "minimax-h3-768-933": dict(durations=list(range(4, 16)), ratios=RATIOS,
@@ -271,12 +276,18 @@ class HongniaoProvider(Provider):
         return self._follow(task_id, data, dest, body["model"], log, cancel,
                             poll_interval, poll_timeout)
 
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=5, poll_timeout=2400):
+        return dict(self._follow(record["task_id"], None, dest, record.get("model", ""), log, cancel,
+                                 poll_interval, poll_timeout), resumed=True)
+
     def _follow(self, task_id, data, dest, model, log, cancel, poll_interval, poll_timeout):
         """查询同一个任务直到落盘。data 为 None 时先查一次（续查旧任务）。
 
         会中断查询的报错都带上「红鸟任务 <ID>」原文：failures.json 只留这一句，
         丢了任务号，下次重跑就会重新提交、再扣一次费。
         """
+        if submitted:
+            submitted.remember(task_id, custom="hongniao")
         try:
             return self._poll(task_id, data, dest, model, log, cancel,
                               poll_interval, poll_timeout)
@@ -288,8 +299,10 @@ class HongniaoProvider(Provider):
                                "重跑这一段会继续查询它", kind=TASK_FATAL) from exc
             status, code = getattr(exc, "status", 0), getattr(exc, "err_code", "")
             if status == 404:
-                raise ApiError(f"红鸟查询不到原任务 {task_id}（{exc}），重跑这一段将重新提交",
-                               kind=TASK_FATAL, err_code=code) from exc
+                gone = ApiError(f"红鸟查询不到原任务 {task_id}（{exc}），重跑这一段将重新提交",
+                                kind=TASK_FATAL, err_code=code)
+                gone.task_finished = True
+                raise gone from exc
             raise ApiError(f"红鸟任务 {task_id} 查询中断：{exc}", status=status,
                            kind=exc.kind, err_code=code) from exc
 
@@ -313,8 +326,10 @@ class HongniaoProvider(Provider):
                 error = data.get("error") or {}
                 message = error.get("message", "生成失败") if isinstance(error, dict) else str(error)
                 code = str(error.get("code") or "generation_failed") if isinstance(error, dict) else "generation_failed"
-                raise ApiError(f"红鸟任务 {task_id} 失败：{message}".replace(self.session.api_key, "[已隐藏]"),
-                               kind=TASK_FATAL, err_code=code)
+                failed = ApiError(f"红鸟任务 {task_id} 失败：{message}".replace(self.session.api_key, "[已隐藏]"),
+                                  kind=TASK_FATAL, err_code=code)
+                failed.task_finished = True
+                raise failed
             if status == "completed":
                 result = data.get("result") or {}
                 url = data.get("video_url") or (result.get("video_url") if isinstance(result, dict) else "")

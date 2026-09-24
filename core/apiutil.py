@@ -16,6 +16,8 @@ from typing import Any, Optional
 
 import requests
 
+from . import submitted
+
 # 完成词。**多收几个同义词是有价值的**，不只是靠下面那支兜底：
 # 认出「完成」之后还有一步 —— 完成了但响应里没给地址时，会去打
 # `content_path_tpl` 那个下载端点；而走兜底那支是拿不到这一步的。
@@ -370,7 +372,9 @@ def task_failed(data: Any) -> "ApiError":
         code = ""
     head = msg or json.dumps(data, ensure_ascii=False)[:400]
     tail = f"（服务商错误码：{code}）" if code else ""
-    return ApiError(f"任务失败：{head}{tail}", 0, err_code=code)
+    exc = ApiError(f"任务失败：{head}{tail}", 0, err_code=code)
+    exc.task_finished = True
+    return exc
 
 
 def extract_video_url(data: Any) -> str:
@@ -1030,6 +1034,8 @@ class HttpSession:
     def poll(self, path_tpl: str, task_id: str, *, picker, interval: int = 8,
              timeout: int = 1800, content_path_tpl: str = "", log=print, cancel=None) -> Any:
         """轮询直到完成。picker(data) 提取结果；cancel() 返回 True 时中止。"""
+        submitted.remember(task_id, path=path_tpl, content=content_path_tpl,
+                           picker=getattr(picker, "__name__", ""))
         start, last_status = time.time(), ""
         # 连续同样失败的计数。**查询一直报错时别拖满超时** ——
         # 端点或参数不对是每次都一样的错，等 30 分钟不会等出不同结果，
@@ -1045,12 +1051,15 @@ class HttpSession:
             except ApiError as exc:
                 fails += 1
                 if str(exc) == last_fail and fails >= 5:
-                    raise ApiError(
+                    stop = ApiError(
                         f"查询任务连续 {fails} 次同样失败，不再等下去：{exc}"
                         f"（任务 {task_id} 可能在服务商那边已经跑完了 —— "
                         f"这类错每次都一样，多半是查询端点或参数不对，"
                         f"等满 {timeout} 秒也不会变）",
-                        status=0, kind=TASK_FATAL) from exc
+                        status=0, kind=TASK_FATAL)
+                    # 连续 404 = 服务商那边没有这条任务，续查不会再有结果。
+                    stop.task_finished = getattr(exc, "status", 0) == 404
+                    raise stop from exc
                 last_fail = str(exc)
                 log(f"轮询错误(继续，第 {fails} 次): {exc}")
                 time.sleep(interval)

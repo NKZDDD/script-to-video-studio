@@ -32,6 +32,7 @@ from typing import Callable, Optional
 
 from ..apiutil import (DONE_STATES, FAIL_STATES, RUNNING_STATES, ApiError,
                        extract_image_items, extract_task_id, extract_video_url)
+from .. import submitted
 from .base import ImageTask, Provider, VideoTask
 
 # --- 模型清单（文档名在前，pricing 实拉名在后）-----------------------------
@@ -291,10 +292,21 @@ class HaomanjuProvider(Provider):
         if not url:
             if not task_id:
                 raise ApiError(f"提交没返回任务 ID：{str(data)[:300]}")
+            submitted.remember(task_id, custom="omni")
             url = self._poll_generations(task_id, poll_interval, poll_timeout,
                                          log=log, cancel=cancel)
         self.session.save_item(url, dest)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
+
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=10, poll_timeout=2400):
+        if (record.get("resume") or {}).get("custom") != "omni":
+            return super().resume(record, dest, log=log, cancel=cancel,
+                                  poll_interval=poll_interval, poll_timeout=poll_timeout)
+        url = self._poll_generations(record["task_id"], poll_interval, poll_timeout,
+                                     log=log, cancel=cancel)
+        self.session.save_item(url, dest)
+        return {"task_id": record["task_id"], "source": url, "provider": self.id,
+                "model": record.get("model", ""), "resumed": True}
 
     def _poll_generations(self, task_id: str, interval: int, timeout: int, *,
                           log, cancel=None) -> str:
@@ -315,7 +327,9 @@ class HaomanjuProvider(Provider):
                 log(f"好漫剧 Omni {task_id}: {status} {inner.get('progress', '')}")
                 last = status
             if status in FAIL_STATES or status == "failure":
-                raise ApiError(f"任务失败：{inner.get('fail_reason') or str(data)[:300]}")
+                failed = ApiError(f"任务失败：{inner.get('fail_reason') or str(data)[:300]}")
+                failed.task_finished = True
+                raise failed
             url = extract_video_url(data)
             # 完成词走整家共用的那张表，别在这儿另写一份三个词的 ——
             # 少收一个同义词就是「平台显示完成、我们等到超时」。
