@@ -854,7 +854,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
             pj, task, out, prov, rec, log=log, cancel=cancel, interval=interval, timeout=timeout,
             meta={"provider": provider_cfg["provider"], "model": model, "identity": ident},
             run=lambda: generate(
-                lambda p: prov.generate_image(
+                lambda p: submitted.new_attempt() or prov.generate_image(
                     ImageTask(prompt=p, refs=refs, size=want, model=model,
                               extra={"resolution": resolution}),
                     out, log=log, cancel=cancel,
@@ -1057,6 +1057,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             f"参考图共×{len(refs)}")
 
         def _go(use, pr):
+            submitted.new_attempt()
             return use.generate_video(
                 VideoTask(prompt=pr, refs=refs, duration=int(p.get("duration", 15)),
                           ratio=want, model=model,

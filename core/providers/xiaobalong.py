@@ -183,7 +183,7 @@ class XiaobalongProvider(Provider):
         # 请求体只能有一个名为 file 的文件字段，不能附带其他表单字段
         data = self.session.request("POST", "/v1/assets/uploads",
                                     files=[("file", (os.path.basename(path), blob, _CTYPES[ext]))],
-                                    retries=1, timeout=900)
+                                    retries=1, timeout=900, submit=False)
         uri = data.get("url", "") if isinstance(data, dict) else ""
         if not uri:
             raise ApiError(f"上传没返回 url: {str(data)[:300]}")

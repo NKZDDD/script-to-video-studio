@@ -39,7 +39,7 @@ from urllib.parse import unquote, urlparse
 import requests
 
 from .. import submitted
-from ..apiutil import ApiError, _atomic_output
+from ..apiutil import ApiError, _atomic_output, never_sent
 from .base import Provider, VideoTask
 
 API_PATH = "/dy/brush/fromApi"
@@ -544,10 +544,17 @@ class HvtaldProvider(Provider):
 
         log(f"HVTALD 投递 actionId={aid} 参考图{len(body['imgs'])}张 prompt={body['prompt'][:40]}…")
         url = self.session.base_url.rstrip("/") + API_PATH
+        # actionId 是本地生成的：投递前就记下，回执丢了也能按它去 outs/ 找成片，不必重投。
+        submitted.remember(aid, custom="hvtald")
         try:
             r = requests.post(url, json=body, timeout=self._timeout)
         except Exception as exc:                            # noqa: BLE001
-            raise ApiError(f"HVTALD 投递发不出去（{url}）：{exc}")
+            if isinstance(exc, requests.RequestException) and never_sent(exc):
+                submitted.discard()
+                raise ApiError(f"HVTALD 投递发不出去（{url}）：{exc}", kind="retryable")
+            raise ApiError(f"HVTALD 投递后没收到回复（{url}）：{exc}。任务可能已经插入；"
+                           f"下次生产会按 actionId={aid} 去 outs/ 找成片，不会重新投递",
+                           kind="task_fatal", err_code="submit_uncertain")
         # **别直接 r.json()。** 网关这一刻没起来、被前置拦了、或者返回
         # 一个 HTML 页面时，抛出来的是
         #   Expecting value: line 1 column 1 (char 0)
@@ -559,15 +566,22 @@ class HvtaldProvider(Provider):
             data = r.json()
         except Exception:                                    # noqa: BLE001
             head = raw[:300].replace(chr(10), " ")
+            # 4xx（地址填错回了登录页之类）肯定没插入；5xx 或 200 空正文说明请求到了，可能已经插入。
+            unsure = r.status_code >= 500 or r.status_code < 300
+            if not unsure:
+                submitted.discard()
             raise ApiError(
                 f"HVTALD 投递回了非 JSON（{url}）：HTTP {r.status_code}，"
                 f"正文前 300 字：{head or '（空的）'}" + chr(10)
-                + ("（200 + 空正文：多半是网关这一刻没起来，稍后重来）"
+                + ("（200 + 空正文：多半是网关这一刻没起来）"
                    if r.status_code == 200 and not raw
                    else "（看状态码：502/504 是网关挂了；回 HTML 多半是"
-                        "base_url 填错了，填的不是接口地址）"),
-                status=r.status_code, kind="retryable")
+                        "base_url 填错了，填的不是接口地址）")
+                + (f"。不确定任务有没有插入，不自动重投；下次生产会按 actionId={aid} 去 outs/ 找成片"
+                   if unsure else ""),
+                status=r.status_code, kind="task_fatal", err_code="submit_uncertain" if unsure else "")
         if int(data.get("code", 0)) != 200:
+            submitted.discard()
             raise ApiError(f"HVTALD 投递被拒：{str(data)[:300]}"
                            f"（检查 deviceId/token，以及线路是否还有余量）")
         aid = str(data.get("actionId") or aid)

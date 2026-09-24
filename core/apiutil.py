@@ -351,6 +351,28 @@ def _dig(node: Any, keys: tuple, depth: int = 4) -> str:
     return ""
 
 
+def never_sent(exc: BaseException) -> bool:
+    """这个网络错误能不能确定请求根本没到服务商（没连上、域名解析失败、握手失败）。
+
+    读超时、连接中途断开、回了 200 但正文不是 JSON，都说明服务商已经收到了 ——
+    对提交来说，这时它可能已经建好任务、开始计费。
+    """
+    if isinstance(exc, (requests.ConnectTimeout, requests.exceptions.SSLError,
+                        requests.exceptions.ProxyError)):
+        return True
+    if isinstance(exc, requests.ConnectionError) and not isinstance(exc, requests.Timeout):
+        text = repr(exc)
+        return any(s in text for s in ("NewConnectionError", "NameResolutionError",
+                                       "Failed to establish a new connection", "getaddrinfo"))
+    return False
+
+
+def submit_uncertain(why: str, status: int = 0) -> "ApiError":
+    return ApiError(f"提交后没有收到服务商的明确回复（{why}）。服务商那边可能已经建好任务、开始计费；"
+                    f"为避免重复扣费，这条不自动重发。请先到服务商后台核对：已经生成的取回放到输出位置，"
+                    f"确认没有生成再重跑这一段。", status, TASK_FATAL, err_code="submit_uncertain")
+
+
 def task_failed(data: Any) -> "ApiError":
     """轮询到「任务失败」→ 一个**保留了结构**的异常。
 
@@ -986,9 +1008,15 @@ class HttpSession:
 
     def request(self, method: str, path: str, *, json_body: Any = None, params: Any = None,
                 files: Any = None, raw_body: Any = None, headers: Optional[dict] = None,
-                retries: int = 3, timeout: Optional[int] = None) -> Any:
+                retries: int = 3, timeout: Optional[int] = None,
+                submit: Optional[bool] = None) -> Any:
+        """`submit` 默认按上下文判断：生产一个输出、还没拿到任务号时的 POST 就是提交。
+        提交之前的上传之类要显式传 `submit=False`，否则上传超时也会被当成提交不确定。
+        """
         url = path if path.startswith("http") else self.base_url + path
         last: Optional[Exception] = None
+        if submit is None:
+            submit = method.upper() == "POST" and submitted.submitting()
         for attempt in range(max(1, retries)):
             try:
                 request_headers = self._headers(multipart=bool(files))
@@ -1007,6 +1035,8 @@ class HttpSession:
                     # 账户级问题（余额/密钥）立刻抛，不浪费重试次数
                     if kind == BATCH_FATAL:
                         raise ApiError(f"HTTP {resp.status_code}: {body}", resp.status_code, kind)
+                    if kind == RETRYABLE and submit and resp.status_code != 429:
+                        raise submit_uncertain(f"HTTP {resp.status_code}：{body[:200]}", resp.status_code)
                     if kind == RETRYABLE and attempt < retries - 1:
                         wait = _retry_after(resp) or (2 ** attempt)
                         time.sleep(min(wait, 30))
@@ -1025,6 +1055,8 @@ class HttpSession:
                 raise
             except requests.RequestException as exc:
                 last = exc
+                if submit and not never_sent(exc):
+                    raise submit_uncertain(f"{type(exc).__name__}：{exc}") from exc
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)
                     continue

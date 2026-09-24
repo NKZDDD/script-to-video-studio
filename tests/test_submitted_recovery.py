@@ -175,6 +175,78 @@ def test_gate_failure_is_a_verdict_and_resume_keeps_model(tmp_path, monkeypatch)
     assert seen == {"model": "seedance-2.5", "tid": "g-1"}
 
 
+class _Resp:
+    def __init__(self, status, body=b'{"id":"t1"}'):
+        self.status_code, self.content, self.encoding = status, body, "utf-8"
+        self.text, self.headers = body.decode(), {}
+
+    def json(self):
+        return __import__("json").loads(self.content)
+
+
+def _session(monkeypatch, outcomes):
+    """真实的 HttpSession.request；requests.request 依次给出 outcomes（异常或状态码）。"""
+    import requests
+    calls = []
+
+    def fake(method, url, **kw):
+        calls.append(method)
+        got = outcomes[min(len(calls), len(outcomes)) - 1]
+        if isinstance(got, Exception):
+            raise got
+        return _Resp(got)
+
+    monkeypatch.setattr(apiutil.requests, "request", fake)
+    monkeypatch.setattr(apiutil.time, "sleep", lambda s: None)
+    return apiutil.HttpSession("k", "https://example.invalid"), calls, requests
+
+
+@pytest.mark.parametrize("failure", ["read_timeout", "disconnected", "gateway"])
+def test_uncertain_submission_is_not_resent(tmp_path, monkeypatch, failure):
+    import requests, urllib3
+    outcome = {"read_timeout": requests.ReadTimeout("read timed out"),
+               "disconnected": requests.ConnectionError(urllib3.exceptions.ProtocolError(
+                   "Connection aborted.", ConnectionResetError())),
+               "gateway": 502}[failure]
+    s, calls, _ = _session(monkeypatch, [outcome, 200])
+    with pytest.raises(ApiError) as caught:
+        _tracked(tmp_path, lambda: s.request("POST", "/v1/videos", json_body={}))
+    assert calls == ["POST"] and caught.value.err_code == "submit_uncertain"
+    assert caught.value.kind == apiutil.TASK_FATAL
+    from core import diagnose
+    d = diagnose.build(caught.value)
+    assert d["code"] == "SUBMIT_UNCERTAIN" and not diagnose.should_failover(d)
+
+
+@pytest.mark.parametrize("first", ["never_connected", 429])
+def test_submission_that_never_reached_the_provider_is_retried(tmp_path, monkeypatch, first):
+    import requests
+    outcome = requests.ConnectionError("Failed to establish a new connection: [WinError 10061]") \
+        if first == "never_connected" else first
+    s, calls, _ = _session(monkeypatch, [outcome, 200])
+    assert _tracked(tmp_path, lambda: s.request("POST", "/v1/videos", json_body={})) == {"id": "t1"}
+    assert calls == ["POST", "POST"]
+
+
+def test_only_the_submission_itself_is_protected(tmp_path, monkeypatch):
+    import requests
+    s, calls, _ = _session(monkeypatch, [requests.ReadTimeout("x"), 200])
+    assert s.request("POST", "/v1/videos") == {"id": "t1"}            # 生产以外照旧重试
+    calls.clear()
+    assert _tracked(tmp_path, lambda: s.request("POST", "/upload", submit=False)) == {"id": "t1"}
+    calls.clear()
+
+    def after_task_id():
+        submitted.remember("t1", path="/x/{id}", picker="extract_video_url")
+        polled = s.request("POST", "/get_result")                       # Gate 用 POST 查询
+        calls.clear()
+        submitted.new_attempt()                                           # 改写提示词后再提交
+        with pytest.raises(ApiError):
+            s.request("POST", "/v1/videos")
+        return polled
+    assert _tracked(tmp_path, after_task_id) == {"id": "t1"} and calls == ["POST"]
+
+
 def test_agent_view_shows_pending_task_and_it_can_be_dropped(tmp_path, monkeypatch):
     import copy, os
     from core import agent_projects as A

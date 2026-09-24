@@ -54,8 +54,33 @@ def remember(task_id, **resume) -> None:
     cur = _current.get()
     if not cur or not task_id:
         return
+    cur["remembered"] = True
     write_json(cur["path"], {**cur["meta"], "task_id": str(task_id), "resume": resume,
                              "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+
+
+def submitting() -> bool:
+    """正在生产一个输出、还没拿到任务号：这时发出的 POST 就是提交（同步出图的整个请求也是）。"""
+    cur = _current.get()
+    return bool(cur) and not cur.get("remembered")
+
+
+def new_attempt() -> None:
+    """又要提交一次（审核被拦后改写提示词重发）：之前的任务号不再代表「已经提交过」。"""
+    cur = _current.get()
+    if cur:
+        cur["remembered"] = False
+
+
+def discard() -> None:
+    """明确没提交成功（被拒、根本没发出去）：去掉先记下的任务号。"""
+    cur = _current.get()
+    if cur:
+        cur["remembered"] = False
+        try:
+            os.remove(cur["path"])
+        except FileNotFoundError:
+            pass
 
 
 def load(root: str, output: str) -> Optional[dict]:

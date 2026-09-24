@@ -582,9 +582,16 @@ class SubmitNonJsonTests(unittest.TestCase):
         exc = self._submit(200, "<!doctype html><title>登录</title>")
         self.assertIn("base_url", str(exc))
 
-    def test_it_is_retryable_not_fatal(self):
-        """★ 网关抖动换个时间就好 —— 判死这一条等于把能救的活丢掉。"""
-        self.assertEqual(self._submit(502, "x").kind, "retryable")
+    def test_gateway_error_is_followed_up_not_resubmitted(self):
+        """★ 502 时任务可能已经插入。重投会重复扣费；actionId 已记下，下次按它去 outs/ 找。"""
+        exc = self._submit(502, "x")
+        self.assertEqual((exc.kind, exc.err_code), ("task_fatal", "submit_uncertain"))
+        self.assertIn("actionId", str(exc))
+
+    def test_client_error_means_nothing_was_inserted(self):
+        exc = self._submit(404, "<html>not found</html>")
+        self.assertNotEqual(exc.err_code, "submit_uncertain")
+        self.assertIn("base_url", str(exc))
 
     def test_the_bare_parse_error_is_gone(self):
         """★ 这一句本身就是那个「什么都没说」的报错。"""

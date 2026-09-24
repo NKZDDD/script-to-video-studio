@@ -858,6 +858,19 @@ CATALOG = {
         "resume": "查清楚之后点「开始」重试",
         "resumable": True, "scope": "task", "level": "error",
     },
+    "SUBMIT_UNCERTAIN": {
+        "title": "提交后没收到服务商的回复，可能已经在计费",
+        "why": "提交请求已经发出去了，但回复没收到（读超时、连接中途断开，或者网关报 5xx）。"
+               "服务商那边可能已经建好任务、开始扣费，只是回执丢了，所以拿不到任务号。"
+               "自动重发会在服务商那边再建一个任务、再扣一次钱，所以这条不自动重试。",
+        "where": "服务商后台的任务 / 订单列表（按提交时间找这一条）",
+        "fix": ["到服务商后台，按提交时间核对这一条有没有建出任务",
+                "已经生成了的：下载下来放到这一段的输出位置，下次生产会自动跳过",
+                "确认没有生成的：直接重跑这一段",
+                "如果经常出现，多半是线路不稳，或者这家提交接口响应慢，可以换一条线路"],
+        "resume": "核对清楚之后，回生产页重跑这一段；已经放回输出位置的会被跳过。",
+        "resumable": True, "scope": "task", "level": "error",
+    },
 }
 
 # 原始报错 → 错误码（按顺序匹配，先命中先用）
@@ -985,6 +998,7 @@ _BY_CODE = {
     "rate_limit_exceeded": "RATE_LIMITED",
     "model_not_found": "MODEL_NOT_FOUND",
     "invalid_prompt": "PROMPT_INVALID",
+    "submit_uncertain": "SUBMIT_UNCERTAIN",
 }
 
 
@@ -1122,6 +1136,8 @@ NO_FAILOVER_CODES = {
     # 提示词里没说清哪张图是谁。换一家服务商收到的还是同一段提示词，
     # 只会把同一个错误重复一遍，还多花一次钱。
     "REF_MAP_INCOMPLETE",
+    # 可能已经在这一家建好任务、开始计费；换一家等于同一段再生成一次。
+    "SUBMIT_UNCERTAIN",
 }
 
 
