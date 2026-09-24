@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 import time
 
-from core import agent_handoff as H, agent_projects as A, agent_runtime as R, diagnose, paths, submitted
+from core import agent_handoff as H, agent_projects as A, agent_runtime as R, assemble, diagnose, paths, submitted
 from core.store import Project, list_projects, read_json, write_json, write_text
 
 
@@ -152,6 +152,10 @@ def get(app, path, q):
             raise ValueError("字幕与后期功能包未开启")
         return {"options": agent_post.options(pj), "styles": subtitle.list_styles(),
                 "files": [pj.rel(str(f)) for f in sorted(Path(pj.p("06_成片")).glob("*.mp4")) if "_SUB" not in f.stem]}
+    if path == "/api/agent/assemble-plan":
+        if not cfg.get("agent_features", {}).get("post"):
+            raise ValueError("请先开启成片合成功能包")
+        return assemble.plan(pj, (q.get("episode") or [""])[0])
     if path == "/api/agent/files":
         if (q.get("sub") or [""])[0]:
             A.inside(pj.root, q["sub"][0])
@@ -298,28 +302,20 @@ def post(app, path, body):
     if path == "/api/agent/assemble":
         if not cfg.get("agent_features", {}).get("post"):
             raise ValueError("请先开启成片合成功能包")
-        from core import probe
-        import subprocess
-        ep = str(body.get("episode") or "")
-        tasks = [t for t in A.task_rows(pj.tasks(), legacy=True) if t["kind"] == "video" and t.get("episode", "") == ep]
-        if not tasks or any(not R.valid_output(str(A.inside(pj.root, t["output"]))) for t in tasks):
-            raise ValueError("这一集的视频尚未完整生成，不能合成缺段成片")
-        # Contract order is the timeline order; do not infer it from filenames.
-        safe_ep = "".join(c for c in ep if c.isalnum() or c in "-_") or "EP01"
-        rel = "06_成片/" + safe_ep + time.strftime("_MASTER_%Y%m%d_%H%M%S_") + str(time.time_ns())[-6:] + ".mp4"
-        concat = pj.p("07_检查与记录", "concat-" + str(time.time_ns()) + ".txt")
-        lines = ["file '" + str(A.inside(pj.root, t["output"])).replace("\\", "/").replace("'", "'\\''") + "'" for t in tasks]
-        write_text(concat, "\n".join(lines))
-        output = A.inside(pj.root, rel)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        ff = probe.find_ffmpeg()
-        if not ff:
-            raise ValueError("未找到 ffmpeg")
-        r = subprocess.run([ff, "-nostdin", "-v", "error", "-f", "concat", "-safe", "0", "-i", concat, "-c", "copy", str(output)],
-                           capture_output=True, timeout=600, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if r.returncode:
-            raise ValueError("成片合成失败：" + r.stderr.decode("utf-8", errors="replace")[-1000:])
-        return {"ok": True, "rel": rel}
+        items = body.get("items")
+        if items is not None and (not isinstance(items, list) or any(not isinstance(x, str) for x in items)):
+            raise ValueError("拼接清单格式不对，请刷新后重试")
+        return assemble.build(pj, str(body.get("episode") or ""), items)
+    if path == "/api/agent/assemble/upload":
+        try:
+            raw = base64.b64decode(body.get("content_b64") or "", validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("上传的文件内容损坏，请重新选择")
+        return assemble.save_insert(pj, str(body.get("filename") or ""), raw)
+    if path == "/api/agent/reroll":
+        if app.JOBS.list(project_root=pj.root, active_only=True):
+            raise ValueError("本项目正在生产，请等这一批结束再重新抽卡")
+        return assemble.reroll(pj, str(body.get("key") or ""))
     if path == "/api/agent/subtitle":
         if not cfg.get("agent_features", {}).get("post"):
             raise ValueError("字幕与后期功能包未开启")

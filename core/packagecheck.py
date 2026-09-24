@@ -19,6 +19,7 @@ from typing import Callable
 RUNTIME_MODULES = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore",
                    "videocaptioner.cli.main", "audioop", "psutil",
                    "core.agent_projects", "core.agent_runtime", "core.agent_post", "core.agent_handoff",
+                   "core.assemble", "core.submitted",
                    "server.agent_api"]
 
 

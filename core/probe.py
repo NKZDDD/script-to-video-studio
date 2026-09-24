@@ -220,6 +220,36 @@ def video_size(path: str) -> Optional[tuple]:
     return None
 
 
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+_FPS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*fps")
+
+
+def media_info(path: str) -> Optional[dict]:
+    """拼接统一规格要用的：宽高、帧率、时长、有没有音轨。读 `ffmpeg -i` 的流信息。"""
+    ff = find_ffmpeg()
+    if not ff or not os.path.isfile(path):
+        return None
+    try:
+        err = run_text([ff, "-hide_banner", "-i", path]).stderr or ""
+    except (OSError, subprocess.SubprocessError):
+        return None
+    info = {"width": 0, "height": 0, "fps": 0.0, "duration": 0.0, "audio": False}
+    m = _DURATION_RE.search(err)
+    if m:
+        info["duration"] = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    for line in err.splitlines():
+        if "Video:" in line and not info["width"]:
+            clean = re.sub(r"\[[^\]]*\]", "", line)
+            size, fps = _SIZE_RE.search(clean), _FPS_RE.search(clean)
+            if size:
+                info["width"], info["height"] = int(size.group(1)), int(size.group(2))
+            if fps:
+                info["fps"] = float(fps.group(1))
+        elif "Audio:" in line:
+            info["audio"] = True
+    return info if info["width"] else None
+
+
 # ---------------------------------------------------------------- 比对
 def as_ratio(want: str) -> Optional[float]:
     """把 '9:16' 或 '1024x1536' 都换算成一个宽高比数值。"""

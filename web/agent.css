@@ -83,5 +83,12 @@ html{scroll-padding-top:calc(var(--studio-header-height,90px) + var(--studio-doc
 #studio-agent-prototype .rv-file-field{display:flex;flex-direction:column;gap:7px;min-width:0;font-weight:500;margin-top:12px}
 #studio-agent-prototype .rv-file-field>small{font-weight:400}
 #studio-agent-prototype .rv-provider-choice{margin-bottom:19px}
+#studio-agent-prototype .rv-asm{list-style:decimal;padding-left:24px;margin:12px 0;max-height:46vh;overflow:auto}
+#studio-agent-prototype .rv-asm li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;align-items:center;padding:8px 6px;border-bottom:1px solid var(--rs-line)}
+#studio-agent-prototype .rv-asm li>small{grid-column:1;overflow-wrap:anywhere}
+#studio-agent-prototype .rv-asm li>.rv-actions{grid-column:2;grid-row:1/3;gap:6px}
+#studio-agent-prototype .rv-asm li>.rv-actions .rv-button{padding:4px 10px}
+#studio-agent-prototype .rv-asm .rv-inline{display:flex;gap:8px;align-items:center}
+#studio-agent-prototype .rv-asm li.rv-off{opacity:.55}
 
 @media(min-width:651px){#studio-agent-prototype .rv-service-row:has([data-setting="image_resolution"]){grid-template-columns:118px minmax(0,1fr) minmax(0,1.6fr) 110px 85px}}
