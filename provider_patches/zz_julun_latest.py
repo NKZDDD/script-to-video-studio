@@ -71,7 +71,7 @@ try:
 except ImportError:
     submitted = None
 
-PATCH_VERSION = "20260928.1"
+PATCH_VERSION = "20260928.2"
 RUNNING_STATES = getattr(_api, "RUNNING_STATES", (
     "queued", "pending", "processing", "in_progress", "in-progress", "inprogress",
     "running", "waiting", "created", "submitted", "start", "starting",
@@ -105,8 +105,8 @@ SPEC = {
          "480p 支持 5/10/15；720p 只有 10 秒"),
     "wan3.0th": ("url_media", (4, 30), ["720p"], R5, 10, 5, 5,
                  "**按秒计费** 0.14 元/秒；音频必须 WAV"),
-    "seedance-2.5-deal": ("url_media", (4, 25), ["480p"], R5, 30, 10, 10,
-                          "音频必须 WAV；公开描述称 30 秒，但 video_api 上限为 25 秒，暂按结构化规格"),
+    "seedance-2.5-deal": ("url_media", (4, 30), ["480p"], R5, 30, 10, 10,
+                          "音频必须 WAV；公开描述称 30 秒，video_api 仍为 25 秒，按用户要求开放到 30 秒"),
     "sd2-c7": ("openai_refs", (5, 15), ["720p"], R6, 9, 0, 0, ""),
     # 2026-09-14 按平台模型卡加进来（原来不在表里，走兜底被改过参数）：
     #   「SD2.5 原生过人脸（无需认证人脸）· 最多 9 张参考图 ·

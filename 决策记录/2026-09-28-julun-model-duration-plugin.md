@@ -36,3 +36,15 @@
 - `git diff --check` 通过；ZIP 完整性及其中插件与源码字节一致性校验通过。
 - 交付：`outputs/julun-update-20260928/Respect-Studio-Julun-20260928.1.zip`，16,537 字节，包含适配器与安装说明，不含 Key/config/项目材料。
 - ZIP SHA-256：`6603ee6839d45e9217b320633d9c31c65c459d21249f3cbadc82f30fb4b53645`。
+
+## 20260928.2：按用户要求将无后缀 deal 放开至 30 秒
+
+用户明确要求：「seedance-2.5-deal 先开放到30秒」。这覆盖上一版优先采用结构化 25 秒上限的取舍。
+
+原因：上一版 SPEC 的 `(4, 25)` 同时生成页面选项并用于 `fit_duration`，因此提交 30 秒会被压成 25 秒。现改为 `(4, 30)`，页面和实际请求同步；最低 4 秒、480p、WAV 及其他媒体参数保持不变。能力备注和说明保留官方描述与结构化数据冲突的事实，明确此次由用户要求放行。
+
+内置及独立外挂版本同时升为 20260928.2。测试验证 deal 的 20/30 秒、全部参考图、结果取回、模型拉取后选项保留，并断言 30 秒不触发时长修正日志。巨轮专项 114 passed in 1.69s。
+
+全量结果：2787 passed、1 failed in 262.80s。唯一失败为 `test_agent_handoff.py::test_revision_not_newer_than_active_is_refused_before_extracting`，`staging.replace(target)` 遇到 Windows WinError 5 拒绝访问，并非时长断言失败。该用例单独复测 1 passed in 1.10s；未为此修改交接包代码。`git diff --check` 通过。
+
+新包 `outputs/julun-update-20260928/Respect-Studio-Julun-20260928.2.zip`，16,576 字节；完整性及插件源码一致性通过。SHA-256：`9920324accb0cf2df891cbfc807f4278edd71fe6eff25ec4c5a1f7a7189d4f01`。不包含密钥，未创建付费生成任务。

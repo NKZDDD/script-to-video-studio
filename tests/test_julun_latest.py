@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PATCH = ROOT / "provider_patches" / "zz_julun_latest.py"
 THIRTY = ["SD 2.0-933", "SD 2.5", "sd2.5", "sd2.5_30",
           "seedance-2.5-720p", "seedance-2.5-pro-480",
-          "seedance-2.5-pro-720", "seedance-2.5-deal-720"]
+          "seedance-2.5-pro-720", "seedance-2.5-deal-720", "seedance-2.5-deal"]
 
 
 @pytest.mark.parametrize("model", THIRTY)
@@ -54,16 +54,16 @@ def test_catalog_refresh_retains_updated_options():
         assert model in VIDEO_MODELS
 
 
-def test_conflicting_deal_spec_uses_structured_25s_and_480p():
+def test_deal_user_override_keeps_30s_and_480p():
     p = JulunProvider()
     opts = p.capabilities()["video"]["model_options"]["seedance-2.5-deal"]
-    assert opts["durations"] == list(range(4, 26))
+    assert opts["durations"] == list(range(4, 31))
     assert opts["resolutions"] == ["480p"]
     said = []
     _, body = p.build_video_body(VideoTask(model="seedance-2.5-deal", prompt="风景", duration=30),
                                  log=said.append)
-    assert body["seconds"] == 25 and body["resolution"] == "480p"
-    assert said and "25" in said[0]
+    assert body["seconds"] == 30 and body["resolution"] == "480p"
+    assert said == []
     with pytest.raises(apiutil.ApiError, match="清晰度"):
         p.build_video_body(VideoTask(model="seedance-2.5-deal", prompt="风景", resolution="720p"))
 
