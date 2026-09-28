@@ -57,11 +57,15 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import time
 from typing import Callable, Optional
+from urllib.parse import urlsplit
+
+import requests
 
 from core import apiutil as _api
-from core.apiutil import (DONE_STATES, FAIL_STATES, TASK_FATAL, ApiError,
+from core.apiutil import (DONE_STATES, FAIL_STATES, TASK_FATAL, ApiError, HttpSession,
                           extract_image_items, task_failed)
 from core.providers.base import ImageTask, Provider, VideoTask
 
@@ -71,7 +75,7 @@ try:
 except ImportError:
     submitted = None
 
-PATCH_VERSION = "20260928.2"
+PATCH_VERSION = "20260928.3"
 RUNNING_STATES = getattr(_api, "RUNNING_STATES", (
     "queued", "pending", "processing", "in_progress", "in-progress", "inprogress",
     "running", "waiting", "created", "submitted", "start", "starting",
@@ -327,6 +331,173 @@ def fit_duration(model: str, want: int, *, log=None) -> int:
     return sec
 
 
+class _JulunSession(HttpSession):
+    """巨轮视频断流后按 64 KiB Range 续传；不改变其他服务商/图片下载。"""
+
+    def save_item(self, item, dest, retries=3, *, log=None, cancel=None):
+        if not str(item).startswith(("http://", "https://")) or not str(dest).lower().endswith(".mp4"):
+            return super().save_item(item, dest, retries=retries, log=log)
+        log = log or (lambda _: None)
+        attempts = max(1, int(retries))
+        folder = os.path.dirname(os.path.abspath(dest))
+        part = None
+        try:
+            os.makedirs(folder, exist_ok=True)
+            fd, part = tempfile.mkstemp(prefix=".julun-", suffix=".mp4", dir=folder)
+            os.close(fd)
+            self._download_video(item, part, attempts, log, cancel)
+            # 不依赖旧 EXE 的私有校验函数；按 MP4 顶层 box 边界检查截断和错误页。
+            self._check_mp4(part)
+            if cancel and cancel():
+                raise ApiError("用户已取消下载，保留已提交任务供下次取回", kind=TASK_FATAL)
+            os.replace(part, dest)
+            log("巨轮视频已完整下载并通过文件检查")
+            return dest
+        except (requests.RequestException, OSError, ValueError, ApiError) as exc:
+            failure = ApiError(
+                f"巨轮结果下载失败：{exc}。已保留服务商任务，不重新生成；稍后继续取回。",
+                kind=TASK_FATAL, err_code="result_download_failed")
+            raise failure from exc
+        finally:
+            if part and os.path.exists(part):
+                os.remove(part)
+
+    @staticmethod
+    def _check_mp4(path):
+        size = os.path.getsize(path)
+        seen = set()
+        with open(path, "rb") as f:
+            pos = 0
+            while pos < size:
+                f.seek(pos)
+                head = f.read(8)
+                if len(head) != 8:
+                    raise ValueError("MP4 文件尾部不完整")
+                length, kind = int.from_bytes(head[:4], "big"), head[4:]
+                header = 8
+                if length == 1:
+                    large = f.read(8)
+                    if len(large) != 8:
+                        raise ValueError("MP4 扩展块头不完整")
+                    length, header = int.from_bytes(large, "big"), 16
+                elif length == 0:
+                    length = size - pos
+                if length < header or pos + length > size:
+                    raise ValueError("MP4 块长度不符，视频尚未完整下载")
+                seen.add(kind)
+                pos += length
+        if not {b"ftyp", b"moov", b"mdat"}.issubset(seen):
+            raise ValueError("返回内容不是完整 MP4 视频（缺少 ftyp/moov/mdat）")
+
+    def _download_video(self, url, part, attempts, log, cancel):
+        src, base = urlsplit(url), urlsplit(self.base_url)
+        # 仅本站下载入口带 Key。公网存储即便返回 403，也不能把巨轮 Key 发送过去。
+        headers = {"Accept": "*/*", "Accept-Encoding": "identity",
+                   "User-Agent": "Respect-Studio/Julun-Download"}
+        if (src.scheme, src.hostname, src.port) == (base.scheme, base.hostname, base.port):
+            headers.update(self._download_headers())
+        offset, total, failures, restarts = 0, None, 0, 0
+        validator = None
+        ranged = False
+        deadline = time.monotonic() + max(60, self.timeout)
+        last_report = time.monotonic()
+        log("巨轮：开始下载视频，连接中断时自动分段续传")
+        with requests.Session() as http, open(part, "w+b") as f:
+            while True:
+                if cancel and cancel():
+                    raise ApiError("用户已取消下载，保留已提交任务供下次取回", kind=TASK_FATAL)
+                if time.monotonic() >= deadline:
+                    raise ValueError("下载超过等待上限")
+                request_headers = dict(headers)
+                # 无 ETag 的巨轮源站也需校对重叠字节，避免直接拼接不同内容。
+                overlap = min(offset, 4096) if ranged else 0
+                start = offset - overlap
+                end = min(start + 65536, total) - 1 if ranged else None
+                if ranged:
+                    request_headers["Range"] = f"bytes={start}-{end}"
+                    if validator:
+                        request_headers["If-Range"] = validator[1]
+                try:
+                    with http.get(url, headers=request_headers, proxies=self._proxies(),
+                                  timeout=(min(15, self.timeout), min(30, self.timeout)), stream=True) as r:
+                        r.raise_for_status()
+                        encoding = (r.headers.get("Content-Encoding") or "identity").lower()
+                        if encoding != "identity":
+                            raise ValueError("视频下载响应经过压缩，无法核对字节偏移")
+                        if r.status_code == 206:
+                            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", r.headers.get("Content-Range", ""))
+                            if not ranged or not match:
+                                raise ValueError("服务商返回了无效的 Content-Range")
+                            lo, hi, whole = map(int, match.groups())
+                            if (lo, hi, whole) != (start, end, total):
+                                raise ValueError("续传偏移或视频总大小发生变化，已停止拼接")
+                            if validator and r.headers.get(validator[0]) != validator[1]:
+                                raise ValueError("续传时视频版本标识变化，已停止拼接")
+                            block = bytearray()
+                            for chunk in r.iter_content(16384):
+                                if cancel and cancel():
+                                    raise ApiError("用户已取消下载，保留已提交任务供下次取回", kind=TASK_FATAL)
+                                if time.monotonic() >= deadline:
+                                    raise ValueError("下载超过等待上限")
+                                block.extend(chunk)
+                                if len(block) > hi - lo + 1:
+                                    raise ValueError("续传返回的字节数超过声明范围")
+                            if len(block) != hi - lo + 1:
+                                raise requests.exceptions.ChunkedEncodingError("续传分段未下载完整")
+                            f.seek(start)
+                            if f.read(overlap) != block[:overlap]:
+                                raise ValueError("续传重叠部分不一致，视频内容可能发生变化")
+                            f.seek(offset)
+                            f.write(block[overlap:])
+                            offset += len(block) - overlap
+                        elif r.status_code == 200:
+                            if ranged:
+                                restarts += 1
+                                if restarts >= attempts:
+                                    raise ValueError("服务商未接受 Range 续传，整文件下载仍失败")
+                                log("服务商未返回分段内容，重新校验并从头下载，不拼接旧数据")
+                            f.seek(0)
+                            f.truncate()
+                            offset = 0
+                            total = int(r.headers.get("Content-Length") or 0) or None
+                            if total is not None and total < 0:
+                                raise ValueError("视频总大小无效")
+                            tag = r.headers.get("ETag")
+                            modified = r.headers.get("Last-Modified")
+                            validator = (("ETag", tag) if tag and not tag.startswith("W/") else
+                                         ("Last-Modified", modified) if modified else None)
+                            for chunk in r.iter_content(65536):
+                                if cancel and cancel():
+                                    raise ApiError("用户已取消下载，保留已提交任务供下次取回", kind=TASK_FATAL)
+                                if time.monotonic() >= deadline:
+                                    raise ValueError("下载超过等待上限")
+                                f.write(chunk)
+                                offset += len(chunk)
+                                if total is not None and offset > total:
+                                    raise ValueError("收到的字节数超过视频总大小")
+                            if total is not None and offset < total:
+                                raise requests.exceptions.ChunkedEncodingError("整文件响应提前结束")
+                        else:
+                            raise ValueError(f"无法使用下载响应 HTTP {r.status_code}")
+                    failures = 0
+                    if total is None or offset == total:
+                        f.flush()
+                        return
+                    ranged = True
+                    if time.monotonic() - last_report >= 5:
+                        log(f"巨轮正在续传：{offset / 1048576:.1f} / {total / 1048576:.1f} MB")
+                        last_report = time.monotonic()
+                except requests.RequestException as exc:
+                    failures += 1
+                    status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
+                    if failures >= attempts or (400 <= status < 500 and status not in (408, 425, 429)):
+                        raise ValueError(f"下载连接失败（{type(exc).__name__}，HTTP {status or '无'}）") from exc
+                    ranged = total is not None and offset < total
+                    log(f"巨轮下载中断，已接收 {offset / 1048576:.2f} MB，"
+                        + ("从断点开始分段续传" if ranged else "重新下载同一结果"))
+                    time.sleep(min(failures, 2))
+
+
 class JulunProvider(Provider):
     id = "julun"
     name = "巨轮 julun.cc"
@@ -336,6 +507,9 @@ class JulunProvider(Provider):
     # 视频参考素材**必须公网可访问**（文档 5.3 通用约束），本机图得先传对象存储，
     # 或用本类的 upload_asset() 换成平台 URL。
     ref_mode = "url"
+
+    def __init__(self, api_key="", base_url="", proxy="", timeout=900):
+        self.session = _JulunSession(api_key, base_url or self.default_base_url, timeout, proxy)
 
     def capabilities(self) -> dict:
         return {
@@ -595,7 +769,7 @@ class JulunProvider(Provider):
             submitted.remember(task_id, custom="julun")
 
         url = self._poll(task_id, poll_interval, poll_timeout, log=log, cancel=cancel)
-        self.session.save_item(url, dest, log=log)
+        self.session.save_item(url, dest, log=log, cancel=cancel)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
 
     def resume(self, record, dest, *, log=print, cancel=None, poll_interval=6, poll_timeout=1800):
@@ -603,7 +777,7 @@ class JulunProvider(Provider):
             return super().resume(record, dest, log=log, cancel=cancel,
                                   poll_interval=poll_interval, poll_timeout=poll_timeout)
         url = self._poll(record["task_id"], poll_interval, poll_timeout, log=log, cancel=cancel)
-        self.session.save_item(url, dest, log=log)
+        self.session.save_item(url, dest, log=log, cancel=cancel)
         return {"task_id": record["task_id"], "source": url, "provider": self.id,
                 "model": record.get("model", ""), "resumed": True}
 
