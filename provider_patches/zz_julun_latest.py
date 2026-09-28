@@ -1,0 +1,687 @@
+# -*- coding: utf-8 -*-
+"""巨轮（julun.cc）。文档：《AI 开放平台接口对接文档》v2.1，2026-08-26。
+
+  · 文本 `/v1/chat/completions`（OpenAI 兼容，走 core/llm.py，本类不管）
+  · 图片 `POST /v1/images/generations`（OpenAI 兼容，**同步**）
+  · 视频 异步三步：提交 → 轮询 → 下载
+
+视频**一个服务、五种请求格式**，按模型名分派（见 `SPEC`）：
+
+| 格式 | 形状 |
+|---|---|
+| `metadata` | `metadata:{content[], duration, ratio, resolution}` |
+| `url_media` | `seconds` + `image_urls[]` / `video_urls[]` / `audio_urls[]` |
+| `openai_refs` | `duration` + `aspect_ratio` + `image_refs[]` |
+| `grok` | `duration` + `extra:{aspect_ratio, resolution, reference_images[{url,role}]}` |
+| `simple` | `model` + `prompt` + `seconds`（h3，走 `/v1/video/generations`）|
+| `hm` | `seconds` + `ratio` + `resolution` + `images[]` / `videos[]` / `audios[]` |
+
+⚠ 对着文档才知道的几个坑：
+
+1. **模型名带空格、中文、全角括号** —— `grok-imagine-video-1.5（按次）` 是**全角**的，
+   `Quality V4 · 480p/720p (可@图/视频/音频)` 带间隔号。照抄，别手打。
+2. **grok 不认 `seconds`**，只认 `duration`；比例分辨率必须在 `extra` 里。
+3. 2026-09-28 公开规格已将 `sd2.5` 改为 4–30 秒；只有旧模型
+   `dubai_sd25_170` 继续按历史文档固定 30 秒。
+4. **查询响应有两种**：旧接口 `{"code":"success","data":{status,progress,result_url}}`，
+   新接口直接在顶层返回 `status` / `result_url` / `error`。
+   状态既有 `IN_PROGRESS`/`SUCCESS`/`FAILURE`，也有 `completed`/`failed`；完成时进度仍可能是 95。
+5. `SD2.0 1080P 933` **至少要 1 张参考图**。
+6. 上传的素材**只保留 72 小时**。
+
+## HM 渠道（`seedance_v2.x` 五个模型，`hm` 格式）
+
+依据《HM Studio（seedance_v2.x）对接文档》。接口地址、鉴权和全站一样，
+但有三件别处没有的事：
+
+1. **参考图必须在 prompt 里 `@Image1` 点名。** 不点名的话上游把图当"首帧/尾帧"，
+   **第 3 张之后直接忽略** —— 片子照出、少用几张图、一处不报错。
+   拼写也挑：`Image 1`（带空格）匹配不上，必须 `@Image1` 连写。
+   所以这里**发之前就检查正文点没点名**，缺哪张说哪张。
+   **不自动补** —— 材料的正文本来就用 `@Image1..N` 写好了身份映射，
+   再追加一遍就是同一个请求里两套编号（鹤那边的 `@图N` 就是这么坏的）。
+2. **分辨率只有 720p**，传 480p/1080p/2k 会被拒或忽略。
+3. **`seedance_v2.5` 三个有「肖像保护」** —— 只让生成"包含你自己的"人脸。
+   别人的脸会被上游拒。要真人脸参考就换 `sd2.5-9img` / `sd2-mini` /
+   `seedance_v2.0`（文档点名的三条出路）。这个在本地判不了（取决于图里是谁），
+   所以只在撞上那句报错时把出路接上去。
+
+`face` 字段（可选，走 `task.extra["face"]`）：不传=浅洗（轻磨皮+提亮）；
+`{"enabled": true, "mode": "heavy"}`=重风格；`{"enabled": false}`=原图不过脸；
+`{"enabled": true, "mode": "blur"}`=模糊打码。
+**⚠ 绝不能传 `"face": true`** —— 上游有个"旧抠脸"（T 形纯色打码）模式，很难看。
+所以这里只放行文档列的那几种形状，别的当场拒。
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import time
+from typing import Callable, Optional
+
+from core import apiutil as _api
+from core.apiutil import (DONE_STATES, FAIL_STATES, TASK_FATAL, ApiError,
+                          extract_image_items, task_failed)
+from core.providers.base import ImageTask, Provider, VideoTask
+
+# 同一文件可作为数据目录 providers/ 外挂；旧 EXE 没有任务恢复模块。
+try:
+    from core import submitted
+except ImportError:
+    submitted = None
+
+PATCH_VERSION = "20260928.1"
+RUNNING_STATES = getattr(_api, "RUNNING_STATES", (
+    "queued", "pending", "processing", "in_progress", "in-progress", "inprogress",
+    "running", "waiting", "created", "submitted", "start", "starting",
+    "generating", "uploading", "preparing", "init", "initializing",
+    "progress", "incomplete", "not_start", "notstart", "doing", "active",
+    "accepted", "scheduled", "retrying",
+))
+
+UPLOAD_MAX_MB = 210
+UPLOAD_EXTS = ("jpg", "jpeg", "png", "webp", "mp4", "mov", "m4v",
+               "webm", "avi", "mkv", "mp3", "wav", "m4a", "aac")
+
+R6 = ["16:9", "9:16", "1:1", "21:9", "3:4", "4:3"]
+R5 = ["16:9", "1:1", "9:16", "3:4", "4:3"]
+
+# 文档 5.3「各模型请求规格」整张表。**逐项抄进来**：这些不是建议，
+# 超了会 invalid_duration 或 400，而那之前的排队是白等的。
+# (格式, 时长规则, 分辨率, 比例, 图上限, 视频上限, 音频上限, 备注)
+SPEC = {
+    "SD2.0 Fast": ("metadata", (4, 15), ["720p", "480p"], R6, 9, 0, 0, ""),
+    "SD2.0 1080P 933": ("metadata", (15, 15), ["1080P"], ["16:9", "9:16"], 9, 3, 3,
+                        "至少 1 张参考图；默认开配音"),
+    "sd-2-c8": ("metadata", (10, 15, [10, 15]), ["720p"], ["16:9", "9:16", "1:1"], 9, 3, 3,
+                "只有 10 或 15 秒"),
+    "sd-2-c6": ("metadata", (4, 15), ["720p"], ["16:9", "9:16", "1:1"], 9, 3, 3, ""),
+    "Seedance 图生视频": ("url_media", (4, 15), ["720p"], ["16:9"], 9, 3, 3, "时长必填"),
+    "sd2-mini": ("url_media", (4, 15), ["720p"], ["16:9"], 9, 3, 3, ""),
+    "Seedance MINI 933": ("url_media", (4, 15), ["720p"], ["16:9"], 9, 3, 3, ""),
+    "Quality V4 · 480p/720p (可@图/视频/音频)":
+        ("url_media", (5, 15, [5, 10, 15]), ["480p", "720p"], ["auto"] + R5, 9, 3, 3,
+         "480p 支持 5/10/15；720p 只有 10 秒"),
+    "wan3.0th": ("url_media", (4, 30), ["720p"], R5, 10, 5, 5,
+                 "**按秒计费** 0.14 元/秒；音频必须 WAV"),
+    "seedance-2.5-deal": ("url_media", (4, 25), ["480p"], R5, 30, 10, 10,
+                          "音频必须 WAV；公开描述称 30 秒，但 video_api 上限为 25 秒，暂按结构化规格"),
+    "sd2-c7": ("openai_refs", (5, 15), ["720p"], R6, 9, 0, 0, ""),
+    # 2026-09-14 按平台模型卡加进来（原来不在表里，走兜底被改过参数）：
+    #   「SD2.5 原生过人脸（无需认证人脸）· 最多 9 张参考图 ·
+    #     5/10/15/30 秒 · 默认 720p · 支持 16:9 / 9:16 / 4:3 / 3:4 / 1:1 ·
+    #     固定按次 4.5 元/次（5/10/15/30 秒同价，不按帧叠加；参考图数量不加价）」
+    # 时长是**离散四档**，不是区间 —— 写成 (5, 30) 的话 7 秒会被放过去。
+    # 计费那句要记住：**30 秒和 5 秒一个价**，所以没理由为省钱选短的。
+    # ⚠ 格式是照 `sd2.5` 同族推的（两个都是 SD2.5），**没有实拉/文档背书**。
+    #   观察到的一次实跑走的是兜底的 url_media 且没报错，所以先保持 url_media，
+    #   不去改一个看起来在工作的东西。真要定下来得用 Key 拉一次或者看它的文档。
+    "sd2.5-9img": ("url_media", (5, 30, [5, 10, 15, 30]), ["720p"],
+                   ["16:9", "9:16", "4:3", "3:4", "1:1"], 9, 0, 0,
+                   "原生过人脸（不用认证人脸）；按次 4.5 元，四档同价；"
+                   "格式按同族推的，没有实拉背书"),
+    "sd2.5": ("openai_refs", (4, 30), ["720p"], R6, 10, 0, 0,
+              "2026-09-28：4–30 秒；沿用已接入的 image_refs 格式，视频/音频字段待官方接口文档确认"),
+    "dubai_sd25_170": ("openai_refs", (30, 30), ["720p"], R6, 10, 0, 0,
+                       "固定 30 秒，**传别的直接 400**；人脸账号每日 00:00 重置"),
+    "grok-imagine-video-1.5（按次）":
+        ("grok", (6, 15), ["720p", "480p"], ["16:9", "9:16", "1:1"], 7, 0, 0,
+         "时长必填、不认 seconds；比例分辨率放 extra"),
+    "grok-imagine-video-1.5-preview":
+        ("grok", (6, 3600), ["720p", "480p"], ["16:9", "9:16", "1:1"], 7, 0, 0, "同上"),
+    "minimax-h3 768p": ("simple", (10, 15), ["768p"], [], 6, 0, 0,
+                        "2026-09-28：10–15 秒，最多 6 图；沿用 /v1/video/generations"),
+    "minimax-h3 2k": ("simple", (10, 15), ["2k"], [], 6, 0, 0, "同上"),
+    # ---- HM 渠道。能力数字抄自文档第四节，**名字按 2026-09-14 实拉校正** ----
+    #
+    # ⚠ 文档写的是内部名（`seedance_v2.5-301010`），**平台上根本没有那个名字** ——
+    # 实拉 `/v1/models` 回的是带空格的显示名 `SD 2.5-301010`。
+    # 照文档抄的那五个选中就是 404（这个文件头第 1 条警告说的就是这件事，
+    # 而我上一版正好犯了它）。
+    #
+    # 映射是坐实的，不是猜的：`-101010` / `-301010` 那串数字**就是文档能力表里的
+    # 图/视频/音频上限**（10/10/10、30/10/10），一一对得上。
+    #
+    # 分辨率只有 720p；时长 4–30 是**任意整数**（页面上的 5/10 是界面简化）。
+    # 比例文档没给封闭清单（示例里出现 16:9 和 9:16）—— 给常见那五个当候选，
+    # 不自造更窄的清单去拦人：拦错了报「不支持」而其实支持，比服务商回 400 难查。
+    "SD 2.0": ("hm", (4, 15), ["720p"], R5, 9, 0, 0,
+               "文档里叫 seedance_v2.0。无肖像保护；参考图要在正文里 @Image1 点名"),
+    "SD 2.0-933": ("hm", (4, 30), ["720p"], R5, 9, 3, 3,
+                   "2026-09-28：4–30 秒；沿用 HM 格式，要 @Image1 点名"),
+    "SD 2.5": ("hm", (4, 30), ["720p"], R5, 9, 0, 0,
+               "文档里叫 seedance_v2.5。**有肖像保护**：只能生成包含你自己的人脸"),
+    "SD 2.5-101010": ("hm", (4, 30), ["720p"], R5, 10, 10, 10,
+                      "文档里叫 seedance_v2.5-101010。**有肖像保护**"),
+    "SD 2.5-301010": ("hm", (4, 30), ["720p"], R5, 30, 10, 10,
+                      "文档里叫 seedance_v2.5-301010。**有肖像保护**"),
+}
+
+# 2026-09-28 GET /api/pricing：仅把公开给出的约束写入；None 表示未公布。
+# 新型号仍沿用此前表外型号使用的 url_media 请求形状，未凭名字改协议。
+SPEC.update({
+    "sd2.5_30": ("url_media", (4, 30), ["720p"], R6, 30, 0, 10,
+                  "30 图 / 10 音频（MP3），不支持参考视频"),
+    "seedance-2.5-720p": ("url_media", (4, 30), ["720p"], [], 30, 10, 10,
+                         "按秒计费；30 图 / 10 视频 / 10 音频"),
+    "seedance-2.5-pro-480": ("url_media", (4, 30), ["480p"], [], 30, 10, 10, "按次计费"),
+    "seedance-2.5-pro-720": ("url_media", (4, 30), ["720p"], [], 30, 10, 10, "按次计费"),
+    "seedance-2.5-deal-720": ("url_media", (5, 30), ["720p"], [], 30, None, 10,
+                            "30 图 / 10 音频；参考视频上限未公布"),
+    "seedance-2.0-fast-15s": ("url_media", (15, 15), ["720p"], [], None, None, None,
+                            "固定 15 秒；素材数量上限未公布"),
+    "sd2.0-933-720p-fast-x5-15s": ("url_media", (5, 15), ["720p"], [], 9, 3, 3, ""),
+    "seedance-2.0-deal": ("url_media", (5, 15), ["480p"], [], 9, None, 3, ""),
+    "Seedance-933": ("url_media", (4, 15), ["720p"], [], 9, 0, 3, "不支持参考视频"),
+    "minimax_h3": ("url_media", (5, 15), ["480p", "768p"], ["16:9", "9:16"], 8, 0, 3, ""),
+    "Minimax-H3-768p-933-10s-15s": (
+        "url_media", (10, 15), ["768p"], R6 + ["3:2", "2:3"], 9, 3, 3, ""),
+})
+
+# 2026-09-14 实拉 `/v1/models` 确认**已经下线**的（选中就是 404）。
+# 留个名字在这儿，是因为老项目的 tasks.json 里可能还存着它们 ——
+# 看见这些名字时知道去哪儿找原因，而不是以为拼错了。
+RETIRED = (
+    "SD2.0 Fast", "SD2.0 1080P 933", "sd-2-c8", "sd-2-c6",
+    "Seedance 图生视频", "Quality V4 · 480p/720p (可@图/视频/音频)",
+    "wan3.0th", "dubai_sd25_170",
+    # 2026-09-17 再拉：这两个 09-14 还在，今天不在了。**平台自己拼错的
+    # "vedio" 不是原因** —— 我们本来就是照抄的名字。
+    # 回来了也不用改代码：有 Key 的机器实拉的清单会盖掉这份声明。
+    "wan3.0-vedio-deal", "wan3.0-video-prime-deal",
+)
+
+# 实拉里有、而我们**没有它的规格**的。列出来是为了页面上能选到 ——
+# 走的是 `_UNKNOWN` 那条：照填的发、不校验、日志说一声。
+# 拿到它们各自的规格（文档或模型卡）再往 SPEC 里搬。
+UNSPECED = [
+    "SD 2.0 基础",
+    "sd2.0-720",
+    "sora2",
+    "video-editing",
+    # 2026-09-17 实拉出现的新名字。sd2.5_30 在 09-28 取得规格后已移入 SPEC；
+    # 剩下这些 `/v1/models` 只回 id，一个规格字段都没有。
+    # 照猜的填进 SPEC 就是拿编出来的时长/比例去夹人要的参数，而夹是静默的。
+    "2.0 MX",
+    "seedance-2.0-fast-deal-720",
+    # 2026-09-28 又出现在模型清单；只有 ID，不能假定与带空格的型号规格一致。
+    "seedance_v2.0", "seedance_v2.0-933", "seedance_v2.5",
+    "seedance_v2.5-101010", "seedance_v2.5-301010",
+    "seedance-2.0-mini", "seedance-2.0-mini-480p", "Q10-SD2.5 全参",
+]
+
+# 肖像保护：文档点名的三条出路。撞上那句报错时接给用户看。
+PORTRAIT_GUARDED = ("SD 2.5", "SD 2.5-101010", "SD 2.5-301010")
+PORTRAIT_ALTERNATIVES = ("sd2.5-9img", "sd2-mini", "SD 2.0")
+
+# `face` 只放行文档列的这几种形状。**`"face": true` 会走上游的"旧抠脸"
+# （T 形纯色打码），很难看** —— 文档专门标了千万别传，所以这里当场拒。
+FACE_MODES = ("heavy", "blur")
+# 报错里那段「可以怎么写」。**单独拎出来是因为它里面全是引号** ——
+# 直接写进 f-string 会把字符串提前收尾（改这个文件时踩过一次）。
+FACE_HELP = '可用写法：整个不传（默认浅洗：轻磨皮+提亮）、{"enabled": false}（原图不过脸）、{"enabled": true, "mode": "heavy"}（重风格）、{"enabled": true, "mode": "blur"}（模糊打码）。'
+# 已下线的不进清单（选中就是 404）；没规格的进，只是不校验。
+VIDEO_MODELS = [m for m in SPEC if m not in RETIRED] + UNSPECED
+IMAGE_MODELS = ["doubao-seedream-5-0-260128"]
+
+
+# `@Image1` 连写，后面不能再跟数字（`@Image1` 不许命中 `@Image12`）。
+# 文档明说带空格的 `Image 1` 匹配不上，所以这里也**不认**空格写法 ——
+# 认了等于告诉人"这样写行"，而上游并不认。
+_AT_IMAGE = re.compile(r"@Image(\d+)(?!\d)")
+
+
+def unnamed_images(prompt: str, count: int) -> list:
+    """正文里没被 `@ImageN` 点到名的是第几张。返回缺的编号列表。
+
+    这个渠道**不点名就丢图**：上游把图当"首帧/尾帧"，第 3 张之后直接忽略 ——
+    片子照出、少用几张参考图、一处不报错。所以发之前就查。
+
+    **只查缺、不自动补。** 自动补是鹤那边 `@图N` 的坑：材料的正文本来就用
+    `@Image1..N` 写好了身份映射，再追加一遍就是同一个请求里两套编号，
+    而画面会照着错的那套走。
+    """
+    if count <= 0:
+        return []
+    named = {int(n) for n in _AT_IMAGE.findall(prompt or "")}
+    return [i for i in range(1, count + 1) if i not in named]
+
+
+def face_field(value) -> dict:
+    """`face` 字段：只放行文档列的那几种形状，别的当场拒。
+
+    文档专门标了**千万别传 `"face": true`** —— 那会走上游的"旧抠脸"
+    （T 形纯色打码）模式，很难看。而 `True` 在 JSON 里是合法值、
+    上游也收，所以这一条只能我们来挡。
+    """
+    if value is None:
+        return {}                                  # 不传 = 默认浅洗
+    if not isinstance(value, dict):
+        raise ApiError(
+            f"巨轮的 face 只能是对象，收到 {type(value).__name__}：{value!r}。"
+            f"**特别不能传 `true`** —— 那会走上游的「旧抠脸」（T 形纯色打码），"
+            f"很难看，而且它是合法 JSON、上游照收，只能我们挡。" + FACE_HELP,
+            status=0, kind="task_fatal")
+    enabled = value.get("enabled")
+    if enabled is False:
+        return {"enabled": False}
+    mode = str(value.get("mode") or "").strip()
+    if enabled is True and mode in FACE_MODES:
+        return {"enabled": True, "mode": mode}
+    raise ApiError(f"巨轮的 face 写法不对：{value!r}。" + FACE_HELP,
+                   status=0, kind="task_fatal")
+
+
+# 表外模型的兜底。**时长/比例/张数一律留空 = 不知道，不是不允许。**
+#
+# 原来这里是 `(4, 15), ["720p"], R5, 9, 3, 3` —— 那几个数是**代码里编的**，
+# 不属于任何一个模型。后果实遇（2026-09-14）：`sd2.5-9img` 不在表里，
+# 用户要 30 秒，被这个编出来的 4–15 悄悄改成 15 秒发出去 ——
+# 而那个模型平台卡上明写支持 5/10/15/30，且**四档同价**，
+# 也就是白白短了一半、钱一分没省。日志里那句「已把 30 纠正为 15」
+# 读起来像是模型的限制，其实是我们自己的默认值。
+#
+# 现在表外的原样发：不合法的话平台会拒，那句拒绝是响的；
+# 而我们编一个限制去改参数，是静默的。
+_UNKNOWN = ("url_media", None, [], [], 0, 0, 0, "")
+
+
+def spec_of(model: str) -> tuple:
+    """模型 → 规格。**表外的返回「不知道」，而不是一套编出来的默认值。**
+
+    格式仍然给 url_media —— 那是这家最通用的一套，总得发出去一个形状。
+    但时长、比例、张数全部留空，让上面的校验跳过它们。
+    """
+    return SPEC.get(model, _UNKNOWN)
+
+
+def is_known(model: str) -> bool:
+    return model in SPEC
+
+
+def fit_duration(model: str, want: int, *, log=None) -> int:
+    """按规格表收敛时长。改了要说 —— 悄悄改会让人对不上账。
+
+    **表外的模型一秒都不改**：没有它的规格，就没有依据去改。
+    编一个范围去夹，夹出来的值看着合法、其实不是人要的（见 `_UNKNOWN`）。
+    """
+    rule = spec_of(model)[1]
+    if not rule:                                   # 表外：原样发
+        return int(want or 0) or 5
+    lo, hi = rule[0], rule[1]
+    allowed = rule[2] if len(rule) > 2 else None
+    sec = int(want or lo)
+    if allowed:
+        if sec not in allowed:
+            near = min(allowed, key=lambda a: abs(a - sec))
+            if log:
+                log(f"巨轮 {model} 只支持 {allowed} 秒，已把 {sec} 纠正为 {near}")
+            return near
+        return sec
+    if sec < lo or sec > hi:
+        near = max(lo, min(hi, sec))
+        if log:
+            log(f"巨轮 {model} 时长范围 {lo}–{hi} 秒，已把 {sec} 纠正为 {near}")
+        return near
+    return sec
+
+
+class JulunProvider(Provider):
+    id = "julun"
+    name = "巨轮 julun.cc"
+    aliases = ("julun.cc", "巨轮", "jl")
+    default_base_url = "https://julun.cc"
+    supports = ("image", "video")
+    # 视频参考素材**必须公网可访问**（文档 5.3 通用约束），本机图得先传对象存储，
+    # 或用本类的 upload_asset() 换成平台 URL。
+    ref_mode = "url"
+
+    def capabilities(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "default_base_url": self.default_base_url,
+            "supports": list(self.supports),
+            "image": {
+                "models": IMAGE_MODELS,
+                "default_model": IMAGE_MODELS[0],
+                "sizes": [""],
+                "default_size": "",
+                "max_refs": 0,
+                "ref_mode": "url",
+                "notes": "OpenAI 兼容、**同步**返回。平台**固定一次出 1 张**（n 传别的没用），"
+                         "0.04 元/张，失败不扣费。size 按 OpenAI 语义透传，不支持的值会 400。",
+            },
+            "video": {
+                "models": VIDEO_MODELS,
+                "default_model": "sd2.5",
+                "ratios": R6,
+                "durations": list(range(4, 31)),
+                "default_duration": 10,
+                "resolutions": ["720p", "480p", "768p", "1080P", "2k"],
+                "max_refs": 30,
+                "ref_mode": "url",
+                "model_options": {
+                    m: dict(
+                        durations=list(s[1][2]) if len(s[1]) > 2 else list(range(s[1][0], s[1][1] + 1)),
+                        **({"resolutions": list(s[2])} if s[2] else {}),
+                        **({"ratios": list(s[3])} if s[3] else {}),
+                        **({"max_refs": s[4]} if s[4] is not None else {}),
+                        **({"max_video_refs": s[5]} if s[5] is not None else {}),
+                        **({"max_audio_refs": s[6]} if s[6] is not None else {}),
+                        notes=s[7],
+                    ) for m, s in SPEC.items() if m not in RETIRED
+                },
+                "specs": {m: {"format": s[0], "duration": s[1], "resolutions": s[2],
+                              "ratios": s[3], "max_images": s[4], "max_videos": s[5],
+                              "max_audios": s[6], "note": s[7]}
+                          for m, s in SPEC.items()},
+                "notes": "⚠ **五种请求格式按模型分派**（metadata / url_media / openai_refs / "
+                         "grok / simple），选模型即选格式。每个模型的时长、比例、素材上限"
+                         "都不一样，见 specs —— 本类在**提交前**校验，超了当场报，"
+                         "不让排队时间白花。参考素材必须公网可访问（可用 upload_asset() "
+                         "换成平台 URL，**保留 72 小时**）。失败任务不扣费、自动退款。",
+            },
+            "notes": "模型名带空格、中文和**全角括号**（grok-imagine-video-1.5（按次）），"
+                     "照抄别手打。域名不通时可临时用 http://107.148.118.228:3000。",
+        }
+
+    # -- 上传素材（本地 → 平台 URL，72 小时）-----------------------------
+    def upload_asset(self, path: str, *, log: Callable = print) -> str:
+        if not os.path.isfile(path):
+            raise ApiError(f"找不到文件: {path}")
+        ext = os.path.splitext(path)[1].lstrip(".").lower()
+        if ext not in UPLOAD_EXTS:
+            raise ApiError(f"巨轮只收 {'/'.join(UPLOAD_EXTS)}，不收 .{ext}")
+        size = os.path.getsize(path)
+        if size > UPLOAD_MAX_MB * 1024 * 1024:
+            raise ApiError(f"{os.path.basename(path)} 有 {size / 1048576:.1f}MB，"
+                           f"超过 {UPLOAD_MAX_MB}MB 上限")
+        with open(path, "rb") as fh:
+            blob = fh.read()
+        ctype = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                 "webp": "image/webp", "mp4": "video/mp4",
+                 "wav": "audio/wav", "mp3": "audio/mpeg"}.get(ext, "application/octet-stream")
+        data = self.session.request(
+            "POST", "/v1/video/uploads",
+            files=[("file", (os.path.basename(path), blob, ctype))],
+            retries=1, timeout=900)
+        url = data.get("url", "") if isinstance(data, dict) else ""
+        if not url:
+            raise ApiError(f"上传没返回 url: {str(data)[:300]}")
+        log(f"巨轮 素材已上传（72 小时内有效）: {url}")
+        return url
+
+    # ---------------------------------------------------------------- video
+    def build_video_body(self, task: VideoTask, *, log=None) -> tuple:
+        """按模型所属格式拼 body，并在提交前校验规格。返回 (路径, body)。"""
+        model = task.model or "sd2.5"
+        fmt, _rule, res_list, ratios, cap_i, cap_v, cap_a, note = spec_of(model)
+        if not (task.prompt or "").strip():
+            raise ApiError("巨轮 prompt 必填", status=0, kind="task_fatal")
+
+        sec = fit_duration(model, task.duration, log=log)
+        ratio = (task.ratio or "").strip() or (ratios[0] if ratios else "16:9")
+        res = (task.resolution or "").strip() or (res_list[0] if res_list else "720p")
+
+        refs = list(task.refs or [])
+        vids = [v for v in (task.extra.get("video_refs") or task.extra.get("videos") or []) if v]
+        auds = [a for a in (task.extra.get("audio_refs") or task.extra.get("audios") or []) if a]
+
+        local = [r for r in refs if not str(r).startswith(("http://", "https://"))]
+        if local:
+            raise ApiError(
+                f"巨轮的参考素材必须**公网可访问**，这一项有 {len(local)} 张是本机图。"
+                f"本该有 {len(refs)} 张参考图 —— 少了出来的就不是同一个人，所以不出这条。"
+                f"去「设置 → 参考图上传」配对象存储，或先用 upload_asset() 传成平台 URL。",
+                status=0, kind="task_fatal")
+
+        problems = []
+        # **表外的模型不校验。** 没有它的规格，每一条校验都是拿编出来的数去拦 ——
+        # 而拦错了报的是「不符合规格表」，人会去改一个本来就对的参数。
+        # 照发出去，不合法的话平台会拒，那句拒绝是响的。
+        if not is_known(model):
+            if log:
+                log(f"⚠️ 巨轮没有 {model} 的规格记录 —— 时长/比例/参考图张数"
+                    f"这一趟都不校验，照你填的发（{sec} 秒 / {ratio} / "
+                    f"图{len(refs)}、视频{len(vids)}、音频{len(auds)}）。"
+                    f"不合法的话平台会回 400，那是响的；"
+                    f"要把它变成有校验的，去 core/providers/julun.py 的 SPEC 加一行。")
+            cap_i = cap_v = cap_a = 10 ** 6
+            ratios = []
+        if cap_i is not None and len(refs) > cap_i:
+            problems.append(f"参考图最多 {cap_i} 张，收到 {len(refs)} 张")
+        if vids and cap_v == 0:
+            problems.append(f"{model} 不支持参考视频，收到 {len(vids)} 条")
+        elif cap_v is not None and len(vids) > cap_v:
+            problems.append(f"参考视频最多 {cap_v} 条，收到 {len(vids)} 条")
+        if auds and cap_a == 0:
+            problems.append(f"{model} 不支持参考音频，收到 {len(auds)} 条")
+        elif cap_a is not None and len(auds) > cap_a:
+            problems.append(f"参考音频最多 {cap_a} 条，收到 {len(auds)} 条")
+        if ratios and ratio not in ratios:
+            problems.append(f"比例只支持 {'、'.join(ratios)}，收到 {ratio}")
+        if res_list and res not in res_list:
+            problems.append(f"清晰度只支持 {'、'.join(res_list)}，收到 {res}；请在视频清晰度选项中修改")
+        if model == "SD2.0 1080P 933" and not refs:
+            problems.append("这个模型至少要 1 张参考图")
+        if fmt == "hm":
+            # **这个渠道不点名就丢图**（第 3 张之后直接忽略，而且不报错）。
+            missing = unnamed_images(task.prompt or "", len(refs))
+            if missing:
+                problems.append(
+                    f"正文里没点名第 {'、'.join(map(str, missing))} 张参考图 —— "
+                    f"这个渠道要求逐张写 `@Image{missing[0]}` 这样的引用（连写，"
+                    f"`Image {missing[0]}` 带空格匹配不上）。不点名的话上游把图当"
+                    f"「首帧/尾帧」，**第 3 张之后直接忽略，而且不报错**。"
+                    f"这里不替你补 —— 补了就是同一个请求里两套编号")
+        if problems:
+            raise ApiError(
+                f"巨轮 {model} 的参数不符合规格表：" + "；".join(problems)
+                + (f"（该模型：{note}）" if note else ""),
+                status=0, kind="task_fatal")
+
+        path = "/v1/videos"
+        if fmt == "metadata":
+            meta = {"duration": sec, "ratio": ratio, "resolution": res}
+            content = list(refs)
+            for v in vids:
+                content.append({"role": "reference_video", "type": "video_url",
+                                "video_url": {"url": v}})
+            for a in auds:
+                content.append({"role": "reference_audio", "type": "audio_url",
+                                "audio_url": {"url": a}})
+            if content:
+                meta["content"] = content
+            if "generate_audio" in task.extra:
+                meta["generate_audio"] = bool(task.extra["generate_audio"])
+            body = {"model": model, "prompt": task.prompt, "metadata": meta}
+        elif fmt == "url_media":
+            body = {"model": model, "prompt": task.prompt, "seconds": sec,
+                    "ratio": ratio, "resolution": res}
+            if refs:
+                body["image_urls"] = refs
+            if vids:
+                body["video_urls"] = vids
+            if auds:
+                body["audio_urls"] = auds
+        elif fmt == "openai_refs":
+            body = {"model": model, "prompt": task.prompt, "duration": sec,
+                    "aspect_ratio": ratio}
+            if refs:
+                body["image_refs"] = refs
+        elif fmt == "grok":
+            # 文档：**不支持 seconds**；比例分辨率必须在 extra 里，放顶层无效
+            extra = {"aspect_ratio": ratio, "resolution": res}
+            body = {"model": model, "prompt": task.prompt, "duration": sec, "extra": extra}
+            if len(refs) == 1:
+                body["input_reference"] = refs[0]
+            elif refs:
+                if task.extra.get("first_last"):
+                    if len(refs) < 2:
+                        raise ApiError("首尾帧要 2 张图", status=0, kind="task_fatal")
+                    # 文档：first_frame 与 last_frame **必须成对**，
+                    # 且**不能与 reference_image 混用**
+                    extra["reference_images"] = [
+                        {"url": refs[0], "role": "first_frame"},
+                        {"url": refs[1], "role": "last_frame"},
+                    ]
+                else:
+                    extra["reference_images"] = [
+                        {"url": u, "role": "reference_image"} for u in refs]
+        elif fmt == "hm":
+            # 字段名和 url_media **不一样**：那边是 image_urls/video_urls/audio_urls，
+            # 这边是 images/videos/audios。名字给错不会报错，
+            # 上游只是收不到素材 —— 又是一条静默的。
+            body = {"model": model, "prompt": task.prompt, "seconds": sec,
+                    "ratio": ratio, "resolution": res}
+            if refs:
+                body["images"] = refs
+            if vids:
+                body["videos"] = vids
+            if auds:
+                body["audios"] = auds
+            face = face_field(task.extra.get("face"))
+            if face:
+                body["face"] = face
+        else:                                        # simple（h3）
+            path = "/v1/video/generations"           # 文档：h3 推荐这个端点
+            body = {"model": model, "prompt": task.prompt, "seconds": sec}
+            if refs:
+                # 上面的 cap_i 已校验张数，这里不做截断 ——
+                # 截断等于悄悄少一个人出镜，而且不报错。
+                body["image_urls"] = refs
+        return path, body
+
+    def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
+                       cancel: Optional[Callable] = None,
+                       poll_interval: int = 6, poll_timeout: int = 1800) -> dict:
+        model = task.model or "sd2.5"
+        path, body = self.build_video_body(task, log=log)
+        fmt = spec_of(model)[0]
+        log(f"巨轮 {model}（{fmt} 格式）→ POST {path}")
+        try:
+            data = self.session.request("POST", path, json_body=body,
+                                        retries=2, timeout=300)
+        except ApiError as exc:
+            # 肖像保护在本地判不了（取决于图里是谁），只能撞上了再把出路接上。
+            # 上游那句话是中英混排的，只认「肖像保护」这四个字最稳。
+            if "肖像保护" in str(exc) or model in PORTRAIT_GUARDED:
+                exc.extra_fix.append(
+                    f"{model} 有**肖像保护**：只让生成「包含你自己的」人脸，"
+                    f"别人的脸会被上游拒。文档点名的三条出路："
+                    f"{' / '.join(PORTRAIT_ALTERNATIVES)} —— "
+                    f"其中 sd2.5-9img 原生过人脸、sd2-mini 不限人脸、"
+                    f"seedance_v2.0 没有这个限制。")
+            if "素材或参数不符合当前模型要求" in str(exc):
+                exc.extra_fix.append(
+                    f"文档：这句话 = 参考素材或参数不合这个模型的 caps。"
+                    f"这一条发的是 "
+                    f"{body.get('seconds') or body.get('duration') or '?'} 秒 / "
+                    f"{body.get('ratio') or body.get('aspect_ratio') or '?'} / "
+                    f"{body.get('resolution') or '?'}，"
+                    f"图{len(body.get('images') or body.get('image_urls') or [])}"
+                    f"、视频{len(body.get('videos') or body.get('video_urls') or [])}"
+                    f"、音频{len(body.get('audios') or body.get('audio_urls') or [])}。"
+                    f"HM 渠道分辨率**只有 720p**。")
+            raise
+        task_id = ""
+        if isinstance(data, dict):
+            task_id = str(data.get("task_id") or data.get("id") or "")
+        if not task_id:
+            raise ApiError(f"提交没返回任务 ID：{str(data)[:300]}")
+        if submitted is not None:
+            submitted.remember(task_id, custom="julun")
+
+        url = self._poll(task_id, poll_interval, poll_timeout, log=log, cancel=cancel)
+        self.session.save_item(url, dest, log=log)
+        return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
+
+    def resume(self, record, dest, *, log=print, cancel=None, poll_interval=6, poll_timeout=1800):
+        if (record.get("resume") or {}).get("custom") != "julun":
+            return super().resume(record, dest, log=log, cancel=cancel,
+                                  poll_interval=poll_interval, poll_timeout=poll_timeout)
+        url = self._poll(record["task_id"], poll_interval, poll_timeout, log=log, cancel=cancel)
+        self.session.save_item(url, dest, log=log)
+        return {"task_id": record["task_id"], "source": url, "provider": self.id,
+                "model": record.get("model", ""), "resumed": True}
+
+    def _poll(self, task_id: str, interval: int, timeout: int, *, log, cancel=None) -> str:
+        """兼容顶层和 data 包装；终态以 status 为准，不等待 progress 到 100。"""
+        start, last = time.time(), ""
+        while time.time() - start < timeout:
+            if cancel and cancel():
+                raise ApiError("用户已取消")
+            data = self.session.request("GET", f"/v1/videos/{task_id}",
+                                        retries=1, timeout=60)
+            inner = (data or {}).get("data")
+            if not isinstance(inner, dict) or not inner.get("status"):
+                inner = data or {}
+            status = str(inner.get("status") or "").strip()
+            low = status.lower()
+            if status != last:
+                log(f"巨轮 {task_id}: {status} {inner.get('progress', '')}")
+                last = status
+            if low in FAIL_STATES or low == "failure":
+                detail = inner.get("error")
+                if not isinstance(detail, dict):
+                    detail = {"message": inner.get("fail_reason") or detail or
+                              inner.get("message") or "服务商未提供失败原因",
+                              "code": inner.get("error_code") or ""}
+                exc = task_failed(detail)
+                exc.args = (f"巨轮 {task_id}：{exc}",)
+                # 原样重发不能解决素材肖像要求；只停此任务，不影响其他任务。
+                if re.search(r"肖像(?:权)?保护|likeness protection", str(exc), re.I):
+                    exc.kind = TASK_FATAL
+                    exc.extra_fix.append("按服务商的肖像要求检查参考素材与账号条件，处理后再手动重试。")
+                raise exc
+            url = inner.get("result_url") or ""
+            # **别只认 `SUCCESS` 这一个词。** 认死一个词的后果是：平台上
+            # 显示已完成、地址也回来了，而我们接着等到超时 ——
+            # 报出来的是「超时」，人会去查线路，查不到任何东西。
+            # 所以：认识的完成词收；认不出的词**只要地址已经到手就收**；
+            # 只有认识的「还在跑」才接着等。
+            done = low in DONE_STATES
+            unknown = bool(low) and not done and low not in RUNNING_STATES
+            if done:
+                if url:
+                    return url
+                return f"{self.session.base_url.rstrip('/')}/v1/videos/{task_id}/content"
+            if url and unknown:
+                log(f"⚠️ 巨轮的状态词 `{status}` 我们不认识，但 result_url 已经"
+                    f"回来了 —— 按完成收下。把这个词补进 apiutil 的 DONE_STATES。")
+                return url
+            time.sleep(interval)
+        raise ApiError(f"巨轮任务超时：{task_id}（一般 1–3 分钟，高峰更久）",
+                       status=0, kind="retryable")
+
+    # ---------------------------------------------------------------- image
+    def generate_image(self, task: ImageTask, dest: str, *, log: Callable = print,
+                       cancel: Optional[Callable] = None,
+                       poll_interval: int = 5, poll_timeout: int = 900) -> dict:
+        model = task.model or IMAGE_MODELS[0]
+        if not (task.prompt or "").strip():
+            raise ApiError("巨轮 prompt 必填", status=0, kind="task_fatal")
+        if task.refs:
+            # 文档四只写了文生图，没有图生图入口。丢掉参考图会静默出一张
+            # 不相干的图，那比不出更糟 —— 让优先级链换支持图生图的家。
+            raise ApiError(
+                f"巨轮的出图接口**只有文生图**（文档四没有图生图入口），"
+                f"这一项带了 {len(task.refs)} 张参考图。"
+                f"少了参考图出来的就不是同一个人，所以不出这张图 —— "
+                f"把这类活排给支持图生图的服务商。",
+                status=0, kind="task_fatal")
+
+        body = {"model": model, "prompt": task.prompt, "n": 1,   # 平台固定 1 张
+                "response_format": "url"}
+        if (task.size or "").strip():
+            body["size"] = task.size.strip()
+        log(f"巨轮 图片 {model}: size={body.get('size', '(不传)')}")
+        data = self.session.request("POST", "/v1/images/generations",
+                                    json_body=body, retries=2, timeout=300)
+        items = extract_image_items(data)
+        if not items:
+            raise ApiError(f"没返回图片：{str(data)[:300]}")
+        self.session.save_item(items[0], dest)
+        return {"task_id": "", "source": items[0][:200], "provider": self.id, "model": model}

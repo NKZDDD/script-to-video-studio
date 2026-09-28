@@ -31,7 +31,8 @@ from core.providers.julun import (FACE_MODES, PORTRAIT_ALTERNATIVES,
 # 这里会亮」—— 亮了就该回去对文档，而不是把这份跟着改。
 DOC = {
     "SD 2.0":        {"dur": (4, 15), "img": 9,  "vid": 0,  "aud": 0,  "guard": False},
-    "SD 2.0-933":    {"dur": (4, 15), "img": 9,  "vid": 3,  "aud": 3,  "guard": False},
+    # 2026-09-28 /api/pricing：933 时长由 4–15 更新为 4–30。
+    "SD 2.0-933":    {"dur": (4, 30), "img": 9,  "vid": 3,  "aud": 3,  "guard": False},
     "SD 2.5":        {"dur": (4, 30), "img": 9,  "vid": 0,  "aud": 0,  "guard": True},
     "SD 2.5-101010": {"dur": (4, 30), "img": 10, "vid": 10, "aud": 10, "guard": True},
     "SD 2.5-301010": {"dur": (4, 30), "img": 30, "vid": 10, "aud": 10, "guard": True},

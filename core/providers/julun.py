@@ -21,8 +21,8 @@
 1. **模型名带空格、中文、全角括号** —— `grok-imagine-video-1.5（按次）` 是**全角**的，
    `Quality V4 · 480p/720p (可@图/视频/音频)` 带间隔号。照抄，别手打。
 2. **grok 不认 `seconds`**，只认 `duration`；比例分辨率必须在 `extra` 里。
-3. `sd2.5` 和 `dubai_sd25_170` 都固定 30 秒，但**行为不同**：前者传别的会被
-   平台悄悄覆盖，后者**直接 400**。所以一律先纠正到 30。
+3. 2026-09-28 公开规格已将 `sd2.5` 改为 4–30 秒；只有旧模型
+   `dubai_sd25_170` 继续按历史文档固定 30 秒。
 4. **查询响应有两种**：旧接口 `{"code":"success","data":{status,progress,result_url}}`，
    新接口直接在顶层返回 `status` / `result_url` / `error`。
    状态既有 `IN_PROGRESS`/`SUCCESS`/`FAILURE`，也有 `completed`/`failed`；完成时进度仍可能是 95。
@@ -60,10 +60,25 @@ import re
 import time
 from typing import Callable, Optional
 
-from ..apiutil import (DONE_STATES, FAIL_STATES, RUNNING_STATES, TASK_FATAL, ApiError,
-                       extract_image_items, task_failed)
-from .. import submitted
-from .base import ImageTask, Provider, VideoTask
+from core import apiutil as _api
+from core.apiutil import (DONE_STATES, FAIL_STATES, TASK_FATAL, ApiError,
+                          extract_image_items, task_failed)
+from core.providers.base import ImageTask, Provider, VideoTask
+
+# 同一文件可作为数据目录 providers/ 外挂；旧 EXE 没有任务恢复模块。
+try:
+    from core import submitted
+except ImportError:
+    submitted = None
+
+PATCH_VERSION = "20260928.1"
+RUNNING_STATES = getattr(_api, "RUNNING_STATES", (
+    "queued", "pending", "processing", "in_progress", "in-progress", "inprogress",
+    "running", "waiting", "created", "submitted", "start", "starting",
+    "generating", "uploading", "preparing", "init", "initializing",
+    "progress", "incomplete", "not_start", "notstart", "doing", "active",
+    "accepted", "scheduled", "retrying",
+))
 
 UPLOAD_MAX_MB = 210
 UPLOAD_EXTS = ("jpg", "jpeg", "png", "webp", "mp4", "mov", "m4v",
@@ -90,7 +105,8 @@ SPEC = {
          "480p 支持 5/10/15；720p 只有 10 秒"),
     "wan3.0th": ("url_media", (4, 30), ["720p"], R5, 10, 5, 5,
                  "**按秒计费** 0.14 元/秒；音频必须 WAV"),
-    "seedance-2.5-deal": ("url_media", (4, 15), ["720p"], R5, 30, 10, 10, "音频必须 WAV"),
+    "seedance-2.5-deal": ("url_media", (4, 25), ["480p"], R5, 30, 10, 10,
+                          "音频必须 WAV；公开描述称 30 秒，但 video_api 上限为 25 秒，暂按结构化规格"),
     "sd2-c7": ("openai_refs", (5, 15), ["720p"], R6, 9, 0, 0, ""),
     # 2026-09-14 按平台模型卡加进来（原来不在表里，走兜底被改过参数）：
     #   「SD2.5 原生过人脸（无需认证人脸）· 最多 9 张参考图 ·
@@ -105,18 +121,18 @@ SPEC = {
                    ["16:9", "9:16", "4:3", "3:4", "1:1"], 9, 0, 0,
                    "原生过人脸（不用认证人脸）；按次 4.5 元，四档同价；"
                    "格式按同族推的，没有实拉背书"),
-    "sd2.5": ("openai_refs", (30, 30), ["720p"], R6, 10, 0, 0,
-              "固定 30 秒；传别的会被平台悄悄覆盖"),
+    "sd2.5": ("openai_refs", (4, 30), ["720p"], R6, 10, 0, 0,
+              "2026-09-28：4–30 秒；沿用已接入的 image_refs 格式，视频/音频字段待官方接口文档确认"),
     "dubai_sd25_170": ("openai_refs", (30, 30), ["720p"], R6, 10, 0, 0,
                        "固定 30 秒，**传别的直接 400**；人脸账号每日 00:00 重置"),
     "grok-imagine-video-1.5（按次）":
-        ("grok", (6, 3600), ["720p", "480p"], ["16:9", "9:16", "1:1"], 7, 0, 0,
+        ("grok", (6, 15), ["720p", "480p"], ["16:9", "9:16", "1:1"], 7, 0, 0,
          "时长必填、不认 seconds；比例分辨率放 extra"),
     "grok-imagine-video-1.5-preview":
         ("grok", (6, 3600), ["720p", "480p"], ["16:9", "9:16", "1:1"], 7, 0, 0, "同上"),
-    "minimax-h3 768p": ("simple", (6, 10, [6, 10]), ["768p"], [], 1, 0, 0,
-                        "走 /v1/video/generations；参考图只 1 张"),
-    "minimax-h3 2k": ("simple", (6, 10, [6, 10]), ["2k"], [], 1, 0, 0, "同上"),
+    "minimax-h3 768p": ("simple", (10, 15), ["768p"], [], 6, 0, 0,
+                        "2026-09-28：10–15 秒，最多 6 图；沿用 /v1/video/generations"),
+    "minimax-h3 2k": ("simple", (10, 15), ["2k"], [], 6, 0, 0, "同上"),
     # ---- HM 渠道。能力数字抄自文档第四节，**名字按 2026-09-14 实拉校正** ----
     #
     # ⚠ 文档写的是内部名（`seedance_v2.5-301010`），**平台上根本没有那个名字** ——
@@ -132,8 +148,8 @@ SPEC = {
     # 不自造更窄的清单去拦人：拦错了报「不支持」而其实支持，比服务商回 400 难查。
     "SD 2.0": ("hm", (4, 15), ["720p"], R5, 9, 0, 0,
                "文档里叫 seedance_v2.0。无肖像保护；参考图要在正文里 @Image1 点名"),
-    "SD 2.0-933": ("hm", (4, 15), ["720p"], R5, 9, 3, 3,
-                   "文档里叫 seedance_v2.0-933。无肖像保护；要 @Image1 点名"),
+    "SD 2.0-933": ("hm", (4, 30), ["720p"], R5, 9, 3, 3,
+                   "2026-09-28：4–30 秒；沿用 HM 格式，要 @Image1 点名"),
     "SD 2.5": ("hm", (4, 30), ["720p"], R5, 9, 0, 0,
                "文档里叫 seedance_v2.5。**有肖像保护**：只能生成包含你自己的人脸"),
     "SD 2.5-101010": ("hm", (4, 30), ["720p"], R5, 10, 10, 10,
@@ -142,16 +158,34 @@ SPEC = {
                       "文档里叫 seedance_v2.5-301010。**有肖像保护**"),
 }
 
+# 2026-09-28 GET /api/pricing：仅把公开给出的约束写入；None 表示未公布。
+# 新型号仍沿用此前表外型号使用的 url_media 请求形状，未凭名字改协议。
+SPEC.update({
+    "sd2.5_30": ("url_media", (4, 30), ["720p"], R6, 30, 0, 10,
+                  "30 图 / 10 音频（MP3），不支持参考视频"),
+    "seedance-2.5-720p": ("url_media", (4, 30), ["720p"], [], 30, 10, 10,
+                         "按秒计费；30 图 / 10 视频 / 10 音频"),
+    "seedance-2.5-pro-480": ("url_media", (4, 30), ["480p"], [], 30, 10, 10, "按次计费"),
+    "seedance-2.5-pro-720": ("url_media", (4, 30), ["720p"], [], 30, 10, 10, "按次计费"),
+    "seedance-2.5-deal-720": ("url_media", (5, 30), ["720p"], [], 30, None, 10,
+                            "30 图 / 10 音频；参考视频上限未公布"),
+    "seedance-2.0-fast-15s": ("url_media", (15, 15), ["720p"], [], None, None, None,
+                            "固定 15 秒；素材数量上限未公布"),
+    "sd2.0-933-720p-fast-x5-15s": ("url_media", (5, 15), ["720p"], [], 9, 3, 3, ""),
+    "seedance-2.0-deal": ("url_media", (5, 15), ["480p"], [], 9, None, 3, ""),
+    "Seedance-933": ("url_media", (4, 15), ["720p"], [], 9, 0, 3, "不支持参考视频"),
+    "minimax_h3": ("url_media", (5, 15), ["480p", "768p"], ["16:9", "9:16"], 8, 0, 3, ""),
+    "Minimax-H3-768p-933-10s-15s": (
+        "url_media", (10, 15), ["768p"], R6 + ["3:2", "2:3"], 9, 3, 3, ""),
+})
+
 # 2026-09-14 实拉 `/v1/models` 确认**已经下线**的（选中就是 404）。
 # 留个名字在这儿，是因为老项目的 tasks.json 里可能还存着它们 ——
 # 看见这些名字时知道去哪儿找原因，而不是以为拼错了。
 RETIRED = (
     "SD2.0 Fast", "SD2.0 1080P 933", "sd-2-c8", "sd-2-c6",
     "Seedance 图生视频", "Quality V4 · 480p/720p (可@图/视频/音频)",
-    "wan3.0th", "seedance-2.5-deal", "dubai_sd25_170",
-    # 这五个是照 HM 文档的内部名加的，平台上从来没有过（见上面）
-    "seedance_v2.0", "seedance_v2.0-933", "seedance_v2.5",
-    "seedance_v2.5-101010", "seedance_v2.5-301010",
+    "wan3.0th", "dubai_sd25_170",
     # 2026-09-17 再拉：这两个 09-14 还在，今天不在了。**平台自己拼错的
     # "vedio" 不是原因** —— 我们本来就是照抄的名字。
     # 回来了也不用改代码：有 Key 的机器实拉的清单会盖掉这份声明。
@@ -163,19 +197,18 @@ RETIRED = (
 # 拿到它们各自的规格（文档或模型卡）再往 SPEC 里搬。
 UNSPECED = [
     "SD 2.0 基础",
-    "Minimax-H3-768p-933-10s-15s",
-    "minimax_h3",
     "sd2.0-720",
-    "sd2.0-933-720p-fast-x5-15s",
     "sora2",
     "video-editing",
-    # 2026-09-17 实拉新冒出来的三个。名字看着像已知家族的变体
-    # （`sd2.5_30` 像 30 秒档、`seedance-2.0-fast-deal-720` 像 720p 快线），
-    # **但那是猜**：这家的 `/v1/models` 只回 id，一个规格字段都没有。
+    # 2026-09-17 实拉出现的新名字。sd2.5_30 在 09-28 取得规格后已移入 SPEC；
+    # 剩下这些 `/v1/models` 只回 id，一个规格字段都没有。
     # 照猜的填进 SPEC 就是拿编出来的时长/比例去夹人要的参数，而夹是静默的。
     "2.0 MX",
-    "sd2.5_30",
     "seedance-2.0-fast-deal-720",
+    # 2026-09-28 又出现在模型清单；只有 ID，不能假定与带空格的型号规格一致。
+    "seedance_v2.0", "seedance_v2.0-933", "seedance_v2.5",
+    "seedance_v2.5-101010", "seedance_v2.5-301010",
+    "seedance-2.0-mini", "seedance-2.0-mini-480p", "Q10-SD2.5 全参",
 ]
 
 # 肖像保护：文档点名的三条出路。撞上那句报错时接给用户看。
@@ -329,6 +362,17 @@ class JulunProvider(Provider):
                 "resolutions": ["720p", "480p", "768p", "1080P", "2k"],
                 "max_refs": 30,
                 "ref_mode": "url",
+                "model_options": {
+                    m: dict(
+                        durations=list(s[1][2]) if len(s[1]) > 2 else list(range(s[1][0], s[1][1] + 1)),
+                        **({"resolutions": list(s[2])} if s[2] else {}),
+                        **({"ratios": list(s[3])} if s[3] else {}),
+                        **({"max_refs": s[4]} if s[4] is not None else {}),
+                        **({"max_video_refs": s[5]} if s[5] is not None else {}),
+                        **({"max_audio_refs": s[6]} if s[6] is not None else {}),
+                        notes=s[7],
+                    ) for m, s in SPEC.items() if m not in RETIRED
+                },
                 "specs": {m: {"format": s[0], "duration": s[1], "resolutions": s[2],
                               "ratios": s[3], "max_images": s[4], "max_videos": s[5],
                               "max_audios": s[6], "note": s[7]}
@@ -406,18 +450,20 @@ class JulunProvider(Provider):
                     f"要把它变成有校验的，去 core/providers/julun.py 的 SPEC 加一行。")
             cap_i = cap_v = cap_a = 10 ** 6
             ratios = []
-        if len(refs) > cap_i:
+        if cap_i is not None and len(refs) > cap_i:
             problems.append(f"参考图最多 {cap_i} 张，收到 {len(refs)} 张")
         if vids and cap_v == 0:
             problems.append(f"{model} 不支持参考视频，收到 {len(vids)} 条")
-        elif len(vids) > cap_v:
+        elif cap_v is not None and len(vids) > cap_v:
             problems.append(f"参考视频最多 {cap_v} 条，收到 {len(vids)} 条")
         if auds and cap_a == 0:
             problems.append(f"{model} 不支持参考音频，收到 {len(auds)} 条")
-        elif len(auds) > cap_a:
+        elif cap_a is not None and len(auds) > cap_a:
             problems.append(f"参考音频最多 {cap_a} 条，收到 {len(auds)} 条")
         if ratios and ratio not in ratios:
             problems.append(f"比例只支持 {'、'.join(ratios)}，收到 {ratio}")
+        if res_list and res not in res_list:
+            problems.append(f"清晰度只支持 {'、'.join(res_list)}，收到 {res}；请在视频清晰度选项中修改")
         if model == "SD2.0 1080P 933" and not refs:
             problems.append("这个模型至少要 1 张参考图")
         if fmt == "hm":
@@ -503,7 +549,7 @@ class JulunProvider(Provider):
             path = "/v1/video/generations"           # 文档：h3 推荐这个端点
             body = {"model": model, "prompt": task.prompt, "seconds": sec}
             if refs:
-                # 上面的 cap_i 校验已经把「超过 1 张」拦掉了，这里不做截断 ——
+                # 上面的 cap_i 已校验张数，这里不做截断 ——
                 # 截断等于悄悄少一个人出镜，而且不报错。
                 body["image_urls"] = refs
         return path, body
@@ -545,7 +591,8 @@ class JulunProvider(Provider):
             task_id = str(data.get("task_id") or data.get("id") or "")
         if not task_id:
             raise ApiError(f"提交没返回任务 ID：{str(data)[:300]}")
-        submitted.remember(task_id, custom="julun")
+        if submitted is not None:
+            submitted.remember(task_id, custom="julun")
 
         url = self._poll(task_id, poll_interval, poll_timeout, log=log, cancel=cancel)
         self.session.save_item(url, dest, log=log)

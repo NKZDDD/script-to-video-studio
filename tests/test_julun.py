@@ -87,7 +87,7 @@ class RegistryTests(unittest.TestCase):
         # 一个规格字段都没有 —— 所以它们进 UNSPECED（页面选得到、不校验），
         # 不进 SPEC：往 SPEC 里填一套猜的时长/比例，就是拿编出来的数去夹
         # 人要的参数，而夹是静默的。
-        for m in ("2.0 MX", "sd2.5_30", "seedance-2.0-fast-deal-720"):
+        for m in ("2.0 MX", "seedance-2.0-fast-deal-720"):
             self.assertIn(m, VIDEO_MODELS)
             self.assertNotIn(m, SPEC, f"{m} 的规格我们没有，别编一套进去")
         # `SD2.0 1080P 933`（无空格那个）也已下线 —— 注意它和实拉里活着的
@@ -209,25 +209,25 @@ class FormatDispatchTests(unittest.TestCase):
     def test_h3_uses_its_own_endpoint(self):
         p = JulunProvider()
         path, body = p.build_video_body(_vt(
-            model="minimax-h3 768p", refs=URLS[:1], duration=6))
+            model="minimax-h3 768p", refs=URLS[:1], duration=15))
         self.assertEqual(path, "/v1/video/generations")
-        self.assertEqual(body["seconds"], 6)
+        self.assertEqual(body["seconds"], 15)
         self.assertEqual(body["image_urls"], URLS[:1])
 
 
 class DurationTests(unittest.TestCase):
-    def test_sd25_family_is_locked_to_30(self):
-        """一个被平台悄悄改成 30，一个直接 400 —— 统一先纠正。"""
+    def test_sd25_updated_range_and_legacy_fixed_30(self):
+        """2026-09-28 sd2.5 开放整数时长；旧 Dubai 的固定规则仍保留。"""
         said = []
-        self.assertEqual(fit_duration("sd2.5", 10, log=said.append), 30)
+        self.assertEqual(fit_duration("sd2.5", 10, log=said.append), 10)
         self.assertEqual(fit_duration("dubai_sd25_170", 15, log=said.append), 30)
         self.assertEqual(fit_duration("sd2.5", 30), 30)
-        self.assertEqual(len(said), 2)      # 改了就要说，不能悄悄改
+        self.assertEqual(len(said), 1)      # 只纠正旧 Dubai
 
     def test_discrete_choices_snap_to_nearest(self):
         self.assertEqual(fit_duration("sd-2-c8", 4), 10)
         self.assertEqual(fit_duration("sd-2-c8", 15), 15)
-        self.assertEqual(fit_duration("minimax-h3 2k", 8), 6)
+        self.assertEqual(fit_duration("minimax-h3 2k", 8), 10)
         self.assertEqual(fit_duration("Quality V4 · 480p/720p (可@图/视频/音频)", 12), 10)
 
     def test_wan30th_allows_up_to_30(self):
@@ -244,7 +244,7 @@ class DurationTests(unittest.TestCase):
         """纠正必须落到真正发出去的 body 里，不能只在日志里说说。"""
         p = JulunProvider()
         _, body = p.build_video_body(_vt(model="sd2.5", refs=URLS, duration=10))
-        self.assertEqual(body["duration"], 30)
+        self.assertEqual(body["duration"], 10)
 
 
 class LoudFailureTests(unittest.TestCase):
@@ -272,7 +272,7 @@ class LoudFailureTests(unittest.TestCase):
     def test_too_many_refs_refused_before_submitting(self):
         p = JulunProvider()
         msg = self._fatal(lambda: p.build_video_body(
-            _vt(model="minimax-h3 2k", refs=URLS * 3, duration=6)))
+            _vt(model="minimax-h3 2k", refs=URLS * 4, duration=10)))
         self.assertIn("参考图", msg)
 
     def test_media_kinds_the_model_cannot_take(self):
