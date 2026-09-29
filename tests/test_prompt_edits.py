@@ -143,6 +143,9 @@ def test_running_batch_keeps_old_prompts_outputs_and_references(pj, monkeypatch)
     assert [text for _, text in calls] == ["生成测试图片"] * 2
     assert [t["output"] for t, _ in calls] == [t["output"] for t in original["asset_tasks"]]
     assert calls[1][0]["reference_images"] == original["asset_tasks"][1]["reference_images"]
+    # 第一批开始时已经取消了勾选；改过提示词的新版本要人自己再勾上才会生产
+    assert not any(t["selected"] for t in A.view(pj)["tasks"])
+    A.select(pj, {"asset0": True, "asset1": True})
     next_job = R.start(pj, {}, CAPS, resolve, jobs, expected_revision="r0002")
     wait_job(jobs.get(next_job["job_id"]))
     assert calls[2][1] == "手动修改后的提示词"

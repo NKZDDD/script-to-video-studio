@@ -97,10 +97,11 @@ class ChaomoNewHostTests(unittest.TestCase):
         2.5 系列声明了 max_reference_images=9 / n_max=4 / quality 四档；
         gpt-image2-*-Native 的 max_reference_images 是 **null**（没声明）——
         所以不给它填数。填一个「看起来合理」的和照文档抄没区别。
+        参考图张数是 2026-09-21 定的例外：本地不限制，由服务商判定。
         """
         for m in IMAGE_25:
             o = IMAGE_MODEL_OPTIONS[m]
-            self.assertEqual(o["max_refs"], 9, m)
+            self.assertNotIn("max_refs", o, m)
             self.assertEqual(o["n_max"], 4, m)
             self.assertEqual(o["quality"], ["auto", "low", "medium", "high"], m)
         for m in ("gpt-image2-1K-Native", "gpt-image2-4K-Native"):

@@ -74,9 +74,12 @@ IMAGE_MODELS = [
 
 # 逐模型的约束，来自实拉 schema。**只写它声明了的** ——
 # gpt-image2-*-Native 的 max_reference_images 是 null（没声明），所以不给它填数。
+#
+# 参考图张数**不在本地限制**（2026-09-21 定、2026-09-25 并进内置）：实拉 2.5 系列
+# 声明了 max_reference_images=9，但按它拦、按它截断的后果是第 10 张起悄悄不传，
+# 提示词里的「图 10」指不到任何图。多了由服务商自己判定、报错。
 IMAGE_MODEL_OPTIONS = {
-    m: {"max_refs": 9, "n_max": 4,
-        "quality": ["auto", "low", "medium", "high"]}
+    m: {"n_max": 4, "quality": ["auto", "low", "medium", "high"]}
     for m in IMAGE_25
 }
 
@@ -98,7 +101,7 @@ for _model in IMAGE_MODELS:
 RATIOS = ["1:1", "5:4", "4:5", "16:9", "9:16", "4:3", "3:4",
           "2:3", "3:2", "21:9"]
 SIZES = ["480p", "720p", "1080p", "4k"]          # 视频 size = 分辨率档位
-MAX_REFS = 9
+MAX_REFS = 9                                     # 只管视频的 content 块；图片不在本地限制
 
 # **每一个 RATIOS 里的值都要在这儿有数**：`_to_ratio` 遍历 RATIOS、
 # 去这张表取值，缺一个就 `KeyError` —— 而且只在「传的是像素尺寸」那条路上崩
@@ -224,14 +227,15 @@ class ChaomoProvider(Provider):
                 "model_options": IMAGE_MODEL_OPTIONS,
                 "sizes": RATIOS,                 # 这家图片的"尺寸"就是比例
                 "default_size": "9:16",
-                "max_refs": MAX_REFS,
+                "refs_unlimited": True,
                 "ref_mode": "bytes",
                 "notes": "比例字段 **ratio / size / aspect_ratio 三个名字都收**"
                          "（2026-09-14 实测：三个都被同一套校验读，非法值统一回"
                          " `unsupported_ratio` 并列出允许的十个）。n 固定 1，异步"
                          "（async:true → 轮询 /v1/images/{id}）。有参考图时走 /v1/images/edits，"
                          "**multipart 字段名是 image[]**：文档明写参考图 URL 不能直传，"
-                         "本类会自动把链接下载成文件再上传。",
+                         "本类会自动把链接下载成文件再上传。"
+                         "参考图张数本地不限制，全部按顺序提交，超出由服务商判定。",
             },
             "video": {
                 "models": VIDEO_MODELS,
@@ -436,7 +440,7 @@ class ChaomoProvider(Provider):
         allowed = IMAGE_MODEL_OPTIONS.get(model, {}).get("resolutions", [])
         if resolution and resolution not in allowed:
             raise ApiError(f"{model} 不支持图片清晰度 {resolution}，请选择对应档位的模型。", kind="task_fatal")
-        refs = list(task.refs or [])[:MAX_REFS]
+        refs = list(task.refs or [])
 
         if refs:
             # 图生图：multipart，字段名是 image[]（复数带方括号，别写成 image / images）

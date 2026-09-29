@@ -17,8 +17,8 @@ import time
 import uuid
 import zipfile
 
-from . import agent_projects as A
-from .store import LOCK, Project, read_json
+from . import agent_projects as A, matspec
+from .store import LOCK, Project, read_json, read_text
 
 RELEASES = "03_提示词/releases"
 MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 5000, 50 * 1024 * 1024, 200 * 1024 * 1024
@@ -38,43 +38,55 @@ def next_revision(pj: Project) -> str:
 
 
 def template(pj: Project, lock: dict, revision: str) -> str:
-    return f"""# Agent 生产任务（交接包）
+    return f"""# 交给 Codex 的交接包
 
-这是 Respect Studio 项目「{pj.meta().get('title', '')}」（{lock['project_id']}）的交接包。Studio 不在你这台机器上：
+项目「{pj.meta().get('title', '')}」（{lock['project_id']}）。这个压缩包里已经有做事需要的全部文字，**不要再向用户要剧本、契约或分析文件**。
 
-- 把交接包解压后的根目录当作项目根目录，下文和契约里的相对路径都相对它。
-- 先读 00_项目说明/production-contract.md、project-lock.json、production.schema.json，以及完整的 00_项目说明/skill/production-skill/。
-- 原文在 01_剧本与分段/原始素材.txt。若原文为空，先要求用户补齐。
-- 已有版本在 03_提示词/releases/（只读，不要改）；定向修订要求在 07_检查与记录/agent-revisions/。
-- 本次新版本号从 {revision} 开始，连续发多个版本时依次递增。
-- 交接包不含已生成的图片和视频。output、file_ref 仍按契约写项目相对路径，Studio 那边会对上实际文件。
-- 不能改项目锁，也不能自行调用收费的生图 / 视频接口。
+先读这些文件，都在包内：
 
-完成后，把 03_提示词/releases/{revision}/ 整个目录（含 READY.json）打包成一个 zip 交给用户，由用户在 Studio 的「Agent 契约」页点「导入 Agent 发布包」。
-只有发布目录会被带回，交接包里其他文件的改动都不会生效。
+1. `剧本.txt`：完整原文。
+2. `生产材料契约.md`：要交回的 `生产材料.jsonl` 的字段和形状。
+3. `01_剧本与分段/`：项目里已经有的分析产物（没有就跳过）。
+4. `00_项目说明/skill/production-skill/`：完整生产技能。按它做分析，不要另找规则。
+5. `00_项目说明/project-lock.json`：用户锁定的画幅、时长、风格。不能改。
 
-锁定选项（用户在创建向导中确认过）：
+两条交回方式，用户都能导入：
+
+- 按生产材料契约交一个 `.jsonl`。
+- 或者按技能交发布目录 `03_提示词/releases/{revision}/`（含 READY.json），打成 zip。版本号从 {revision} 起，再发就递增。已有版本在包内的 `03_提示词/releases/`，只读。
+
+不要调用收费的生图或视频接口。包内没有图片和视频；引用仍写项目相对路径。
+
+锁定选项：
 ```json
 {json.dumps(lock['options'], ensure_ascii=False, indent=2)}
 ```
-
-完成后列出发布版本、结构审计结果、需要用户查看的视觉审计项。
 """
 
 
-def export_package(pj: Project) -> dict:
+def export_package(pj: Project, limits=None) -> dict:
     if pj.meta().get("workflow") != "agent":
         raise ValueError("旧项目不走 Agent 发布，没有交接包")
     lock = read_json(pj.p("00_项目说明", "project-lock.json"))
     if not isinstance(lock, dict):
         raise ValueError("项目锁缺失，不能导出交接包")
+    script = read_text(pj.p("01_剧本与分段", "原始素材.txt"))
+    if not script.strip():
+        raise ValueError("原文是空的。先在「Agent 契约」里补上剧本再导出，否则 Codex 还是没有可分析的原文")
     revision = next_revision(pj)
     root = Path(pj.root)
+    system = pj.meta().get("system") or "v34"
     files = {"AGENT_TASK.md": template(pj, lock, revision).encode("utf-8"),
+             "剧本.txt": script.encode("utf-8"),
+             "生产材料契约.md": matspec.render(limits, pj.meta().get("title", ""), system).encode("utf-8"),
              "00_项目说明/production-contract.md": A.contract(pj, lock, remote=True).encode("utf-8")}
     for rel in ("00_项目说明/project-lock.json", "00_项目说明/production.schema.json",
                 "01_剧本与分段/原始素材.txt"):
         files[rel] = (root / rel).read_bytes()
+    analysis = root / "01_剧本与分段"
+    for path in sorted(analysis.rglob("*")) if analysis.is_dir() else []:
+        if path.is_file() and path.suffix.lower() in (".txt", ".md", ".json", ".jsonl"):
+            files.setdefault(path.relative_to(root).as_posix(), path.read_bytes())
     for folder in ("00_项目说明/skill", RELEASES, "07_检查与记录/agent-revisions"):
         base = root / folder
         for p in sorted(base.rglob("*")) if base.is_dir() else []:
@@ -83,7 +95,9 @@ def export_package(pj: Project) -> dict:
     files["交接包说明.json"] = json.dumps({
         "project_id": lock["project_id"], "title": pj.meta().get("title", ""),
         "next_revision": revision, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "contains": "文字材料，不含图片和视频"}, ensure_ascii=False, indent=2).encode("utf-8")
+        "contains": "剧本、生产材料契约、已有分析和完整技能；不含图片和视频",
+        "script": "剧本.txt", "material_contract": "生产材料契约.md"},
+        ensure_ascii=False, indent=2).encode("utf-8")
     name = f"{lock['project_id']}_交接包_{time.strftime('%Y%m%d-%H%M%S')}.zip"
     rel = f"07_检查与记录/handoff/{name}"
     target = A.inside(pj.root, rel)

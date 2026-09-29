@@ -294,6 +294,10 @@ def apply_catalog(cap, result, source):
                 options['max_refs'] = row['max_images']
             options.update(_from_schema(row.get('capability_schema')))
             options.update(_from_toplevel(row))
+            if block.get('refs_unlimited'):
+                # 这一类服务商声明了「参考图张数本地不限制」：清单里的数只是参考，
+                # 合并进来就又会按它拦、按它截断。
+                options.pop('max_refs', None)
             if options:
                 block.setdefault('model_options', {}).setdefault(row['id'], {}).update(options)
     cap['model_catalog'] = {'source': source, 'updated_at': result.get('updated_at', ''),

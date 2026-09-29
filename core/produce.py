@@ -825,7 +825,10 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
     ref_side, ref_fmt = _ref_rules(provider_cfg, "image")
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="image", ref_fmt=ref_fmt)
     _llm = _lazy_llm(llm_factory)
-    generate = (lambda gen, prompt, **kw: gen(prompt)) if provider_cfg.get("agent_mode") else soften.run_with_softening
+    # Agent 工作台里 LLM 只做这一件事：被审核拒绝后改写提示词再重发。轮数给 0 就直接出图。
+    generate = ((lambda gen, prompt, **kw: gen(prompt))
+                if provider_cfg.get("agent_mode") and not _soften_rounds(provider_cfg)
+                else soften.run_with_softening)
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
@@ -951,7 +954,10 @@ def make_video_worker(pj: Project, provider_cfg: dict,
     ref_side, ref_fmt = _ref_rules(provider_cfg, "video")
     to_ref = make_ref_resolver(pj, prov, provider_cfg, model, ref_side, media="video", ref_fmt=ref_fmt)
     _llm = _lazy_llm(llm_factory)
-    generate = (lambda gen, prompt, **kw: gen(prompt)) if provider_cfg.get("agent_mode") else soften.run_with_softening
+    # Agent 工作台里 LLM 只做这一件事：被审核拒绝后改写提示词再重发。轮数给 0 就直接出图。
+    generate = ((lambda gen, prompt, **kw: gen(prompt))
+                if provider_cfg.get("agent_mode") and not _soften_rounds(provider_cfg)
+                else soften.run_with_softening)
     # 按账号计费、一个账号只能同时跑一条的家（HVTALD）：按账号排队。
     # 声明在服务商自己身上，这里只问一句。别家 pool 是 None，走老路。
     pid = provider_cfg["provider"]

@@ -206,6 +206,7 @@ class Job:
         self.abort_diag: Optional[dict] = None
         self.items: dict = {}
         self.logs: list = []
+        self.max_retry: Optional[int] = None
         self._lock = threading.RLock()
 
     def abort_with(self, diag: dict) -> None:
@@ -278,6 +279,7 @@ class Job:
             d = self.brief()
             d["items"] = {k: dict(v) for k, v in self.items.items()}
             d["logs"] = self.logs[-120:]
+            d["max_retry"] = self.max_retry
             return d
 
     def cancel(self) -> None:
@@ -411,6 +413,8 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
     人还得自己回头找是哪个上游没成。既费钱又难查。
     """
     provider = provider or job.provider
+    if job.max_retry is None:
+        job.max_retry = max_retry
     for t in tasks:
         job.set_item(key_of(t), state="pending")
 
@@ -420,7 +424,7 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
             job.set_item(key, state="aborted" if job.aborted else "cancelled",
                          msg="前面出错停了，这条还没开始" if job.aborted else "已取消")
             return
-        job.set_item(key, state="queued")
+        job.set_item(key, state="queued", msg="排队中：等服务商或全局并发名额")
 
         def log(msg):
             job.log(key, msg)
@@ -429,7 +433,7 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
             if job.cancelled:
                 job.set_item(key, state="aborted" if job.aborted else "cancelled")
                 return
-            job.set_item(key, state="running")
+            job.set_item(key, state="running", msg="")
             for attempt in range(1 + max_retry):
                 if job.cancelled:
                     job.set_item(key, state="aborted" if job.aborted else "cancelled")
@@ -501,6 +505,16 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
             return []
         return [d for d in (deps_of(key) or ()) if d in mine and d != key]
 
+    # 还没派出去的写明在等什么。不写的话任务明细里只有一个「pending」，
+    # 看不出是在等哪张参考图，还是在等并发空位。
+    noted: dict = {}
+
+    def _note(t, text: str) -> None:
+        k = key_of(t)
+        if noted.get(k) != text:
+            noted[k] = text
+            job.set_item(k, msg=text)
+
     left = list(tasks)
     # 「在等跨批输入」那种等待要有个上界。正常情况下等待的终点是上游那一批
     # 跑完（ready_of 那边会知道），这个上界只防依赖图里出现没想到的环 ——
@@ -529,6 +543,7 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                     continue
                 if not all(_state(d) in _DONE_STATES for d in deps):
                     hold.append((t, ""))        # 等同批的 —— 空的等待说明
+                    _note(t, "等待上游：" + "、".join(d for d in deps if _state(d) not in _DONE_STATES))
                     continue
                 # 同批的依赖齐了，再问一句**跨批**的输入齐没齐 ——
                 # 出图出片四类活是并发跑的，故事板可能比它要的场景状态图先排到。
@@ -548,14 +563,24 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                         continue
                     if not ok:
                         hold.append((t, waits))
+                        _note(t, waits or "等待上游产物")
                         continue
                 fire.append(t)
             left = [t for t, _ in hold]
             for t in fire:
+                _note(t, "排队中：等这一类的并发空位")
                 running[pool.submit(one, t)] = t
             if running:
                 idle_since = 0.0
-                done, _ = wait(running, return_when=FIRST_COMPLETED)
+                # 有人在跑时也要定期回来看还在等的那些。
+                #
+                # 以前一直等到这一批里某一条做完才回来。分段视频一条要几分钟，
+                # 这几分钟里别的段的参考图已经齐了 —— 它们和正在跑的那条没有依赖，
+                # 却要干等到那条结束才被派出去。人看到的就是「没有强关联的段
+                # 没有一起开跑，等第一条快结束了才突然并起来」。
+                # 没有还在等的（left 空了）就照旧堵到有一条做完，不必空转。
+                done, _ = wait(running, timeout=2.0 if left else None,
+                               return_when=FIRST_COMPLETED)
                 for f in done:
                     running.pop(f, None)
                     f.result()      # one 内部已消化业务异常；这里让程序 bug 冒出来

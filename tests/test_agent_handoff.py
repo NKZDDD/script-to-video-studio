@@ -38,8 +38,10 @@ def test_export_is_text_only_with_relative_instructions(pj):
         assert must in names, must
     assert not any(n.endswith((".png", ".mp4")) for n in names)
     z = zipfile.ZipFile(d["file"])
-    task, contract = z.read("AGENT_TASK.md").decode(), z.read("00_项目说明/production-contract.md").decode()
-    assert "r0002" in task and pj.root not in task and pj.root not in contract and "交接包" in contract
+    task = z.read("AGENT_TASK.md").decode()
+    script, contract = z.read("剧本.txt").decode(), z.read("生产材料契约.md").decode()
+    assert script == "测试原文" and "生产材料.jsonl" in contract
+    assert "不要再向用户要剧本" in task and pj.root not in task
 
 
 @pytest.mark.parametrize("layout", ["project", "folder", "flat"])
@@ -107,6 +109,24 @@ def test_handoff_routes_work_through_the_http_layer(pj, monkeypatch):
     raw = base64.b64encode(released(pj, "r0001")).decode()
     d = agent_api.post(app, "/api/agent/handoff/import", {"root": pj.root, "filename": "r.zip", "content_b64": raw})
     assert d["imported"] == ["r0001"] and d["active"] == "r0001"
+
+
+def test_jsonl_material_becomes_visible_tasks_on_an_agent_project(pj, monkeypatch):
+    import base64
+    import copy
+    from core import matspec
+    from server import agent_api, app
+    from test_agent_workspace import CAPS
+    raw = matspec.jsonl_schema("v34").encode("utf-8")
+    cfg = {"projects_dir": str(Path(pj.root).parent), "providers": {}, "limits": {"global": 8, "per_provider": {}}}
+    monkeypatch.setattr(app, "load_config", lambda: copy.deepcopy(cfg))
+    monkeypatch.setattr(app, "caps_of", lambda cfg=None: copy.deepcopy(CAPS))
+    monkeypatch.setattr(app, "_material_limits", lambda *a: {})
+    d = agent_api.post(app, "/api/agent/handoff/import", {
+        "root": pj.root, "filename": "生产材料.jsonl", "content_b64": base64.b64encode(raw).decode()})
+    assert d["ok"] and d["revision"]
+    assert A.view(pj)["tasks"]
+    assert A.view(pj)["publication"]["source"] == "jsonl"
 
 
 def test_jsonl_source_reads_as_plain_text():

@@ -71,7 +71,7 @@ def test_catalog_cannot_restore_limit_and_other_capabilities_preserved(patched):
     assert patched.generate_video is ChaomoProvider.generate_video
     assert ChaomoProvider().capabilities() == original
     plain = model_catalog.apply_catalog(original, {"rows": rows}, "fixture")
-    assert plain["image"]["model_options"][rows[0]["id"]]["max_refs"] == 9
+    assert "max_refs" not in plain["image"]["model_options"].get(rows[0]["id"], {})
 
 
 def test_reload_and_removal_restore_builtin(patched, tmp_path):
@@ -85,7 +85,7 @@ def test_reload_and_removal_restore_builtin(patched, tmp_path):
     (tmp_path / PATCH.name).unlink()
     providers.reload_all()
     assert providers.REGISTRY["chaomo"] is ChaomoProvider
-    assert providers.REGISTRY["chaomo"]().capabilities()["image"]["max_refs"] == 9
+    assert providers.REGISTRY["chaomo"]().capabilities()["image"]["refs_unlimited"] is True
 
 
 def test_invalid_tenth_reference_still_fails_before_submission(patched):

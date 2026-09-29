@@ -225,7 +225,7 @@ _FPS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*fps")
 
 
 def media_info(path: str) -> Optional[dict]:
-    """拼接统一规格要用的：宽高、帧率、时长、有没有音轨。读 `ffmpeg -i` 的流信息。"""
+    """读拼接要用的画面规格：编码、像素格式、宽高、帧率、时长、有没有音轨。"""
     ff = find_ffmpeg()
     if not ff or not os.path.isfile(path):
         return None
@@ -233,7 +233,8 @@ def media_info(path: str) -> Optional[dict]:
         err = run_text([ff, "-hide_banner", "-i", path]).stderr or ""
     except (OSError, subprocess.SubprocessError):
         return None
-    info = {"width": 0, "height": 0, "fps": 0.0, "duration": 0.0, "audio": False}
+    info = {"width": 0, "height": 0, "fps": 0.0, "duration": 0.0, "audio": False,
+            "codec": "", "pix_fmt": ""}
     m = _DURATION_RE.search(err)
     if m:
         info["duration"] = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
@@ -241,13 +242,40 @@ def media_info(path: str) -> Optional[dict]:
         if "Video:" in line and not info["width"]:
             clean = re.sub(r"\[[^\]]*\]", "", line)
             size, fps = _SIZE_RE.search(clean), _FPS_RE.search(clean)
+            spec = re.search(r"Video:\s*([0-9A-Za-z]+)\b(?:\s*\([^)]*\))*,\s*([0-9A-Za-z]+)", clean)
             if size:
                 info["width"], info["height"] = int(size.group(1)), int(size.group(2))
             if fps:
                 info["fps"] = float(fps.group(1))
+            if spec:
+                info["codec"], info["pix_fmt"] = spec.group(1), spec.group(2)
         elif "Audio:" in line:
             info["audio"] = True
     return info if info["width"] else None
+
+
+_FRAMES_RE = re.compile(r"frame=\s*(\d+)")
+
+
+def video_duration(path: str, fps: float = 0.0) -> float:
+    """画面流自己的时长（帧数 ÷ 帧率）。
+
+    容器时长取的是音画里**更长**的那条：音轨比画面长 0.5 秒时它报的是音轨的长度，
+    拿它去对齐等于没对齐。读不到帧数时退回容器时长。
+    """
+    ff = find_ffmpeg()
+    info = media_info(path) or {}
+    fps = fps or info.get("fps") or 0.0
+    if ff and fps:
+        try:
+            err = run_text([ff, "-hide_banner", "-i", path, "-map", "0:v:0", "-c", "copy",
+                            "-f", "null", "-"]).stderr or ""
+            frames = _FRAMES_RE.findall(err)
+            if frames and int(frames[-1]) > 0:
+                return int(frames[-1]) / fps
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return float(info.get("duration") or 0.0)
 
 
 # ---------------------------------------------------------------- 比对

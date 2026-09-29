@@ -2606,6 +2606,46 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
+    def _send_file(self, full: str, ctype: str):
+        """产物文件按 Range 分段回。浏览器拖视频进度条要从中间某个字节开始取，
+        只回整份 200 的话它就不让拖。"""
+        size = os.path.getsize(full)
+        start, end, code = 0, size - 1, 200
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            code = 206
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        left = end - start + 1
+        try:
+            with open(full, "rb") as f:
+                f.seek(start)
+                while left > 0:
+                    chunk = f.read(min(left, 1 << 20))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
     def do_GET(self):
         u = urlparse(self.path)
         path, q = unquote(u.path), parse_qs(u.query)
@@ -2625,8 +2665,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not os.path.isfile(full):
                     return self._json({"error": "不存在"}, 404)
                 ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
-                with open(full, "rb") as f:
-                    return self._send(200, f.read(), ctype)
+                return self._send_file(full, ctype)
             name = "agent.html" if path in ("/", "", "/index.html") else path.lstrip("/")
             if name not in ("agent.html", "agent.css", "agent.js", "favicon.ico"):
                 return self._json({"error": "404"}, 404)

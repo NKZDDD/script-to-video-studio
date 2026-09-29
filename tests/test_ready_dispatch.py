@@ -128,6 +128,37 @@ class DispatchTests(unittest.TestCase):
         self.assertGreaterEqual(run.started("C"), run.finished("B"))
         self.assertEqual(job.counts().get("ok"), 3)
 
+    def test_a_cross_batch_input_that_lands_while_another_runs_starts_that_task(self):
+        """★ 同批里正跑着一条慢任务时，另一条的跨批上游齐了就要开工。
+
+        分段视频走的是 ready_of，不是同批依赖。一条视频要几分钟，
+        调度如果干等到它结束才回来看，其余参考图已经齐、又和它没有依赖的段
+        会一直挂着，等人以为「不会并发」。
+        """
+        ready = {"B": False}
+        started, finished = {}, {}
+
+        def worker(task, log, cancel):
+            started[task["key"]] = time.time()
+            if task["key"] == "A":
+                time.sleep(0.05)
+                ready["B"] = True          # A 已经在跑，B 的上游这才齐
+                time.sleep(4)
+            finished[task["key"]] = time.time()
+            return {}
+
+        def ready_of(task):
+            if task["key"] == "B" and not ready["B"]:
+                return False, "等待上游"
+            return True, ""
+
+        job = _job(2, conc=2)
+        run_batch(job, [_t("A"), _t("B")], worker, key_of=lambda t: t["key"],
+                  max_retry=0, ready_of=ready_of)
+        self.assertLess(started["B"], finished["A"],
+                        "B 的上游已经齐了，却要等 A 跑完才开工")
+        self.assertEqual(job.counts().get("ok"), 2)
+
     def test_everything_independent_runs_together(self):
         """没有依赖的就该同时跑，不许被这套机制拖成串行。"""
         tasks = [_t(k) for k in "ABCD"]

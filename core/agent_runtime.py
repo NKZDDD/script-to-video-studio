@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 from functools import lru_cache
 from pathlib import Path
+import re
 import threading
 import time
 
@@ -37,6 +38,38 @@ def _seconds(values) -> str:
     return "、".join(f"{n:g}" for n in nums) + " 秒"
 
 
+_FINAL = ("ok", "skipped", "failed", "cancelled", "aborted", "interrupted")
+
+
+def busy(jobs, root: str) -> dict:
+    """本项目在跑的批次里还没结束的任务 → 它所在的批次。
+
+    同一个项目可以同时开几批，只要任务不重叠：同一个任务在两批里各提交一次，
+    就是同一段付两次钱。
+    """
+    out = {}
+    if jobs is None:
+        return out
+    for job in list(jobs.jobs.values()):
+        if job.project_root != root or job.status in ("done", "error", "cancelled", "aborted"):
+            continue
+        for key, item in list(job.items.items()):
+            if item.get("state") not in _FINAL:
+                out[key] = job
+    return out
+
+
+def retries(cfg: dict) -> int:
+    return max(0, int((cfg or {}).get("defaults", {}).get("max_retry", 2)))
+
+
+def soften_rounds(cfg: dict) -> int:
+    """被审核拒绝后用 LLM 改写提示词再重发，最多几轮。0 = 关掉。"""
+    from . import soften
+    v = (cfg or {}).get("defaults", {}).get("soften_rounds")
+    return soften.clamp_rounds(soften.DEFAULT_ROUNDS if v in (None, "") else v)
+
+
 def valid_output(path: str) -> bool:
     try:
         p = Path(path)
@@ -60,7 +93,7 @@ def settings(pj, caps: list, cfg=None) -> dict:
         pid = opts.get(media + "_provider") or first.get("provider") or (compatible[0]["id"] if compatible else "")
         cap = next((c for c in compatible if c["id"] == pid), {})
         model = opts.get(media + "_model") or (first.get("model") if first.get("provider") == pid else "") or cap.get(media, {}).get("default_model", "")
-        result[kind] = dict(provider=pid, model=model, concurrency=max(1, min(512, int(cfg.get("defaults", {}).get("concurrency", 3)))))
+        result[kind] = dict(provider=pid, model=model, concurrency=max(1, int(cfg.get("defaults", {}).get("concurrency", 3))))
         result[kind].update(saved.get(kind) or {})
     return result
 
@@ -72,8 +105,8 @@ def validate_settings(value: dict, caps: list) -> dict:
         if kind not in A.LEGACY_KINDS or not isinstance(row, dict):
             raise ValueError("生产设置类别无效")
         conc = int(row.get("concurrency", 3))
-        if not 1 <= conc <= 512:
-            raise ValueError("每类并发须在 1–512 之间")
+        if conc < 1:
+            raise ValueError("每类并发至少为 1")
         media = "video" if kind == "video" else "image"
         pid = row.get("provider", "")
         if pid not in byid or media not in byid[pid].get("supports", []):
@@ -82,8 +115,24 @@ def validate_settings(value: dict, caps: list) -> dict:
         resolution = str(row.get("image_resolution") or "").upper()
         if resolution and resolution not in ("1K", "2K", "4K"):
             raise ValueError("图片清晰度须为 1K、2K 或 4K")
+        shape = str(row.get("size" if media == "image" else "ratio") or "").strip()
+        if shape and not re.fullmatch(r"[0-9A-Za-z:x.]{1,20}", shape):
+            raise ValueError("比例 / 尺寸只能是 16:9、1024x1536 这类写法")
+        out[kind]["size" if media == "image" else "ratio"] = shape
         if media == "image":
             out[kind]["image_resolution"] = resolution
+        else:
+            clarity = str(row.get("resolution") or "").strip()
+            if clarity and not re.fullmatch(r"[0-9A-Za-z]{1,12}", clarity):
+                raise ValueError("视频清晰度只能是 720p、1080p 这类写法")
+            out[kind]["resolution"] = clarity
+            seconds = row.get("duration")
+            if seconds in (None, ""):
+                out[kind]["duration"] = ""
+            else:
+                if isinstance(seconds, bool) or not 1 <= int(seconds) <= 600:
+                    raise ValueError("视频秒数须在 1–600 之间")
+                out[kind]["duration"] = int(seconds)
         override = row.get("override") or {}
         if not isinstance(override, dict) or set(override) - {"size", "ratio", "duration", "resolution"}:
             raise ValueError("不支持的生产参数覆盖")
@@ -91,16 +140,19 @@ def validate_settings(value: dict, caps: list) -> dict:
     return out
 
 
-def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
+def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None) -> dict:
     data = A.view(pj)
     rows = data["tasks"]
     saved = settings(pj, caps, cfg)
     wanted = set(only) if only is not None else {t["key"] for t in rows if t["selected"]}
     if wanted - {t["key"] for t in rows}:
         raise ValueError("所选任务已变化，请刷新")
+    running = running or {}
     selected = [t for t in rows if t["key"] in wanted]
     done = {t["key"] for t in rows if valid_output(str(A.inside(pj.root, t["output"])))}
-    todo = [t for t in selected if t["key"] not in done]
+    elsewhere = [t["key"] for t in selected if t["key"] not in done and t["key"] in running]
+    todo = [t for t in selected if t["key"] not in done and t["key"] not in running]
+    coming = wanted | set(running)
     blocked, pcs = [], {}
     capmap = {c["id"]: c for c in caps}
     for t in todo:
@@ -121,14 +173,14 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
                 # 取回已生成结果不依赖当前提示词、参考图、模型是否仍可新建。
                 continue
             for dep in t["dependencies"]:
-                if dep not in wanted and dep not in done:
+                if dep not in coming and dep not in done:
                     raise ValueError(f"缺少勾选的上游：{dep}（可点“补选依赖”）")
             for r in A.references(t):
                 rel = r.get("file_ref") or r.get("url") or ""
                 if rel.startswith(("http://", "https://")) and data["publication"].get("legacy"):
                     continue
                 target = A.inside(pj.root, rel)
-                if not valid_output(str(target)) and not any(x["output"] == rel and x["key"] in wanted for x in rows):
+                if not valid_output(str(target)) and not any(x["output"] == rel and x["key"] in coming for x in rows):
                     raise ValueError(f"缺失或无效参考图：{rel}")
             dest = A.inside(pj.root, t["output"])
             if dest.exists() and not valid_output(str(dest)):
@@ -146,9 +198,15 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
                 p.update(row.get("override") or {})
             if media == "image" and row.get("image_resolution"):
                 p["resolution"] = row["image_resolution"]
+            if media == "video" and row.get("duration"):
+                p["duration"] = int(row["duration"])
+            if media == "video" and row.get("resolution"):
+                p["resolution"] = row["resolution"]
             if media == "image" and p.get("resolution") and p["resolution"] not in effective.get("resolutions", []):
                 raise ValueError("当前图片模型不支持所选清晰度，请选择对应档位模型或恢复跟随任务")
             sizefield = "ratio" if media == "video" else "size"
+            if row.get(sizefield):
+                p[sizefield] = row[sizefield]
             supported = effective.get("ratios" if media == "video" else "sizes")
             if not supported:
                 raise ValueError("该模型的画幅能力未知，先补全服务商能力声明")
@@ -156,17 +214,20 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
             if value is None:
                 raise ValueError(note)
             if str(value) != str(p.get(sizefield)) and sizes.as_ratio(value) != sizes.as_ratio(p.get(sizefield)):
-                raise ValueError(f"请求 {p.get(sizefield)} 与服务商支持的 {supported} 不兼容；请显式修改参数或让 Agent 修订")
+                chosen = "这一行选的" if row.get(sizefield) else "任务里写的"
+                raise ValueError(f"{chosen} {p.get(sizefield)} 与服务商支持的 {supported} 不兼容；"
+                                 "在「本次服务商与并发」这一行的比例里选一个支持的，或让 Agent 修订")
             p[sizefield] = value
             refs = len({r.get("file_ref") or r.get("url") for r in A.references(t)})
             maximum = effective.get("max_refs")
-            if refs and (maximum is None or refs > maximum):
+            if refs and not effective.get("refs_unlimited") and (maximum is None or refs > maximum):
                 raise ValueError(f"参考图 {refs} 张，服务商上限 {maximum if maximum is not None else '未知'}")
             if media == "video":
                 if p.get("resolution") and p["resolution"] not in effective.get("resolutions", []):
-                    raise ValueError("该清晰度不在模型能力中，请清空覆盖或选择已支持的清晰度")
+                    raise ValueError(f"清晰度 {p['resolution']} 不在这个视频模型的能力里"
+                                     f"（{'、'.join(effective.get('resolutions', [])) or '没有声明'}），"
+                                     "在「本次服务商与并发」视频那一行的清晰度里重新选，或选「跟随任务」")
                 rules = {}
-                import re
                 raw_rules = ((cfg.get("providers") or {}).get(row["provider"], {}).get("durations") or "")
                 for rule in re.split(r"[;\n]+", str(raw_rules)):
                     if "=" in rule:
@@ -178,20 +239,24 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
                     who = f"「{capmap.get(row['provider'], {}).get('name') or row['provider']} / {row['model']}」"
                     source = "设置里手填的「已实测的模型时长档位」" if manual else "服务商的模型能力声明"
                     can = f"只支持 {_seconds(durations)}（来自{source}）" if durations else "没有声明支持哪些时长"
-                    raise ValueError(f"这一段要 {p.get('duration')} 秒，但视频模型{who}{can}。"
-                                     "处理办法：换一个支持这个时长的视频模型；或者让 Agent 按不超过上限的时长重新切段；"
+                    asked = (f"视频那一行选的是 {p.get('duration')} 秒" if row.get("duration")
+                             else f"这一段要 {p.get('duration')} 秒")
+                    raise ValueError(f"{asked}，但视频模型{who}{can}。"
+                                     "处理办法：在「本次服务商与并发」视频那一行的秒数里选一个支持的档位；"
+                                     "换一个支持这个时长的视频模型；或者让 Agent 按不超过上限的时长重新切段；"
                                      "如果确认服务商实际支持，到设置 → 服务商里补上「已实测的模型时长档位」。")
             t["params"] = p
             if kind not in pcs or pcs[kind].get("model") != row["model"]:
                 pc = resolve_cfg(cfg, {"provider": row["provider"], "model": row["model"]}, "video" if media == "video" else "asset")
-                pc["soften_rounds"] = 0
+                pc["soften_rounds"] = soften_rounds(cfg)
                 pc["agent_mode"] = True
                 pcs[kind] = pc
         except (ValueError, OSError, KeyError, TypeError) as exc:
             blocked.append({"key": t["key"], "reason": str(exc)})
     return {"revision": data["publication"].get("revision", ""), "selected": len(selected),
             "keys": [t["key"] for t in selected],
-            "reuse": len(selected) - len(todo), "todo": len(todo), "blocked": blocked,
+            "reuse": len(selected) - len(todo) - len(elsewhere), "todo": len(todo), "blocked": blocked,
+            "elsewhere": elsewhere, "max_retry": retries(cfg), "soften_rounds": soften_rounds(cfg),
             "resuming": sum(1 for t in todo if t.get("submitted")),
             "rows": [{"kind": k, **saved[k], "count": sum(t["kind"] == k for t in todo),
                       "global_limit": GATE.snapshot()["global_limit"],
@@ -219,21 +284,24 @@ class ChildJob(Job):
         self.parent.log(key, message)
 
 
-def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None):
+def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None, llm_factory=None):
+    """`llm_factory` 只用在一件事上：被审核拒绝时改写提示词再重发（见 soften.py）。"""
     with LOCK:
-        if jobs.list(project_root=pj.root, active_only=True):
-            raise ValueError("本项目已有运行任务，请等待结束或先停止，避免重复收费")
-        result = preview(pj, cfg, caps, resolve_cfg, only)
+        others = busy(jobs, pj.root)
+        result = preview(pj, cfg, caps, resolve_cfg, only, running=others)
         if expected_revision is not None and result["revision"] != expected_revision:
             raise ValueError("计划已更新，请重新预览生产范围")
         if result["blocked"]:
             return dict(public_preview(result), ok=False)
         if not result["todo"]:
-            return dict(public_preview(result), ok=True, message="已选产物均有效，已复用，无需生成")
+            message = (f"选中的 {len(result['elsewhere'])} 项正在另一批里生成，这次没有新的要提交"
+                       if result["elsewhere"] else "已选产物均有效，已复用，无需生成")
+            return dict(public_preview(result), ok=True, message=message)
         tasks = copy.deepcopy(result["_tasks"])
         settings_ = result["_settings"]
         job = jobs.create("production", len(tasks), sum(settings_[k]["concurrency"] for k in result["_providers"]),
                           project_root=pj.root, project_name=pj.meta().get("title", ""))
+        job.max_retry = retries(cfg)
         directory = f"07_检查与记录/jobs/{job.id}"
         # Freeze prompt bytes now. Editing releases or selections cannot change this job.
         for i, t in enumerate(tasks):
@@ -244,28 +312,35 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None):
             job.set_item(t["key"], state="pending")
         write_json(pj.p(*directory.split("/"), "snapshot.json"),
                    {"revision": result["revision"], "tasks": tasks, "settings": settings_, "created_at": time.time()})
+        # 已经交出去的这一批取消勾选：再点一次「开始生产」不会把同一批重新提交，
+        # 失败了要重做也得人自己再勾上。
+        A.select(pj, {k: False for k in result["keys"]})
         children, threads = [], []
         bykey = {t["key"]: t for t in tasks}
 
         def ready(t):
             if t.get("resume_only"):
                 return True, ""
+            waits = []
             for dep in t["dependencies"]:
-                if dep in bykey:
-                    state = job.items[dep]["state"]
-                    if state in ("failed", "aborted", "cancelled"):
-                        return None, f"上游 {dep} 未完成"
-                    if state not in ("ok", "skipped"):
-                        return False, f"等待 {dep}"
-            return True, ""
+                owner = job if dep in bykey else others.get(dep)
+                if owner is None:
+                    continue
+                state = (owner.items.get(dep) or {}).get("state")
+                if state in ("failed", "aborted", "cancelled"):
+                    return None, f"上游 {dep} 未完成" + ("" if owner is job else "（在另一批里）")
+                if state not in ("ok", "skipped"):
+                    waits.append(dep + ("" if owner is job else "（另一批在生成）"))
+            return (False, "等待上游：" + "、".join(waits)) if waits else (True, "")
 
         def run_kind(kind, pc):
             items = [t for t in tasks if t["kind"] == kind]
             child = ChildJob(job, kind, len(items), settings_[kind]["concurrency"], pc)
             children.append(child)
             try:
-                worker = (produce.make_video_worker(pj, pc) if kind == "video" else
-                          produce.make_image_worker(pj, pc, "asset" if kind == "asset" else "storyboard"))
+                worker = (produce.make_video_worker(pj, pc, llm_factory) if kind == "video" else
+                          produce.make_image_worker(pj, pc, "asset" if kind == "asset" else "storyboard",
+                                                    llm_factory))
                 def checked(t, log, cancel):
                     use = worker
                     if t.get("resume_only"):
@@ -284,7 +359,7 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None):
                     return value
                 child.cancelled = job.cancelled
                 run_batch(child, items, checked, key_of=lambda t: t["key"], ready_of=ready,
-                          max_retry=max(0, min(5, int(cfg.get("defaults", {}).get("max_retry", 2)))))
+                          max_retry=retries(cfg))
             except Exception as exc:
                 for t in items:
                     if job.items[t["key"]]["state"] not in ("ok", "skipped", "failed"):
