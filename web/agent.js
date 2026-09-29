@@ -156,7 +156,7 @@ function production() {
  <div class="rv-panel"><div class="rv-row"><h3>本次服务商与并发</h3>${btn('填写 / 管理密钥','providers')}</div><div class="rv-service-head"><span>生产类型</span><span>服务商</span><span>模型</span><span>图片清晰度</span><span>并发</span></div><div id="production-services"></div><p class="rv-caption">各行共享全局总上限与服务商上限；批内并发不能相加当作可用额度。设置变更只影响下次开始的批次。</p></div>
  <div id="jobs"></div>
  <div class="rv-toolbar"><select id="tree-mode" aria-label="树形分组">${[['family','按资源分类'],['episode','按集查看'],['disk','按磁盘目录']].map(([v,n])=>option(v,n,S.treeMode)).join('')}</select><label class="rv-search"><input id="asset-search" type="search" aria-label="搜索资源" placeholder="搜索人物、场景、任务 ID、文件名" value="${esc(S.filters.asset||'')}"></label><select id="asset-status" aria-label="资源状态">${choices(['全部状态','待生产','已完成','失败','选择有阻塞'],S.filters.assetStatus||'全部状态')}</select><select id="asset-type" aria-label="资源类型">${option('','全部类型',S.filters.assetType||'')}${Object.entries(cats).map(([k,v])=>option(k,v,S.filters.assetType)).join('')}</select></div>
- <div class="rv-row rv-selection"><span id="selection-count"></span><div class="rv-actions">${btn('选中当前结果','select-visible')}${btn('取消当前结果','clear-visible')}${btn('全项目全选','select-all')}${btn('补选依赖','dependencies')}</div></div><div id="dependency-alert"></div>
+ <div class="rv-row rv-selection"><span id="selection-count"></span><div class="rv-actions">${btn('选中当前结果','select-visible')}${btn('取消当前结果','clear-visible')}${btn('全项目全选','select-all')}${btn('补选依赖','dependencies')}${btn('批量放弃已选待取回','drop-submitted-batch')}</div></div><div id="dependency-alert"></div>
  <div class="rv-production-grid"><div class="rv-panel rv-tree-panel"><div id="resource-tree" role="region" aria-label="生产资源列表" tabindex="0"></div></div><aside class="rv-panel rv-detail" id="resource-detail" aria-label="资源详情" tabindex="0"></aside></div>`;
  renderServices();renderPublication();renderTree();renderDetail();renderJobs();renderPlan();
 }
@@ -250,6 +250,22 @@ async function savePrompt() {
   if(S.root===editor.root)await loadProject(editor.root);
   notice(result.changed?`已保存 ${result.revision}，${result.affected.length} 项任务使用新版本；下次生产生效。`:'提示词没有变化，无需新建版本。');
  } catch(e) {if(S.editor===editor){error.textContent=e.message;error.hidden=false;}}
+}
+async function dropSubmittedBatch() {
+ const root=S.root;
+ await selectionQueue;
+ if(S.root!==root)return;
+ const pending=S.data.tasks.filter(t=>t.selected&&t.submitted&&!t.done);
+ if(!pending.length)throw Error('请先勾选需要放弃的“已提交待取回”任务');
+ const items=pending.map(t=>({key:t.key,task_id:t.submitted.task_id}));
+ const visible=new Set(S.visibleKeys||[]),hidden=pending.filter(t=>!visible.has(t.key)).length;
+ const names=pending.slice(0,20).map(t=>t.key).join('、')+(pending.length>20?' 等':'');
+ if(!confirm(`确定放弃已勾选的 ${items.length} 个待取回任务？${hidden?`其中 ${hidden} 个被当前筛选隐藏。`:''}\n${names}\n\n不会删除已有成品，也不会取消服务商后台的任务。放弃后不立即生成；下次开始生产将按最新计划重新提交、重新计费。`))return;
+ const d=await post('submitted/clear-batch',{root,items});
+ if(S.root!==root)return;
+ invalidatePlan();
+ await loadProject(root);
+ notice(`已放弃 ${d.count} 个任务${d.skipped.length?`，跳过 ${d.skipped.length} 个已完成或记录已清除的任务`:''}。请核对参数并重新查看生产计划，再开始生产。`);
 }
 async function preview() {
  const root=S.root,request=++S.planRequest;await selectionQueue;
@@ -366,6 +382,7 @@ const actions={
  'detail':e=>{S.detail=e.dataset.id;$$('[data-action="detail"]',main).forEach(b=>b.closest('.rv-leaf')?.classList.toggle('active',b.dataset.id===S.detail));renderDetail();},
  'select-visible':()=>setSelection(S.visibleKeys,true),'clear-visible':()=>setSelection(S.visibleKeys,false),'select-all':()=>setSelection(S.data.tasks.map(t=>t.key),true),
  'dependencies':async()=>{await post('dependencies');await loadProject();notice('已补选必要上游；有效成品继续复用。');},
+ 'drop-submitted-batch':dropSubmittedBatch,
  'drop-submitted':async e=>{if(!confirm('放弃后，下次生产会重新提交这一段并重新计费。确定服务商那边已查不到、或你已手动取回？'))return;await post('submitted/clear',{key:e.dataset.key});await loadProject();notice('已放弃这个任务，下次生产会重新提交。');},
  'prompt':e=>editPrompt(e.dataset.key),
  'save-prompt':savePrompt,

@@ -10,7 +10,7 @@ import threading
 import time
 
 from core import agent_handoff as H, agent_projects as A, agent_runtime as R, assemble, diagnose, paths, submitted
-from core.store import Project, list_projects, read_json, write_json, write_text
+from core.store import LOCK, Project, list_projects, read_json, write_json, write_text
 
 
 def projects(cfg):
@@ -199,6 +199,40 @@ def post(app, path, body):
     if path == "/api/agent/parse":
         return app.api_post("/api/script/parse", body)
     pj = project(body.get("root"), cfg)
+    if path == "/api/agent/submitted/clear-batch":
+        items = body.get("items")
+        if not isinstance(items, list) or not items:
+            raise ValueError("请先勾选需要放弃的待取回任务")
+        with LOCK:
+            if any(j.project_root == pj.root and j.finished_at is None for j in list(app.JOBS.jobs.values())):
+                raise ValueError("本项目正在生产，请先停止并等待任务退出，再批量放弃")
+            rows = {t["key"]: t for t in A.task_rows(pj.tasks(), legacy=True)}
+            chosen = {}
+            # 整批先核对任务 ID，避免页面过期后误删新提交的记录。
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("key"), str) \
+                        or not isinstance(item.get("task_id"), str) or not item["task_id"]:
+                    raise ValueError("待取回任务记录无效，请刷新后重新选择")
+                key = item["key"]
+                if key not in rows:
+                    raise ValueError(f"任务不存在：{key}，请刷新后重新选择")
+                if key in chosen and chosen[key] != item["task_id"]:
+                    raise ValueError("同一任务包含不同的服务商 ID，请刷新后重新选择")
+                chosen[key] = item["task_id"]
+            pending, skipped = [], []
+            for key, task_id in chosen.items():
+                row = rows[key]
+                rec = submitted.load(pj.root, row["output"])
+                if not rec:
+                    skipped.append(key)
+                elif rec["task_id"] != task_id:
+                    raise ValueError(f"{key} 的任务 ID 已变化，本次未放弃任何任务，请刷新后重选")
+                elif R.valid_output(str(A.inside(pj.root, row["output"]))):
+                    skipped.append(key)
+                else:
+                    pending.append(row)
+            cleared = [row["key"] for row in pending if submitted.clear(pj.root, row["output"])]
+            return {"ok": True, "cleared": cleared, "skipped": skipped, "count": len(cleared)}
     if path == "/api/agent/submitted/clear":
         if app.JOBS.list(project_root=pj.root, active_only=True):
             raise ValueError("本项目正在生产，请先停止再放弃已提交的任务")
