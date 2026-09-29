@@ -396,6 +396,7 @@ def task_failed(data: Any) -> "ApiError":
     tail = f"（服务商错误码：{code}）" if code else ""
     exc = ApiError(f"任务失败：{head}{tail}", 0, err_code=code)
     exc.task_finished = True
+    exc.provider_task_failed = True
     return exc
 
 

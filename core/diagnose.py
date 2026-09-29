@@ -860,11 +860,20 @@ CATALOG = {
     },
     "SUBMITTED_PENDING": {
         "title": "原任务已保留，尚未取回结果",
-        "why": "该输出已有服务商任务 ID。查询、下载或生成失败不会自动清除它，也不会按新参数重新生成。",
+        "why": "该输出已有服务商任务 ID，但尚未确认生成失败。查询异常、查不到或下载失败仍保留原 ID。",
         "where": "生产页 → 任务明细",
         "fix": ["重试生产会继续查询原任务；请核对原服务商及账号设置",
                 "确实需要重新生成时，手动点击“放弃这个任务，下次重新提交”，将重新计费"],
         "resume": "保留原 ID 继续取回，或明确放弃后重新生成。",
+        "resumable": True, "scope": "task", "level": "error",
+    },
+    "PROVIDER_TASK_FAILED": {
+        "title": "服务商任务已失败，旧 ID 已解除",
+        "why": "服务商明确返回该任务失败；本次已停止，不会在本批自动创建新任务。",
+        "where": "生产页 → 任务明细",
+        "fix": ["查看服务商失败原因，按需修改提示词、参考图或参数",
+                "无需手动放弃；重新查看生产计划并开始，将提交新任务并可能产生费用"],
+        "resume": "下次开始生产按最新参数提交新任务。",
         "resumable": True, "scope": "task", "level": "error",
     },
     "SUBMIT_UNCERTAIN": {
@@ -1009,6 +1018,7 @@ _BY_CODE = {
     "invalid_prompt": "PROMPT_INVALID",
     "submit_uncertain": "SUBMIT_UNCERTAIN",
     "submitted_pending": "SUBMITTED_PENDING",
+    "provider_task_failed": "PROVIDER_TASK_FAILED",
 }
 
 
@@ -1149,6 +1159,7 @@ NO_FAILOVER_CODES = {
     # 可能已经在这一家建好任务、开始计费；换一家等于同一段再生成一次。
     "SUBMIT_UNCERTAIN",
     "SUBMITTED_PENDING",
+    "PROVIDER_TASK_FAILED",  # 等用户下次启动，不在本批自动换服务商重提。
 }
 
 

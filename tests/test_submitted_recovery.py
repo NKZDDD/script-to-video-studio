@@ -1,4 +1,4 @@
-"""有任务 ID 就只取回；参数变化或失败都必须手动放弃才能重新生成。"""
+"""未确认失败的任务只取回；服务商明确失败后，下次生产才提交新任务。"""
 from pathlib import Path
 import time
 
@@ -82,7 +82,7 @@ def test_poll_timeout_then_rerun_resumes_the_same_task_without_paying_again(env)
     assert pj.registry("video")[0]["resumed"] is True
 
 
-@pytest.mark.parametrize("state", ["failed", "gone"])
+@pytest.mark.parametrize("state", ["gone"])
 def test_provider_verdict_keeps_id_until_explicit_abandon(env, state):
     pj, prov, task = env
     with pytest.raises(ApiError):

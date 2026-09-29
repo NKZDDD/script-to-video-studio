@@ -329,6 +329,7 @@ class HongniaoProvider(Provider):
                 failed = ApiError(f"红鸟任务 {task_id} 失败：{message}".replace(self.session.api_key, "[已隐藏]"),
                                   kind=TASK_FATAL, err_code=code)
                 failed.task_finished = True
+                failed.provider_task_failed = True
                 raise failed
             if status == "completed":
                 result = data.get("result") or {}

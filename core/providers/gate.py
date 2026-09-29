@@ -409,6 +409,7 @@ class GateProvider(Provider):
                 failed = ApiError(f"Gate 任务失败：{(data or {}).get('error') or str(data)[:300]}",
                                   status=0, kind="task_fatal")
                 failed.task_finished = True
+                failed.provider_task_failed = True
                 raise failed
             url = _gate_result_url(data)
             if url:

@@ -787,7 +787,7 @@ def _resume_pending(pj, task, provider_cfg, prov, kind, log, cancel, interval, t
 
 def _deliver(pj: Project, task: dict, out: str, prov, rec: Optional[dict], *, meta: dict,
              run: Callable, log: Callable, cancel: Callable, interval: int, timeout: int) -> dict:
-    """生成或续查；有 ID 的失败只能手动放弃，绝不自动转成新生成。"""
+    """生成或续查；明确失败解除 ID，但本批不重提；取回异常保留 ID。"""
     with submitted.tracking(pj.root, task["output"], key=task["key"], **meta):
         try:
             if rec:
@@ -803,6 +803,13 @@ def _deliver(pj: Project, task: dict, out: str, prov, rec: Optional[dict], *, me
         except Exception as exc:
             pending = submitted.load(pj.root, task["output"])
             if pending:
+                # 404/查询错误也可能带 task_finished，不能把“查不到”当作
+                # 生成失败。只接受轮询明确返回失败状态的专用标记。
+                if getattr(exc, "provider_task_failed", False):
+                    submitted.clear(pj.root, task["output"])
+                    raise ApiError(f"服务商已明确返回任务 {pending['task_id']} 失败：{exc}。"
+                                   "旧任务 ID 已解除；本次不再重试，下次开始生产将按最新参数提交新任务。",
+                                   kind=TASK_FATAL, err_code="provider_task_failed") from exc
                 raise ApiError(f"任务 {pending['task_id']} 取回未成功：{exc}。"
                                "原任务 ID 已保留，不会重新提交；需要重新生成时请先手动放弃任务。",
                                kind=TASK_FATAL, err_code="submitted_pending") from exc

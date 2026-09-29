@@ -336,6 +336,7 @@ class XmdProvider(Provider):
                 error = data.get("error") or {}
                 failed = self._error(error if isinstance(error, dict) else {"message": str(error)}, task=True)
                 failed.task_finished = True
+                failed.provider_task_failed = True
                 raise failed
             if status == "success":
                 url = data.get("video_url")

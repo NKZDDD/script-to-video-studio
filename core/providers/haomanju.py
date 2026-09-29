@@ -329,6 +329,7 @@ class HaomanjuProvider(Provider):
             if status in FAIL_STATES or status == "failure":
                 failed = ApiError(f"任务失败：{inner.get('fail_reason') or str(data)[:300]}")
                 failed.task_finished = True
+                failed.provider_task_failed = True
                 raise failed
             url = extract_video_url(data)
             # 完成词走整家共用的那张表，别在这儿另写一份三个词的 ——

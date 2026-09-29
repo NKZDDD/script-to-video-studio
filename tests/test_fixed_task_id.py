@@ -1,4 +1,4 @@
-"""Only explicit abandonment permits a second paid submission."""
+"""Keep submitted IDs until retrieval, a confirmed failure, or explicit abandonment."""
 from pathlib import Path
 
 import pytest
