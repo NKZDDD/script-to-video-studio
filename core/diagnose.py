@@ -858,6 +858,15 @@ CATALOG = {
         "resume": "查清楚之后点「开始」重试",
         "resumable": True, "scope": "task", "level": "error",
     },
+    "SUBMITTED_PENDING": {
+        "title": "原任务已保留，尚未取回结果",
+        "why": "该输出已有服务商任务 ID。查询、下载或生成失败不会自动清除它，也不会按新参数重新生成。",
+        "where": "生产页 → 任务明细",
+        "fix": ["重试生产会继续查询原任务；请核对原服务商及账号设置",
+                "确实需要重新生成时，手动点击“放弃这个任务，下次重新提交”，将重新计费"],
+        "resume": "保留原 ID 继续取回，或明确放弃后重新生成。",
+        "resumable": True, "scope": "task", "level": "error",
+    },
     "SUBMIT_UNCERTAIN": {
         "title": "提交后没收到服务商的回复，可能已经在计费",
         "why": "提交请求已经发出去了，但回复没收到（读超时、连接中途断开，或者网关报 5xx）。"
@@ -999,6 +1008,7 @@ _BY_CODE = {
     "model_not_found": "MODEL_NOT_FOUND",
     "invalid_prompt": "PROMPT_INVALID",
     "submit_uncertain": "SUBMIT_UNCERTAIN",
+    "submitted_pending": "SUBMITTED_PENDING",
 }
 
 
@@ -1138,6 +1148,7 @@ NO_FAILOVER_CODES = {
     "REF_MAP_INCOMPLETE",
     # 可能已经在这一家建好任务、开始计费；换一家等于同一段再生成一次。
     "SUBMIT_UNCERTAIN",
+    "SUBMITTED_PENDING",
 }
 
 

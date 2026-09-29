@@ -6,7 +6,8 @@
 在服务商那边照样跑完、照样扣费，没人去取。
 
 这里给每个输出记一份：提交成功拿到任务号就落盘，结果下载成功就删。重跑时有记录、
-而且这一段的内容（提示词、参考图、参数、服务商、模型）没变，就续查旧任务。
+就按保存的任务 ID 续查，不再比较当前提示词、参考图或生成参数。
+失败、查不到也保留记录；只有成功取回或用户明确放弃才清除。
 
 记录落盘由公共轮询 `HttpSession.poll` 自动完成；自己写轮询的服务商在拿到任务号后
 调 `remember()`。两者都只在生产工作函数用 `tracking()` 声明了「这是哪个输出」时生效。
@@ -36,7 +37,7 @@ def _path(root: str, output: str) -> str:
 
 
 def identity(**parts) -> str:
-    """这一段内容的指纹。任何一项变了，旧任务的成片就不再对应这一段。"""
+    """记录提交时内容的指纹，仅供追溯，不用于放弃旧任务或决定重新提交。"""
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True,
                                      default=str).encode("utf-8")).hexdigest()
 
@@ -66,10 +67,22 @@ def submitting() -> bool:
 
 
 def new_attempt() -> None:
-    """又要提交一次（审核被拦后改写提示词重发）：之前的任务号不再代表「已经提交过」。"""
+    """只允许尚无任务 ID 的生成重试；已有 ID 必须手动放弃。"""
     cur = _current.get()
     if cur:
+        rec = current_record()
+        if rec:
+            from .apiutil import ApiError, TASK_FATAL
+            raise ApiError(f"任务 {rec['task_id']} 已提交，不能自动重新生成；请先手动放弃旧任务。",
+                           kind=TASK_FATAL, err_code="submitted_pending")
         cur["remembered"] = False
+
+
+def current_record() -> Optional[dict]:
+    """当前输出的已提交记录，供自动重试/改写入口拦截二次提交。"""
+    cur = _current.get()
+    rec = read_json(cur["path"]) if cur else None
+    return rec if isinstance(rec, dict) and rec.get("task_id") else None
 
 
 def discard() -> None:
@@ -108,5 +121,5 @@ def clear(root: str, output: str) -> bool:
 
 
 def finished(exc: BaseException) -> bool:
-    """服务商已经给了结论（失败 / 查不到这个任务）：旧任务不会再出结果，下次该重新提交。"""
+    """服务商终态标记（失败 / 查不到），不代表允许自动清除记录或重新提交。"""
     return bool(getattr(exc, "task_finished", False))

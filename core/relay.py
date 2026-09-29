@@ -135,6 +135,9 @@ class Relay:
         """
 
         def ready(task: dict) -> tuple:
+            from . import submitted
+            if task.get("output") and submitted.load(self.pj.root, task["output"]):
+                return True, ""  # 旧任务取回不再依赖当前素材是否齐全。
             miss = self._missing(task)
             if not miss:
                 return True, ""

@@ -7,7 +7,7 @@ from pathlib import Path
 import threading
 import time
 
-from . import agent_projects as A, diagnose, probe, produce, resources, sizes
+from . import agent_projects as A, diagnose, probe, produce, resources, sizes, submitted
 from .apiutil import _wrong_kind, _incomplete_image, MIN_BYTES, MEDIA_IMAGE
 from .executor import GATE, Job, run_batch
 from .store import LOCK, read_json, read_text, write_json, write_text
@@ -106,6 +106,20 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
     for t in todo:
         try:
             kind = t["kind"]
+            pending = submitted.load(pj.root, t["output"])
+            if pending:
+                row = saved[kind]
+                if row["provider"] != pending.get("provider"):
+                    raise ValueError(f"已有任务 {pending['task_id']} 属于「{pending.get('provider')}」，"
+                                     "请切回原服务商取回，或手动放弃旧任务后重新生成")
+                if kind not in pcs:
+                    pc = resolve_cfg(cfg, {"provider": pending["provider"], "model": pending.get("model", "")},
+                                     "video" if kind == "video" else "asset")
+                    pc["soften_rounds"], pc["agent_mode"] = 0, True
+                    pcs[kind] = pc
+                t["resume_only"] = True
+                # 取回已生成结果不依赖当前提示词、参考图、模型是否仍可新建。
+                continue
             for dep in t["dependencies"]:
                 if dep not in wanted and dep not in done:
                     raise ValueError(f"缺少勾选的上游：{dep}（可点“补选依赖”）")
@@ -168,7 +182,7 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None) -> dict:
                                      "处理办法：换一个支持这个时长的视频模型；或者让 Agent 按不超过上限的时长重新切段；"
                                      "如果确认服务商实际支持，到设置 → 服务商里补上「已实测的模型时长档位」。")
             t["params"] = p
-            if kind not in pcs:
+            if kind not in pcs or pcs[kind].get("model") != row["model"]:
                 pc = resolve_cfg(cfg, {"provider": row["provider"], "model": row["model"]}, "video" if media == "video" else "asset")
                 pc["soften_rounds"] = 0
                 pc["agent_mode"] = True
@@ -223,9 +237,10 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None):
         directory = f"07_检查与记录/jobs/{job.id}"
         # Freeze prompt bytes now. Editing releases or selections cannot change this job.
         for i, t in enumerate(tasks):
-            text = read_text(str(A.inside(pj.root, t["prompt_ref"])))
-            t["prompt_ref"] = f"{directory}/prompts/{i:05}.txt"
-            write_text(str(A.inside(pj.root, t["prompt_ref"])), text)
+            if not t.get("resume_only"):
+                text = read_text(str(A.inside(pj.root, t["prompt_ref"])))
+                t["prompt_ref"] = f"{directory}/prompts/{i:05}.txt"
+                write_text(str(A.inside(pj.root, t["prompt_ref"])), text)
             job.set_item(t["key"], state="pending")
         write_json(pj.p(*directory.split("/"), "snapshot.json"),
                    {"revision": result["revision"], "tasks": tasks, "settings": settings_, "created_at": time.time()})
@@ -233,6 +248,8 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None):
         bykey = {t["key"]: t for t in tasks}
 
         def ready(t):
+            if t.get("resume_only"):
+                return True, ""
             for dep in t["dependencies"]:
                 if dep in bykey:
                     state = job.items[dep]["state"]
@@ -250,7 +267,18 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None):
                 worker = (produce.make_video_worker(pj, pc) if kind == "video" else
                           produce.make_image_worker(pj, pc, "asset" if kind == "asset" else "storyboard"))
                 def checked(t, log, cancel):
-                    value = worker(t, log, lambda: job.cancelled or cancel())
+                    use = worker
+                    if t.get("resume_only"):
+                        record = submitted.load(pj.root, t["output"])
+                        if not record:
+                            raise produce.ApiError("原任务记录已变化，请重新查看生产计划，不会自动创建新任务。",
+                                                   kind="task_fatal", err_code="submitted_pending")
+                        original = resolve_cfg(cfg, {"provider": record["provider"], "model": record.get("model", "")},
+                                               "video" if kind == "video" else "asset")
+                        original["agent_mode"], original["soften_rounds"] = True, 0
+                        use = (produce.make_video_worker(pj, original) if kind == "video" else
+                               produce.make_image_worker(pj, original, "asset" if kind == "asset" else "storyboard"))
+                    value = use(t, log, lambda: job.cancelled or cancel())
                     if not valid_output(str(A.inside(pj.root, t["output"]))):
                         raise RuntimeError("服务商返回后产物未通过文件校验")
                     return value

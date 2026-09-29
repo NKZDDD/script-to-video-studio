@@ -289,6 +289,9 @@ def _gen_with_upstream_retry(gen: Callable, log: Callable) -> Callable:
         try:
             return gen(p)
         except Exception as exc:                            # noqa: BLE001
+            from . import submitted
+            if submitted.current_record():
+                raise  # 已有任务 ID，只能取回或手动放弃，不能自动重发。
             if getattr(exc, "err_code", "") != "upstream_rejected":
                 raise
             log("  upstream_rejected（上游拒收）：先原样重发一次，"
@@ -322,6 +325,9 @@ def run_with_softening(gen: Callable, prompt: str, *, pj: Project, llm,
             return g(used)
         except Exception as exc:                            # noqa: BLE001
             # 把这一轮实际发出去的提示词交给判定：报错里回显了它的话要先剔掉
+            from . import submitted
+            if submitted.current_record():
+                raise  # 避免在已提交任务失败后改写并创建新任务。
             if attempt > rounds:
                 _gave_up(exc, attempt - 1, rounds, rounds, reasons,
                          f"改写了 {rounds} 轮，每一轮都还是被拒"

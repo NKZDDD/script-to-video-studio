@@ -743,21 +743,51 @@ def _who_line(provider_cfg: dict, model: str) -> str:
     return " / ".join(bits)
 
 
-def _pending(pj: Project, task: dict, ident: str, log: Callable) -> Optional[dict]:
-    """这一段已提交、还没取回的任务。内容改过的旧任务直接放弃（它的结果不再对应这一段）。"""
+def _resume_pending(pj, task, provider_cfg, prov, kind, log, cancel, interval, timeout):
+    """已提交的 ID 优先于新材料；这里只取回，不上传、不校验新的生成参数。"""
     rec = submitted.load(pj.root, task["output"])
-    if rec and rec.get("identity") != ident:
-        log(f"这一段上次在「{rec.get('provider')}」提交过任务 {rec['task_id']}"
-            f"（{rec.get('submitted_at', '')}），之后提示词、参考图、参数或服务商 / 模型改过，"
-            f"旧任务的结果不再对应这一段 —— 放弃它，按现在的内容重新提交")
-        submitted.clear(pj.root, task["output"])
+    if not rec:
+        if task.get("resume_only"):
+            raise ApiError("原任务记录已变化，请重新查看生产计划后再开始，不会在取回批次里新建任务。",
+                           kind=TASK_FATAL, err_code="submitted_pending")
         return None
-    return rec
+    if rec.get("provider") != provider_cfg["provider"]:
+        raise ApiError(f"任务 {rec['task_id']} 已提交给「{rec.get('provider')}」，"
+                       "请切回该服务商取回结果，或手动放弃旧任务后重新生成。原任务已保留。",
+                       kind=TASK_FATAL, err_code="submitted_pending")
+    out = pj.p(*task["output"].split("/"))
+    meta = {k: v for k, v in rec.items() if k not in ("output", "key", "task_id", "resume", "submitted_at")}
+
+    def retrieve(use):
+        return _deliver(pj, task, out, use, rec, meta=meta, run=None, log=log,
+                        cancel=cancel, interval=interval, timeout=timeout)
+
+    if rec.get("account"):
+        pool = accounts.pool(provider_cfg["provider"])
+        if pool is None or rec["account"] not in pool.labels():
+            raise ApiError(f"任务 {rec['task_id']} 的原账号「{rec['account']}」不可用。"
+                           "请恢复原账号后取回，或手动放弃旧任务；不会换账号重新提交。",
+                           kind=TASK_FATAL, err_code="submitted_pending")
+        with pool.slot(log=log, cancel=cancel, prefer=rec["account"]) as acct:
+            mine = build_provider(rec["provider"], acct.api_key,
+                                  provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
+            got = retrieve(mine)
+            accounts.bump(rec["provider"], acct.label)
+    else:
+        got = retrieve(prov)
+    # 不把当前材料的时长、比例或参考图记成旧任务的生成参数。
+    pj.upsert_registry(kind, {"id": task["key"], "file_ref": task["output"],
+                              "status": "generated", **got})
+    pj.log_event({"stage": kind, "id": task["key"], "result": "ok", **got})
+    ledger.record(pj.root, kind="video" if kind == "video" else "image", stage=kind,
+                  target=task["key"], episode=task.get("episode", ""), provider=rec.get("provider", ""),
+                  model=rec.get("model", ""), account=rec.get("account", ""), count=1, resumed=True)
+    return {"output": task["output"], "resumed": True}
 
 
 def _deliver(pj: Project, task: dict, out: str, prov, rec: Optional[dict], *, meta: dict,
              run: Callable, log: Callable, cancel: Callable, interval: int, timeout: int) -> dict:
-    """生成，或者续查上次已提交的任务。只有服务商给了结论（失败 / 查不到）才丢掉任务号。"""
+    """生成或续查；有 ID 的失败只能手动放弃，绝不自动转成新生成。"""
     with submitted.tracking(pj.root, task["output"], key=task["key"], **meta):
         try:
             if rec:
@@ -767,9 +797,15 @@ def _deliver(pj: Project, task: dict, out: str, prov, rec: Optional[dict], *, me
                                   poll_interval=interval, poll_timeout=timeout)
             else:
                 got = run()
+            if not probe.have_output(out):
+                raise ApiError("服务商返回后成品未通过文件检查，继续保留任务 ID",
+                               kind=TASK_FATAL, err_code="submitted_pending")
         except Exception as exc:
-            if submitted.finished(exc):
-                submitted.clear(pj.root, task["output"])
+            pending = submitted.load(pj.root, task["output"])
+            if pending:
+                raise ApiError(f"任务 {pending['task_id']} 取回未成功：{exc}。"
+                               "原任务 ID 已保留，不会重新提交；需要重新生成时请先手动放弃任务。",
+                               kind=TASK_FATAL, err_code="submitted_pending") from exc
             raise
     submitted.clear(pj.root, task["output"])
     return got
@@ -793,6 +829,10 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
+        if not probe.have_output(out):
+            restored = _resume_pending(pj, task, provider_cfg, prov, kind, log, cancel, interval, timeout)
+            if restored is not None:
+                return restored
         want = _fit_size(provider_cfg, model, "image",
                          (task.get("params") or {}).get("size", "1024x1536"), log)
         if probe.have_output(out):
@@ -847,7 +887,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
         resolution = (task.get("params") or {}).get("resolution", "")
         ident = submitted.identity(prompt=prompt, refs=[s for _, s in srcs], size=want,
                                    resolution=resolution, provider=provider_cfg["provider"], model=model)
-        rec = _pending(pj, task, ident, log)
+        rec = submitted.load(pj.root, task["output"])
         refs = [] if rec else [to_ref(s, log) for _, s in srcs]
         log(f"{_who_line(provider_cfg, model)}　参考图×{len(srcs)}")
         meta = _deliver(
@@ -932,6 +972,10 @@ def make_video_worker(pj: Project, provider_cfg: dict,
 
     def worker(task: dict, log: Callable, cancel: Callable) -> dict:
         out = pj.p(*task["output"].split("/"))
+        if not probe.have_output(out):
+            restored = _resume_pending(pj, task, provider_cfg, prov, "video", log, cancel, interval, timeout)
+            if restored is not None:
+                return restored
         p = task.get("params") or {}
         want = _fit_size(provider_cfg, model, "video",
                          p.get("ratio", "9:16"), log)
@@ -1070,12 +1114,10 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             prompt=prompt, spine=spine, aux=[str(r.get("url") or r.get("file_ref") or "") for r in aux],
             aux_reference=task.get("aux_reference") or "", duration=int(p.get("duration", 15)),
             ratio=want, resolution=resolution, provider=pid, model=model)
-        rec = _pending(pj, task, ident, log)
+        rec = submitted.load(pj.root, task["output"])
         if rec and pool is not None and rec.get("account") not in pool.labels():
-            log(f"上次提交任务 {rec['task_id']} 的账号「{rec.get('account')}」已不在账号列表里，"
-                f"查不到它的结果 —— 放弃这个任务，重新提交")
-            submitted.clear(pj.root, task["output"])
-            rec = None
+            raise ApiError(f"原任务 {rec['task_id']} 的账号不可用，请恢复原账号或手动放弃任务。",
+                           kind=TASK_FATAL, err_code="submitted_pending")
         track = {"provider": pid, "model": model, "identity": ident}
 
         acct_label = ""

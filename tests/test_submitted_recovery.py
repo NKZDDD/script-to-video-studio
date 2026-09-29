@@ -1,4 +1,4 @@
-"""已提交、没取回的任务：重跑续查，不重新付费；服务商给了结论才重新提交。"""
+"""有任务 ID 就只取回；参数变化或失败都必须手动放弃才能重新生成。"""
 from pathlib import Path
 import time
 
@@ -70,7 +70,7 @@ def test_poll_timeout_then_rerun_resumes_the_same_task_without_paying_again(env)
     pj, prov, task = env
     with pytest.raises(ApiError) as caught:
         run(pj, task)
-    assert caught.value.kind == RETRYABLE and prov.posts == 1
+    assert caught.value.kind == apiutil.TASK_FATAL and prov.posts == 1
     rec = submitted.load(pj.root, task["output"])
     assert rec["task_id"] == "task-1" and rec["resume"]["picker"] == "extract_video_url"
     assert set(rec) == {"output", "key", "provider", "model", "identity", "task_id", "resume", "submitted_at"}
@@ -83,21 +83,25 @@ def test_poll_timeout_then_rerun_resumes_the_same_task_without_paying_again(env)
 
 
 @pytest.mark.parametrize("state", ["failed", "gone"])
-def test_provider_verdict_drops_the_task_so_next_run_submits(env, state):
+def test_provider_verdict_keeps_id_until_explicit_abandon(env, state):
     pj, prov, task = env
     with pytest.raises(ApiError):
         run(pj, task)
     prov.state = state
     with pytest.raises(ApiError) as caught:
         run(pj, task)
-    assert submitted.finished(caught.value) and prov.posts == 1
-    assert submitted.load(pj.root, task["output"]) is None
+    assert caught.value.err_code == "submitted_pending" and prov.posts == 1
+    assert submitted.load(pj.root, task["output"])["task_id"] == "task-1"
+    with pytest.raises(ApiError):
+        run(pj, task)
+    assert prov.posts == 1
+    submitted.clear(pj.root, task["output"])
     prov.state = "completed"
     run(pj, task)
     assert prov.posts == 2
 
 
-def test_changed_prompt_abandons_the_old_task_and_says_why(env):
+def test_changed_prompt_still_retrieves_old_task(env):
     pj, prov, task = env
     with pytest.raises(ApiError):
         run(pj, task)
@@ -105,7 +109,7 @@ def test_changed_prompt_abandons_the_old_task_and_says_why(env):
                "Image 1 = P__SCSTATE_FOREST\nImage 2 = P__CHAR_001\n改成奔跑")
     prov.state = "completed"
     _, logs = run(pj, task)
-    assert prov.posts == 2 and any("task-1" in line and "改过" in line for line in logs)
+    assert prov.posts == 1 and any("task-1" in line and "不重新提交" in line for line in logs)
 
 
 def test_existing_output_clears_a_stale_record(env):
@@ -240,7 +244,11 @@ def test_only_the_submission_itself_is_protected(tmp_path, monkeypatch):
         submitted.remember("t1", path="/x/{id}", picker="extract_video_url")
         polled = s.request("POST", "/get_result")                       # Gate 用 POST 查询
         calls.clear()
-        submitted.new_attempt()                                           # 改写提示词后再提交
+        with pytest.raises(ApiError, match="手动放弃"):
+            submitted.new_attempt()                                       # 有 ID 就不能自动重发
+        assert calls == []
+        submitted.discard()                                              # 仅明确未提交成功才可内部丢弃
+        submitted.new_attempt()
         with pytest.raises(ApiError):
             s.request("POST", "/v1/videos")
         return polled
