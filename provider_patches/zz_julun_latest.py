@@ -75,7 +75,8 @@ try:
 except ImportError:
     submitted = None
 
-PATCH_VERSION = "20260928.3"
+PATCH_VERSION = "20260930.1"
+Q10_MODEL = "Q10-SD2.5 全参"
 RUNNING_STATES = getattr(_api, "RUNNING_STATES", (
     "queued", "pending", "processing", "in_progress", "in-progress", "inprogress",
     "running", "waiting", "created", "submitted", "start", "starting",
@@ -165,6 +166,9 @@ SPEC = {
 # 2026-09-28 GET /api/pricing：仅把公开给出的约束写入；None 表示未公布。
 # 新型号仍沿用此前表外型号使用的 url_media 请求形状，未凭名字改协议。
 SPEC.update({
+    # 用户提供《Q10-SD2.5全参-下游对接文档》，2026-09-30。
+    Q10_MODEL: ("url_media", (4, 30), ["480p"], ["16:9", "9:16"], 30, 10, 10,
+                "提示词最多 4500 字符；单图不超过 20MB；4–30 秒按秒计费"),
     "sd2.5_30": ("url_media", (4, 30), ["720p"], R6, 30, 0, 10,
                   "30 图 / 10 音频（MP3），不支持参考视频"),
     "seedance-2.5-720p": ("url_media", (4, 30), ["720p"], [], 30, 10, 10,
@@ -212,7 +216,7 @@ UNSPECED = [
     # 2026-09-28 又出现在模型清单；只有 ID，不能假定与带空格的型号规格一致。
     "seedance_v2.0", "seedance_v2.0-933", "seedance_v2.5",
     "seedance_v2.5-101010", "seedance_v2.5-301010",
-    "seedance-2.0-mini", "seedance-2.0-mini-480p", "Q10-SD2.5 全参",
+    "seedance-2.0-mini", "seedance-2.0-mini-480p",
 ]
 
 # 肖像保护：文档点名的三条出路。撞上那句报错时接给用户看。
@@ -595,6 +599,21 @@ class JulunProvider(Provider):
         if not (task.prompt or "").strip():
             raise ApiError("巨轮 prompt 必填", status=0, kind="task_fatal")
 
+        if model == Q10_MODEL:
+            # 按秒计费的专用协议：不悄悄取整或夹到另一个时长。
+            try:
+                seconds = int(task.duration)
+                valid = (not isinstance(task.duration, bool)
+                         and float(task.duration) == seconds and 4 <= seconds <= 30)
+            except (TypeError, ValueError, OverflowError):
+                valid = False
+            if not valid:
+                raise ApiError("巨轮 Q10 时长必须是 4–30 的整数秒，请修改视频时长。",
+                               kind=TASK_FATAL)
+            if len(task.prompt) > 4500:
+                raise ApiError(f"巨轮 Q10 提示词最多 4500 字符，当前 {len(task.prompt)} 字符；"
+                               "请编辑缩短提示词后再提交，不会自动截断。", kind=TASK_FATAL)
+
         sec = fit_duration(model, task.duration, log=log)
         ratio = (task.ratio or "").strip() or (ratios[0] if ratios else "16:9")
         res = (task.resolution or "").strip() or (res_list[0] if res_list else "720p")
@@ -674,6 +693,9 @@ class JulunProvider(Provider):
         elif fmt == "url_media":
             body = {"model": model, "prompt": task.prompt, "seconds": sec,
                     "ratio": ratio, "resolution": res}
+            if model == Q10_MODEL:
+                # ratio 也是合法兼容字段；这里统一使用专用文档的主字段。
+                body["aspect_ratio"] = body.pop("ratio")
             if refs:
                 body["image_urls"] = refs
             if vids:
