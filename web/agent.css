@@ -101,6 +101,11 @@ html{scroll-padding-top:calc(var(--studio-header-height,90px) + var(--studio-doc
 #studio-agent-prototype .rv-ref-empty{display:grid;place-items:center;height:78px;border-radius:5px;background:var(--rs-bg);color:var(--rs-muted);font-size:12px}
 #studio-agent-prototype .rv-ref small{overflow-wrap:anywhere;font-size:11px}
 #studio-agent-prototype .rv-ref .rv-badge{align-self:flex-start;font-size:11px;padding:1px 5px}
+#studio-agent-prototype .rv-ref-preview{display:block;width:100%;padding:0;border:0;background:transparent;border-radius:5px;cursor:zoom-in}
+#studio-agent-prototype .rv-ref-preview:focus-visible{outline:2px solid var(--rs-blue);outline-offset:2px}
+#studio-agent-prototype #dialog.rv-image-dialog{width:min(1200px,94vw);max-width:94vw}
+#studio-agent-prototype .rv-image-preview{display:grid;place-items:center;background:var(--rs-bg);border-radius:8px;padding:8px}
+#studio-agent-prototype .rv-image-preview img{display:block;max-width:100%;max-height:72vh;width:auto;height:auto;object-fit:contain}
 #studio-agent-prototype .rv-outgroup{margin-bottom:26px}
 #studio-agent-prototype .rv-outgroup>h3 small,#studio-agent-prototype .rv-outgroup>h4 small{display:inline;margin-left:6px}
 #studio-agent-prototype .rv-outgroup>h4{margin:16px 0 10px;font-size:14px;font-weight:600;color:var(--rs-muted)}

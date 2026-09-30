@@ -25,7 +25,7 @@ async function api(path, body) {
 const get = (path,args={}) => api(path+'?'+new URLSearchParams(args));
 const post = (path,data={}) => api(path,{root:S.root,...data});
 function notice(text,error=false) {const e=$('#message'); e.hidden=false; e.className='rv-notice '+(error?'is-error':'');e.textContent=text;clearTimeout(notice.timer);notice.timer=setTimeout(()=>e.hidden=true,error?15000:6000);}
-function dialog(title,body) {$('#dialog').classList.remove('rv-job-dialog');$('#dialog-close').textContent='关闭';$('#dialog-close').setAttribute('aria-label','关闭对话框');$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;$('#dialog-body').scrollTop=0;$('#dialog-body').scrollLeft=0;S.job='';S.jobRequest++;S.editor=null;S.del=null;if(!$('#dialog').open)$('#dialog').showModal();}
+function dialog(title,body) {$('#dialog').classList.remove('rv-job-dialog','rv-image-dialog');$('#dialog-close').textContent='关闭';$('#dialog-close').setAttribute('aria-label','关闭对话框');$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;$('#dialog-body').scrollTop=0;$('#dialog-body').scrollLeft=0;S.job='';S.jobRequest++;S.editor=null;S.del=null;if(!$('#dialog').open)$('#dialog').showModal();}
 function closeDialog() {$('#dialog').close();S.job='';S.jobRequest++;S.editor=null;S.del=null;}
 const STATE_NAMES={pending:'待开始',queued:'排队中',running:'生成中',ok:'完成',skipped:'已有，跳过',failed:'失败',cancelled:'已取消',aborted:'已中止',interrupted:'中断'};
 function taskState(t) {
@@ -334,8 +334,13 @@ function refCards(t) {
  const byOut=new Map(S.data.tasks.map(x=>[x.output,x]));
  const rows=refs.map(x=>{const rel=x.file_ref||x.url||'',src=byOut.get(rel),web=/^https?:/.test(rel);return {x,rel,src,web,st:src?taskState(src):{label:web?'外部链接':'外部文件',cls:''}};});
  const waiting=rows.filter(r=>r.src&&!r.src.done);
- const head=waiting.length?`<p class="rv-notice rv-alert">${waiting.length} 张参考图还没好：${waiting.map(r=>`<button type="button" class="rv-link" data-action="jump" data-key="${esc(r.src.key)}">${esc(r.src.key)}</button>（${esc(r.st.label)}）`).join('、')}。它们做好之前这一条不会提交。</p>`:`<p class="rv-caption">${rows.length>1?`${rows.length} 张参考图都已就绪`:'参考图已就绪'}，点图可以跳到那一项。</p>`;
- return head+`<div class="rv-refs">${rows.map(({x,rel,src,web,st})=>`<button type="button" class="rv-ref" ${src?`data-action="jump" data-key="${esc(src.key)}"`:'disabled'} title="${esc(rel)}">${!src||src.done?`<img loading="lazy" alt="" src="${esc(web?rel:fileURL(rel))}">`:`<span class="rv-ref-empty">${esc(st.label)}</span>`}<small>${esc(x.image_n||x.order||'')} · ${esc(x.asset_id||x.sheet_id||'')}</small><span class="rv-badge ${st.cls}">${esc(st.label)}</span></button>`).join('')}</div>`;
+ const head=waiting.length?`<p class="rv-notice rv-alert">${waiting.length} 张参考图还没好：${waiting.map(r=>`<button type="button" class="rv-link" data-action="jump" data-key="${esc(r.src.key)}">${esc(r.src.key)}</button>（${esc(r.st.label)}）`).join('、')}。它们做好之前这一条不会提交。</p>`:`<p class="rv-caption">${rows.length>1?`${rows.length} 张参考图都已就绪`:'参考图已就绪'}，点击图片放大预览；查看任务请点下方入口。</p>`;
+ return head+`<div class="rv-refs">${rows.map(({x,rel,src,web,st})=>{const title=x.asset_id||x.sheet_id||src?.key||rel,url=web?rel:fileURL(rel);return `<div class="rv-ref" title="${esc(rel)}">${!src||src.done?`<button type="button" class="rv-ref-preview" data-action="preview-ref" data-src="${esc(url)}" data-title="${esc(title)}" aria-label="放大预览 ${esc(title)}"><img loading="lazy" alt="${esc(title)}" src="${esc(url)}"></button>`:`<span class="rv-ref-empty">${esc(st.label)}</span>`}<small>${esc(x.image_n||x.order||'')} · ${esc(title)}</small><span class="rv-badge ${st.cls}">${esc(st.label)}</span>${src?`<button type="button" class="rv-link" data-action="jump" data-key="${esc(src.key)}">查看任务</button>`:''}</div>`;}).join('')}</div>`;
+}
+function previewReference(e) {
+ const src=e.dataset.src;if(!src)return;
+ dialog('参考图预览',`<div class="rv-image-preview"><img src="${esc(src)}" alt="${esc(e.dataset.title||'参考图')}"></div><p class="rv-caption">${esc(e.dataset.title||'参考图')}</p><a href="${esc(src)}" target="_blank" rel="noopener">打开原图</a>`);
+ $('#dialog').classList.add('rv-image-dialog');
 }
 let selectionQueue=Promise.resolve();
 async function setSelection(keys,value) {
@@ -441,7 +446,7 @@ function llmForm() {
 function providerForm() {
  const cap=S.boot.capabilities.find(c=>c.id===S.provider)||S.boot.capabilities[0];if(!cap){$('#settings-content').textContent='没有可用服务商';return;}
  S.provider=cap.id;const saved=S.boot.providers_public[cap.id]||{},status=S.boot.provider_keys_configured[cap.id]||{};
- let keys=cap.key_fields||[];if(cap.id==='chaomo')keys=[['image_1k_api_key','image_1k','图片 1K Key'],['image_4k_api_key','image_4k','图片 4K Key'],['video_api_key','video','视频 Key']];
+ let keys=cap.key_fields||[];if(cap.id==='chaomo')keys=[['image_1k_api_key','image_1k','TH 分组 Key（原图片 1K）','对应 -th 模型；支持的分辨率由模型和清晰度选项决定。'],['image_4k_api_key','image_4k','Native 原生 Key（原图片 4K）','对应 Native 模型；1K、2K、4K 均使用这把 Key。'],['video_api_key','video','视频 Key']];
  if(!keys.length)keys=[['api_key','api_key','API Key / 多账号凭据']];
  const keyField=(name,label,isSet,help='')=>field(`${esc(label)} · ${isSet?'已配置':'未配置'}`,`<div class="secret-field"><input type="password" name="${esc(name)}" autocomplete="new-password" placeholder="${isSet?'留空保持已存密钥':'填写密钥'}"><button type="button" class="rv-link" data-action="reveal">显示</button></div>`,esc(help));
  let credential=keys.map(([k,slot,label,help])=>keyField(k,label,status[slot]||status[k]||(k==='api_key'&&(status.image||status.video)),help)).join('');
@@ -484,6 +489,7 @@ async function jobDetail(id,root=S.root,refresh=false) {
 }
 async function readFile(file) {if(file.size>40*1024*1024)throw Error('文件超过 40MB');const data=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('读取文件失败'));r.readAsDataURL(file);});return data.split(',')[1];}
 const actions={
+ 'preview-ref':previewReference,
  'back-top':backToTop,
  'new':()=>beginWizard(), 'batch':()=>{beginWizard();S.wizard.batch='项目一\n项目二';wizard();},
  'back-projects':()=>show('projects'), 'production':()=>show('production'),'handoff':()=>show('handoff'),

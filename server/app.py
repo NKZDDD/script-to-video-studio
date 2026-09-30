@@ -276,6 +276,10 @@ def _media_capability(kind: str) -> str:
 def _provider_key_slot(provider_id: str, capability: str, model: str = "") -> str:
     pid = resolve_provider_id(provider_id or "")
     if pid == "chaomo" and capability == "image":
+        from core import providers
+        route = getattr(providers.REGISTRY.get(pid), "image_key_slot", None)
+        if route:
+            return route(str(model or ""))
         return "image_4k" if "4k" in str(model).lower() else "image_1k"
     return capability
 

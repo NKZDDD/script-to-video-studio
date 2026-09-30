@@ -28,13 +28,21 @@ from __future__ import annotations
 import base64
 import io
 import os
+import sys
+from functools import wraps
 from typing import Callable, Optional
 
 import requests
 
-from ..apiutil import (ApiError, _b64_bytes, extract_image_items,
+from core.apiutil import (ApiError, _b64_bytes, extract_image_items,
                        extract_task_id, extract_video_url)
-from .base import ImageTask, Provider, VideoTask
+from core.providers.base import ImageTask, Provider, VideoTask
+
+PATCH_VERSION = "20260930.1"
+NATIVE_SIZED_MODELS = (
+    "gpt-image-2-Native", "gpt-image-2.5-Native",
+    "gpt-image-2.5-flare-Native", "gpt-image-2.5-sunburst-Native",
+)
 
 VIDEO_MODELS = ["seedance2", "seedance2-fast", "seedance2-mini"]
 
@@ -54,6 +62,7 @@ IMAGE_25 = [
 ]
 IMAGE_MODELS = [
     "gpt-image-2-th", "gpt-image-2.5-th", "gpt-image-2.5-flare-th", "gpt-image-2.5-sunburst-th",
+    *NATIVE_SIZED_MODELS,
     *IMAGE_25,
     # Native 三档：实拉确认还在。`gpt-image2-4K` 是 4K-Native 的 legacy_aliases，
     # 接口自己声明的，所以留着 —— 老项目的 tasks.json 里可能存着这个名字。
@@ -85,11 +94,13 @@ IMAGE_MODEL_OPTIONS = {
 
 # 2026-09-22 /v1/models：TH 使用 size=1K/2K/4K，ratio 仍为画幅。
 TH_SIZED_MODELS = ("gpt-image-2-th", "gpt-image-2.5-th", "gpt-image-2.5-flare-th", "gpt-image-2.5-sunburst-th")
-for _model in TH_SIZED_MODELS:
+SIZED_MODELS = TH_SIZED_MODELS + NATIVE_SIZED_MODELS
+PINNED_IMAGE_MODELS = ["gpt-image-1k-th", *TH_SIZED_MODELS, *NATIVE_SIZED_MODELS]
+for _model in SIZED_MODELS:
     IMAGE_MODEL_OPTIONS[_model] = {"resolutions": ["1K", "2K", "4K"], "default_resolution": "1K"}
 IMAGE_MODEL_OPTIONS["gpt-image-1k-th"] = {"resolutions": ["1K"]}
 for _model in IMAGE_MODELS:
-    if _model in TH_SIZED_MODELS or _model == "gpt-image-1k-th":
+    if _model in SIZED_MODELS or _model == "gpt-image-1k-th":
         continue
     if _model in IMAGE_25 or _model.endswith("-Native"):
         IMAGE_MODEL_OPTIONS.setdefault(_model, {})["resolutions"] = [
@@ -190,6 +201,45 @@ def _block(kind: str, url: str) -> dict:
             f"{kind}_url": {"url": url}}
 
 
+def _install_legacy_host_hooks():
+    """旧 EXE 的选 Key 逻辑在 server 层；外挂需同步修正，不能只换请求代码。
+
+    capabilities 在启动和刷新时调用，server 未初始化时不抢先 import。
+    包装器读当前注册表，移走外挂再扫描后恢复宿主的规则。
+    """
+    app = sys.modules.get("server.app")
+    route = getattr(app, "_provider_key_slot", None)
+    if route and not getattr(route, "_chaomo_group_router", False):
+        @wraps(route)
+        def routed(provider_id, capability, model=""):
+            from core import providers
+            pid = providers.resolve_id(provider_id or "")
+            picker = getattr(providers.REGISTRY.get(pid), "image_key_slot", None)
+            if pid == "chaomo" and capability == "image" and picker:
+                return picker(str(model or ""))
+            return route(provider_id, capability, model)
+        routed._chaomo_group_router = True
+        app._provider_key_slot = routed
+
+    from core import model_catalog
+    merge = model_catalog.apply_catalog
+    if not getattr(merge, "_chaomo_groups_catalog", False):
+        @wraps(merge)
+        def merged(cap, result, source):
+            output = merge(cap, result, source)
+            block = output.get("image") or {}
+            pinned = block.get("catalog_keep_models")
+            if output.get("id") == "chaomo" and output.get("_chaomo_groups_patch") and pinned:
+                block["models"] = list(dict.fromkeys(list(block.get("models") or []) + list(pinned)))
+                # 老宿主不认识 refs_unlimited，防止旧快照重新按 9 张阻断。
+                block["max_refs"] = sys.maxsize
+                for options in block.get("model_options", {}).values():
+                    options["max_refs"] = sys.maxsize
+            return output
+        merged._chaomo_groups_catalog = True
+        model_catalog.apply_catalog = merged
+
+
 class ChaomoProvider(Provider):
     id = "chaomo"
     name = "超模 chaomoapi.com"
@@ -202,6 +252,16 @@ class ChaomoProvider(Provider):
     # 图生图能吃字节（本类会把 data URI 解码、把链接下载），视频只收链接 → 见 needs_url
     ref_mode = "data_uri"
 
+    @staticmethod
+    def image_key_slot(model: str) -> str:
+        """Key 属于渠道分组，size 属于输出分辨率；两者不能混为一谈。"""
+        if model in PINNED_IMAGE_MODELS:
+            return "image_4k" if model in NATIVE_SIZED_MODELS else "image_1k"
+        # 旧固定档位 Native 名称仍属于同一个原生分组。
+        if model in IMAGE_MODELS and model.lower().endswith("-native"):
+            return "image_4k"
+        return "image_4k" if "4k" in model.lower() else "image_1k"
+
     def needs_url(self, model: str = "", media: str = "image") -> bool:
         # 视频的 content 块只放 url，本地图必须先换成链接；
         # 图片反过来只能上传文件，所以这里只对视频声明。
@@ -213,13 +273,17 @@ class ChaomoProvider(Provider):
         return media == "video"
 
     def capabilities(self) -> dict:
+        if __name__ != "core.providers.chaomo":
+            _install_legacy_host_hooks()
         return {
             "id": self.id,
+            "_chaomo_groups_patch": __name__ != "core.providers.chaomo",
             "name": self.name,
             "default_base_url": self.default_base_url,
             "supports": list(self.supports),
             "image": {
                 "models": IMAGE_MODELS,
+                "catalog_keep_models": PINNED_IMAGE_MODELS,
                 # **换成实拉里真存在的。** 原来是 `gpt-image2-1K` —— 那个名字
                 # 实拉里没有，也就是「没改过模型就点开始」必然报找不到模型
                 # （和鹤的 sd2-720p 同一个坑）。挑 2.5 的 1K：最新、最便宜的一档。
@@ -228,6 +292,7 @@ class ChaomoProvider(Provider):
                 "sizes": RATIOS,                 # 这家图片的"尺寸"就是比例
                 "default_size": "9:16",
                 "refs_unlimited": True,
+                "max_refs": sys.maxsize,  # 兼容旧版预检，本地不限制参考图张数。
                 "ref_mode": "bytes",
                 "notes": "比例字段 **ratio / size / aspect_ratio 三个名字都收**"
                          "（2026-09-14 实测：三个都被同一套校验读，非法值统一回"
@@ -460,7 +525,7 @@ class ChaomoProvider(Provider):
                      # 返回可核验的实际宽高/格式/**字节数**，用来核对有没有传丢
                      ("include_metadata", (None, "true"))]
             attached = 0
-            if model in TH_SIZED_MODELS:
+            if model in SIZED_MODELS:
                 files.append(("size", (None, resolution or "1K")))
             for i, ref in enumerate(refs, start=1):
                 got = self._ref_bytes(ref, i, log=log)
@@ -486,7 +551,7 @@ class ChaomoProvider(Provider):
                     "include_metadata": True}
             if task.extra.get("quality"):
                 body["quality"] = str(task.extra["quality"])
-            if model in TH_SIZED_MODELS:
+            if model in SIZED_MODELS:
                 body["size"] = resolution or "1K"
             log(f"超模 文生图 {model}: ratio={ratio}")
             data = self.session.request("POST", "/v1/images/generations", json_body=body,

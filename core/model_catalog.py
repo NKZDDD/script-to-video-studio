@@ -280,7 +280,8 @@ def apply_catalog(cap, result, source):
         if not got and (block.get('models') or []):
             kept.append(kind)
             continue                    # 原样留着，别把这一类清空
-        block['models'] = got
+        # 服务商明确保留的兼容/分组型号不能被旧快照或单个 Key 的目录抹掉。
+        block['models'] = list(dict.fromkeys(got + list(block.get('catalog_keep_models') or [])))
         if block.get('default_model') not in block['models']:
             block['default_model'] = next(iter(block['models']), '')
         for row in rows:
