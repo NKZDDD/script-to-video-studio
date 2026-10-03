@@ -11,6 +11,7 @@ from core.apiutil import ApiError
 from core.providers import _check, _classes_in
 from core.providers.base import ImageTask
 from core.providers.hzyfai import HzyfaiProvider, IMAGE_MODELS, IMAGE_SIZES
+from test_agent_workspace import pj, plan_for, publish, resolve  # noqa: F401
 
 
 def image_bytes(fmt="PNG"):
@@ -68,7 +69,7 @@ def test_invalid_image_rejected_before_post(raw):
     p.session.request.assert_not_called()
 
 
-@pytest.mark.parametrize("params", [{"model":"not-supported"}, {"size":"4K"}, {"extra":{"resolution":"4K"}}, {"prompt":""}, {"n":2}])
+@pytest.mark.parametrize("params", [{"model":"not-supported"}, {"size":"4K"}, {"extra":{"resolution":"2K"}}, {"prompt":""}, {"n":2}])
 def test_unsupported_parameters_are_not_silently_changed(params):
     p = provider()
     with pytest.raises(ApiError):
@@ -96,6 +97,49 @@ def test_base64_output():
     assert p.session.save_item.call_args.args[0].endswith(encoded)
 
 
+@pytest.mark.parametrize("size,resolution", [("4096x4096", ""), ("1024x1024", "4K"), ("4096x4096", "4K")])
+@pytest.mark.parametrize("with_reference", [False, True])
+def test_4k_uses_verified_pixel_size_for_generation_and_edits(size, resolution, with_reference):
+    p = provider()
+    refs = ["data:image/png;base64," + base64.b64encode(image_bytes()).decode()] if with_reference else []
+    p.generate_image(ImageTask("test", model="gpt-image-2", size=size, refs=refs,
+                               extra={"resolution": resolution}), "out.png")
+    _, kw = p.session.request.call_args
+    fields = {k: v[1] for k, v in kw["files"] if k != "image[]"} if with_reference else kw["json_body"]
+    assert fields["size"] == "4096x4096"
+    assert "resolution" not in fields
+    p.session.request.assert_called_once()
+
+
+@pytest.mark.parametrize("params", [
+    {"model": "gpt-image-2.5", "size": "4096x4096"},
+    {"model": "gpt-image-2.5", "extra": {"resolution": "4K"}},
+    {"size": "1536x1024", "extra": {"resolution": "4K"}},
+    {"size": "1024x1536", "extra": {"resolution": "4K"}},
+])
+def test_4k_does_not_invent_other_model_support_or_change_aspect(params):
+    p = provider()
+    with pytest.raises(ApiError):
+        p.generate_image(ImageTask(**dict({"prompt": "x", "size": "1024x1024"}, **params)), "out.png")
+    p.session.request.assert_not_called()
+
+
+def test_existing_production_preview_accepts_plugin_4k_options(pj):
+    from core import agent_runtime as runtime
+    from core.store import write_json
+
+    caps = [HzyfaiProvider().capabilities()]
+    plan = plan_for(pj, count=1)
+    plan["asset_tasks"][0]["params"]["size"] = "1:1"
+    publish(pj, plan)
+    setting = runtime.validate_settings({"asset": {"provider": "hzyfai", "model": "gpt-image-2",
+                                        "size": "4096x4096", "image_resolution": "4K"}}, caps)
+    write_json(pj.p("07_检查与记录", "production-settings.json"), setting)
+    preview = runtime.preview(pj, {}, caps, resolve)
+    assert not preview["blocked"]
+    assert preview["_tasks"][0]["params"] == {"size": "4096x4096", "resolution": "4K"}
+
+
 def test_capability_and_external_plugin():
     root = Path(__file__).resolve().parents[1]
     patch = root/'provider_patches/zz_hzyfai_image.py'
@@ -108,3 +152,5 @@ def test_capability_and_external_plugin():
     assert p.needs_bytes() and not p.needs_url() and not p.accepts_url()
     assert p.capabilities()['image']['refs_unlimited']
     assert p.capabilities() == HzyfaiProvider().capabilities()
+    options = p.capabilities()['image']['model_options']['gpt-image-2']
+    assert '4096x4096' in options['sizes'] and options['resolutions'] == ['4K']

@@ -13,9 +13,11 @@ import requests
 from core.apiutil import ApiError, extract_image_items
 from core.providers.base import ImageTask, Provider
 
-PATCH_VERSION = "20261002.1"
+PATCH_VERSION = "20261004.1"
 IMAGE_MODELS = ["gpt-image-2", "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]
 IMAGE_SIZES = ["1024x1024", "1536x1024", "1024x1536"]
+IMAGE_4K_MODEL = "gpt-image-2"
+IMAGE_4K_SIZE = "4096x4096"
 
 
 class HzyfaiProvider(Provider):
@@ -37,10 +39,13 @@ class HzyfaiProvider(Provider):
                 "supports": list(self.supports), "image": {
                     "models": IMAGE_MODELS, "default_model": "gpt-image-2",
                     "sizes": IMAGE_SIZES, "default_size": "1024x1024",
+                    "model_options": {IMAGE_4K_MODEL: {
+                        "sizes": IMAGE_SIZES + [IMAGE_4K_SIZE], "resolutions": ["4K"]}},
                     "ref_mode": "bytes", "refs_unlimited": True, "max_refs": sys.maxsize,
                     "notes": "OpenAI 兼容图片接口，size 传像素尺寸。参考图使用 multipart image[]，"
                              "本地图片无需对象存储。参考图本地不截断，实际服务端上限以响应为准。"
-                             "暂未声明独立 1K/2K/4K 参数，请用尺寸选项。"},
+                             "gpt-image-2 已实测 4096x4096 方图；选 4K 时转换为此像素尺寸，"
+                             "请选方图。其余模型仍使用已验证尺寸。"},
                 "notes": "仅接入图片；同步返回 URL/Base64。CPU 过载 503 属于服务商网关繁忙。"}
 
     def _image_file(self, ref: str, index: int) -> tuple:
@@ -82,10 +87,18 @@ class HzyfaiProvider(Provider):
         size = task.size or "1024x1024"
         if model not in IMAGE_MODELS:
             raise ApiError(f"HZYF 尚未接入图片模型 {model}，请选择已声明的图片模型", kind="task_fatal")
-        if size not in IMAGE_SIZES:
-            raise ApiError(f"HZYF 请选择已验证的像素尺寸：{'、'.join(IMAGE_SIZES)}", kind="task_fatal")
-        if task.extra.get("resolution"):
-            raise ApiError("HZYF 暂未验证独立清晰度参数，请清空清晰度覆盖并选择像素尺寸", kind="task_fatal")
+        allowed = IMAGE_SIZES + ([IMAGE_4K_SIZE] if model == IMAGE_4K_MODEL else [])
+        if size not in allowed:
+            raise ApiError(f"HZYF {model} 请选择已验证的像素尺寸：{'、'.join(allowed)}", kind="task_fatal")
+        resolution = str(task.extra.get("resolution") or "").strip().upper()
+        if resolution:
+            if model != IMAGE_4K_MODEL or resolution != "4K":
+                raise ApiError("HZYF 目前仅 gpt-image-2 已验证方图 4K；其他模型或档位请用像素尺寸，"
+                               "清晰度选跟随任务", kind="task_fatal")
+            if size not in ("1024x1024", IMAGE_4K_SIZE):
+                raise ApiError("HZYF 已验证的 4K 是 4096x4096 方图，请在比例中选择 4096x4096；"
+                               "不会自动改变横图或竖图比例", kind="task_fatal")
+            size = IMAGE_4K_SIZE
         if not (task.prompt or "").strip() or task.n != 1:
             raise ApiError("HZYF 提示词不能为空；Studio 每个图片任务只能生成一张", kind="task_fatal")
         if cancel and cancel():
