@@ -16,6 +16,7 @@ import time
 import uuid
 
 from . import paths, probe, submitted
+from .reference_contract import MARKER as REFERENCE_MARKER, RULES as REFERENCE_RULES
 from .store import LOCK, Project, read_json, read_text, write_json, write_text
 
 SCHEMA = "studio.production-plan/v1"
@@ -177,6 +178,8 @@ Studio 自动发现，验证后保存不可变快照。不能修改已发布版�
 相同 key 的输出/提示词/参数/依赖有改变时必须改用新输出文件名（递增版本），禁止把旧成品当成新版本复用。
 Studio 拥有 00_项目说明、07_检查与记录、selections.json、active-plan.json；请勿修改这些运行态文件或服务商凭据。
 检测通过只表示结构就绪，不代表视觉质量通过，也不触发付费生成。
+
+{REFERENCE_RULES}
 """
 
 
@@ -428,7 +431,27 @@ def select(pj: Project, changes: dict):
         write_json(pj.p("07_检查与记录", "selections.json"), state)
 
 
+def update_reference_contract(pj: Project) -> None:
+    """Append writer guidance without rebuilding an older project's locked contract."""
+    if pj.meta().get("workflow") != "agent":
+        return
+    path = inside(pj.root, "00_项目说明/production-contract.md")
+    with LOCK:
+        if not path.is_file():
+            return
+        original = path.read_bytes()
+        if REFERENCE_MARKER.encode("utf-8") in original:
+            return
+        temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            temp.write_bytes(original + ("\n\n" + REFERENCE_RULES).encode("utf-8"))
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+
 def view(pj: Project) -> dict:
+    update_reference_contract(pj)
     publication = scan(pj)
     plan = pj.tasks()
     rows = task_rows(plan, legacy=True)
@@ -463,5 +486,6 @@ def revision_request(pj: Project, keys: list, note: str) -> dict:
     text = f"# Agent 定向修订\n\n项目根：`{pj.root}`\n当前发布：{current['publication'].get('revision', 'legacy')}\n\n原因：{note}\n\n"
     text += "仅修订下列任务及受影响下游，按原契约发布新版本；不要覆盖旧发布或成品。\n\n"
     text += "\n".join(f"- {t['key']}：{t['prompt_ref']}" for t in tasks)
+    text += "\n\n先读原项目已有契约，不要用其他项目的契约替换项目编号、根目录或锁定配置。\n\n" + REFERENCE_RULES
     write_text(str(inside(pj.root, rel)), text)
     return {"rel": rel, "text": text}

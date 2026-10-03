@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from .reference_contract import RULES as REFERENCE_RULES
+
 # ====================================================================
 # 这里有**两套字段**，而且名字不一样。混着写就是 codex 实测撞上的那个歧义：
 #
@@ -719,6 +721,8 @@ def render(limits: Optional[dict] = None, project_name: str = "",
       "第二道查每个编号后面有没有说清这张图是谁。"
       "只写编号会被第二道拦下 ——「只说这张图控制服饰」不够，"
       "它不知道是哪个人，多人场景必然张冠李戴。")
+    a("")
+    a(REFERENCE_RULES)
     a("")
     a("## 视频的参考图：两个数组，一个编号序列")
     a("")
