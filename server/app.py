@@ -2669,6 +2669,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not os.path.isfile(full):
                     return self._json({"error": "不存在"}, 404)
                 ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+                # 项目文本是 UTF-8；不能让浏览器猜本机编码。
+                # Windows 的 .md 关联各不相同，契约/模板统一按纯文本预览。
+                if os.path.splitext(full)[1].lower() in (".md", ".markdown"):
+                    ctype = "text/plain"
+                if ctype.startswith("text/") or ctype == "application/json":
+                    ctype += "; charset=utf-8"
                 return self._send_file(full, ctype)
             name = "agent.html" if path in ("/", "", "/index.html") else path.lstrip("/")
             if name not in ("agent.html", "agent.css", "agent.js", "favicon.ico"):
