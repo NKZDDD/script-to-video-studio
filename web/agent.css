@@ -126,5 +126,8 @@ html{scroll-padding-top:calc(var(--studio-header-height,90px) + var(--studio-doc
 #studio-agent-prototype .rv-bulk{display:block;max-height:50vh;overflow:auto}
 #studio-agent-prototype .rv-bulk th:nth-child(1){width:32%}#studio-agent-prototype .rv-bulk th:nth-child(2){width:40%}
 #studio-agent-prototype .rv-bulk select{width:100%;font-size:12px}
+#studio-agent-prototype .rv-audio-ref{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0;padding:10px;border:1px solid var(--line,#dce3f3);border-radius:8px}
+#studio-agent-prototype .rv-audio-ref>span{flex-basis:100%;overflow-wrap:anywhere}
+#studio-agent-prototype .rv-audio-ref audio{min-width:0;max-width:100%;flex:1 1 180px;height:40px}
 #studio-agent-prototype .rv-bulk tr.rv-good td,#studio-agent-prototype .rv-bulk tr.rv-bad td{background:transparent}
 @media(max-width:650px){#studio-agent-prototype .rv-service-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr) 80px}#studio-agent-prototype .rv-service-row>strong,#studio-agent-prototype .rv-service-row>select,#studio-agent-prototype .rv-service-row>input[list]{grid-column:1/-1}}

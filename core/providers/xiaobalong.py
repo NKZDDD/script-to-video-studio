@@ -144,6 +144,7 @@ class XiaobalongProvider(Provider):
                          "HTTP 200 不代表成功：error 非空或 data:[] 都算失败。",
             },
             "video": {
+                "max_audio_refs": MAX_AUDIOS,
                 "models": VIDEO_MODELS,
                 "default_model": "sd2-720p-933",
                 "prices_usd": VIDEO_PRICES,

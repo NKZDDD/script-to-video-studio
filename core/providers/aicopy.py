@@ -213,9 +213,9 @@ class AicopyProvider(Provider):
                 "durations": [4, 5, 6, 8, 10, 12, 15, 20, 29],
                 "default_duration": 10,
                 "resolutions": [""],
-                "model_options": {"sd2.5-720均衡版": {
+                "model_options": {**{m: {"max_audio_refs": _ref_caps(m)[2]} for m in VIDEO_MODELS}, "sd2.5-720均衡版": {
                     "durations": list(range(4, 30)), "max_refs": 30,
-                    "max_video_refs": 10, "resolutions": ["720p"]}},
+                    "max_video_refs": 10, "max_audio_refs": 10, "resolutions": ["720p"]}},
                 "max_refs": 30,
                 "ref_mode": "url",
                 "notes": "统一视频接口（2026-08-19）：所有模型同一套 /v1/videos，"

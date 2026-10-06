@@ -149,15 +149,15 @@ class AkeProvider(Provider):
                 "max_refs": 10,
                 "ref_mode": "url",
                 "model_options": {
-                    "wan3.0-video": {"durations": list(range(2, 31)), "max_refs": 10},
-                    "wan3.0-video-prime": {"durations": list(range(2, 31)), "max_refs": 10},
-                    "wan3.0-image": {"durations": list(range(2, 31)), "max_refs": 10},
-                    "wan3.0-image-prime": {"durations": list(range(2, 31)), "max_refs": 10},
-                    "grok-imagine-video-1.5": {
+                    "wan3.0-video": {"max_audio_refs": _limits("wan3.0-video")[2], "durations": list(range(2, 31)), "max_refs": 10},
+                    "wan3.0-video-prime": {"max_audio_refs": _limits("wan3.0-video-prime")[2], "durations": list(range(2, 31)), "max_refs": 10},
+                    "wan3.0-image": {"max_audio_refs": _limits("wan3.0-image")[2], "durations": list(range(2, 31)), "max_refs": 10},
+                    "wan3.0-image-prime": {"max_audio_refs": _limits("wan3.0-image-prime")[2], "durations": list(range(2, 31)), "max_refs": 10},
+                    "grok-imagine-video-1.5": {"max_audio_refs": _limits("grok-imagine-video-1.5")[2],
                         "durations": list(range(4, 16)), "max_refs": 7},
-                    "grok-imagine-video-1.5-preview": {
+                    "grok-imagine-video-1.5-preview": {"max_audio_refs": _limits("grok-imagine-video-1.5-preview")[2],
                         "durations": list(range(4, 16)), "max_refs": 7},
-                    "wan-3.0": {"durations": list(range(1, 61)), "max_refs": 9},
+                    "wan-3.0": {"max_audio_refs": _limits("wan-3.0")[2], "durations": list(range(1, 61)), "max_refs": 9},
                 },
                 "notes": "seconds 必须按字符串发送；reference_images 是 {url,role?} 对象数组。"
                          "wan3.0-video* 支持 10 图/5 视频/5 音频，wan3.0-image* 不支持参考视频；"

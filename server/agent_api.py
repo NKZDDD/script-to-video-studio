@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 import time
 
-from core import agent_handoff as H, agent_projects as A, agent_runtime as R, assemble, bulk_place, diagnose, paths, recycle, submitted
+from core import agent_handoff as H, agent_projects as A, agent_runtime as R, assemble, audio_refs, bulk_place, diagnose, paths, recycle, submitted
 from core.store import LOCK, Project, list_projects, read_json, write_json, write_text
 
 
@@ -437,11 +437,20 @@ def post(app, path, body):
             reasons = "；".join(b["reason"] for b in started.get("blocked") or []) or started.get("message", "")
             raise ValueError("没有开始重新生成，原视频已放回原处：" + reasons)
         return dict(moved, job_id=started["job_id"])
+    if path == '/api/agent/audio/upload':
+        try:
+            raw = base64.b64decode(body.get('content_b64') or '', validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError('音频文件编码无效，请重新选择文件')
+        return audio_refs.save(pj, body.get('key'), body.get('filename'), raw)
+    if path == '/api/agent/audio/remove':
+        return audio_refs.remove(pj, body.get('key'), body.get('file_ref'))
     if path == "/api/agent/delete":
         keys = body.get("keys")
         if not isinstance(keys, list) or not keys or any(not isinstance(k, str) for k in keys):
             raise ValueError("先选要删除的产物")
-        return recycle.delete(pj, keys, R.busy(app.JOBS, pj.root))
+        with LOCK:
+            return recycle.delete(pj, list(dict.fromkeys(keys)), R.busy(app.JOBS, pj.root))
     if path == "/api/agent/subtitle":
         if not cfg.get("agent_features", {}).get("post"):
             raise ValueError("字幕与后期功能包未开启")

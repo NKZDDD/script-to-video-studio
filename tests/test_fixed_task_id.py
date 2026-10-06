@@ -16,6 +16,7 @@ def test_resume_skips_changed_or_missing_generation_materials(env, monkeypatch):
         run(project, task)
     task['params'] = {'duration': 'invalid', 'ratio': 'invalid', 'resolution': 'invalid'}
     task['reference_images'] = [{'file_ref': 'missing.png'}]
+    task['reference_audios'] = ['missing.wav']
     Path(project.p(*task['prompt_ref'].split('/'))).unlink()
     from core.relay import Relay
     assert Relay(project).ready_of('video')(task) == (True, '')

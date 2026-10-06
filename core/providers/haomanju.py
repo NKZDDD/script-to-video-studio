@@ -148,6 +148,7 @@ class HaomanjuProvider(Provider):
                          "`1536x1152` 是这家独有的尺寸。",
             },
             "video": {
+                "model_options": {m: {"max_audio_refs": H3_MAX_AUDIOS if branch_of(m) == "h3" else 0} for m in VIDEO_MODELS},
                 "models": VIDEO_MODELS,
                 "default_model": "minimax_h3",
                 "ratios": H3_RATIOS,

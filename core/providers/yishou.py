@@ -49,6 +49,7 @@ class YishouProvider(Provider):
             "default_base_url": self.default_base_url,
             "supports": list(self.supports),
             "video": {
+                "supports_audio_refs": True,
                 # 故意留空：这家的模型和能力由 GET /v1/models 决定，写死会过期。
                 # 前端拿到空列表会去调 list_models()。
                 "models": [],

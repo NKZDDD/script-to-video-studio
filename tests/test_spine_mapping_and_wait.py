@@ -21,6 +21,7 @@ n13 的 schema 示例里 `storyboard_spine.images[]` 和 `reference_order[]`
 熬过 180 秒还没被切，就说明这条线路容得下长思考 —— 那句预言再刷下去，
 人会一直等着看一个不会来的错误，而真正该知道的是「还能等多久、到点会怎样」。
 """
+import ast
 import io
 import os
 import unittest
@@ -104,10 +105,14 @@ class VideoMappingCheckTests(unittest.TestCase):
 
     def test_it_warns_instead_of_stopping(self):
         """★ 出片是最贵的一步，为一句措辞把整段拦住不值得。"""
-        i = self.src.index("if not handoff and len(spine) > 1:")
-        blk = self.src[i:i + 1400]
-        self.assertIn("log(", blk)
-        self.assertNotIn("raise", blk)
+        # Inspect the mapping branch itself, not a fixed-length slice that also
+        # includes unrelated validation added after it (such as reference audio).
+        branch = next(node for node in ast.walk(ast.parse(self.src))
+                      if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == 'not handoff and len(spine) > 1')
+        self.assertTrue(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id == 'log' for node in ast.walk(branch)))
+        self.assertFalse(any(isinstance(node, ast.Raise) for node in ast.walk(branch)))
 
 
 class ThinkingWaitTests(unittest.TestCase):

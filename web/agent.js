@@ -180,13 +180,23 @@ function renderAssemble() {
 }
 async function loadDelete() {
  const d=S.del;if(!d)return;
- const r=await get('delete-plan',{root:d.root,key:d.key,up:d.up?1:0,down:d.down?1:0,siblings:d.siblings?1:0});
- if(S.del!==d||!$('#dialog').open)return;
- d.items=r.items;renderDelete();
+ const request=++d.request;d.loading=true;renderDelete();
+ try{
+  const r=await get('delete-plan',{root:d.root,key:d.key,up:d.up?1:0,down:d.down?1:0,siblings:d.siblings?1:0});
+  if(S.del!==d||d.request!==request||!$('#dialog').open)return;
+  d.items=r.items;
+  for(const x of d.items)if(!(x.key in d.choices))d.choices[x.key]=x.exists&&!S.data?.running?.[x.key];
+ }catch(e){if(S.del===d&&d.request===request)d.items=[];throw e;}
+ finally{if(S.del===d&&d.request===request){d.loading=false;renderDelete();}}
 }
+function deleteFiles() {return S.del?.items.filter(x=>x.exists&&S.del.choices[x.key])||[];}
 function renderDelete() {
- const d=S.del,files=d.items.filter(x=>x.exists),live=d.items.filter(x=>S.data?.running?.[x.key]);
- $('#dialog-body').innerHTML=`<p><strong>${esc(d.key)}</strong></p><p class="rv-caption">删的是已生成的文件：挪进 07_检查与记录/回收站/，保留原来的目录结构，想要回来可以从那里拿。任务留在生产树上、变回待生产，要重做就勾上再生产。</p><div class="rv-del-opts">${[['down','连同下游（子链路）：拿它当参考做出来的，一直往下'],['up','连同上游（父链路）：它用到的参考图，一直往上'],['siblings','连同兄弟链路：和它共用同一个上游的其他任务']].map(([k,l])=>`<label class="rv-inline"><input type="checkbox" data-del="${k}" ${d[k]?'checked':''}> ${esc(l)}</label>`).join('')}<small>勾了下游时，列表里每一项的下游都会一起删 —— 它们是用旧图做出来的，旧图没了就对不上。</small></div><h4>将移到回收站的文件（${files.length} 个）</h4><ol class="rv-del-list">${d.items.map(x=>`<li class="${x.exists?'':'rv-off'}"><span class="rv-badge">${esc(x.relation)}</span> <strong>${esc(x.name)}</strong><small>${esc(S.boot.kinds[x.kind]||x.kind)} · ${esc(x.output)}${x.exists?'':' · 还没有文件，跳过'}</small></li>`).join('')}</ol>${live.length?`<p class="rv-notice is-error">${live.map(x=>esc(x.key)).join('、')} 正在生成，先停止那一批或等它结束再删。</p>`:''}<div class="rv-actions wizard-footer">${btn(`移到回收站（${files.length} 个文件）`,'delete-run',files.length&&!live.length?'':'disabled',true)}</div>`;
+ const d=S.del,files=deleteFiles(),live=files.filter(x=>S.data?.running?.[x.key]);
+ $('#dialog-body').innerHTML=`<p><strong>${esc(d.key)}</strong></p><p class="rv-caption">只把勾选的已生成文件移到 07_检查与记录/回收站/，保留原目录结构。任务保留在生产树上；未勾选的产物不动。</p><div class="rv-del-opts">${[['down','列出下游（子链路）：拿它当参考做出来的，一直往下'],['up','列出上游（父链路）：它用到的参考图，一直往上'],['siblings','列出兄弟链路：和它共用同一个上游的其他任务']].map(([k,l])=>`<label class="rv-inline"><input type="checkbox" data-del="${k}" ${d[k]?'checked':''}> ${esc(l)}</label>`).join('')}<small>链路选项只决定候选范围，下面逐项决定删除哪些文件。保留下游成品时，它仍是按旧参考图生成的。</small></div><div class="rv-actions">${btn('全选可删除文件','delete-all',d.loading?'disabled':'')}${btn('清空选择','delete-none',d.loading?'disabled':'')}</div><h4>${d.loading?'正在更新候选文件…':`已选 ${files.length} / ${d.items.filter(x=>x.exists).length} 个文件`}</h4><ol class="rv-del-list">${d.items.map(x=>`<li class="${x.exists?'':'rv-off'}"><label class="rv-inline"><input type="checkbox" data-delete-key="${esc(x.key)}" ${d.choices[x.key]&&x.exists?'checked':''} ${!x.exists||d.loading?'disabled':''}><span class="rv-badge">${esc(x.relation)}</span> <strong>${esc(x.name)}</strong></label><small>${esc(S.boot.kinds[x.kind]||x.kind)} · ${esc(x.output)}${x.exists?'':' · 还没有文件，跳过'}${S.data?.running?.[x.key]?' · 正在生成，请取消勾选':''}</small></li>`).join('')}</ol>${live.length?`<p class="rv-notice is-error">${live.map(x=>esc(x.key)).join('、')} 正在生成，请取消勾选，或先停止对应批次。</p>`:''}<div class="rv-actions wizard-footer">${btn(`移到回收站（${files.length} 个文件）`,'delete-run',files.length&&!live.length&&!d.loading?'':'disabled',true)}</div>`;
+}
+function audioCards(t) {
+ const refs=t.reference_audios||[];
+ return `<h4>参考音频（提交顺序）</h4>${refs.map((r,i)=>`<div class="rv-audio-ref"><span>${i+1}. ${esc(r.name||r.file_ref)}</span><audio controls preload="none" src="${esc(/^https?:/.test(r.file_ref)?r.file_ref:fileURL(r.file_ref))}"></audio>${btn('移除','audio-remove',`data-key="${esc(t.key)}" data-ref="${esc(r.file_ref)}"`)}</div>`).join('')||'<p class="rv-caption">未添加参考音频</p>'}<div class="rv-file-field">${fileButton('audio-file','添加参考音频…','.mp3,.wav,.m4a,.aac,.ogg,.flac',`multiple data-key="${esc(t.key)}"`)}<small>每个音频最多 25MB；使用设置中的对象存储上传。服务商须支持参考音频。仅影响下一次新生成，已提交任务仍取回原 ID。</small></div>`;
 }
 const BULK_EXT=/\.(png|jpe?g|webp)$/i;
 function bulkIntro() {
@@ -225,7 +235,7 @@ async function runBulk() {
 }
 async function openDelete(key) {
  dialog('删除产物','<p>正在列出会被删除的文件…</p>');
- S.del={root:S.root,key,down:true,up:false,siblings:false,items:[]};
+ S.del={root:S.root,key,down:true,up:false,siblings:false,items:[],choices:{},request:0,loading:false};
  await loadDelete();
 }
 async function importRelease(file) {
@@ -326,7 +336,7 @@ function renderDetail() {
  const r=S.data.resources.find(r=>r.id===S.detail);if(!r){updateHTML($('#resource-detail'),'<h3>资源详情</h3><p>点选树中的资源，查看来源、参考图、提示词和输出位置。</p>');return;}
  const t=S.data.tasks.find(t=>t.key===r.task_key);
  const detail=$('#resource-detail'),scroll=detail.scrollTop,link=linker(S.data.tasks.map(x=>x.key)),run=t&&S.data.running?.[t.key],st=taskState(t);
- if(updateHTML(detail,`<h3>${esc(r.name)}</h3><p class="rv-caption">${esc(r.id)}</p><dl><dt>分类</dt><dd>${esc(S.boot.semantics[r.semantic]||r.semantic)}</dd><dt>使用范围</dt><dd>${esc(r.episodes.join('、')||'全剧共享')}</dd></dl>${t?`<dl><dt>状态</dt><dd><span class="rv-badge ${st.cls}">${esc(st.label)}</span>${run?.msg?` ${link(run.msg)}`:''}</dd><dt>输出</dt><dd><code>${esc(t.output)}</code></dd><dt>参数</dt><dd>${esc(JSON.stringify(t.params))}</dd><dt>依赖</dt><dd>${t.dependencies.length?link(t.dependencies.join('、')):'无'}</dd></dl>${t.done?(t.kind==='video'?`<video controls preload="metadata" src="${esc(fileURL(t.output))}"></video>`:`<img loading="lazy" alt="${esc(r.name)}" src="${esc(fileURL(t.output))}">`)+fileLink(t.output,'查看原文件'):''}<div class="rv-actions">${btn('查看 / 编辑提示词','prompt',`data-key="${esc(t.key)}"`)}${btn('交给 Agent 修订','revision',`data-key="${esc(t.key)}"`)}${t.kind==='video'&&t.done?btn('重新抽卡','reroll',`data-key="${esc(t.key)}"`):''}${t.done||t.exists?btn('删除产物…','delete',`data-key="${esc(t.key)}"`):''}</div><h4>参考图（上传顺序）</h4>${refCards(t)}${t.kind!=='video'?`<div class="rv-file-field"><span>手动放图</span>${fileButton('manual-file','选择图片…','image/png,image/jpeg,image/webp',`data-key="${esc(t.key)}" data-kind="${esc(t.kind)}"`)}<small>空位置可补图；已有产物的修改请发起新版本修订。</small></div>`:''}${t.submitted?`<div class="rv-notice">已在「${esc(t.submitted.provider)}」提交任务 <code>${esc(t.submitted.task_id)}</code>（${esc(t.submitted.submitted_at)}），结果还没取回。下次生产只按此任务 ID 取回；修改参数不会重新生成。<div class="rv-actions">${btn('放弃这个任务，下次重新提交','drop-submitted',`data-key="${esc(t.key)}"`)}</div><small>查询或下载异常仍保留此 ID；服务商明确返回失败时自动解除，显示失败，下次生产提交新任务。需要提前重新生成时可手动放弃；新任务将重新计费。</small></div>`:''}${S.data.failures.filter(f=>f.target===t.key).map(f=>`<p class="rv-notice is-error">${esc(f.raw||f.title)}</p>`).join('')}`:'<p>声音身份与连续性元数据，无独立收费任务。</p>'}`))detail.scrollTop=scroll;
+ if(updateHTML(detail,`<h3>${esc(r.name)}</h3><p class="rv-caption">${esc(r.id)}</p><dl><dt>分类</dt><dd>${esc(S.boot.semantics[r.semantic]||r.semantic)}</dd><dt>使用范围</dt><dd>${esc(r.episodes.join('、')||'全剧共享')}</dd></dl>${t?`<dl><dt>状态</dt><dd><span class="rv-badge ${st.cls}">${esc(st.label)}</span>${run?.msg?` ${link(run.msg)}`:''}</dd><dt>输出</dt><dd><code>${esc(t.output)}</code></dd><dt>参数</dt><dd>${esc(JSON.stringify(t.params))}</dd><dt>依赖</dt><dd>${t.dependencies.length?link(t.dependencies.join('、')):'无'}</dd></dl>${t.done?(t.kind==='video'?`<video controls preload="metadata" src="${esc(fileURL(t.output))}"></video>`:`<img loading="lazy" alt="${esc(r.name)}" src="${esc(fileURL(t.output))}">`)+fileLink(t.output,'查看原文件'):''}<div class="rv-actions">${btn('查看 / 编辑提示词','prompt',`data-key="${esc(t.key)}"`)}${btn('交给 Agent 修订','revision',`data-key="${esc(t.key)}"`)}${t.kind==='video'&&t.done?btn('重新抽卡','reroll',`data-key="${esc(t.key)}"`):''}${t.done||t.exists?btn('删除产物…','delete',`data-key="${esc(t.key)}"`):''}</div><h4>参考图（上传顺序）</h4>${refCards(t)}${t.kind==='video'?audioCards(t):''}${t.kind!=='video'?`<div class="rv-file-field"><span>手动放图</span>${fileButton('manual-file','选择图片…','image/png,image/jpeg,image/webp',`data-key="${esc(t.key)}" data-kind="${esc(t.kind)}"`)}<small>空位置可补图；已有产物的修改请发起新版本修订。</small></div>`:''}${t.submitted?`<div class="rv-notice">已在「${esc(t.submitted.provider)}」提交任务 <code>${esc(t.submitted.task_id)}</code>（${esc(t.submitted.submitted_at)}），结果还没取回。下次生产只按此任务 ID 取回；修改参数不会重新生成。<div class="rv-actions">${btn('放弃这个任务，下次重新提交','drop-submitted',`data-key="${esc(t.key)}"`)}</div><small>查询或下载异常仍保留此 ID；服务商明确返回失败时自动解除，显示失败，下次生产提交新任务。需要提前重新生成时可手动放弃；新任务将重新计费。</small></div>`:''}${S.data.failures.filter(f=>f.target===t.key).map(f=>`<p class="rv-notice is-error">${esc(f.raw||f.title)}</p>`).join('')}`:'<p>声音身份与连续性元数据，无独立收费任务。</p>'}`))detail.scrollTop=scroll;
 }
 function refCards(t) {
  const refs=[...(t.handoff_refs||t.storyboard_refs||[]),...(t.reference_images||[])];
@@ -517,7 +527,10 @@ const actions={
  'bulk-place':()=>{dialog('批量放外部图片',bulkIntro());S.bulk=null;},
  'bulk-run':runBulk,
  'delete':e=>openDelete(e.dataset.key),
- 'delete-run':async()=>{const d=S.del;if(!d)return;const keys=d.items.filter(x=>x.exists).map(x=>x.key);if(!keys.length)return;const r=await api('delete',{root:d.root,keys});closeDialog();invalidatePlan();if(S.root===d.root)await loadProject();notice(`已把 ${r.moved.length} 个文件移到 ${r.folder}。这些任务变回待生产，要重做就勾上再生产。`);},
+ 'delete-all':()=>{if(S.del&&!S.del.loading){for(const x of S.del.items)S.del.choices[x.key]=x.exists&&!S.data?.running?.[x.key];renderDelete();}},
+ 'delete-none':()=>{if(S.del&&!S.del.loading){for(const x of S.del.items)S.del.choices[x.key]=false;renderDelete();}},
+ 'audio-remove':async(el)=>{await post('audio/remove',{key:el.dataset.key,file_ref:el.dataset.ref});invalidatePlan();await loadProject();notice('已移除音频引用，正在运行的批次不受影响。');},
+ 'delete-run':async()=>{const d=S.del;if(!d||d.loading)return;const keys=deleteFiles().map(x=>x.key);if(!keys.length)return;const r=await api('delete',{root:d.root,keys});closeDialog();invalidatePlan();if(S.root===d.root)await loadProject();notice(`已把 ${r.moved.length} 个文件移到 ${r.folder}。这些任务变回待生产，要重做就勾上再生产。`);},
  'asm-all':async()=>{S.asm.chosen=[...S.asm.episodes];await loadAssemble();},
  'asm-none':()=>{S.asm.chosen=[];S.asm.rows=[];renderAssemble();},
  'detail':e=>{S.detail=e.dataset.id;$$('[data-action="detail"]',main).forEach(b=>b.closest('.rv-leaf')?.classList.toggle('active',b.dataset.id===S.detail));renderDetail();},
@@ -562,6 +575,7 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.id==='provider-file'&&el.files[0]){const file=el.files[0];el.value='';await importProvider(file);return;}
  if(el.id==='release-file'&&el.files[0]){const file=el.files[0];el.value='';await importRelease(file);return;}
  if(el.dataset.asmEp!==undefined){const a=S.asm,e=el.dataset.asmEp,on=new Set(a.chosen);el.checked?on.add(e):on.delete(e);a.chosen=a.episodes.filter(x=>on.has(x));await loadAssemble();return;}
+ if(el.dataset.deleteKey!==undefined){if(S.del&&!S.del.loading){S.del.choices[el.dataset.deleteKey]=el.checked;renderDelete();}return;}
  if(el.dataset.del){if(!S.del)return;S.del[el.dataset.del]=el.checked;await loadDelete();return;}
  if(['bulk-folder','bulk-files'].includes(el.id)&&el.files.length){const files=[...el.files];el.value='';await loadBulk(files);return;}
  if(el.dataset.bulkKey!==undefined){const r=S.bulk?.rows[+el.dataset.bulkKey],t=S.data.tasks.find(x=>x.key===el.value.trim()&&x.kind!=='video');if(!r)return;if(!t)throw Error(`没有出图任务「${el.value.trim()}」，从下拉提示里选一个任务 ID`);if(!r.candidates.some(c=>c.key===t.key))r.candidates.unshift({key:t.key,kind:t.kind,name:S.data.resources.find(x=>x.task_key===t.key)?.name||t.key,output:t.output,exists:!!t.exists});r.choice=t.key;r.note='';renderBulk();return;}
@@ -584,6 +598,7 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
  try{await post('production-settings',{settings:{[kind]:setting}});if(currentRoot!==S.root||S.page!=='production')return;S.data.production[kind]=setting;invalidatePlan();if(['provider','model'].includes(el.dataset.setting))renderServices();}
  finally{controls.forEach(control=>control.disabled=false);}return;}
  if(el.id==='source-file'&&el.files[0]){const d=await api('parse',{filename:el.files[0].name,content_b64:await readFile(el.files[0])});$('[name=source]').value=d.text;return;}
+ if(el.id==='audio-file'&&el.files.length){const root=S.root,key=el.dataset.key,files=[...el.files];el.value='';el.disabled=true;try{for(const f of files){if(f.size>25*1024*1024)throw Error(`${f.name} 超过 25MB`);await api('audio/upload',{root,key,filename:f.name,content_b64:await readFile(f)});}notice('参考音频已添加，按列表顺序提交。');}finally{el.disabled=false;if(S.root===root){invalidatePlan();await loadProject();}}return;}
  if(el.id==='manual-file'&&el.files[0]){await post('manual',{kind:el.dataset.kind,key:el.dataset.key,content_b64:await readFile(el.files[0])});await loadProject();notice('参考图已保存。');return;}
  if(el.id==='output-kind'){S.filters.outputKind=el.value;outputList();return;}
  if(S.page==='wizard'&&['image_provider','video_provider'].includes(el.name)){const media=el.name.split('_')[0],cap=S.boot.capabilities.find(c=>c.id===el.value);$(`[name=${media}_model]`).value=cap?.[media]?.default_model||'';}

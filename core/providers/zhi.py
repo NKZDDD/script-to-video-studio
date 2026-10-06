@@ -99,6 +99,7 @@ class ZhiProvider(Provider):
             "default_base_url": self.default_base_url,
             "supports": list(self.supports),
             "video": {
+                "supports_audio_refs": True,
                 "models": [],              # 动态：按账号分配，见 note
                 "default_model": "",
                 "ratios": ["9:16", "16:9", "1:1", "4:3", "3:4"],

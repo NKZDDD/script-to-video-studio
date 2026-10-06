@@ -451,10 +451,12 @@ def update_reference_contract(pj: Project) -> None:
 
 
 def view(pj: Project) -> dict:
+    from . import audio_refs
     update_reference_contract(pj)
     publication = scan(pj)
     plan = pj.tasks()
-    rows = task_rows(plan, legacy=True)
+    rows = [audio_refs.overlay(pj, t) if t['kind'] == 'video' else t
+            for t in task_rows(plan, legacy=True)]
     chosen = selections(pj, rows)
     by_output = {t["output"]: t["key"] for t in rows}
     waiting = submitted.pending(pj.root)
