@@ -60,7 +60,7 @@ import re
 import tempfile
 import time
 from typing import Callable, Optional
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -75,8 +75,9 @@ try:
 except ImportError:
     submitted = None
 
-PATCH_VERSION = "20260930.1"
+PATCH_VERSION = "20261008.1"
 Q10_MODEL = "Q10-SD2.5 全参"
+MX_MODEL = "SD2.5720MX"
 RUNNING_STATES = getattr(_api, "RUNNING_STATES", (
     "queued", "pending", "processing", "in_progress", "in-progress", "inprogress",
     "running", "waiting", "created", "submitted", "start", "starting",
@@ -166,6 +167,9 @@ SPEC = {
 # 2026-09-28 GET /api/pricing：仅把公开给出的约束写入；None 表示未公布。
 # 新型号仍沿用此前表外型号使用的 url_media 请求形状，未凭名字改协议。
 SPEC.update({
+    # 用户提供《SD2.5720MX-接入参数》：固定成片 30 秒，不是任选 1–30 秒。
+    MX_MODEL: ("openai_refs", (30, 30), ["720p"], R6, 30, 10, 10,
+               "固定生成 30 秒；30 图 / 10 视频 / 10 音频；文档标价 5.5 元/次，完成时扣费"),
     # 用户提供《Q10-SD2.5全参-下游对接文档》，2026-09-30。
     Q10_MODEL: ("url_media", (4, 30), ["480p"], ["16:9", "9:16"], 30, 10, 10,
                 "提示词最多 4500 字符；单图不超过 20MB；4–30 秒按秒计费"),
@@ -513,7 +517,10 @@ class JulunProvider(Provider):
     ref_mode = "url"
 
     def __init__(self, api_key="", base_url="", proxy="", timeout=900):
-        self.session = _JulunSession(api_key, base_url or self.default_base_url, timeout, proxy)
+        base = (base_url or self.default_base_url).strip().rstrip('/')
+        if base.endswith('/v1'):
+            base = base[:-3]
+        self.session = _JulunSession(api_key, base, timeout, proxy)
 
     def capabilities(self) -> dict:
         return {
@@ -533,6 +540,7 @@ class JulunProvider(Provider):
             },
             "video": {
                 "models": VIDEO_MODELS,
+                "catalog_keep_models": [MX_MODEL],
                 "default_model": "sd2.5",
                 "ratios": R6,
                 "durations": list(range(4, 31)),
@@ -599,6 +607,17 @@ class JulunProvider(Provider):
         if not (task.prompt or "").strip():
             raise ApiError("巨轮 prompt 必填", status=0, kind="task_fatal")
 
+        if model == MX_MODEL:
+            try:
+                seconds = int(task.duration)
+                valid = (not isinstance(task.duration, bool)
+                         and float(task.duration) == seconds and 1 <= seconds <= 30)
+            except (TypeError, ValueError, OverflowError):
+                valid = False
+            if not valid:
+                raise ApiError("巨轮 SD2.5720MX 接受 1–30 整数秒，但固定生成 30 秒；请将视频时长选为 30 秒。",
+                               kind=TASK_FATAL)
+
         if model == Q10_MODEL:
             # 按秒计费的专用协议：不悄悄取整或夹到另一个时长。
             try:
@@ -621,6 +640,8 @@ class JulunProvider(Provider):
         refs = list(task.refs or [])
         vids = [v for v in (task.extra.get("video_refs") or task.extra.get("videos") or []) if v]
         auds = [a for a in (task.extra.get("audio_refs") or task.extra.get("audios") or []) if a]
+        if model == MX_MODEL and any(not str(u).startswith(('https://', 'http://')) for u in vids + auds):
+            raise ApiError("巨轮 SD2.5720MX 的参考视频和音频必须是公网 HTTP(S) URL，请先上传素材。", kind=TASK_FATAL)
 
         local = [r for r in refs if not str(r).startswith(("http://", "https://"))]
         if local:
@@ -707,6 +728,15 @@ class JulunProvider(Provider):
                     "aspect_ratio": ratio}
             if refs:
                 body["image_refs"] = refs
+            if model == MX_MODEL:
+                path = "/v1/videos/generations"
+                if vids:
+                    body["video_refs"] = vids
+                if auds:
+                    body["audio_refs"] = auds
+                for field in ('store', 'face_split'):
+                    if field in task.extra:
+                        body[field] = task.extra[field]
         elif fmt == "grok":
             # 文档：**不支持 seconds**；比例分辨率必须在 extra 里，放顶层无效
             extra = {"aspect_ratio": ratio, "resolution": res}
@@ -788,9 +818,10 @@ class JulunProvider(Provider):
         if not task_id:
             raise ApiError(f"提交没返回任务 ID：{str(data)[:300]}")
         if submitted is not None:
-            submitted.remember(task_id, custom="julun")
+            submitted.remember(task_id, custom="julun", **({"model": model} if model == MX_MODEL else {}))
 
-        url = self._poll(task_id, poll_interval, poll_timeout, log=log, cancel=cancel)
+        url = self._poll(task_id, poll_interval, poll_timeout, log=log, cancel=cancel,
+                         **({"model": model} if model == MX_MODEL else {}))
         self.session.save_item(url, dest, log=log, cancel=cancel)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
 
@@ -798,19 +829,30 @@ class JulunProvider(Provider):
         if (record.get("resume") or {}).get("custom") != "julun":
             return super().resume(record, dest, log=log, cancel=cancel,
                                   poll_interval=poll_interval, poll_timeout=poll_timeout)
-        url = self._poll(record["task_id"], poll_interval, poll_timeout, log=log, cancel=cancel)
+        model = record.get('model') or (record.get('resume') or {}).get('model', '')
+        url = self._poll(record["task_id"], poll_interval, poll_timeout, log=log, cancel=cancel,
+                         **({"model": model} if model == MX_MODEL else {}))
         self.session.save_item(url, dest, log=log, cancel=cancel)
         return {"task_id": record["task_id"], "source": url, "provider": self.id,
                 "model": record.get("model", ""), "resumed": True}
 
-    def _poll(self, task_id: str, interval: int, timeout: int, *, log, cancel=None) -> str:
+    def _poll(self, task_id: str, interval: int, timeout: int, *, log, cancel=None, model="") -> str:
         """兼容顶层和 data 包装；终态以 status 为准，不等待 progress 到 100。"""
+        mx = model == MX_MODEL
+        if mx:
+            interval, timeout = max(30, interval), min(3600, timeout)
+        query = f"/v1/videos/generations/{task_id}" if mx else f"/v1/videos/{task_id}"
         start, last = time.time(), ""
         while time.time() - start < timeout:
             if cancel and cancel():
                 raise ApiError("用户已取消")
-            data = self.session.request("GET", f"/v1/videos/{task_id}",
-                                        retries=1, timeout=60)
+            try:
+                data = self.session.request("GET", query, retries=1, timeout=60)
+            except ApiError as exc:
+                if mx:
+                    exc.kind = TASK_FATAL
+                    exc.args = (f"巨轮 {task_id} 查询未成功：{exc}；请继续取回同一个 ID，不要重新提交。",)
+                raise
             inner = (data or {}).get("data")
             if not isinstance(inner, dict) or not inner.get("status"):
                 inner = data or {}
@@ -827,28 +869,44 @@ class JulunProvider(Provider):
                               "code": inner.get("error_code") or ""}
                 exc = task_failed(detail)
                 exc.args = (f"巨轮 {task_id}：{exc}",)
+                if mx:
+                    exc.kind = TASK_FATAL
                 # 原样重发不能解决素材肖像要求；只停此任务，不影响其他任务。
                 if re.search(r"肖像(?:权)?保护|likeness protection", str(exc), re.I):
                     exc.kind = TASK_FATAL
                     exc.extra_fix.append("按服务商的肖像要求检查参考素材与账号条件，处理后再手动重试。")
                 raise exc
             url = inner.get("result_url") or ""
+            if mx:
+                video = inner.get('video')
+                url = (video.get('url') if isinstance(video, dict) else '') or url
+                if url:
+                    # API Base 为 /v1/；根相对路径由 urljoin 保持在站点根目录。
+                    url = urljoin(self.session.base_url.rstrip('/') + '/v1/', str(url))
+                    if urlsplit(url).scheme not in ('http', 'https'):
+                        raise ApiError(f"巨轮 {task_id} 返回了不支持的视频下载地址，请继续取回原任务。", kind=TASK_FATAL)
             # **别只认 `SUCCESS` 这一个词。** 认死一个词的后果是：平台上
             # 显示已完成、地址也回来了，而我们接着等到超时 ——
             # 报出来的是「超时」，人会去查线路，查不到任何东西。
             # 所以：认识的完成词收；认不出的词**只要地址已经到手就收**；
             # 只有认识的「还在跑」才接着等。
-            done = low in DONE_STATES
+            done = low in DONE_STATES or (mx and low in ("done", "succeeded"))
             unknown = bool(low) and not done and low not in RUNNING_STATES
             if done:
                 if url:
                     return url
+                if mx:
+                    raise ApiError(f"巨轮 {task_id} 已完成但未返回 video.url；请继续取回原任务，不要重新提交。",
+                                   kind=TASK_FATAL, err_code="result_download_failed")
                 return f"{self.session.base_url.rstrip('/')}/v1/videos/{task_id}/content"
             if url and unknown:
                 log(f"⚠️ 巨轮的状态词 `{status}` 我们不认识，但 result_url 已经"
                     f"回来了 —— 按完成收下。把这个词补进 apiutil 的 DONE_STATES。")
                 return url
             time.sleep(interval)
+        if mx:
+            raise ApiError(f"巨轮任务 {task_id} 本次查询超时（最多 1 小时）；未确认服务商失败，保留 ID 供下次取回。",
+                           kind=TASK_FATAL, err_code="submitted_pending")
         raise ApiError(f"巨轮任务超时：{task_id}（一般 1–3 分钟，高峰更久）",
                        status=0, kind="retryable")
 
