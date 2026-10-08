@@ -41,8 +41,9 @@ class ModelCatalogTests(unittest.TestCase):
         got = MC.apply_catalog(cap, {"ok": True, "models": ["gpt-image-2"]}, "测试")
         self.assertEqual(list(got["video"]["models"]), before, "video 被清空了")
         self.assertIn("video", got["model_catalog"]["kept_declared"])
-        # 拉到的那一类照常替换
-        self.assertEqual(got["image"]["models"], ["gpt-image-2"])
+        # 拉到的那一类替换目录，并保留服务商明确声明的分组兼容型号。
+        self.assertEqual(got["image"]["models"],
+                         ["gpt-image-2", *cap["image"].get("catalog_keep_models", [])])
 
     def test_unknown_kinds_still_make_the_list(self):
         """★ 认不出类型的**照样进清单** —— 拉取结果不是白名单。

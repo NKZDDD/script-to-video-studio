@@ -5,7 +5,7 @@
 
   1. `gpt-image-2` —— OpenAI 兼容。无参考图 `POST /v1/images/generations`(JSON)、
      有参考图 `POST /v1/images/edits`(**multipart，要真文件字节，不收链接**)
-  2. **香蕉**(`gemini-3-*-image-preview`) —— **Gemini 原生格式**：
+  2. **香蕉**（见 BANANA_MODELS，含 2.1 与非 preview 名称）—— **Gemini 原生格式**：
      `POST /v1beta/models/{model}:generateContent`，模型名在**路径**里不在 body，
      参考图是 `inline_data`/`file_data` 部件，尺寸走 `imageConfig.imageSize`
   3. **veo 视频**(`veo-3.1-*`) —— `POST /v1/videos` + 轮询，720p、4/6/8 秒
@@ -26,17 +26,25 @@ import os
 import re
 from typing import Callable, Optional
 
-from ..apiutil import ApiError, extract_image_items, extract_task_id, extract_video_url
-from .base import ImageTask, Provider, VideoTask
+from core.apiutil import ApiError, extract_image_items, extract_task_id, extract_video_url
+from core.providers.base import ImageTask, Provider, VideoTask
+
+PATCH_VERSION = "20261008.1"
+
+# 2026-10-08 使用香蕉分组 Key 实拉 /v1/models；2.1 已实测 Gemini 1K 生图。
+# 目录和协议路由共用名单，不能仅在下拉框增加名称而继续走 OpenAI images。
+BANANA_MODELS = (
+    "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image-preview",
+    "gemini-3-pro-image",
+    "gemini-3.1-flash-image",
+    "gemini-nano-banana-2.1",
+)
 
 IMAGE_MODELS = [
-    # 2026-08-19 实拉：/v1/models 只返回 gpt-image-2（按令牌分组过滤后），
-    # /api/pricing 另列两个 gemini。旧清单里的 gpt-image-1 / nano-banana 查不到。
     "gpt-image-2",
-    "gemini-3-pro-image-preview",       # 香蕉 Pro：画质档
-    "gemini-3.1-flash-image-preview",   # 香蕉2：速度档，额外支持超宽比例
+    *BANANA_MODELS,
 ]
-BANANA_MODELS = ("gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview")
 VIDEO_MODELS = ["veo-3.1-fast-generate-preview", "veo-3.1-generate-preview",
                 "veo-3.1-generate-preview-ref"]
 # 档位写法和像素写法都收（文档正文用档位、curl 示例用像素）
@@ -170,6 +178,7 @@ class KunjiProvider(Provider):
             "supports": list(self.supports),
             "image": {
                 "models": IMAGE_MODELS,
+                "catalog_keep_models": list(BANANA_MODELS),
                 "default_model": "gpt-image-2",
                 "sizes": SIZES,
                 "default_size": "1K",
@@ -177,7 +186,7 @@ class KunjiProvider(Provider):
                 "max_refs": 9,
                 "ref_mode": "data_uri",
                 "notes": "**两条协议**：gpt-image-2 走 OpenAI 兼容（有参考图=multipart 的 edits，"
-                         "要真文件字节不收链接）；**香蕉**(gemini-3-*) 走 Gemini 原生 "
+                         "要真文件字节不收链接）；**香蕉**（含 2.1、Pro、Flash 及 preview）走 Gemini 原生 "
                          "generateContent，模型名在路径里、尺寸走 imageSize(1K/2K/4K，K大写)。"
                          "⚠ **4K 按令牌分组**：gpt-image-2 要 4K 分组的 Key 才出得了 4K，"
                          "香蕉那条不看分组。多把 Key 可以一起填：`1k=sk-a;4k=sk-b;high=sk-c`。"
