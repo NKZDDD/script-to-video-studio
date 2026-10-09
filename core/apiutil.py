@@ -561,8 +561,8 @@ def extract_image_items(data: Any) -> list:
 # 是 682x1024，只剩 44% 的像素；2048x2048 的资产只剩 25%。参考图是喂给模型
 # 的身份和构图来源，缩掉一半而没人选过这件事。
 #
-# 现在只有**这一家自己声明要**的时候才动（`ref_max_side` / `ref_format`），
-# 而且动了必须在日志里说出来。声明缺失 = 不动，不是「猜一个安全值」。
+# 2026-10-09：用户要求所有上传参考图兼容 10 MB 限制。默认预算 9.5 MB，
+# 以下仍原样发送；超过只生成上传副本。声明的尺寸/格式限制继续生效，改动写日志。
 REF_KEEP = 0                    # max_side 传这个 = 不缩
 
 
@@ -577,11 +577,11 @@ def _alpha(path: str) -> bool:
 
 
 def encode_ref(path: str, max_side: int = REF_KEEP, quality: int = 80,
-               fmt: str = "") -> tuple:
+               fmt: str = "", max_bytes: int = 9_500_000) -> tuple:
     """本地图片 → `(字节, mime, 扩展名, 说明)`。
 
-    `max_side <= 0` 且 `fmt` 为空 = **原样读、原样发**，一个字节都不改。
-    这是默认。只有这一家声明了上限或指定了格式，才会重新编码。
+    未指定尺寸/格式且低于 max_bytes 时原样发送；超限只重编码上传副本。
+    原素材永远不覆盖。默认预算 9.5 MB，兼容常见的 10 MB 文件上限。
 
     **说明不是可选的。** 改过就要在日志里看得见 —— 出来的脸不像时，
     第一件要排除的就是「是不是我们把参考图改小了」，而那件事以前只有
@@ -595,6 +595,10 @@ def encode_ref(path: str, max_side: int = REF_KEEP, quality: int = 80,
     if max_side <= 0 and not fmt:
         with open(path, "rb") as f:
             raw = f.read()
+        from .reference_images import limit_bytes
+        bounded, bounded_mime, bounded_ext, bounded_note = limit_bytes(raw, max_bytes)
+        if bounded_note:
+            return bounded, bounded_mime, bounded_ext, bounded_note
         mime = mimetypes.guess_type(path)[0] or "image/png"
         note = "原样（未改）"
         if _alpha(path):
@@ -608,11 +612,7 @@ def encode_ref(path: str, max_side: int = REF_KEEP, quality: int = 80,
     except ImportError:
         # 这一家声明了要改，而我们改不了。**不能装作改过了** ——
         # 原样发过去撞上限时报的是别的错，方向完全跑偏。
-        with open(path, "rb") as f:
-            raw = f.read()
-        return (raw, mimetypes.guess_type(path)[0] or "image/png", ext,
-                f"这一家要求改（上限 {max_side or '—'} / 格式 {fmt or '—'}），"
-                f"但没装 Pillow，只能原样发")
+        raise ApiError('缺少 Pillow，无法按服务商要求准备参考图；请使用完整安装包', kind=TASK_FATAL)
 
     img = Image.open(path)
     w, h = img.size
@@ -633,7 +633,9 @@ def encode_ref(path: str, max_side: int = REF_KEEP, quality: int = 80,
              **({"quality": quality} if out_fmt == "JPEG" else {}))
     ext2 = ".jpg" if out_fmt == "JPEG" else ("." + out_fmt.lower())
     mime2 = "image/jpeg" if out_fmt == "JPEG" else f"image/{out_fmt.lower()}"
-    return buf.getvalue(), mime2, ext2, ("；".join(bits) or f"{w}x{h} 原尺寸")
+    from .reference_images import limit_bytes
+    bounded, bounded_mime, bounded_ext, bounded_note = limit_bytes(buf.getvalue(), max_bytes, required_format=fmt)
+    return bounded, bounded_mime or mime2, bounded_ext or ext2, (bounded_note or "；".join(bits) or f"{w}x{h} 原尺寸")
 
 
 def file_to_data_uri(path: str, max_side: int = REF_KEEP, quality: int = 80,
@@ -848,6 +850,44 @@ def _atomic_output(dest: str):
             os.remove(part)
 
 
+def _normalize_result_image(path: str, dest: str, log) -> None:
+    """Convert a complete image to the contract's file format; never rename raw JPEG to PNG."""
+    target = {'.png': 'PNG', '.jpg': 'JPEG', '.jpeg': 'JPEG', '.webp': 'WEBP'}.get(os.path.splitext(dest)[1].lower())
+    if not target:
+        return
+    from PIL import Image, UnidentifiedImageError
+    try:
+        opened = Image.open(path)
+    except (UnidentifiedImageError, OSError, ValueError):
+        return  # 未能识别的文件交给原有类型/残图检查，保留已有错误诊断。
+    try:
+        with opened as source:
+            actual = source.format
+            if actual == target or actual not in ('PNG', 'JPEG', 'WEBP'):
+                return
+            source.verify()
+        with Image.open(path) as source:
+            source.load()
+            if getattr(source, 'n_frames', 1) > 1:
+                raise ValueError('不自动压平多帧图片')
+            pixels = source.copy()
+        if target in ('PNG', 'WEBP') and pixels.mode == 'CMYK':
+            pixels = pixels.convert('RGB')
+        if target == 'JPEG' and pixels.mode not in ('RGB', 'L'):
+            if 'A' in pixels.getbands():
+                bg = Image.new('RGB', pixels.size, 'white')
+                bg.paste(pixels, mask=pixels.getchannel('A'))
+                pixels = bg
+            else:
+                pixels = pixels.convert('RGB')
+        pixels.save(path, format=target, **({'quality': 95} if target == 'JPEG' else {}))
+        log(f'服务商返回 {actual}，已转为目标 {target}，像素尺寸保持 {pixels.width}×{pixels.height}')
+    except UnidentifiedImageError:
+        return  # 原有文件类型检查会报告 HTML/JSON/无效内容。
+    except Exception as exc:
+        raise ApiError(f'结果图片格式转换或完整性检查失败：{exc}', kind=RETRYABLE, err_code='result_invalid') from exc
+
+
 def _check_saved(dest: str, src: str, *, extension: Optional[str] = None) -> None:
     """落盘之后验一遍。**0 字节的文件是最坏的一种失败。**
 
@@ -962,6 +1002,7 @@ class HttpSession:
         self.base_url = (base_url or "").strip().rstrip("/")
         self.timeout = timeout
         self.proxy = (proxy or "").strip()
+        self.result_source_bytes = {}
         # 鉴权头的形状：绝大多数网关是 Bearer，但「智」（zhi168）用 X-API-Key。
         # 服务商在 __init__ 里改这个属性就行，默认不动。
         self.auth_style = "bearer"
@@ -1187,6 +1228,8 @@ class HttpSession:
         raise last                              # type: ignore[misc]
 
     def _save_once(self, item: str, dest: str, *, log=None) -> str:
+        if not hasattr(self, 'result_source_bytes'):
+            self.result_source_bytes = {}  # 兼容旧外挂创建/恢复的 session。
         log = log or (lambda _: None)
         os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
         # 内嵌数据也要能追溯：只写「内嵌数据」的话，大小检查报出来的那条
@@ -1201,6 +1244,8 @@ class HttpSession:
             with _atomic_output(dest) as part:
                 with open(part, "wb") as f:
                     f.write(raw)
+                self.result_source_bytes[os.path.abspath(dest)] = os.path.getsize(part)
+                _normalize_result_image(part, dest, log)
                 _check_saved(part, src, extension=os.path.splitext(dest)[1].lower())
         elif item.startswith("http"):
             src = item
@@ -1279,6 +1324,8 @@ class HttpSession:
                             f"收下的话成片会少一段而且不报错，所以这里判失败。\n"
                             f"来源：{item[:200]}",
                             status=0, kind=RETRYABLE)
+                    self.result_source_bytes[os.path.abspath(dest)] = os.path.getsize(part)
+                    _normalize_result_image(part, dest, log)
                     _check_saved(part, src, extension=os.path.splitext(dest)[1].lower())
             finally:
                 r.close()
@@ -1287,5 +1334,7 @@ class HttpSession:
             with _atomic_output(dest) as part:
                 with open(part, "wb") as f:
                     f.write(raw)
+                self.result_source_bytes[os.path.abspath(dest)] = os.path.getsize(part)
+                _normalize_result_image(part, dest, log)
                 _check_saved(part, src, extension=os.path.splitext(dest)[1].lower())
         return dest

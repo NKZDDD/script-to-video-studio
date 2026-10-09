@@ -278,16 +278,20 @@ function serviceRow(kind,label) {
  const row=S.data.production[kind],media=kind==='video'?'video':'image';if(!row)return '';
  const cs=S.boot.capabilities.filter(c=>c.supports.includes(media)),cap=cs.find(c=>c.id===row.provider)||{};
  const models=cap[media]?.models||[];
- const resolutions=(cap[media]?.model_options?.[row.model]?.resolutions||cap[media]?.resolutions||[]).filter(v=>['1K','2K','4K'].includes(v));
+ const resolutions=(cap[media]?.model_options?.[row.model]?.resolutions||cap[media]?.resolutions||[]).map(String);
  const secs=media==='video'?durationsOf(row.provider,row.model).map(String):[],cur=String(row.duration??'');
  const seconds=`<label>秒数<select aria-label="${label}秒数" data-setting="duration">${option('','跟随任务',cur)}${[...new Set([...secs,...(cur?[cur]:[])])].map(v=>option(v,v+' 秒'+(secs.includes(v)?'':'（当前模型未声明）'),cur)).join('')}</select></label>`;
  const opts=cap[media]?.model_options?.[row.model]||{},shapes=((media==='image'?opts.sizes||cap.image?.sizes:opts.ratios||cap.video?.ratios)||[]).map(String);
  const shapeKey=media==='image'?'size':'ratio',shapeNow=String(row[shapeKey]??'');
- const shape=`<label>比例<select aria-label="${label}比例" data-setting="${shapeKey}">${option('','跟随任务',shapeNow)}${[...new Set([...shapes,...(shapeNow?[shapeNow]:[])])].map(v=>option(v,v+(shapes.includes(v)?'':'（当前模型未声明）'),shapeNow)).join('')}</select></label>`;
+ const shapeLabel=media==='video'?'比例':(opts.size_mode==='mixed'?'比例 / 像素尺寸':opts.size_mode==='ratio'||shapes.every(v=>v.includes(':'))?'比例':'尺寸');
+ const shapeChoices=[...new Set([...shapes,...(shapeNow?[shapeNow]:[])])];
+ const shape=opts.allow_custom_size&&media==='image'?`<label>${shapeLabel}<input aria-label="${label}${shapeLabel}" data-setting="size" list="sizes-${kind}" value="${esc(shapeNow)}" placeholder="跟随任务"><datalist id="sizes-${kind}">${shapes.map(v=>option(v,v,'')).join('')}</datalist></label>`:`<label>${shapeLabel}<select aria-label="${label}${shapeLabel}" data-setting="${shapeKey}">${option('','跟随任务',shapeNow)}${shapeChoices.map(v=>option(v,(v==='auto'?'自动比例':v)+(shapes.includes(v)?'':'（当前模型未声明）'),shapeNow)).join('')}</select></label>`;
  const advanced=[];
  const vres=media==='video'?((opts.resolutions||cap.video?.resolutions)||[]).map(String).filter(Boolean):[],vnow=String(row.resolution??'');
  const videoClarity=vres.length||vnow?`<label>清晰度<select aria-label="${label}清晰度" data-setting="resolution">${option('','跟随任务',vnow)}${[...new Set([...vres,...(vnow?[vnow]:[])])].map(v=>option(v,v+(vres.includes(v)?'':'（当前模型未声明）'),vnow)).join('')}</select></label>`:`<label>清晰度<select aria-label="${label}清晰度" disabled title="这个模型没有单独的清晰度参数，清晰度写在模型名里">${option('','由模型决定','')}</select></label>`;
- const clarity=shape+(media==='image'?`<label>清晰度<select aria-label="${label}清晰度" data-setting="image_resolution">${option('','跟随任务',row.image_resolution||'')}${resolutions.map(v=>option(v,v,row.image_resolution)).join('')}</select></label>`:`<div class="rv-pair">${videoClarity}${seconds}</div>`);
+ const imageClarity=resolutions.length?`<label>清晰度<select aria-label="${label}清晰度" data-setting="image_resolution">${option('','跟随任务',row.image_resolution||'')}${resolutions.map(v=>option(v,v,row.image_resolution)).join('')}</select></label>`:`<label>清晰度<select aria-label="${label}清晰度" disabled>${option('',opts.fixed_resolution?`模型固定 ${opts.fixed_resolution}`:(opts.resolution_mode==='pixels'?'由像素尺寸决定':'由模型 / 尺寸决定'),'')}</select></label>`;
+ const series=opts.series_options?.length?`<label>系列<select aria-label="${label}系列" data-setting="series">${opts.series_options.map(v=>option(v,v,row.series||opts.default_series)).join('')}</select></label>`:'';
+ const clarity=shape+(media==='image'?`<div>${imageClarity}${series}</div>`:`<div class="rv-pair">${videoClarity}${seconds}</div>`);
  return `<div class="rv-service-row" data-kind="${kind}"><strong>${label}</strong><select aria-label="${label}服务商" data-setting="provider">${cs.map(c=>option(c.id,c.name,row.provider)).join('')}</select><input aria-label="${label}模型" data-setting="model" list="models-${kind}" value="${esc(row.model)}"><datalist id="models-${kind}">${models.map(m=>option(m,m,'')).join('')}</datalist>${clarity}<input aria-label="${label}并发" type="number" min="1" data-setting="concurrency" value="${row.concurrency}">${S.boot.features.advanced&&advanced.length?`<div class="row-advanced"><span>参数覆盖（留空沿用任务）</span>${advanced.map(k=>`<label>${esc({ratio:'画幅',duration:'秒数',resolution:'清晰度',size:'尺寸'}[k])}<input data-override="${k}" aria-label="${label}${k}覆盖" value="${esc(row.override?.[k]||'')}"></label>`).join('')}</div>`:''}</div>`;
 }
 function matchedResources() {
@@ -591,8 +595,8 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.id==='provider-picker'){S.provider=el.value;providerForm();return;}
  if(el.dataset.feature){await api('settings',{agent_features:{[el.dataset.feature]:el.checked}});await reloadBoot();notice('功能入口已更新，基础生产功能始终保留。');return;}
  if(el.dataset.setting||el.dataset.override){const currentRoot=S.root;invalidatePlan();const row=el.closest('[data-kind]'),kind=row.dataset.kind,setting={...S.data.production[kind],override:{...S.data.production[kind].override}};if(el.dataset.override)setting.override[el.dataset.override]=el.dataset.override==='duration'?(el.value?+el.value:''):el.value;else setting[el.dataset.setting]=el.dataset.setting==='concurrency'?+el.value:el.value;
- if(el.dataset.setting==='provider'){const cap=S.boot.capabilities.find(c=>c.id===el.value),media=kind==='video'?'video':'image';setting.model=cap?.[media]?.default_model||'';setting.image_resolution='';}
- if(el.dataset.setting==='model')setting.image_resolution='';
+ if(el.dataset.setting==='provider'){const cap=S.boot.capabilities.find(c=>c.id===el.value),media=kind==='video'?'video':'image';setting.model=cap?.[media]?.default_model||'';setting.image_resolution='';setting.series='';setting.size='';}
+ if(el.dataset.setting==='model'){setting.image_resolution='';setting.series='';setting.size='';}
  if(['provider','model'].includes(el.dataset.setting)){setting[kind==='video'?'ratio':'size']='';if(kind==='video'){setting.duration='';setting.resolution='';}}
  const controls=[...row.querySelectorAll('input,select')];controls.forEach(control=>control.disabled=true);
  try{await post('production-settings',{settings:{[kind]:setting}});if(currentRoot!==S.root||S.page!=='production')return;S.data.production[kind]=setting;invalidatePlan();if(['provider','model'].includes(el.dataset.setting))renderServices();}

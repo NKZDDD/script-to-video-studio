@@ -167,10 +167,16 @@ class RefTests(unittest.TestCase):
         self._write(PNG)
         self.assertTrue(self._resolve().startswith("data:"))
 
-    def test_an_http_reference_is_left_alone(self):
-        r = P.make_ref_resolver(self.pj, Prov(), {}, "m", 1024)(
-            "https://cdn.example.com/a.png", log=lambda *a: None)
-        self.assertEqual(r, "https://cdn.example.com/a.png")
+    def test_an_http_reference_is_checked_and_inlined_when_provider_rejects_urls(self):
+        import base64
+        from unittest.mock import patch, MagicMock
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.iter_content.return_value = [PNG]
+        with patch('requests.get', return_value=response):
+            r = P.make_ref_resolver(self.pj, Prov(), {}, "m", 0)(
+                "https://cdn.example.com/a.png", log=lambda *a: None)
+        self.assertEqual(base64.b64decode(r.partition(',')[2]), PNG)
 
 
 if __name__ == "__main__":

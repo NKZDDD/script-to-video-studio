@@ -22,14 +22,16 @@
 from __future__ import annotations
 
 import base64
+import mimetypes
 import os
 import re
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 from core.apiutil import ApiError, extract_image_items, extract_task_id, extract_video_url
 from core.providers.base import ImageTask, Provider, VideoTask
 
-PATCH_VERSION = "20261008.1"
+PATCH_VERSION = "20261009.1"
 
 # 2026-10-08 使用香蕉分组 Key 实拉 /v1/models；2.1 已实测 Gemini 1K 生图。
 # 目录和协议路由共用名单，不能仅在下拉框增加名称而继续走 OpenAI images。
@@ -96,14 +98,14 @@ def _to_bytes(ref: str, idx: int) -> Optional[tuple]:
     if ref.startswith("data:"):
         head, _, b64 = ref.partition(",")
         mime = head[5:].split(";")[0] or "image/png"
-        ext = "png" if "png" in mime else "jpg"
+        ext = {'image/png':'png', 'image/webp':'webp', 'image/jpeg':'jpg'}.get(mime, 'jpg')
         try:
             return (f"ref_{idx}.{ext}", base64.b64decode(b64), mime)
         except Exception:                       # noqa: BLE001
             return None
     if not ref.startswith("http") and os.path.isfile(ref):
         ext = os.path.splitext(ref)[1].lstrip(".").lower() or "png"
-        mime = "image/png" if ext == "png" else "image/jpeg"
+        mime = mimetypes.guess_type(ref)[0] or "image/png"
         with open(ref, "rb") as f:
             return (f"ref_{idx}.{ext}", f.read(), mime)
     return None
@@ -182,6 +184,12 @@ class KunjiProvider(Provider):
                 "default_model": "gpt-image-2",
                 "sizes": SIZES,
                 "default_size": "1K",
+                "model_options": {m: {
+                    "sizes": ['auto'] + BANANA_RATIOS + (list(BANANA_WIDE_ONLY) if '3.1-flash' in m else []),
+                    "resolutions": list(BANANA_SIZES), "size_mode": "ratio",
+                    "resolution_mode": "parameter", "default_resolution": "1K",
+                    "default_size": "auto", "legacy_resolution_sizes": True,
+                } for m in BANANA_MODELS},
                 "ratios": BANANA_RATIOS + list(BANANA_WIDE_ONLY),
                 "max_refs": 9,
                 "ref_mode": "data_uri",
@@ -217,13 +225,14 @@ class KunjiProvider(Provider):
         size = task.size or "1K"
         if not (task.prompt or "").strip():
             raise ApiError("提示词是空的")
-        self._with_key(self.key_for(size, str(task.extra.get("quality") or "")))
+        tier = str(task.extra.get('resolution') or (size if size in BANANA_SIZES else '1K')) if model in BANANA_MODELS else size
+        self._with_key(self.key_for(tier, str(task.extra.get("quality") or "")))
 
         if model in BANANA_MODELS:
             return self._banana(task, dest, model, size, log=log)
 
         files, dropped = [], []
-        for i, r in enumerate(task.refs[:9], 1):
+        for i, r in enumerate(task.refs, 1):
             got = _to_bytes(r, i)
             if got:
                 files.append(("image[]", got))      # 文档：image / image[] 都行，多张用 image[]
@@ -261,21 +270,28 @@ class KunjiProvider(Provider):
 
     def _banana(self, task: ImageTask, dest: str, model: str, size: str, *, log) -> dict:
         """香蕉：Gemini 原生 generateContent。模型名在**路径**里，不在 body。"""
-        ratio = str(task.extra.get("ratio") or "").strip()
+        ratio = str(task.extra.get("ratio") or (task.size if ':' in (task.size or '') else '')).strip()
+        if ratio == 'auto':
+            ratio = ''
         if ratio in BANANA_WIDE_ONLY and "3.1-flash" not in model:
             raise ApiError(
                 f"{ratio} 这种超宽比例只有香蕉2（gemini-3.1-flash-image-preview）支持，"
                 f"当前是 {model}。", status=0, kind="task_fatal")
-        tier = size if size in BANANA_SIZES else "1K"
+        tier = str(task.extra.get('resolution') or (size if size in BANANA_SIZES else "1K")).upper()
+        if tier not in BANANA_SIZES:
+            raise ApiError(f'香蕉清晰度不支持 {tier}，请选择 1K/2K/4K', kind='task_fatal')
 
         parts = [{"text": task.prompt}]
-        for r in (task.refs or [])[:9]:
+        for r in (task.refs or []):
             if r.startswith("data:"):
                 head, _, b64 = r.partition(",")
                 parts.append({"inline_data": {
                     "mime_type": head[5:].split(";")[0] or "image/png", "data": b64}})
             elif r.startswith(("http://", "https://")):
-                parts.append({"file_data": {"mime_type": "image/png", "file_uri": r}})
+                mime = mimetypes.guess_type(urlsplit(r).path)[0] or 'image/png'
+                parts.append({"file_data": {"mime_type": mime, "file_uri": r}})
+            else:
+                raise ApiError('香蕉参考图未转换为 data URI 或公网地址，已停止提交，避免漏图', kind='task_fatal')
         img_cfg = {"imageSize": tier}
         if ratio:
             # 文档：需要自动比例时**省略**，不要传 auto

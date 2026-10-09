@@ -241,11 +241,21 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
     need_bytes = prov.needs_bytes(model)
     can_url = prov.accepts_url(model, media)
     use_url = need_url or (configured and can_url)
+    from .reference_images import DEFAULT_MAX_BYTES, local_copy, remote_copy
+    try:
+        block = prov.capabilities().get(media) or {}
+    except (AttributeError, NotImplementedError):
+        block = {}  # 老外挂可不声明能力；仍执行共用上传体积限制。
+    effective = dict(block, **block.get('model_options', {}).get(model, {}))
+    maximum = min(DEFAULT_MAX_BYTES, int(effective.get('ref_max_bytes') or DEFAULT_MAX_BYTES))
 
     def resolve(src: str, log: Callable = print) -> str:
         src = (src or "").strip()
-        if not src or src.startswith("http"):
+        if not src:
             return src
+        original_url = src if src.startswith(('https://', 'http://')) else ''
+        if original_url:
+            src = remote_copy(original_url, pj.root, log)
         # **先验这张图是不是真的图，再决定怎么送。**
         # 三条分支（本机路径 / data URI / 传对象存储）以前各走各的，
         # 而 0 字节的文件在每一条上都过得去：传上去是个空对象、
@@ -259,14 +269,15 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
                 raise ApiError(
                     f"参考图不存在或者是个空文件：{src}。"
                     f"少一张参考图出来的就不是同一个人，所以这一条不出。")
+            prepared = local_copy(path0, pj.root, max_side=ref_side, fmt=ref_fmt, maximum=maximum, log=log)
+            if original_url and prepared == path0 and not need_bytes and can_url:
+                return original_url
             if need_bytes:
                 # 本机绝对路径，provider 自己读字节塞 multipart
-                return src if os.path.isabs(src) else os.path.join(pj.root, src)
+                return prepared
             if not use_url:
-                return resolve_ref(src, pj.root, max_side=ref_side, fmt=ref_fmt)
-            path = src if os.path.isabs(src) else os.path.join(pj.root, src)
-            return uploader.to_url(path, up, project_root=pj.root,
-                                   max_side=ref_side, fmt=ref_fmt, log=log)
+                return resolve_ref(prepared, pj.root)
+            return uploader.to_url(prepared, up, project_root=pj.root, log=log)
         except ApiError as exc:
             raise _why_ref_missing(pj, src, exc) from exc
 
@@ -704,6 +715,11 @@ def _fit_size(provider_cfg: dict, model: str, media: str,
         cls = _P.REGISTRY.get(_P.resolve_id(provider_cfg.get("provider") or ""))
         cap = (cls().capabilities() if cls else {}) or {}
         blk = cap.get(media) or {}
+        blk = dict(blk, **blk.get('model_options', {}).get(model, {}))
+        if media == 'image' and blk.get('legacy_resolution_sizes') and str(want).upper() in blk.get('resolutions', []):
+            return want  # 老香蕉任务把档位存在 size；适配器仍识别，不猜成方图。
+        if media == 'image' and blk.get('allow_custom_size') and re.fullmatch(r'[1-9]\d{1,4}x[1-9]\d{1,4}', str(want or '')):
+            return want
         supported = blk.get("sizes" if media == "image" else "ratios") or []
     except Exception:                                       # noqa: BLE001
         supported = []
@@ -906,7 +922,9 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
             run=lambda: generate(
                 lambda p: submitted.new_attempt() or prov.generate_image(
                     ImageTask(prompt=p, refs=refs, size=want, model=model,
-                              extra={"resolution": resolution}),
+                              extra={"resolution": resolution,
+                                     "ratio": (task.get('params') or {}).get('ratio', ''),
+                                     "series": (task.get('params') or {}).get('series', '')}),
                     out, log=log, cancel=cancel,
                     poll_interval=interval, poll_timeout=timeout),
                 prompt, pj=pj, llm=_llm(), kind=kind, key=task["key"],

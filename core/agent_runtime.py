@@ -113,14 +113,21 @@ def validate_settings(value: dict, caps: list) -> dict:
             raise ValueError(f"服务商不支持该类别：{kind}")
         out[kind] = {"provider": pid, "model": str(row.get("model", "")), "concurrency": conc}
         resolution = str(row.get("image_resolution") or "").upper()
-        if resolution and resolution not in ("1K", "2K", "4K"):
-            raise ValueError("图片清晰度须为 1K、2K 或 4K")
+        image_cap = byid[pid].get('image') or {}
+        image_options = dict(image_cap, **image_cap.get('model_options', {}).get(out[kind]['model'], {}))
+        declared = [str(v).upper() for v in image_options.get('resolutions', [])]
+        if resolution and resolution not in declared:
+            raise ValueError('当前模型没有声明该图片清晰度，请按模型可选参数设置')
         shape = str(row.get("size" if media == "image" else "ratio") or "").strip()
         if shape and not re.fullmatch(r"[0-9A-Za-z:x.]{1,20}", shape):
             raise ValueError("比例 / 尺寸只能是 16:9、1024x1536 这类写法")
         out[kind]["size" if media == "image" else "ratio"] = shape
         if media == "image":
             out[kind]["image_resolution"] = resolution
+            series = str(row.get('series') or '')
+            if series and series not in image_options.get('series_options', []):
+                raise ValueError('当前模型没有声明这个系列')
+            out[kind]['series'] = series
         else:
             clarity = str(row.get("resolution") or "").strip()
             if clarity and not re.fullmatch(r"[0-9A-Za-z]{1,12}", clarity):
@@ -199,21 +206,37 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None) -> 
             p = dict(t.get("params") or {})
             if cfg.get("agent_features", {}).get("advanced"):
                 p.update(row.get("override") or {})
+            if media == 'image' and effective.get('legacy_resolution_sizes') and str(p.get('size')).upper() in effective.get('resolutions', []):
+                p['resolution'] = p.get('resolution') or str(p['size']).upper()
+                p['size'] = p.get('ratio') or 'auto'
             if media == "image" and row.get("image_resolution"):
                 p["resolution"] = row["image_resolution"]
+            if media == 'image' and row.get('series'):
+                p['series'] = row['series']
             if media == "video" and row.get("duration"):
                 p["duration"] = int(row["duration"])
             if media == "video" and row.get("resolution"):
                 p["resolution"] = row["resolution"]
-            if media == "image" and p.get("resolution") and p["resolution"] not in effective.get("resolutions", []):
-                raise ValueError("当前图片模型不支持所选清晰度，请选择对应档位模型或恢复跟随任务")
             sizefield = "ratio" if media == "video" else "size"
             if row.get(sizefield):
                 p[sizefield] = row[sizefield]
+            if media == 'image' and effective.get('legacy_resolution_sizes') and str(p.get('size')).upper() in effective.get('resolutions', []):
+                p['resolution'] = p.get('resolution') or str(p['size']).upper()
+                p['size'] = p.get('ratio') or 'auto'  # 保留旧版省略 aspectRatio 的行为。
+            if media == 'image' and effective.get('resolution_mode') in ('model', 'pixels'):
+                # 当前已选模型/像素决定档位；旧任务的独立 resolution 不再适用。
+                if effective.get('fixed_resolution'):
+                    p['resolution'] = effective['fixed_resolution']
+                else:
+                    p.pop('resolution', None)
+            if media == "image" and p.get("resolution") and p["resolution"] not in effective.get("resolutions", []) and p['resolution'] != effective.get('fixed_resolution'):
+                raise ValueError("当前图片模型不支持所选清晰度，请选择对应档位模型或恢复跟随任务")
             supported = effective.get("ratios" if media == "video" else "sizes")
             if not supported:
                 raise ValueError("该模型的画幅能力未知，先补全服务商能力声明")
-            value, note = sizes.resolve(p.get(sizefield), supported)
+            custom_pixel = (media == 'image' and effective.get('allow_custom_size') and
+                            re.fullmatch(r'[1-9]\d{1,4}x[1-9]\d{1,4}', str(p.get(sizefield) or '')))
+            value, note = (p[sizefield], '') if custom_pixel else sizes.resolve(p.get(sizefield), supported)
             if value is None:
                 raise ValueError(note)
             if str(value) != str(p.get(sizefield)) and sizes.as_ratio(value) != sizes.as_ratio(p.get(sizefield)):

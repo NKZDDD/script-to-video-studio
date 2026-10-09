@@ -397,7 +397,7 @@ class ChaomoProvider(Provider):
         return {}
 
     @staticmethod
-    def check_meta(meta: dict, items: list, *, dest: str = "", log=print) -> None:
+    def check_meta(meta: dict, items: list, *, dest: str = "", log=print, source_bytes=None) -> None:
         """拿网关自报的字节数核对手里的数据 —— 判断「有没有被截断」的硬证据。
 
         文档说 include_metadata 给的是「**可核验的**实际图片宽高、格式和字节数」，
@@ -420,7 +420,7 @@ class ChaomoProvider(Provider):
         # save_item 那两道检查全都放行，于是任务标 ok、资产却是模糊的。
         # include_metadata 给的宽高和字节数是网关自报的原图规格，拿来一比就露馅。
         if dest and os.path.isfile(dest):
-            got = os.path.getsize(dest)
+            got = source_bytes if source_bytes is not None else os.path.getsize(dest)
             w, h = _header_size(dest)
             want_w = meta.get("width") if isinstance(meta.get("width"), int) else 0
             want_h = meta.get("height") if isinstance(meta.get("height"), int) else 0
@@ -489,7 +489,8 @@ class ChaomoProvider(Provider):
         if not items:
             raise ApiError(f"超模图片任务 {record['task_id']} 没返回可用结果")
         self.session.save_item(items[0], dest, log=log)
-        self.check_meta(self.meta_of(final), items, dest=dest, log=log)
+        self.check_meta(self.meta_of(final), items, dest=dest, log=log,
+                        source_bytes=getattr(self.session, "result_source_bytes", {}).get(os.path.abspath(dest)))
         return {"task_id": record["task_id"], "source": items[0][:200], "provider": self.id,
                 "model": record.get("model", ""), "resumed": True}
 
@@ -564,7 +565,8 @@ class ChaomoProvider(Provider):
         self.session.save_item(items[0], dest, log=log)
         # 核验放在落盘之后：URL 结果只有存下来才量得到真实宽高
         log("超模 图片已下载，正在核验图片信息")
-        self.check_meta(self.meta_of(final), items, dest=dest, log=log)
+        self.check_meta(self.meta_of(final), items, dest=dest, log=log,
+                        source_bytes=getattr(self.session, "result_source_bytes", {}).get(os.path.abspath(dest)))
         log("超模 图片结果已就绪")
         return {"task_id": extract_task_id(data), "source": items[0][:200],
                 "provider": self.id, "model": model}

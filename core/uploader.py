@@ -55,7 +55,7 @@ def _sha(path: str, max_side: int, fmt: str = "") -> str:
     服务商拿到的还是那张压过的旧图。一处都不报错。
     """
     h = hashlib.sha256()
-    h.update(f"{max_side}|{fmt}|".encode())
+    h.update(f"{max_side}|{fmt}|ref-byte-budget-v1:9500000|".encode())
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
@@ -149,7 +149,7 @@ def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 0,
            fmt: str = "", log: Callable = print) -> str:
     """本地图片 → 公网 URL。命中缓存就不重复上传。
 
-    `max_side=0` 且 `fmt` 为空（默认）= **原样上传，一个字节都不改**。
+    `max_side=0` 且 `fmt` 为空时，9.5 MB 以下原样上传；超限只压缩上传副本。
     只有这一家自己声明了要求才会重编码，见 `produce._ref_rules`。
     """
     if not os.path.isfile(path):
