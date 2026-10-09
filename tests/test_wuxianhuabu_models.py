@@ -10,27 +10,20 @@
 编一个范围去夹的话，夹出来的值看着合法、其实不是人要的，而且不报错。
 """
 import io
+import json
+from pathlib import Path
 import unittest
 from unittest import mock
 
 from core.apiutil import ApiError
 from core.providers.base import VideoTask
-from core.providers.wuxianhuabu import MODELS, RATIOS, WuxianhuabuProvider
+from core.providers.wuxianhuabu import MODELS, RATIOS, WuxianhuabuProvider, _limits
 
 # 实拉那一份（2026-09-17，GET /v1/models 的 capability_schema 原样）。
 # 抄在这里是为了「哪天有人手改了 MODELS，这里会亮」——
 # 亮了就该重新实拉一次，而不是把这份跟着改。
-LIVE = {
-    "sd-2.5-480p-hg": {"resolutions": ["480p"], "videoReference": False,
-                       "reference_types": ["IMAGE", "AUDIO"]},
-    "sd-2.5-720p-hg": {"resolutions": ["720p"], "videoReference": False,
-                       "reference_types": ["IMAGE", "AUDIO"]},
-    "seedance-2.0-nt-480": {"resolutions": ["480p"], "videoReference": False},
-    "seedance-2.0-nt-720": {"resolutions": ["720p"], "videoReference": False},
-    "seedance2.5": {"durations": [30], "resolutions": ["720p"],
-                    "aspect_ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]},
-    "seedance2.5-720-wd": {"resolutions": ["720p"]},
-}
+LIVE = {row['id']: row['capability_schema'] for row in json.loads(
+    (Path(__file__).parent / 'fixtures/wuxianhuabu-20261009.json').read_text(encoding='utf-8'))['data']}
 
 
 class WuxianhuabuModelTests(unittest.TestCase):
@@ -62,18 +55,22 @@ class WuxianhuabuModelTests(unittest.TestCase):
                 self.assertNotIn("ratios", got, f"{m} 的比例它没声明")
             if not live.get("durations"):
                 self.assertNotIn("durations", got, f"{m} 的时长它没声明")
-            for k in ("max_images", "max_audios", "min_images",
-                      "max_prompt", "max_assets"):
-                self.assertNotIn(k, got, f"{m} 的 {k} 它没声明")
+            for k in ("max_images", "max_audios", "min_images", "max_prompt", "max_assets"):
+                if k in live:
+                    self.assertEqual(got[k], live[k], m)
+                elif k == 'max_audios' and live.get('reference_types') and 'AUDIO' not in live['reference_types']:
+                    self.assertEqual(got[k], 0, m)
+                else:
+                    self.assertIsNone(got.get(k), f"{m} 的 {k} 它没声明")
 
     def test_a_model_that_says_no_video_refs_gets_zero(self):
         """★ `videoReference: false` / `reference_types` 里没有 VIDEO ——
         **这是它明说的**，所以记 0；没提的那两个不动（不知道 ≠ 不允许）。"""
         for m in ("sd-2.5-480p-hg", "sd-2.5-720p-hg",
                   "seedance-2.0-nt-480", "seedance-2.0-nt-720"):
-            self.assertEqual(MODELS[m]["max_videos"], 0, m)
+            self.assertEqual(_limits(m)["max_videos"], 0, m)
         for m in ("seedance2.5", "seedance2.5-720-wd"):
-            self.assertNotIn("max_videos", MODELS[m], m)
+            self.assertIsNone(_limits(m).get("max_videos"), m)
 
     def test_the_global_list_is_the_union_not_a_filter(self):
         """全局那份只说「这家总体收什么」，判合不合法要按模型。
@@ -220,19 +217,15 @@ class WuxianhuabuModelTests(unittest.TestCase):
             p.generate_video(t, "out.mp4", log=lambda *a: None)
         self.assertNotIn("resolution", sent)
 
-    def test_the_interface_wide_caps_apply_to_unlisted_models_too(self):
-        """★ 张数上限对表外的也判。
-
-        30/10/10 是**整家的接口上限**，不是某个模型的脾气。超了服务商会截掉
-        多的，而截掉的正是排在后面的那几张 —— 画面用错参考却标成功。
-        """
+    def test_unlisted_model_is_not_truncated_by_an_invented_global_cap(self):
+        """当前统一网关文档明确不限制数量，未知型号完整发送。"""
         p = WuxianhuabuProvider(api_key="k")
         t = VideoTask(prompt="正文", refs=[f"https://x/{i}.png" for i in range(31)],
                       duration=10, ratio="9:16", model="全新的模型")
-        with self.assertRaises(ApiError) as c:
-            p.generate_video(t, "out.mp4", log=lambda *a: None)
-        self.assertIn("31 条", str(c.exception))
-        self.assertIn("这个模型没单独声明", str(c.exception))
+        p.session.request = mock.Mock(return_value={"download_url": "https://cdn.example/v.mp4"})
+        p.session.save_item = mock.Mock()
+        p.generate_video(t, "out.mp4", log=lambda *a: None)
+        self.assertEqual(p.session.request.call_args.kwargs['json_body']['reference_images'], t.refs)
 
     def _sent(self, **kw):
         sent = {}
@@ -353,10 +346,8 @@ class WuxianhuabuModelTests(unittest.TestCase):
             with self.assertRaises(ApiError) as c:
                 self._run("测试用·声明了张数的模型", n_img=31)
             self.assertIn("测试用·声明了张数的模型 声明的", str(c.exception))
-        # 今天这批一个都没声明张数 —— 报错要说清这个 30 是整家的
-        with self.assertRaises(ApiError) as c:
-            self._run("seedance2.5-720-wd", n_img=31)
-        self.assertIn("这个模型没单独声明", str(c.exception))
+        # 当前官网未声明该型号的张数；统一网关不添加数量上限。
+        self._run("seedance2.5-720-wd", n_img=31)
 
     def test_the_notes_say_which_parts_are_unchecked(self):
         """★ 这一批大多数只声明了清晰度 —— 页面上要说清哪几项没在校验。
@@ -364,7 +355,7 @@ class WuxianhuabuModelTests(unittest.TestCase):
         不说的话，「我们没拦」看起来就像「它允许」。
         """
         notes = WuxianhuabuProvider().capabilities()["video"]["notes"]
-        self.assertIn("2026-09-17", notes)
+        self.assertIn("2026-10-09", notes)
         self.assertIn("不校验", notes)
         self.assertIn("30 秒", notes)
 

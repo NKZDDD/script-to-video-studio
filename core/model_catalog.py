@@ -206,6 +206,11 @@ def _from_schema(schema):
                         ('max_prompt_chars', 'max_prompt_chars')):
         if isinstance(schema.get(key), int):
             out[target] = schema[key]
+    # 无限画布当前目录使用短字段名；0 是明确不支持，不能当成缺省丢掉。
+    for key, target in (('max_images', 'max_refs'), ('max_videos', 'max_video_refs'),
+                        ('max_audios', 'max_audio_refs')):
+        if target not in out and isinstance(schema.get(key), int):
+            out[target] = schema[key]
     # 「这个模型收不收视频参考」也是它自己声明的。**只在明确写了 False
     # 时记 0** —— 没写就是没声明，不是不允许（见 `_UNKNOWN` 那一课）。
     if schema.get('videoReference') is False:
@@ -295,6 +300,8 @@ def apply_catalog(cap, result, source):
                 options['max_refs'] = row['max_images']
             options.update(_from_schema(row.get('capability_schema')))
             options.update(_from_toplevel(row))
+            if isinstance(options.get('max_refs'), int) and not block.get('refs_unlimited'):
+                options['refs_unlimited'] = False
             pattern = block.get('unlimited_ref_model_pattern')
             if pattern and re.search(pattern, row['id']):
                 options.update(refs_unlimited=True, max_refs=None)

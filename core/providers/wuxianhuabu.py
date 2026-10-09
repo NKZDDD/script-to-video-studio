@@ -1,15 +1,10 @@
 # -*- coding: utf-8 -*-
-"""无限画布（videogogo.top）统一视频 API。只做视频。
+"""无限画布统一视频 API；2026-10-09 官网模型广场公开目录。
 
-这不是阿珂。**模型清单和逐模型约束从 `GET /v1/models` 实拉**（2026-09-17）——
-这家每个模型自己回一份 `capability_schema`，比文档准。
-清单换得很快：09-01 实拉的那五个模型，09-17 再拉时**一个都不在了**，
-所以这里的任何一个数都别当长期事实（见 MODELS 那张表）。
-
-混合参考：图 / 视频 / 音频三类，默认音频开、水印关。
-本地图片/data URI 先 POST /v1/assets 上传，随后把 asset_id 放进字符串数组。
+来源：https://videogogo.top/models 及 /api/model-plaza/v1/models。
+公开候选不等于某把 Key 的权限；账号可用列表以 GET /api/v1/models 为准。
+本地素材上传 /v1/assets，创建 /v1/videos，查询 /v1/videos/{id}。
 """
-
 from __future__ import annotations
 
 import base64
@@ -20,58 +15,89 @@ import uuid
 from typing import Callable, Optional
 from urllib.parse import unquote_to_bytes
 
-from ..apiutil import ApiError, extract_task_id, extract_video_url
-from .base import Provider, VideoTask
+from core.apiutil import ApiError, extract_task_id, extract_video_url
+from core.providers.base import Provider, VideoTask
 
-# 这张表是 **2026-09-17 从 `GET /v1/models` 实拉的**，不是照文档抄的。
-# 这家每个模型自己回一份 `capability_schema`，比任何文档都准。
-#
-# **09-01 那批五个模型今天一个都不在了**（`seedance-2.5-hf-720p`、
-# `seedance-2.5gs 720p`、`seedance-2.0(-F)-r-720P`、`seedance-2.5-hf`）——
-# 整家清单半个月换了一遍。原来的默认模型也在其中：不改的话「没动过模型
-# 就点开始」发出去的是一个已经下线的名字。
-#
-# 这一批声明得比上一批**少**，所以表里的键也跟着少 ——
-# **只写它自己声明过的**。上一批有人（`seedance-2.5gs 720p`）声明了
-# 时长/比例/张数一整套，这一批里只有 `seedance2.5` 声明了时长和比例，
-# 其余几个只声明了清晰度。没声明的键不放进来：放一个「看起来合理」的数
-# 进去和照文档抄没有区别，它会显示在页面上、会拿去拦人，而没有任何东西背书。
-#
-# 另外两件今天才见到的事：
-#   · `seedance2.5` 的比例里**有 `21:9`** —— 上一批一个模型都不支持，
-#     当时还专门写了条测试盯着「别提供没人支持的画幅」。现在有人支持了。
-#   · `durations` 这次是**直接一个数组**（`[30]`），不是 `duration: {min,max}`。
-#     解析那边原来只认后者，整份会被丢掉 —— 已经在 model_catalog 里补上。
-MODELS = {
-    # 这四个只声明了清晰度。时长和比例它们一个字没提 ——
-    # 那是「没声明」，不是「不限」，所以这两项这一趟不校验（照填的发）。
-    "sd-2.5-480p-hg": {
-        "resolution": "480p",
-        # reference_types 里只有 IMAGE / AUDIO：**它明说了不收视频参考**。
-        "max_videos": 0,
-    },
-    "sd-2.5-720p-hg": {
-        "resolution": "720p",
-        "max_videos": 0,
-    },
-    # videoReference: false —— 同上，明说不收视频参考。
-    "seedance-2.0-nt-480": {"resolution": "480p", "max_videos": 0},
-    "seedance-2.0-nt-720": {"resolution": "720p", "max_videos": 0},
-    # 这一批里**唯一**声明了时长和比例的。时长只有 30 这一个值 ——
-    # 不是 4–30，是只能 30。默认不选它就是因为这个：
-    # 我们的分段是 15 秒，选了它每段都会被拒（或者按 30 秒收费）。
-    "seedance2.5": {
-        "resolution": "720p",
-        "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
-        "durations": [30],
-    },
-    "seedance2.5-720-wd": {"resolution": "720p"},
-}
+PATCH_VERSION = "20261009.1"
+CATALOG_DATE = "2026-10-09"
+DEFAULT_MODEL = "sd-2.5-ss-720p"
+
+# None：统一网关不设数量限制；只对模型明确声明的上限做本地检查。
+MODELS = {'sd-2.5-ss-720p': {'resolution': '720p',
+                    'durations': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                                  23, 24, 25, 26, 27, 28, 29, 30],
+                    'ratios': ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
+                    'max_images': 30,
+                    'max_videos': 10,
+                    'max_audios': 10},
+ 'dola-2.5-720p': {'resolution': '720p',
+                   'durations': [5, 10, 30],
+                   'ratios': ['16:9', '9:16', '1:1', '3:4', '4:3', '21:9'],
+                   'max_images': 9,
+                   'max_videos': 0,
+                   'max_audios': 0},
+ 'seedance-2.5-dl-720p': {'resolution': '720p',
+                          'durations': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                                        21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+                          'ratios': ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
+                          'max_images': 9,
+                          'max_videos': 0,
+                          'max_audios': 1},
+ 'seedance-2.5-dlcf-720p': {'resolution': '720p',
+                            'durations': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                                          21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+                            'ratios': ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
+                            'max_images': 9,
+                            'max_videos': 0,
+                            'max_audios': 1},
+ 'seedance-2.5-dl-480p': {'resolution': '480p',
+                          'durations': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                                        21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+                          'ratios': ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
+                          'max_images': 9,
+                          'max_videos': 0,
+                          'max_audios': 1},
+ 'lltai-vs-2.5': {'resolution': '480p',
+                  'durations': [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                                22, 23, 24, 25, 26, 27, 28, 29, 30],
+                  'ratios': ['16:9', '9:16', '1:1', '4:3', '3:4'],
+                  'max_images': 30,
+                  'max_videos': 10,
+                  'max_audios': 10},
+ 'video-sd25-30s': {'resolution': '720p',
+                    'durations': [10, 30],
+                    'ratios': ['16:9', '9:16'],
+                    'max_images': None,
+                    'max_videos': 0,
+                    'max_audios': None},
+ 'NTT-720p': {'resolution': '720p', 'max_images': None, 'max_videos': 0, 'max_audios': None},
+ 'NTT-480p': {'resolution': '480p', 'max_images': None, 'max_videos': 0, 'max_audios': None},
+ 'seedance2.5-720-wd': {'resolution': '720p',
+                        'max_images': None,
+                        'max_videos': None,
+                        'max_audios': None},
+ 'seedance2.0-720-wd': {'resolution': '720p',
+                        'max_images': None,
+                        'max_videos': None,
+                        'max_audios': None},
+ 'seedance-2.0-nt-480': {'resolution': '480p',
+                         'max_images': None,
+                         'max_videos': 0,
+                         'max_audios': None},
+ 'seedance-2.0-nt-720': {'resolution': '720p',
+                         'max_images': None,
+                         'max_videos': 0,
+                         'max_audios': None}}
+
+# 保留旧任务的已知约束，不作为当前官网候选或默认模型。
+LEGACY_MODELS = {'sd-2.5-480p-hg': {'resolution': '480p', 'max_videos': 0},
+ 'sd-2.5-720p-hg': {'resolution': '720p', 'max_videos': 0},
+ 'seedance2.5': {'resolution': '720p',
+                 'ratios': ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+                 'durations': [30]}}
 VIDEO_MODELS = list(MODELS)
 MODEL_RESOLUTION = {k: v["resolution"] for k, v in MODELS.items()}
-# 全局那份 = 各模型的**并集**，只用来填「这家总体收什么」。
-# 真正判合不合法要按模型来（见 `_limits`）—— 拿并集去判等于全放行。
-RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]
+RATIOS = list(dict.fromkeys(r for v in MODELS.values() for r in v.get("ratios", [])))
 MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 30, 10, 10
 
 
@@ -91,7 +117,7 @@ def _limits(model: str) -> dict:
     最新清单随时可以实拉：基类的 `list_models()` 打的就是这家的 `/v1/models`，
     「生产」页模型框的候选和开跑前的 `preflight_models` 用的都是实拉那一份。
     """
-    return MODELS.get(model) or {}
+    return MODELS.get(model) or LEGACY_MODELS.get(model) or {}
 
 
 def _guess_resolution(model: str) -> str:
@@ -131,12 +157,10 @@ class WuxianhuabuProvider(Provider):
             "supports": list(self.supports),
             "video": {
                 "models": VIDEO_MODELS,
-                "default_model": "sd-2.5-720p-hg",
+                "default_model": DEFAULT_MODEL,
+                "catalog_keep_models": VIDEO_MODELS,
                 "ratios": RATIOS,
-                # 整家这一份是**页面候选**，不是谁声明的上限 ——
-                # 这一批模型只有 seedance2.5 声明了时长（只能 30），
-                # 其余几个一个字没提。校验只看逐模型那份（见 `_limits`），
-                # 这里给个常见范围只是让页面有东西可选。
+                # 未声明时长的模型使用常见候选；适配器不静默改秒数。
                 "durations": list(range(4, 31)),
                 "default_duration": 15,
                 "resolutions": ["480p", "720p"],
@@ -159,19 +183,17 @@ class WuxianhuabuProvider(Provider):
                         # 没单独声明的退回整家的上限 —— 页面要有个数可显示，
                         # 但**判的时候**会说清它是整家的（见 generate_video）。
                         "max_refs": v.get("max_images", MAX_IMAGES),
+                        "refs_unlimited": v.get("max_images", MAX_IMAGES) is None,
+                        "supports_audio_refs": v.get("max_audios", MAX_AUDIOS) is None,
                         "max_video_refs": v.get("max_videos", MAX_VIDEOS),
                         "max_audio_refs": v.get("max_audios", MAX_AUDIOS)}
                     for m, v in MODELS.items()
                 },
-                "notes": "模型清单和逐模型约束是 2026-09-17 从 /v1/models 实拉的。"
-                         "09-01 那批五个模型已经整份下线，换成了现在这六个。"
-                         "这一批**大多数只声明了清晰度** —— 时长和比例它们一个字"
-                         "没提，那是「没声明」不是「不限」，所以这两项不校验、"
-                         "照你填的发。"
-                         "唯一声明全的是 seedance2.5：**时长只能 30 秒**"
-                         "（不是 4–30，是只有这一个值），比例六个、**含 21:9**。"
-                         "sd-2.5-*-hg 和 seedance-2.0-nt-* 明说了不收视频参考。"
-                         "图片、视频、音频数组都是 URL 或 /v1/assets 返回的 asset_id 字符串。",
+                "notes": "2026-10-09 官网公开目录，共 13 个视频模型。"
+                         "支持的时长、比例、清晰度和参考数量按所选模型展示。"
+                         "未声明的时长/比例不校验；不能把 5/10/30 秒当成连续区间。"
+                         "未声明参考数量时不添加本地上限；具体权限以当前 Key 为准。"
+                         "参考图片、视频、音频使用 URL 或 /v1/assets 返回的 asset_id。",
             },
             "notes": "独立于阿珂。素材与结果最多保留 24 小时；创建请求带幂等键，"
                      "同一次网络重试不会重复建单。",
@@ -221,7 +243,7 @@ class WuxianhuabuProvider(Provider):
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 5, poll_timeout: int = 2400) -> dict:
-        model = (task.model or "sd-2.5-720p-hg").strip()
+        model = (task.model or DEFAULT_MODEL).strip()
         lim = _limits(model)
         image_src = list(task.refs or [])
         video_src = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
@@ -235,7 +257,7 @@ class WuxianhuabuProvider(Provider):
         ratio = task.ratio or "9:16"
         if not lim:
             # 表里没有 = 我们不知道它的约束，**不是不允许**。照发。
-            log(f"⚠️ 无限画布没有 {model} 的约束记录（这张表是 2026-09-17 实拉的，"
+            log(f"⚠️ 无限画布没有 {model} 的约束记录（这张表来自 2026-10-09 官网目录，"
                 f"平台上新会比它快）—— 时长/比例/参考图张数这一趟都不校验，"
                 f"照你填的发出去。不合法的话平台会拒，那句拒绝是响的。"
                 f"要把它变成有校验的：跑一次 list_models() 看它声明的 "
@@ -246,25 +268,18 @@ class WuxianhuabuProvider(Provider):
             # 只有一个合法值时别写成「30–30 秒」—— 那句话读起来像个区间，
             # 人会以为自己填的 15 落在里面，去找别的原因。
             span = (f"{min(ds)} 秒" if len(ds) == 1
-                    else f"{min(ds)}–{max(ds)} 秒")
+                    else " / ".join(str(s) for s in ds) + " 秒")
             bad.append(f"{model} 的时长只能是 {span}，本任务是 {sec} 秒")
         if lim.get("ratios") and ratio not in lim["ratios"]:
             bad.append(f"{model} 不收 {ratio} 这个画幅，它只有 "
                        f"{' / '.join(lim['ratios'])}")
-        # 张数上限**表外的模型也判** —— 这几个是整家的接口上限，不是某个
-        # 模型的脾气；而超了的后果是服务商截掉多的，**截掉的正是排在后面的
-        # 那几张**，画面用错参考却标成功。
-        #
-        # 报错里要分清这个数是**这个模型声明的**还是**整家的兜底** ——
-        # 前者改不了（换模型），后者可能只是我们没拿到它的声明。
-        for label, n, key, fam in (("参考图", len(image_src), "max_images", MAX_IMAGES),
-                                   ("参考视频", len(video_src), "max_videos", MAX_VIDEOS),
-                                   ("参考音频", len(audio_src), "max_audios", MAX_AUDIOS)):
+        # 网关不限定数量；只拦截模型明确声明的上限，绝不裁掉多余素材。
+        for label, n, key in (("参考图", len(image_src), "max_images"),
+                              ("参考视频", len(video_src), "max_videos"),
+                              ("参考音频", len(audio_src), "max_audios")):
             cap = lim.get(key)
-            src = f"{model} 声明的" if cap is not None else "整家的上限（这个模型没单独声明）"
-            cap = cap if cap is not None else fam
-            if n > cap:
-                bad.append(f"{label} {n} 条，超了 {cap} 条 —— {src}")
+            if cap is not None and n > cap:
+                bad.append(f"{label} {n} 条，超了 {cap} 条 —— {model} 声明的")
         # **三类加起来还有一个总数。** 这一条它声明了而我们一直没判：
         # 图 30 + 视频 10 + 音频 10 各自都不超，加起来 50 也可能正好撞上。
         total_cap = lim.get("max_assets")
