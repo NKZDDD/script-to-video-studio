@@ -295,6 +295,9 @@ def apply_catalog(cap, result, source):
                 options['max_refs'] = row['max_images']
             options.update(_from_schema(row.get('capability_schema')))
             options.update(_from_toplevel(row))
+            pattern = block.get('unlimited_ref_model_pattern')
+            if pattern and re.search(pattern, row['id']):
+                options.update(refs_unlimited=True, max_refs=None)
             if block.get('refs_unlimited'):
                 # 这一类服务商声明了「参考图张数本地不限制」：清单里的数只是参考，
                 # 合并进来就又会按它拦、按它截断。

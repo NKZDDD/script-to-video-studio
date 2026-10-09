@@ -371,7 +371,7 @@ async function editPrompt(key) {
   const data=await get('prompt-edit',editor);
   if(S.editor!==editor||S.root!==editor.root||!$('#dialog').open)return;
   Object.assign(editor,data);
-  $('#dialog-body').innerHTML=`<p><strong>${esc(key)}</strong> · 当前版本 ${esc(data.revision)}</p><label>任务提示词<textarea id="prompt-edit" rows="16" spellcheck="false">${esc(data.text)}</textarea></label><div id="prompt-edit-error" class="rv-notice is-error" role="alert" hidden></div><p class="rv-notice">保存后，本任务${data.affected.length>1?`及依赖它的 ${data.affected.length-1} 项下游`:''}使用新产物版本。旧产物保留，正在运行的批次不受影响；保存不会自动开始生产。</p><details><summary>查看受影响的 ${data.affected.length} 项任务</summary>${data.affected.map(t=>`<p>${esc(S.boot.kinds[t.kind]||t.kind)} · ${esc(t.key)}</p>`).join('')}</details><div class="rv-actions">${btn('保存新版本','save-prompt','',true)}</div>`;
+  $('#dialog-body').innerHTML=`<p><strong>${esc(key)}</strong> · 当前版本 ${esc(data.revision)}</p><label>任务提示词<textarea id="prompt-edit" rows="16" spellcheck="false">${esc(data.text)}</textarea></label><div id="prompt-edit-error" class="rv-notice is-error" role="alert" hidden></div><p class="rv-notice">保存后，本任务${data.affected.length>1?`及依赖它的 ${data.affected.length-1} 项下游`:''}使用新产物版本。旧产物保留，正在运行的批次不受影响；保存不会自动开始生产。缺少生产参数不影响保存，可在生产前补选。</p><details><summary>查看受影响的 ${data.affected.length} 项任务</summary>${data.affected.map(t=>`<p>${esc(S.boot.kinds[t.kind]||t.kind)} · ${esc(t.key)}</p>`).join('')}</details><div class="rv-actions">${btn('保存新版本','save-prompt','',true)}</div>`;
   $('#prompt-edit').focus();
  } catch(e) {if(S.editor===editor)$('#dialog-body').textContent=e.message;}
 }

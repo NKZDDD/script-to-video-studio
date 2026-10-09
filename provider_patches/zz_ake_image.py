@@ -27,7 +27,7 @@ import requests
 from core.apiutil import ApiError, extract_image_items, extract_task_id, extract_video_url
 from core.providers.base import ImageTask, Provider, VideoTask
 
-PATCH_VERSION = "20260930.1"
+PATCH_VERSION = "20261009.2"
 # https://snumom.com/docs/gpt-image-2.html
 # https://snumom.com/docs/grok-imagine-image-2.0.html
 IMAGE_MODELS = ["gpt-image-2", "grok-imagine-image-2.0"]
@@ -86,8 +86,10 @@ def _duration(model: str, want: int) -> int:
     return min(10, max(4, sec)) if "h3" in model.lower() else max(1, sec)
 
 
-def _limits(model: str) -> tuple[int, int, int]:
-    """返回图片/视频/音频上限。0 表示该类素材不支持。"""
+def _limits(model: str) -> tuple[int | None, int, int]:
+    """返回图片/视频/音频上限。None 不做本地张数限制，0 表示不支持。"""
+    if "h3" in model.lower():
+        return (None, 3, 3) if model.lower().startswith("minimax_h3-") else (None, 0, 0)
     if model.startswith("wan3.0-video"):
         return 10, 5, 5
     if model.startswith("wan3.0-image"):
@@ -96,8 +98,6 @@ def _limits(model: str) -> tuple[int, int, int]:
         return 9, 3, 3
     if model.startswith("grok-imagine-video-1.5"):
         return 7, 0, 0
-    if model.startswith("minimax_h3-"):
-        return 9, 3, 3
     return 4, 0, 0
 
 
@@ -147,6 +147,8 @@ class AkeProvider(Provider):
                 "default_duration": 15,
                 "resolutions": RESOLUTIONS,
                 "max_refs": 10,
+                # H3 无本地图片张数上限；拉取清单时也不能恢复旧的 4/9 图限制。
+                "unlimited_ref_model_pattern": "(?i)h3",
                 "ref_mode": "url",
                 "model_options": {
                     "wan3.0-video": {"max_audio_refs": _limits("wan3.0-video")[2], "durations": list(range(2, 31)), "max_refs": 10},
@@ -250,7 +252,7 @@ class AkeProvider(Provider):
                 f"阿珂 reference_images 只收公网 URL；本任务有 {len(bad)} 张不是公网链接。"
                 "请在设置里配置参考图对象存储，不能少图后继续生成。",
                 status=0, kind="task_fatal")
-        if len(refs) > img_max:
+        if img_max is not None and len(refs) > img_max:
             raise ApiError(f"阿珂 {model} 最多 {img_max} 张参考图，本任务有 {len(refs)} 张；"
                            "不能静默裁图，否则人物/场景绑定会丢失。",
                            status=0, kind="task_fatal")

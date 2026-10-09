@@ -106,16 +106,100 @@ def test_incomplete_agent_directory_is_not_overwritten(pj):
     assert (reserved / "draft.txt").read_text(encoding="utf-8") == "未完成"
 
 
-def test_failed_publication_preserves_active_plan(pj, monkeypatch):
+def test_failed_manual_write_preserves_active_plan(pj, monkeypatch):
     publish(pj, plan_for(pj)); A.scan(pj)
     original = pj.tasks()
-    def reject(*args):
-        raise ValueError("模拟校验失败")
-    monkeypatch.setattr(A, "validate_release", reject)
-    with pytest.raises(ValueError, match="模拟校验失败"):
+    real_write = P.write_json
+    def reject(path, data):
+        if path.endswith("active-plan.json"):
+            raise OSError("模拟写入失败")
+        return real_write(path, data)
+    monkeypatch.setattr(P, "write_json", reject)
+    with pytest.raises(OSError, match="模拟写入失败"):
         save(pj)
     assert pj.tasks() == original and A.scan(pj)["revision"] == "r0001"
     assert not Path(pj.p("03_提示词", "releases", "r0002", "READY.json")).exists()
+
+
+def test_edit_does_not_require_agent_contract_or_unrelated_prompts(pj):
+    publish(pj, plan_for(pj)); A.scan(pj)
+    state = A.scan(pj)
+    original = pj.tasks()
+    original.pop("schema")
+    original["project_id"] = "old-project-id"
+    original["asset_tasks"][1].pop("params")
+    A.inside(pj.root, original["asset_tasks"][1]["prompt_ref"]).unlink()
+    write_json(str(A.inside(pj.root, state["tasks_path"])), original)
+    Path(pj.p("00_项目说明", "project-lock.json")).unlink()
+    assert save(pj)["changed"]
+    assert P.read(pj, "asset0")["text"] == "手动修改后的提示词"
+    assert save(pj, text="再次修改")["revision"] == "r0003"
+    assert A.scan(pj)["revision"] == "r0003"
+    assert pj.tasks()["project_id"] == "old-project-id"
+    assert not Path(pj.p("03_提示词", "releases", "r0002", "READY.json")).exists()
+
+
+def test_edit_missing_params_saves_but_production_requires_parameters(pj):
+    publish(pj, plan_for(pj, count=1)); A.scan(pj)
+    plan = pj.tasks()
+    plan["asset_tasks"][0].pop("params")
+    write_json(str(A.inside(pj.root, A.scan(pj)["tasks_path"])), plan)
+    assert save(pj)["changed"]
+    preview = R.preview(pj, {}, CAPS, resolve)
+    assert len(preview["blocked"]) == 1
+    assert "缺少生产参数" in preview["blocked"][0]["reason"]
+    write_json(pj.p("07_检查与记录", "production-settings.json"),
+               {"asset": {"provider": "chaomo", "model": "test", "size": "16:9"}})
+    assert not R.preview(pj, {}, CAPS, resolve)["blocked"]
+
+
+def test_agent_can_publish_after_manual_edit_and_reuse_unchanged_outputs(pj):
+    publish(pj, plan_for(pj)); A.scan(pj)
+    save(pj)
+    edited = pj.tasks()
+    plan = copy.deepcopy(edited)
+    plan["revision"] = "r0003"
+    for row in plan["asset_tasks"]:
+        row["prompt_ref"] = f"03_提示词/releases/r0003/images/{row['key']}.txt"
+    folder, ready = publish(pj, plan)
+    for row, old in zip(plan["asset_tasks"], edited["asset_tasks"]):
+        A.inside(pj.root, row["prompt_ref"]).write_bytes(A.inside(pj.root, old["prompt_ref"]).read_bytes())
+    ready["files"] = A.file_manifest(folder)
+    ready["files"].pop("READY.json", None)
+    write_json(str(folder / "READY.json"), ready)
+    state = A.scan(pj)
+    assert state["revision"] == "r0003" and not state["errors"]
+    assert [t["output"] for t in pj.tasks()["asset_tasks"]] == [t["output"] for t in edited["asset_tasks"]]
+
+
+def test_manual_edit_export_contains_all_referenced_prompt_files(pj):
+    import zipfile
+    from core.agent_handoff import export_package
+    publish(pj, plan_for(pj)); A.scan(pj)
+    save(pj)
+    with zipfile.ZipFile(export_package(pj)["file"]) as archive:
+        for task in A.task_rows(pj.tasks()):
+            assert archive.read(task["prompt_ref"]) == A.inside(pj.root, task["prompt_ref"]).read_bytes()
+
+
+def test_h3_production_preview_accepts_more_than_old_four_or_ten_refs(pj):
+    from core.model_catalog import apply_catalog
+    from core.providers.ake import AkeProvider
+    plan = plan_for(pj, count=12)
+    plan["resources"].append({"id": "video", "name": "视频", "semantic": "VIDEO",
+                              "parent_id": None, "episodes": ["EP01"], "task_key": "video"})
+    plan["video_tasks"] = [{"key": "video", "episode": "EP01", "output": "05_分段视频/video.mp4",
+                            "prompt_ref": "03_提示词/releases/r0001/videos/video.txt",
+                            "params": {"ratio": "16:9", "duration": 10}, "handoff_refs": [],
+                            "reference_images": [{"asset_id": t["key"], "file_ref": t["output"], "image_n": i}
+                                                 for i, t in enumerate(plan["asset_tasks"], 1)]}]
+    publish(pj, plan); A.scan(pj)
+    cap = apply_catalog(AkeProvider().capabilities(), {"rows": [{"id": "minimax_h3", "max_images": 4}]}, "test")
+    write_json(pj.p("07_检查与记录", "production-settings.json"),
+               {"video": {"provider": "ake", "model": "minimax_h3"}})
+    result = R.preview(pj, {}, CAPS + [cap], resolve)
+    assert not result["blocked"]
+    assert result["todo"] == 13
 
 
 def test_running_batch_keeps_old_prompts_outputs_and_references(pj, monkeypatch):

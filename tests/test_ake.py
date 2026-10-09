@@ -28,6 +28,31 @@ class AkeTests(unittest.TestCase):
         self.assertEqual(_limits("wan3.0-image"), (10, 0, 5))
         self.assertEqual(_limits("grok-imagine-video-1.5"), (7, 0, 0))
 
+    def test_h3_sends_all_references_without_local_count_limit(self):
+        from core.model_catalog import apply_catalog
+        for model in ("minimax_h3", "minimax_h3-fast", "H3", "h3-pro"):
+            with self.subTest(model=model):
+                p = AkeProvider(api_key="test-key")
+                captured = {}
+                def fake(method, path, **kwargs):
+                    captured.update(kwargs["json_body"])
+                    return {"id": "job-1", "metadata": {"url": "https://cdn.example/out.mp4"}}
+                p.session.request = fake
+                p.session.save_item = lambda *_: None
+                refs = [f"https://cdn.example/{i}.png" for i in range(16)]
+                p.generate_video(VideoTask(prompt="test", model=model, refs=refs), "out.mp4")
+                self.assertEqual([r["url"] for r in captured["reference_images"]], refs)
+                cap = apply_catalog(p.capabilities(), {"rows": [{"id": model, "max_images": 4}]}, "test")
+                effective = dict(cap["video"], **cap["video"]["model_options"][model])
+                self.assertTrue(effective["refs_unlimited"])
+                self.assertIsNone(effective["max_refs"])
+
+    def test_other_video_models_keep_documented_limit(self):
+        p = AkeProvider(api_key="test-key")
+        with self.assertRaisesRegex(Exception, "最多 7 张"):
+            p.generate_video(VideoTask(prompt="test", model="grok-imagine-video-1.5",
+                refs=[f"https://cdn.example/{i}.png" for i in range(8)]), "out.mp4")
+
     def test_request_uses_object_reference_arrays(self):
         p = AkeProvider(api_key="k")
         captured = {}

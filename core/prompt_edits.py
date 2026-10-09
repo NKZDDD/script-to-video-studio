@@ -8,7 +8,7 @@ import time
 import uuid
 
 from . import agent_projects as A
-from .store import LOCK, read_json, write_json
+from .store import LOCK, write_json
 
 
 def _state(pj, key):
@@ -90,16 +90,12 @@ def save(pj, key, text, expected_version):
     with LOCK:
         if pj.meta().get("archived"):
             raise ValueError("请先恢复归档项目，再编辑提示词")
-        original, rows, _, previous, current = _state(pj, key)
+        original, _, _, previous, current = _state(pj, key)
         if not expected_version or expected_version != current["version"]:
             raise ValueError("材料或提示词已更新，本次未保存；请复制当前编辑内容，再重新打开对比后保存")
         if text == previous:
             return {"ok": True, "changed": False, "revision": current["revision"], "affected": []}
         affected = {t["key"] for t in current["affected"]}
-        # Read every original prompt before writing or activating anything. Unchanged
-        # bytes must stay exact, otherwise the existing publication fingerprint changes.
-        prompts = {t["key"]: A.inside(pj.root, t["prompt_ref"]).read_bytes() for t in rows}
-        prompts[key] = text.encode("utf-8")
         agent = pj.meta().get("workflow") == "agent"
         edit_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
         if agent:
@@ -118,26 +114,40 @@ def save(pj, key, text, expected_version):
         for kind in A.LEGACY_KINDS:
             for i, t in enumerate(plan.get(kind + "_tasks", [])):
                 if agent or t["key"] == key:
+                    if t["key"] == key:
+                        raw = text.encode("utf-8")
+                    else:
+                        try:
+                            raw = A.inside(pj.root, t["prompt_ref"]).read_bytes()
+                        except OSError:
+                            # Save the selected edit even if another prompt is
+                            # missing. Its original path remains for diagnostics.
+                            continue
                     target = folder / ("videos" if kind == "video" else "images") / f"{kind}-{i:05d}.txt"
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(prompts[t["key"]])
+                    target.write_bytes(raw)
                     t["prompt_ref"] = pj.rel(str(target))
         if agent:
             plan["revision"] = revision
             write_json(str(folder / "tasks.json"), plan)
-            lock = read_json(pj.p("00_项目说明", "project-lock.json"))
-            ready = {k: lock[k] for k in ("schema", "project_id", "options_hash", "skill_hash")}
-            ready.update(revision=revision, files=A.file_manifest(folder), source="studio.manual", base_revision=current["revision"])
-            write_json(str(folder / "READY.json"), ready)
-            try:
-                A.validate_release(pj, revision)
-                state = A.scan(pj)
-                if state.get("revision") != revision:
-                    raise ValueError("新版本未激活，请刷新检查发布状态：" + "; ".join(e["message"] for e in state["errors"]))
-            except Exception:
-                # Leave diagnostic files, but don't expose a rejected edit as a ready release.
-                (folder / "READY.json").rename(folder / "REJECTED.json")
-                raise
+            # Local prompt edits are not Agent publications. Keep the registered
+            # plan and immutable source prompts; validate production when starting.
+            # Publish the pointer last, so a failed write cannot replace the plan.
+            fingerprints = {}
+            for task in A.task_rows(plan, legacy=True):
+                stable = {k: v for k, v in task.items() if k not in ("prompt_ref", "episode")}
+                try:
+                    raw = A.inside(pj.root, task["prompt_ref"]).read_bytes()
+                except OSError:
+                    # An unrelated missing prompt must not block editing this task.
+                    # A future Agent release must give that task a fresh output.
+                    continue
+                fingerprints[task["key"]] = A.digest([stable, A.digest(raw)])
+            write_json(pj.p("07_检查与记录", "active-plan.json"), {
+                "revision": revision, "tasks_path": pj.rel(str(folder / "tasks.json")),
+                "fingerprints": fingerprints, "activated_at": time.time(),
+                "source": "studio.manual", "base_revision": current["revision"],
+            })
         else:
             plan["studio_prompt_revision"] = revision
             write_json(str(folder / "tasks.json"), plan)

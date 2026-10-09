@@ -220,6 +220,10 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None) -> 
             sizefield = "ratio" if media == "video" else "size"
             if row.get(sizefield):
                 p[sizefield] = row[sizefield]
+            if not p.get(sizefield) or (media == "video" and not p.get("duration")):
+                raise ValueError("缺少生产参数：请在本次服务商与并发中选择尺寸/比例"
+                                 + ("和时长" if media == "video" else "")
+                                 + "；已保存的提示词不受影响")
             if media == 'image' and effective.get('legacy_resolution_sizes') and str(p.get('size')).upper() in effective.get('resolutions', []):
                 p['resolution'] = p.get('resolution') or str(p['size']).upper()
                 p['size'] = p.get('ratio') or 'auto'  # 保留旧版省略 aspectRatio 的行为。
