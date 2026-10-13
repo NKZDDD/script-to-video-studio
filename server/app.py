@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import re
+import tempfile
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1568,7 +1569,10 @@ def api_post(path: str, body: dict) -> dict:
         d = str(body.get("projects_dir") or "").strip().strip('"')
         if not d:
             raise ValueError("路径是空的")
-        d = os.path.abspath(os.path.expanduser(d))
+        d = os.path.expanduser(d)
+        if not os.path.isabs(d):
+            raise ValueError("默认生产目录必须是绝对路径，例如 D:\\项目")
+        d = os.path.abspath(d)
         if os.path.isfile(d):
             raise ValueError(f"这是个文件不是目录：{d}")
         try:
@@ -1579,13 +1583,16 @@ def api_post(path: str, body: dict) -> dict:
             # `probe.have_output(...)` 读到一个还没赋值的名字，
             # 报「cannot access free variable 'probe'」。
             # 一个巨型函数里随手起的临时变量名，能把几百行外的另一个功能打死。
-            touch = os.path.join(d, ".写入自检")
-            with open(touch, "w", encoding="utf-8") as f:
-                f.write("ok")
-            os.remove(touch)
+            with tempfile.TemporaryFile(dir=d) as writable_check:
+                writable_check.write(b"ok")
+                writable_check.flush()
         except OSError as exc:
             raise ValueError(f"这个目录建不了或者写不进去：{exc}") from exc
         cur = load_config()
+        # 改默认目录不搬家；保留旧项目的扫描入口，否则旧目录的项目会消失。
+        old = cur.get("projects_dir")
+        if old and os.path.normcase(os.path.abspath(old)) != os.path.normcase(d):
+            cur["agent_project_dirs"] = sorted(set(cur.get("agent_project_dirs", []) + [os.path.abspath(old)]))
         cur["projects_dir"] = d
         save_config(cur)
         found = list_projects(d)

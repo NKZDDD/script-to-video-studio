@@ -209,6 +209,8 @@ def get(app, path, q):
 def post(app, path, body):
     cfg = app.load_config()
     caps = app.caps_of(cfg)
+    if path == "/api/agent/paths/projects":
+        return app.api_post("/api/paths/projects", body)
     if path == "/api/agent/create":
         base = str(body.get("base") or cfg["projects_dir"])
         if not os.path.isabs(base):

@@ -155,11 +155,11 @@ def model_kind(row, cap):
     if kinds:
         return kinds
     name = mid.lower()
-    if re.search(r'image|banana|seedream|flux|dall|gpt本地|香蕉|绘图|生图|图片', name):
+    if re.search(r'image|banana|seedream|midjourney|flux|dall|gpt本地|香蕉|绘图|生图|图片', name):
         return ['image']
-    if re.search(r'video|seedance|sora|veo|kling|h3|wan|happy.?horse|omni_flash|快乐马|可灵|视频|sd[\d.-]|官方稳定版.*2\.5', name):
+    if re.search(r'video|seedance|sora|veo|kling|h3|wan|happy.?horse|^omni-(?:fast|v2v)|^niulai-pro$|omni_flash|快乐马|可灵|视频|sd[\d.-]|官方稳定版.*2\.5', name):
         return ['video']
-    if re.search(r'^gpt-|^o[134]-|claude|deepseek|qwen|embedding|rerank|whisper|tts|gemini|^glm-|^kimi-|doubao-seed|推理', name):
+    if re.search(r'^gpt-|^o[134]-|claude|deepseek|qwen|embedding|rerank|whisper|tts|gemini|^lyria-|^suno$|^glm-|^kimi-|doubao-seed|推理', name):
         return ['other']
     return []
 
