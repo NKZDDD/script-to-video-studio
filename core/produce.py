@@ -18,7 +18,7 @@ import os
 import re
 from typing import Callable, Optional
 
-from . import accounts, audio_refs, diagnose, ledger, probe, soften, submitted, uploader
+from . import accounts, audio_refs, diagnose, ledger, probe, soften, submitted, uploader, video_inputs
 from .apiutil import TASK_FATAL, ApiError, resolve_ref
 from .video_refs import primary_refs, ref_file, uses_handoff
 from .providers import ImageTask, VideoTask, build as build_provider
@@ -1069,7 +1069,16 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                     f"会把后段当前段用（不报错，出来的片子时间顺序是乱的）。"
                     f"去重跑第十三环节，或者在「任务明细」里把缺的那几行补上 —— "
                     f"`Image N = SBPKG_..._SHEET_B`，顺序和上面传的一致。")
-        task = audio_refs.overlay(pj, task)
+        task = video_inputs.overlay(pj, audio_refs.overlay(pj, task))
+        videos = video_inputs.urls(task)
+        video_cap = task.get('_video_capability') or {}
+        if videos and not video_cap:
+            block = prov.capabilities().get('video', {})
+            video_cap = dict(block, **block.get('model_options', {}).get(model, {}))
+        try:
+            video_inputs.validate(task, video_cap)
+        except ValueError as exc:
+            raise ApiError(str(exc), kind=TASK_FATAL) from exc
         audios = []
         if audio_refs.refs(task):
             audio_cap = task.get('_audio_capability')
@@ -1149,7 +1158,8 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                 VideoTask(prompt=pr, refs=refs, duration=int(p.get("duration", 15)),
                           ratio=want, model=model,
                           resolution=p.get("resolution") or provider_cfg.get("resolution", ""),
-                          extra={"audio_refs": audios} if audios else {}),
+                          extra={**({"audio_refs": audios} if audios else {}),
+                                 **({"video_refs": videos} if videos else {})}),
                 out, log=log, cancel=cancel,
                 poll_interval=interval, poll_timeout=timeout)
 
@@ -1158,7 +1168,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             prompt=prompt, spine=spine, aux=[str(r.get("url") or r.get("file_ref") or "") for r in aux],
             aux_reference=task.get("aux_reference") or "", duration=int(p.get("duration", 15)),
             ratio=want, resolution=resolution, provider=pid, model=model,
-            audio_refs=audio_refs.refs(task))
+            audio_refs=audio_refs.refs(task), video_refs=videos)
         rec = submitted.load(pj.root, task["output"])
         if rec and pool is not None and rec.get("account") not in pool.labels():
             raise ApiError(f"原任务 {rec['task_id']} 的账号不可用，请恢复原账号或手动放弃任务。",

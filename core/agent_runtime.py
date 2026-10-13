@@ -8,7 +8,7 @@ import re
 import threading
 import time
 
-from . import agent_projects as A, audio_refs, diagnose, probe, produce, resources, sizes, submitted
+from . import agent_projects as A, audio_refs, diagnose, probe, produce, resources, sizes, submitted, video_inputs
 from .apiutil import _wrong_kind, _incomplete_image, MIN_BYTES, MEDIA_IMAGE
 from .executor import GATE, Job, run_batch
 from .store import LOCK, read_json, read_text, write_json, write_text
@@ -203,6 +203,8 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None) -> 
             if kind == 'video':
                 audio_refs.validate(pj, t, effective, cfg.get('upload') or {})
                 t['_audio_capability'] = {k: effective[k] for k in ('max_audio_refs', 'supports_audio_refs') if k in effective}
+                video_inputs.validate(t, effective)
+                t['_video_capability'] = {k: effective[k] for k in ('max_video_refs', 'min_video_refs', 'reference_video_urls_supported') if k in effective}
             p = dict(t.get("params") or {})
             if cfg.get("agent_features", {}).get("advanced"):
                 p.update(row.get("override") or {})

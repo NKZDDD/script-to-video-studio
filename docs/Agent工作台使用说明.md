@@ -89,6 +89,8 @@ Agent 项目会生成下一份 `03_提示词/releases/rNNNN` 发布，后续 Age
 
 ## 开发验证
 
+沧元视频支持的型号可以在视频任务详情添加、移除公开 HTTPS 参考视频链接，按列表顺序提交。`omni-v2v` 需要参考视频及参考图片。链接随生产批次保存快照，修改只影响下一次新生成，已提交任务继续取回原 ID。
+
 新增契约、调度和手动编辑测试：`py -m pytest tests/test_agent_workspace.py tests/test_prompt_edits.py`。
 离线浏览器验收：`py tools/qa_agent_workspace.py`；使用独立测试配置及模拟生成，证据写入 `outputs/agent-ui-qa/`。
 长列表与刷新验收：`py tools/qa_agent_layout.py`；使用 313 项隔离旧任务，不提交生产，证据写入 `outputs/agent-layout-qa/`。

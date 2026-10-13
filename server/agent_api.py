@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 import time
 
-from core import agent_handoff as H, agent_projects as A, agent_runtime as R, assemble, audio_refs, bulk_place, diagnose, paths, recycle, submitted
+from core import agent_handoff as H, agent_projects as A, agent_runtime as R, assemble, audio_refs, bulk_place, diagnose, paths, recycle, submitted, video_inputs
 from core.store import LOCK, Project, list_projects, read_json, write_json, write_text
 
 
@@ -447,6 +447,8 @@ def post(app, path, body):
         return audio_refs.save(pj, body.get('key'), body.get('filename'), raw)
     if path == '/api/agent/audio/remove':
         return audio_refs.remove(pj, body.get('key'), body.get('file_ref'))
+    if path in ('/api/agent/video-reference/add', '/api/agent/video-reference/remove'):
+        return video_inputs.update(pj, body.get('key'), body.get('url'), remove=path.endswith('/remove'))
     if path == "/api/agent/delete":
         keys = body.get("keys")
         if not isinstance(keys, list) or not keys or any(not isinstance(k, str) for k in keys):

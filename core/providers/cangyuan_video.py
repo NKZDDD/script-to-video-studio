@@ -553,6 +553,8 @@ def model_options(model):
         'max_video_refs': params.get('reference_videos', {}).get('maxItems', 0),
         'max_audio_refs': params.get('reference_audios', {}).get('maxItems', 0),
         'supports_audio_refs': 'reference_audios' in params,
+        'reference_video_urls_supported': True,
+        'min_video_refs': 1 if model.startswith('omni-v2v') else 0,
         'ref_max_bytes': 9_500_000,
         'ref_mode': 'url',
         'notes': '；'.join(spec.get('notes', [])),
