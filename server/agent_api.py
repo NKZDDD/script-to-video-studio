@@ -209,6 +209,15 @@ def get(app, path, q):
 def post(app, path, body):
     cfg = app.load_config()
     caps = app.caps_of(cfg)
+    if path == '/api/agent/paths/browse':
+        from core.workspace_paths import browse
+        return browse(body.get('path'))
+    if path == '/api/agent/paths/data':
+        from core.workspace_paths import change_data
+        return change_data(app, body.get('data_dir'))
+    if path == '/api/agent/paths/project':
+        from core.workspace_paths import relocate_project
+        return relocate_project(app, project(body.get('root'), cfg), body.get('destination'))
     if path == "/api/agent/paths/projects":
         return app.api_post("/api/paths/projects", body)
     if path == "/api/agent/create":

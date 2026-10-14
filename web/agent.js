@@ -129,7 +129,7 @@ function projectList() {
  else rows=rows.filter(p=>!p.archived);
  if(S.filters.type==='Agent 项目')rows=rows.filter(p=>p.workflow==='agent');if(S.filters.type==='旧项目')rows=rows.filter(p=>p.workflow!=='agent');
  rows.sort((a,b)=>S.filters.sort==='项目名称'?a.title.localeCompare(b.title,'zh'):b.updated.localeCompare(a.updated));
- $('#project-list').innerHTML=rows.map(p=>`<div class="rv-projectrow"><div><strong>${esc(p.title)}</strong><small>${esc(p.project_code)} · ${esc(p.tags.join(' · '))}</small><code>${esc(p.root)}</code></div><div><span class="rv-badge">${esc(p.state)}</span><small>${p.workflow==='agent'?'Agent 完整技能项目':'旧项目 · 保留现有产物'}</small></div><span class="rv-projecttime">${esc(p.updated)}</span><div>${btn('打开','open',`data-root="${esc(p.root)}"`)} ${btn(p.archived?'恢复':'归档','archive',`data-root="${esc(p.root)}" data-archived="${!p.archived}"`)}</div></div>`).join('')||'<div class="rv-panel">没有匹配项目。可以调整筛选，或创建第一个项目。</div>';
+ $('#project-list').innerHTML=rows.map(p=>`<div class="rv-projectrow"><div><strong>${esc(p.title)}</strong><small>${esc(p.project_code)} · ${esc(p.tags.join(' · '))}</small><code>${esc(p.root)}</code></div><div><span class="rv-badge">${esc(p.state)}</span><small>${p.workflow==='agent'?'Agent 完整技能项目':'旧项目 · 保留现有产物'}</small></div><span class="rv-projecttime">${esc(p.updated)}</span><div>${btn('打开','open',`data-root="${esc(p.root)}"`)} ${btn('修改目录','project-path',`data-root="${esc(p.root)}"`)} ${btn(p.archived?'恢复':'归档','archive',`data-root="${esc(p.root)}" data-archived="${!p.archived}"`)}</div></div>`).join('')||'<div class="rv-panel">没有匹配项目。可以调整筛选，或创建第一个项目。</div>';
  $('#project-count').textContent=`显示 ${rows.length} 个项目 · 生产父目录 ${S.boot.projects_dir}`;
 }
 function beginWizard(batch=false) {S.wizard={...S.boot.defaults,title:'',source:'',base:S.boot.projects_dir,tags:'',batch:batch?'':''};S.step=0;show('wizard');}
@@ -269,7 +269,7 @@ function production() {
 }
 function renderServices() {
  const cats={...S.boot.kinds};if(S.data.tasks.some(t=>t.kind==='storyboard'))cats.storyboard='旧项目故事板';
- updateHTML($('#production-services'),Object.entries(cats).map(([k,n])=>serviceRow(k,n)).join(''));
+ updateHTML($('#production-services'),Object.entries(cats).map(([k,n])=>serviceRow(k,n)+`<div class="rv-actions">${btn('首选＋备用排序','provider-chain',`data-kind="${k}"`)}<small>${esc((S.data.production[k]?.fallbacks||[]).map((r,i)=>`备用 ${i+1}：${r.provider} / ${r.model}`).join(' → ')||'尚未配置备用')}</small></div>`).join(''));
 }
 function renderPublication() {
  $('#production-version').textContent='材料版本 '+(S.data.publication.revision||'等待 Agent 发布');
@@ -278,8 +278,8 @@ function renderPublication() {
 function renderJobs() {
  updateHTML($('#jobs'),S.data.jobs.slice(0,8).map(j=>`<div class="rv-notice rv-row"><div><strong>${esc(j.project_name||S.data.meta.title)} · ${esc(kindName(j.kind))} · ${esc(j.status)}</strong> ${j.finished}/${j.total} · 已用 ${j.elapsed} 秒</div><div>${btn('任务明细','job',`data-id="${esc(j.id)}"`)}${!['done','error','cancelled','aborted','interrupted'].includes(j.status)?btn('停止','cancel',`data-id="${esc(j.id)}"`):''}</div></div>`).join(''));
 }
-function serviceRow(kind,label) {
- const row=S.data.production[kind],media=kind==='video'?'video':'image';if(!row)return '';
+function serviceRow(kind,label,custom=null) {
+ const row=custom||S.data.production[kind],media=kind==='video'?'video':'image';if(!row)return '';
  const cs=S.boot.capabilities.filter(c=>c.supports.includes(media)),cap=cs.find(c=>c.id===row.provider)||{};
  const models=cap[media]?.models||[];
  const resolutions=(cap[media]?.model_options?.[row.model]?.resolutions||cap[media]?.resolutions||[]).map(String);
@@ -298,6 +298,18 @@ function serviceRow(kind,label) {
  const clarity=shape+(media==='image'?`<div>${imageClarity}${series}</div>`:`<div class="rv-pair">${videoClarity}${seconds}</div>`);
  return `<div class="rv-service-row" data-kind="${kind}"><strong>${label}</strong><select aria-label="${label}服务商" data-setting="provider">${cs.map(c=>option(c.id,c.name,row.provider)).join('')}</select><input aria-label="${label}模型" data-setting="model" list="models-${kind}" value="${esc(row.model)}"><datalist id="models-${kind}">${models.map(m=>option(m,m,'')).join('')}</datalist>${clarity}<input aria-label="${label}并发" type="number" min="1" data-setting="concurrency" value="${row.concurrency}">${S.boot.features.advanced&&advanced.length?`<div class="row-advanced"><span>参数覆盖（留空沿用任务）</span>${advanced.map(k=>`<label>${esc({ratio:'画幅',duration:'秒数',resolution:'清晰度',size:'尺寸'}[k])}<input data-override="${k}" aria-label="${label}${k}覆盖" value="${esc(row.override?.[k]||'')}"></label>`).join('')}</div>`:''}</div>`;
 }
+function editChain(kind) {
+ const first={...S.data.production[kind]};delete first.fallbacks;
+ S.chain={kind,rows:[first,...structuredClone(S.data.production[kind].fallbacks||[])]};renderChain();
+}
+function renderChain(){
+ const c=S.chain;dialog('首选＋备用排序',`<p>从上往下依次使用。可随时修改，保存后用于下一批；已提交任务自动沿用原服务商取回。只有可切换的服务商故障才启用备用。</p>${c.rows.map((r,i)=>`<section data-route-index="${i}">${serviceRow(c.kind,i?'备用 '+i:'首选',r).replaceAll('models-'+c.kind,'models-route-'+i)}<div class="rv-actions">${i?btn('上移','route-up',`data-index="${i}"`):''}${i<c.rows.length-1?btn('下移','route-down',`data-index="${i}"`):''}${c.rows.length>1?btn('移除','route-remove',`data-index="${i}"`):''}</div></section>`).join('')}<div class="rv-actions">${btn('增加备用','route-add')}${btn('保存优先级','route-save','',true)}</div>`);
+}
+async function choosePath(mode,root=''){
+ S.pathEdit={mode,root};const current=mode==='project'?root:mode==='data'?S.boot.paths.data_dir:S.boot.projects_dir;
+ dialog(mode==='project'?'修改已有项目目录':mode==='data'?'修改程序数据目录':'选择默认生产目录',`<p>${mode==='project'?'填写新的完整项目目录。保存会移动整个项目并更新契约路径，不合并已有目录；请先结束该项目的生产批次和 Agent 文件写入。':mode==='data'?'填写新的空目录。保存会复制配置、密钥和外挂，并记住新位置；已有项目和旧数据保留。':'保存后新建项目使用此父目录，已有项目不移动。'}</p><input id="path-destination" aria-label="目标目录" value="${esc(current)}"><div class="rv-actions">${btn('浏览此目录','path-browse')}${btn('磁盘列表','path-roots')}${btn('保存目录','path-save','',true)}</div><div id="path-folders"></div>`);
+}
+async function browsePath(path){const d=await api('paths/browse',{path});$('#path-folders').innerHTML=`<p><code>${esc(d.path||'磁盘 / 网络路径可在上方输入')}</code></p>${d.path?btn('上一级','path-folder',`data-path="${esc(d.parent)}"`):''}${d.dirs.map(p=>`<div>${btn(p,'path-folder',`data-path="${esc(p)}"`)}</div>`).join('')}`;if(d.path)$('#path-destination').value=d.path;}
 function matchedResources() {
  const tasks=new Map(S.data.tasks.map(t=>[t.key,t])),bad=new Set(S.data.failures.map(x=>x.target));
  return S.data.resources.filter(r=>{const t=tasks.get(r.task_key),q=(S.filters.asset||'').toLowerCase();
@@ -477,7 +489,7 @@ function providerForm() {
 }
 function limitForm() {$('#settings-content').innerHTML=`<form id="limits-form" class="rv-panel"><h3>所有项目共享的并发额度与重试</h3><div class="rv-fields">${field('失败自动重试次数',input('max_retry',S.boot.retry??2,'number','min="0" required'),'网络抖动、服务商忙这类技术失败自动再试几次，不设上限。审核拦截、参数错误不重试；已经提交出去的任务重试时续查原任务，不重新付费。')}${field('全局在途总上限',input('global',S.boot.limits.global,'number','min="1" required'))}${S.boot.capabilities.map(c=>field(esc(c.name),input('provider.'+c.id,S.boot.limits.per_provider[c.id]||4,'number','min="1" required'))).join('')}</div><p class="rv-caption">运行中降低上限不会撤回在途任务。新任务等额度释放后再提交；按账号串行的服务商还受账号数约束。</p>${btn('保存并发与重试','save-limits','',true)}</form>`;}
 function uploadForm() {const u=S.boot.upload;$('#settings-content').innerHTML=`<form id="upload-form" class="rv-panel"><h3>参考图对象存储</h3><p>仅收公网图片地址的服务商使用这里的配置；沿用原程序的上传缓存与图片检查。</p><div class="rv-fields">${[['endpoint','S3 Endpoint'],['bucket','Bucket'],['public_base_url','公开访问域名'],['region','Region'],['prefix','对象路径前缀']].map(([k,l])=>field(l,input(k,u[k]||''))).join('')}${field('Access Key · '+(u.access_key_set?'已配置':'未配置'),input('access_key','','password','autocomplete="new-password" placeholder="留空不改"'))}${field('Secret Key · '+(u.secret_key_set?'已配置':'未配置'),input('secret_key','','password','autocomplete="new-password" placeholder="留空不改"'))}</div>${btn('保存上传设置','save-upload','',true)}</form>`;}
-function featureForm() {$('#settings-content').innerHTML=`<form id="projects-path-form" class="rv-panel"><h3>默认生产目录</h3>${field('新项目的生产父目录',input('projects_dir',S.boot.projects_dir||'','text','required'),'填写完整路径，例如 D:\\项目。保存后新建项目自动填入，也可在创建向导中临时修改。')}<p class="rv-caption">只改变新项目的默认位置。已有项目保留在原目录，并继续显示在项目列表中。</p>${btn('保存默认目录','save-projects-path','',true)}</form><div class="rv-panel"><h3>功能包</h3><p>密钥、基础并发、当前线程、建议并发、开始 / 停止、核心报错和产物查看固定保留。</p>${Object.entries(S.boot.feature_labels).map(([k,l])=>`<div class="rv-feature"><strong>${esc(l)}</strong><label><input type="checkbox" data-feature="${k}" ${S.boot.features[k]?'checked':''}> 显示页面入口</label></div>`).join('')}<h3>数据与路径</h3><dl>${Object.entries(S.boot.paths).filter(([k,v])=>typeof v==='string'&&/dir|path/.test(k)).map(([k,v])=>`<dt>${esc(k)}</dt><dd><code>${esc(v)}</code></dd>`).join('')}</dl><p class="rv-caption">新项目可在向导指定生产父目录。更新程序时保留配置和项目目录；功能包只控制入口，不删除已有项目文件。</p></div>`;}
+function featureForm() {$('#settings-content').innerHTML=`<form id="projects-path-form" class="rv-panel"><h3>默认生产目录</h3>${field('新项目的生产父目录',input('projects_dir',S.boot.projects_dir||'','text','required'),'填写完整路径，例如 D:\\项目。保存后新建项目自动填入，也可在创建向导中临时修改。')}<p class="rv-caption">只改变新项目的默认位置。已有项目保留在原目录，并继续显示在项目列表中。</p>${btn('选择文件夹…','default-path')} ${btn('保存默认目录','save-projects-path','',true)}</form><div class="rv-panel"><h3>程序数据目录</h3><code>${esc(S.boot.paths.data_dir)}</code><p>配置、密钥和外挂可以迁到新目录；已有项目保持原位置，旧数据保留。运行批次结束后可修改。</p>${btn('修改数据目录…','data-path')}</div><div class="rv-panel"><h3>功能包</h3><p>密钥、基础并发、当前线程、建议并发、开始 / 停止、核心报错和产物查看固定保留。</p>${Object.entries(S.boot.feature_labels).map(([k,l])=>`<div class="rv-feature"><strong>${esc(l)}</strong><label><input type="checkbox" data-feature="${k}" ${S.boot.features[k]?'checked':''}> 显示页面入口</label></div>`).join('')}<h3>数据与路径</h3><p class="rv-caption">program_dir 是 EXE 所在位置，移动 EXE 后改变；bundle_dir 是每次启动的临时解压位置。config_path 随数据目录改变。已有项目的位置可在项目列表点击“修改目录”。</p><dl>${Object.entries(S.boot.paths).filter(([k,v])=>typeof v==='string'&&/dir|path/.test(k)).map(([k,v])=>`<dt>${esc(k)}</dt><dd><code>${esc(v)}</code></dd>`).join('')}</dl><p class="rv-caption">新项目可在向导指定生产父目录。更新程序时保留配置和项目目录；功能包只控制入口，不删除已有项目文件。</p></div>`;}
 async function importProvider(file) {
  const d=await api('providers/import',{filename:file.name,content_b64:await readFile(file)});
  if(!d.ok)throw Error(`「${file.name}」加载失败，${d.restored?'已恢复原来的同名文件':'没有留在服务商目录里'}：\n${d.errors.map(x=>x.error).join('\n')}`);
@@ -528,6 +540,19 @@ const actions={
  'save-provider':saveProvider,
  'refresh-models':async()=>{const d=await api('models/refresh',{provider:S.provider});await reloadBoot();settings();notice(d.rows?.map(r=>`${r.provider}：${r.ok?'已刷新 '+r.count+' 个模型':r.msg||'未能刷新'}`).join('；')||d.msg, d.rows?.some(r=>!r.ok));},
  'reload-providers':async()=>{await api('providers/reload',{});await reloadBoot();settings();notice('服务商已重新扫描。');},
+ 'default-path':()=>choosePath('default'),
+ 'data-path':()=>choosePath('data'),
+ 'project-path':e=>choosePath('project',e.dataset.root),
+ 'path-browse':()=>browsePath($('#path-destination').value),
+ 'path-roots':()=>browsePath(''),
+ 'path-folder':e=>browsePath(e.dataset.path),
+ 'path-save':async()=>{const p=S.pathEdit,value=$('#path-destination').value;const d=await api(p.mode==='project'?'paths/project':p.mode==='data'?'paths/data':'paths/projects',p.mode==='project'?{root:p.root,destination:value}:p.mode==='data'?{data_dir:value}:{projects_dir:value});if(p.mode==='project'&&S.root===p.root){S.root=d.root;await loadProject(d.root,false);}await reloadBoot();render();closeDialog();notice('目录已保存；项目和配置按新位置使用。');},
+ 'provider-chain':e=>editChain(e.dataset.kind),
+ 'route-add':()=>{const r={...S.chain.rows.at(-1)};delete r.fallbacks;S.chain.rows.push(r);renderChain();},
+ 'route-up':e=>{const i=+e.dataset.index,a=S.chain.rows;[a[i-1],a[i]]=[a[i],a[i-1]];renderChain();},
+ 'route-down':e=>{const i=+e.dataset.index,a=S.chain.rows;[a[i+1],a[i]]=[a[i],a[i+1]];renderChain();},
+ 'route-remove':e=>{S.chain.rows.splice(+e.dataset.index,1);renderChain();},
+ 'route-save':async()=>{const c=S.chain,setting={...c.rows[0],fallbacks:c.rows.slice(1)};await post('production-settings',{settings:{[c.kind]:setting}});invalidatePlan();await loadProject();closeDialog();notice('首选和备用顺序已保存；正在运行的批次及原任务 ID 不受影响。');},
  'save-projects-path':async()=>{const f=$('#projects-path-form');if(!f.reportValidity())return;await api('paths/projects',Object.fromEntries(new FormData(f)));await reloadBoot();settings();notice('默认生产目录已保存，新建项目自动使用；已有项目仍在原位置。');},
  'save-limits':async()=>{const f=$('#limits-form');if(!f.reportValidity())return;const d=Object.fromEntries(new FormData(f)),per={};Object.entries(d).filter(([k])=>k.startsWith('provider.')).forEach(([k,v])=>per[k.slice(9)]=+v);await api('settings',{limits:{global:+d.global,per_provider:per},defaults:{max_retry:+d.max_retry}});await reloadBoot();notice('已保存共享并发上限和失败自动重试次数，下次开始的批次生效。');await refreshRuntime();},
  'save-llm':async()=>{const f=$('#llm-form');if(!f.reportValidity())return;const d=Object.fromEntries(new FormData(f));await api('settings',{llm:{base_url:d.base_url,model:d.model,api_key:d.api_key},defaults:{soften_rounds:+d.soften_rounds}});await reloadBoot();settings();notice(S.boot.llm?.ready?'已保存。被审核拒绝时会用这个 LLM 改写提示词后重发。':'已保存，但 LLM 的地址或密钥还不齐，被拒时不会改写。',!S.boot.llm?.ready);},
@@ -601,6 +626,14 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
  if(el.dataset.group){await setSelection(S.groupKeys[el.dataset.group],el.checked);return;}
  if(el.id==='provider-picker'){S.provider=el.value;providerForm();return;}
  if(el.dataset.feature){await api('settings',{agent_features:{[el.dataset.feature]:el.checked}});await reloadBoot();notice('功能入口已更新，基础生产功能始终保留。');return;}
+ if(el.closest('[data-route-index]')&&(el.dataset.setting||el.dataset.override)){
+ const i=+el.closest('[data-route-index]').dataset.routeIndex,r=S.chain.rows[i],k=el.dataset.setting;
+ if(el.dataset.override){r.override={...r.override,[el.dataset.override]:el.value};return;}
+ r[k]=k==='concurrency'?+el.value:el.value;
+ if(k==='provider'){const media=S.chain.kind==='video'?'video':'image';r.model=S.boot.capabilities.find(c=>c.id===r.provider)?.[media]?.default_model||'';}
+ if(['provider','model'].includes(k)){for(const key of ['image_resolution','series','size','ratio','duration','resolution'])r[key]='';renderChain();}
+ return;
+ }
  if(el.dataset.setting||el.dataset.override){const currentRoot=S.root;invalidatePlan();const row=el.closest('[data-kind]'),kind=row.dataset.kind,setting={...S.data.production[kind],override:{...S.data.production[kind].override}};if(el.dataset.override)setting.override[el.dataset.override]=el.dataset.override==='duration'?(el.value?+el.value:''):el.value;else setting[el.dataset.setting]=el.dataset.setting==='concurrency'?+el.value:el.value;
  if(el.dataset.setting==='provider'){const cap=S.boot.capabilities.find(c=>c.id===el.value),media=kind==='video'?'video':'image';setting.model=cap?.[media]?.default_model||'';setting.image_resolution='';setting.series='';setting.size='';}
  if(el.dataset.setting==='model'){setting.image_resolution='';setting.series='';setting.size='';}

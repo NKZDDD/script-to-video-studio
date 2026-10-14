@@ -144,13 +144,18 @@ def validate_settings(value: dict, caps: list) -> dict:
         if not isinstance(override, dict) or set(override) - {"size", "ratio", "duration", "resolution"}:
             raise ValueError("不支持的生产参数覆盖")
         out[kind]["override"] = {k: v for k, v in override.items() if v not in (None, "")}
+        backups = row.get('fallbacks') or []
+        if not isinstance(backups, list) or any(not isinstance(b, dict) or b.get('fallbacks') for b in backups):
+            raise ValueError('备用服务商须为有序列表，不能嵌套')
+        if backups:
+            out[kind]['fallbacks'] = [validate_settings({kind: dict(b, concurrency=conc)}, caps)[kind] for b in backups]
     return out
 
 
-def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None) -> dict:
+def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None, *, _settings=None, _routes=True) -> dict:
     data = A.view(pj)
     rows = data["tasks"]
-    saved = settings(pj, caps, cfg)
+    saved = _settings if _settings is not None else settings(pj, caps, cfg)
     wanted = set(only) if only is not None else {t["key"] for t in rows if t["selected"]}
     if wanted - {t["key"] for t in rows}:
         raise ValueError("所选任务已变化，请刷新")
@@ -168,9 +173,7 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None) -> 
             pending = submitted.load(pj.root, t["output"])
             if pending:
                 row = saved[kind]
-                if row["provider"] != pending.get("provider"):
-                    raise ValueError(f"已有任务 {pending['task_id']} 属于「{pending.get('provider')}」，"
-                                     "请切回原服务商取回，或手动放弃旧任务后重新生成")
+                # Existing IDs always use their recorded provider; changing the next provider is allowed.
                 if kind not in pcs:
                     pc = resolve_cfg(cfg, {"provider": pending["provider"], "model": pending.get("model", "")},
                                      "video" if kind == "video" else "asset")
@@ -278,13 +281,29 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None) -> 
                                      "换一个支持这个时长的视频模型；或者让 Agent 按不超过上限的时长重新切段；"
                                      "如果确认服务商实际支持，到设置 → 服务商里补上「已实测的模型时长档位」。")
             t["params"] = p
-            if kind not in pcs or pcs[kind].get("model") != row["model"]:
+            if kind not in pcs or pcs[kind].get("model") != row["model"] or pcs[kind].get('provider') != row['provider']:
                 pc = resolve_cfg(cfg, {"provider": row["provider"], "model": row["model"]}, "video" if media == "video" else "asset")
                 pc["soften_rounds"] = soften_rounds(cfg)
                 pc["agent_mode"] = True
                 pcs[kind] = pc
         except (ValueError, OSError, KeyError, TypeError) as exc:
             blocked.append({"key": t["key"], "reason": str(exc)})
+    routes = {}
+    if _routes and not blocked:
+        for kind, row in saved.items():
+            keys = [t['key'] for t in todo if t['kind'] == kind and not t.get('resume_only')]
+            if not keys:
+                continue
+            for index, backup in enumerate(row.get('fallbacks') or [], 1):
+                variants = copy.deepcopy(saved)
+                variants[kind] = dict(backup, concurrency=row['concurrency'])
+                candidate = preview(pj, cfg, caps, resolve_cfg, only=list(wanted), running=running,
+                                    _settings=variants, _routes=False)
+                failures = [b for b in candidate['blocked'] if b['key'] in keys]
+                blocked.extend(dict(b, reason=f'备用 {index}：{b["reason"]}') for b in failures)
+                if not failures:
+                    routes.setdefault(kind, []).append({'config': candidate['_providers'][kind],
+                        'tasks': {t['key']: t for t in candidate['_tasks'] if t['key'] in keys}})
     return {"revision": data["publication"].get("revision", ""), "selected": len(selected),
             "keys": [t["key"] for t in selected],
             "reuse": len(selected) - len(todo) - len(elsewhere), "todo": len(todo), "blocked": blocked,
@@ -294,7 +313,7 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None) -> 
                       "global_limit": GATE.snapshot()["global_limit"],
                       "provider_limit": GATE.snapshot()["per_provider_limit"].get(saved[k]["provider"])}
                      for k in saved if any(t["kind"] == k for t in todo)],
-            "_tasks": todo, "_providers": pcs, "_settings": saved}
+            "_tasks": todo, "_providers": pcs, "_settings": saved, '_routes': routes}
 
 
 def public_preview(result):
@@ -309,7 +328,11 @@ class ChildJob(Job):
 
     def set_item(self, key, **kw):
         super().set_item(key, **kw)
-        self.parent.set_item(key, **kw)
+        # Dependants keep waiting until the provider chain has finished deciding this task.
+        parent_kw = dict(kw)
+        if getattr(self, 'defer_failure', False) and kw.get('state') in ('failed', 'aborted'):
+            parent_kw['state'] = 'pending'
+        self.parent.set_item(key, **parent_kw)
 
     def log(self, key, message):
         super().log(key, message)
@@ -367,31 +390,86 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None, l
 
         def run_kind(kind, pc):
             items = [t for t in tasks if t["kind"] == kind]
-            child = ChildJob(job, kind, len(items), settings_[kind]["concurrency"], pc)
-            children.append(child)
-            try:
-                worker = (produce.make_video_worker(pj, pc, llm_factory) if kind == "video" else
-                          produce.make_image_worker(pj, pc, "asset" if kind == "asset" else "storyboard",
-                                                    llm_factory))
+            def execute(config, selected, defer=False):
+                child = ChildJob(job, kind, len(selected), settings_[kind]["concurrency"], config)
+                child.defer_failure = defer
+                children.append(child)
+                worker = (produce.make_video_worker(pj, config, llm_factory) if kind == "video" else
+                          produce.make_image_worker(pj, config, "asset" if kind == "asset" else "storyboard", llm_factory))
                 def checked(t, log, cancel):
-                    use = worker
-                    if t.get("resume_only"):
-                        record = submitted.load(pj.root, t["output"])
-                        if not record:
-                            raise produce.ApiError("原任务记录已变化，请重新查看生产计划，不会自动创建新任务。",
-                                                   kind="task_fatal", err_code="submitted_pending")
-                        original = resolve_cfg(cfg, {"provider": record["provider"], "model": record.get("model", "")},
-                                               "video" if kind == "video" else "asset")
-                        original["agent_mode"], original["soften_rounds"] = True, 0
-                        use = (produce.make_video_worker(pj, original) if kind == "video" else
-                               produce.make_image_worker(pj, original, "asset" if kind == "asset" else "storyboard"))
-                    value = use(t, log, lambda: job.cancelled or cancel())
+                    if t.get('resume_only') and not submitted.load(pj.root, t['output']):
+                        raise produce.ApiError('原任务记录已变化，请重新查看生产计划，不会自动创建新任务。',
+                                               kind='task_fatal', err_code='submitted_pending')
+                    value = worker(t, log, lambda: job.cancelled or cancel())
                     if not valid_output(str(A.inside(pj.root, t["output"]))):
                         raise RuntimeError("服务商返回后产物未通过文件校验")
                     return value
                 child.cancelled = job.cancelled
-                run_batch(child, items, checked, key_of=lambda t: t["key"], ready_of=ready,
+                def route_ready(t):
+                    for dep in t.get('dependencies', []):
+                        if child.items.get(dep, {}).get('state') in ('failed', 'aborted', 'cancelled'):
+                            return None, f'上游 {dep} 在当前服务商未完成'
+                    return ready(t)
+                run_batch(child, selected, checked, key_of=lambda t: t["key"], ready_of=route_ready,
                           max_retry=retries(cfg))
+                return child
+            try:
+                groups = {}
+                for t in items:
+                    if not t.get('resume_only'):
+                        continue
+                    record = submitted.load(pj.root, t['output'])
+                    if not record:
+                        raise ValueError('原任务记录已变化，请重新查看生产计划')
+                    key = (record['provider'], record.get('model', ''))
+                    groups.setdefault(key, []).append(t)
+                for (provider, model), group in groups.items():
+                    original = resolve_cfg(cfg, {'provider': provider, 'model': model}, 'video' if kind == 'video' else 'asset')
+                    original['agent_mode'], original['soften_rounds'] = True, 0
+                    execute(original, group)
+                remaining = [t for t in items if not t.get('resume_only')]
+                routes = [{'config': pc, 'tasks': {t['key']: t for t in remaining}}] + result['_routes'].get(kind, [])
+                for index, route in enumerate(routes):
+                    if not remaining or job.cancelled:
+                        break
+                    selected = []
+                    for t in remaining:
+                        variant = copy.deepcopy(route['tasks'][t['key']])
+                        variant['prompt_ref'] = t['prompt_ref']  # frozen prompt, never live edits
+                        selected.append(variant)
+                    if index:
+                        job.log(kind, f"改用备用 {index}：{route['config']['provider']} / {route['config']['model']}")
+                    child = execute(route['config'], selected, defer=True)
+                    next_items = []
+                    for t in remaining:
+                        state = child.items.get(t['key'], {})
+                        diag = state.get('diag') or child.abort_diag
+                        can_switch = (index + 1 < len(routes) and not job.cancelled
+                                      and state.get('state') in ('failed', 'aborted')
+                                      and (diag or {}).get('code') in diagnose.FAILOVER_CODES
+                                      and not submitted.load(pj.root, t['output']))
+                        if can_switch:
+                            next_items.append(t)
+                    # Same-kind dependants were not submitted; retry them after their upstream switches.
+                    for _ in range(len(remaining)):
+                        keys = {t['key'] for t in next_items}
+                        extra = [t for t in remaining if t['key'] not in keys
+                                 and child.items.get(t['key'], {}).get('state') in ('failed', 'aborted')
+                                 and any(d in keys for d in t.get('dependencies', []))
+                                 and not submitted.load(pj.root, t['output'])]
+                        if not extra:
+                            break
+                        next_items.extend(extra)
+                    keys = {t['key'] for t in next_items}
+                    for t in remaining:
+                        state = child.items.get(t['key'], {})
+                        if t['key'] not in keys and state.get('state') not in ('ok', 'skipped'):
+                            job.set_item(t['key'], **state)
+                    remaining = next_items
+                if job.cancelled:
+                    for t in items:
+                        if job.items[t['key']]['state'] not in _FINAL:
+                            job.set_item(t['key'], state='cancelled')
             except Exception as exc:
                 for t in items:
                     if job.items[t["key"]]["state"] not in ("ok", "skipped", "failed"):

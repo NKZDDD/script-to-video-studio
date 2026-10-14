@@ -56,6 +56,23 @@ def res(*parts: str) -> str:
 
 # 启动时由 run.py 用 --data 填进来（命令行优先于环境变量）
 _forced: dict = {"data": ""}
+DATA_REDIRECT = '.studio-data-location.json'
+
+
+def _redirect_data(folder: str) -> str:
+    import json
+    seen = set()
+    while os.path.isfile(os.path.join(folder, DATA_REDIRECT)):
+        key = os.path.normcase(os.path.abspath(folder))
+        if key in seen:
+            raise ValueError('数据目录跳转循环，请检查 .studio-data-location.json')
+        seen.add(key)
+        with open(os.path.join(folder, DATA_REDIRECT), encoding='utf-8') as f:
+            target = json.load(f).get('data_dir', '')
+        if not os.path.isabs(target) or not os.path.isfile(os.path.join(target, 'config.json')):
+            raise ValueError('已设置的数据目录不可访问，请恢复磁盘/网络连接后重试：' + target)
+        folder = target
+    return folder
 
 
 def set_data_dir(path: str) -> None:
@@ -95,14 +112,14 @@ def default_data_dir() -> str:
 
 def data_dir() -> str:
     if _forced["data"]:
-        return _forced["data"]
+        return _redirect_data(_forced["data"])
     env = os.environ.get("STV_DATA_DIR", "").strip()
     if env:
-        return os.path.abspath(os.path.expanduser(env))
+        return _redirect_data(os.path.abspath(os.path.expanduser(env)))
     # 老装法：配置已经在程序目录里，就继续用那儿 —— 悄悄换位置会让人以为配置丢了
     if os.path.isfile(legacy_config()):
-        return PROGRAM_DIR
-    return default_data_dir()
+        return _redirect_data(PROGRAM_DIR)
+    return _redirect_data(default_data_dir())
 
 
 def config_path() -> str:
