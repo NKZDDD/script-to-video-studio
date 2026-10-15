@@ -20,14 +20,14 @@ RUNTIME_MODULES = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore",
                    "videocaptioner.cli.main", "audioop", "psutil",
                    "core.agent_projects", "core.agent_runtime", "core.agent_post", "core.agent_handoff",
                    "core.assemble", "core.bulk_place", "core.recycle", "core.submitted",
-                   "server.agent_api"]
+                   "server.agent_api", "core.studio_login"]
 
 
 def resource_inventory() -> dict:
     """Hashes from the actual source/bundle, never from the user's data directory."""
     from . import paths
     base = Path(paths.BUNDLE_DIR)
-    files = [base / "web" / name for name in ("agent.html", "agent.js", "agent.css")]
+    files = [base / "web" / name for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css")]
     files += list((base / "prompts").glob("*.md"))
     files += list((base / "字幕样式").glob("*.txt"))
     files += [p for p in (base / "skills" / "production-skill").rglob("*")
@@ -136,7 +136,7 @@ def _check_ffmpeg() -> str:
 
 def _check_agent_assets() -> str:
     from . import paths, agent_projects
-    for name in ("agent.html", "agent.js", "agent.css"):
+    for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css"):
         if not os.path.isfile(paths.res("web", name)):
             raise FileNotFoundError(f"Agent 页面资源缺失：{name}")
     manifest = agent_projects.file_manifest(agent_projects.skill_source())
@@ -145,9 +145,35 @@ def _check_agent_assets() -> str:
     return f"Agent 页面资源齐全；完整技能包 {len(manifest)} 文件"
 
 
+def _check_agent_creation() -> str:
+    import tempfile
+    from . import agent_projects as A, providers
+    with tempfile.TemporaryDirectory(prefix="stv-package-project-") as base:
+        pj = A.create_project(base, {"title": "打包自检项目", "source": "离线自检"},
+                              providers.list_capabilities())
+        root = Path(pj.root)
+        if not root.resolve().is_relative_to(Path(base).resolve()):
+            raise ValueError("自检项目没有写入隔离目录")
+        template = (root / "00_项目说明" / "AGENT_TASK.md").read_text(encoding="utf-8")
+        copied = A.file_manifest(root / "00_项目说明" / "skill" / "production-skill")
+        if str(root) not in template or copied != A.file_manifest(A.skill_source()):
+            raise ValueError("项目契约或技能快照不完整")
+        return f"新建项目与技能快照 {len(copied)} 文件正常"
+
+
+def _check_threads() -> str:
+    import psutil
+    threads = psutil.Process().num_threads()
+    if threads < 1:
+        raise ValueError("线程统计不可用")
+    return f"当前线程数 {threads}"
+
+
 def run_package_check() -> dict:
     """返回适合命令行和打包脚本消费的完整检查结果。"""
     checks = [
+        _try("离线项目创建", _check_agent_creation),
+        _try("线程统计", _check_threads),
         _try("Agent 工作台资源", _check_agent_assets),
         _try("HTTP 请求库", _check_requests),
         _try("对象存储库", _check_object_storage),
@@ -165,5 +191,7 @@ def run_package_check() -> dict:
         inventory = resource_inventory()
     except Exception as exc:
         checks.append({"name": "发布资源校验和", "ok": False, "detail": str(exc)})
+    from . import providers
+    provider_ids = sorted(p["id"] for p in providers.status()["providers"] if p.get("builtin"))
     return {"ok": all(x["ok"] for x in checks), "checks": checks,
-            "modules": modules, "resources": inventory}
+            "modules": modules, "resources": inventory, "providers": provider_ids}

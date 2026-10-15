@@ -22,6 +22,9 @@ from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provid
 from core import paths
 from core import relay as _relay
 from core.store import Project, list_projects, read_json, write_json
+from core.studio_login import LoginManager, LoginRequired, COOKIE as LOGIN_COOKIE
+
+_LOGIN_INIT = threading.Lock()
 
 ROOT = paths.PROGRAM_DIR
 WEB_DIR = paths.res("web")      # 打包后是解压出来的临时目录，只读
@@ -2605,17 +2608,36 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):                   # 静音默认日志
         pass
 
-    def _send(self, code: int, payload: bytes, ctype: str):
+    def _send(self, code: int, payload: bytes, ctype: str, headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(payload)
 
-    def _json(self, data, code: int = 200):
+    def _json(self, data, code: int = 200, headers=None):
         self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"),
-                   "application/json; charset=utf-8")
+                   "application/json; charset=utf-8", headers)
+
+    def _login(self):
+        with _LOGIN_INIT:
+            if not hasattr(self.server, "studio_login"):
+                self.server.studio_login = LoginManager()
+        return self.server.studio_login
+
+    def _local_origin(self):
+        host = self.headers.get("Host", "")
+        if urlparse("http://"+host).hostname not in ("127.0.0.1", "localhost", "::1"):
+            raise LoginRequired("local_only", "请通过本机 localhost 或 127.0.0.1 打开 Studio", 403)
+        origin = self.headers.get("Origin", "")
+        if (origin and origin != "http://"+host) or self.headers.get("Sec-Fetch-Site") == "cross-site":
+            raise LoginRequired("origin_rejected", "不接受其他网站发起的 Studio 请求", 403)
+
+    def _login_error(self, exc):
+        return self._json({"error": str(exc), "code": exc.code, "login_required": True}, exc.status)
 
     def _send_file(self, full: str, ctype: str):
         """产物文件按 Range 分段回。浏览器拖视频进度条要从中间某个字节开始取，
@@ -2661,6 +2683,11 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         path, q = unquote(u.path), parse_qs(u.query)
         try:
+            self._local_origin()
+            if path == "/api/auth/status":
+                return self._json(self._login().status(self.headers.get("Cookie", "")))
+            if path.startswith("/api/") or path.startswith("/file"):
+                self._login().require(self.headers.get("Cookie", ""))
             if path.startswith("/api/"):
                 from server import agent_api
                 import sys
@@ -2684,7 +2711,7 @@ class Handler(BaseHTTPRequestHandler):
                     ctype += "; charset=utf-8"
                 return self._send_file(full, ctype)
             name = "agent.html" if path in ("/", "", "/index.html") else path.lstrip("/")
-            if name not in ("agent.html", "agent.css", "agent.js", "favicon.ico"):
+            if name not in ("agent.html", "agent.css", "agent.js", "login.css", "login.js", "favicon.ico"):
                 return self._json({"error": "404"}, 404)
             full = os.path.join(WEB_DIR, name)
             if os.path.isfile(full):
@@ -2692,6 +2719,8 @@ class Handler(BaseHTTPRequestHandler):
                 with open(full, "rb") as f:
                     return self._send(200, f.read(), f"{ctype}; charset=utf-8")
             return self._json({"error": "404"}, 404)
+        except LoginRequired as exc:
+            return self._login_error(exc)
         except Exception as exc:                          # noqa: BLE001
             traceback.print_exc()
             return self._json({"error": str(exc)}, 500)
@@ -2700,7 +2729,22 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         try:
             n = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(n) if n else b""
+            # Consume small requests before rejecting them. Closing a Windows TCP
+            # socket with unread input can reset it and hide the JSON error.
+            raw = self.rfile.read(n) if 0 <= n <= 16384 else None
+            self._local_origin()
+            path = unquote(u.path)
+            cookie = self.headers.get("Cookie", "")
+            auth_route = path in ("/api/auth/login", "/api/auth/logout", "/api/auth/verify")
+            if not auth_route:
+                self._login().require(cookie, force=path in (
+                    "/api/agent/start", "/api/agent/assemble", "/api/agent/subtitle", "/api/agent/models/refresh"))
+            if self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json":
+                raise LoginRequired("json_required", "请使用 JSON 请求", 415)
+            if n < 0 or (auth_route and n > 16384):
+                raise LoginRequired("invalid_request", "登录请求过大或长度不正确", 413)
+            if raw is None:
+                raw = self.rfile.read(n) if n else b""
             try:
                 body = json.loads(raw.decode("utf-8")) if raw else {}
             except UnicodeDecodeError as exc:
@@ -2710,12 +2754,25 @@ class Handler(BaseHTTPRequestHandler):
                     f"请求体不是 UTF-8 编码（第 {exc.start} 字节 0x{raw[exc.start]:02x} 解不开）。"
                     f"如果你是用脚本调这个接口，把 body 显式编成 UTF-8 再发；"
                     f"网页端不会出这个问题。") from exc
+            if not isinstance(body, dict):
+                raise ValueError("请求体必须是 JSON 对象")
+            if path == "/api/auth/login":
+                result, session = self._login().login(body)
+                return self._json(result, headers={"Set-Cookie": f"{LOGIN_COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict"})
+            if path == "/api/auth/verify":
+                return self._json(self._login().status(cookie, force=True))
+            if path == "/api/auth/logout":
+                result = self._login().logout(cookie)
+                return self._json(result, headers={"Set-Cookie": f"{LOGIN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"})
             from server import agent_api
             import sys
             path = unquote(u.path)
             if not path.startswith("/api/agent/"):
                 return self._json({"error": "内部分析接口已停用，请把修订要求交给 Agent"}, 410)
             return self._json(agent_api.post(sys.modules[__name__], path, body))
+        except LoginRequired as exc:
+            self.close_connection = True
+            return self._login_error(exc)
         except Exception as exc:                          # noqa: BLE001
             traceback.print_exc()
             return self._json({"error": str(exc)}, 500)

@@ -26,6 +26,8 @@ def test_text_preview_declares_utf8(pj, monkeypatch, filename, registered_type, 
     monkeypatch.setattr(app, "load_config", lambda: {"projects_dir": str(Path(pj.root).parent)})
     monkeypatch.setattr(app.mimetypes, "guess_type", lambda path: (registered_type, None))
     server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+    from types import SimpleNamespace
+    server.studio_login = SimpleNamespace(require=lambda *a, **k: None)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

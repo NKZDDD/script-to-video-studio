@@ -19,6 +19,7 @@ const fileLink = (rel,label) => `<a href="${esc(fileURL(rel))}" target="_blank" 
 async function api(path, body) {
  const response = await fetch('/api/agent/'+path, body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  const data = await response.json();
+ if(data.login_required){window.StudioLogin.lock(data.error||'请重新登录',response.status===503);throw Error(data.error||'请重新登录');}
  if(!response.ok || data.error) throw Error(data.error||`请求失败 ${response.status}`);
  return data;
 }
@@ -650,9 +651,9 @@ document.addEventListener('change',safe(async e=>{const el=e.target;
 $('#dialog-close').addEventListener('click',closeDialog);$('#dialog').addEventListener('close',()=>{S.job='';S.jobRequest++;S.editor=null;S.del=null;});
 $('#dialog').addEventListener('click',e=>{const d=$('#dialog');if(e.target!==d||!d.classList.contains('rv-job-dialog'))return;const r=d.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeDialog();});
 $('#apply-advice').addEventListener('click',safe(()=>{const n=S.runtime?.advice?.limit;if(n==null||n<1)throw Error('当前样本不足，暂不能给出可用建议');S.tab='limits';show('settings');$('[name=global]').value=n;notice('建议已填入，检查各服务商额度后点击保存。');}));
-async function tick(){try{await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job,S.jobRoot,true);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous!==undefined)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
+async function tick(){try{if(!window.StudioLogin.isAuthenticated())return;await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job,S.jobRoot,true);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous!==undefined)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
 document.addEventListener('click',event=>{if(!$('#runtime').contains(event.target))$('#runtime').open=false;});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')$('#runtime').open=false;});
 stickyObserver.observe($('#sticky-header'));
-safe(async()=>{await reloadBoot();render();tick();})();
+safe(async()=>{await window.StudioLogin.ready;await reloadBoot();render();tick();})();
 })();

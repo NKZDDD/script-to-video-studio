@@ -247,8 +247,10 @@ def selfcheck(exe: str) -> bool:
                 print((proc.stdout.read() or "")[-2000:])
                 return False
             try:
-                boot = json.loads(get("/api/agent/bootstrap"))
-                got_prov = sorted(p["id"] for p in boot["capabilities"])
+                status = json.loads(get("/api/auth/status"))
+                if status.get("authenticated") is not False:
+                    raise ValueError("首次启动没有要求登录")
+                got_prov = report["providers"]
                 break
             except Exception:                            # noqa: BLE001, PERF203
                 if time.time() > deadline:
@@ -292,33 +294,26 @@ def selfcheck(exe: str) -> bool:
         matched = report.get("resources") == expected_resources
         print(f"  {'✓' if matched else '✗'} 页面、技能、模板、字幕样式资源 {len(expected_resources)} 份与源码逐字节核对")
         ok = ok and matched
-        for url, filename in (("/", "agent.html"), ("/agent.js", "agent.js"), ("/agent.css", "agent.css")):
+        for url, filename in (("/", "agent.html"), ("/agent.js", "agent.js"), ("/agent.css", "agent.css"), ("/login.js", "login.js"), ("/login.css", "login.css")):
             with io.open(os.path.join(HERE, "web", filename), encoding="utf-8") as f:
                 matched = get(url).replace("\r\n", "\n") == f.read()
             print(f"  {'✓' if matched else '✗'} 新工作台 HTTP 资源 {filename}")
             ok = ok and matched
 
-        usage = json.loads(get("/api/agent/runtime"))["usage"]
-        measured = usage.get("has_psutil") and usage.get("threads", 0) > 0
-        print(f"  {'✓' if measured else '✗'} 当前线程与资源统计：{usage.get('threads', '不可用')}")
-        ok = ok and bool(measured)
-
-        # Exercise project creation inside the frozen app, including the full skill snapshot.
-        body = json.dumps({"title": "打包自检项目", "source": "仅用于离线发布验证的原文。"}, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/agent/create", data=body,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=20) as response:
-            created = json.load(response)
-        from pathlib import Path
-        root = Path(created["root"]).resolve()
-        if not root.is_relative_to(Path(data).resolve()):
-            raise ValueError("自检项目没有写入隔离目录")
-        template = (root / "00_项目说明" / "AGENT_TASK.md").read_text(encoding="utf-8")
-        from core.agent_projects import file_manifest, skill_source
-        copied = file_manifest(root / "00_项目说明" / "skill" / "production-skill")
-        matched = str(root) in template and copied == file_manifest(skill_source())
-        print(f"  {'✓' if matched else '✗'} 新建项目、绝对路径契约、完整技能快照 {len(copied)} 份")
-        ok = ok and matched
+        # Never introduce an authentication bypass for release checks. The CLI
+        # already checked project creation and runtime libraries offline above.
+        import urllib.error
+        for route, body in (("/api/agent/bootstrap", None), ("/api/agent/create", b"{}")):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{route}", data=body,
+                                         headers={"Content-Type": "application/json"})
+            blocked = False
+            try:
+                with urllib.request.urlopen(req, timeout=10):
+                    pass
+            except urllib.error.HTTPError as exc:
+                blocked = exc.code == 401 and json.load(exc).get("login_required") is True
+            print(f"  {'✓' if blocked else '✗'} 未登录接口保护 {route}")
+            ok = ok and blocked
 
         # 4b. 自带字幕样式：打进去了没有。**漏了不报错** ——
         #     字幕照出，只是用的是 videocaptioner 的默认样子。

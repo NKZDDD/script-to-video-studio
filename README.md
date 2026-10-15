@@ -16,6 +16,8 @@ Claude Code / Codex（skill 迭代设计）
 
 ## 启动
 
+当前源码启动后需要登录账号，认证地址为 `https://login.respect.chat`。账号由管理员在服务器开通；服务商 Key 继续在客户端配置。详见 [登录使用说明](docs/studio-login.md)。旧 EXE 需重新打包才能包含此功能。
+
 ```bash
 pip install -r requirements.txt      # 只有 requests；Pillow/imageio-ffmpeg 可选
 python run.py                        # 浏览器自动打开 http://127.0.0.1:8770

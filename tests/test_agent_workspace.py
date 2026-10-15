@@ -405,6 +405,9 @@ def test_file_route_serves_byte_ranges_so_videos_can_seek(tmp_path, monkeypatch)
     cfg = {"projects_dir": str(tmp_path), "providers": {}, "limits": {"global": 8, "per_provider": {}}}
     monkeypatch.setattr(app, "load_config", lambda: copy.deepcopy(cfg))
     srv = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+    # Range behavior is tested after authorization; auth boundaries have their own HTTP tests.
+    from types import SimpleNamespace
+    srv.studio_login = SimpleNamespace(require=lambda *a, **k: None)
     thread = threading.Thread(target=srv.serve_forever, daemon=True); thread.start()
     url = f"http://127.0.0.1:{srv.server_port}/file?" + urlencode({"root": project.root, "rel": "05_分段视频/a.mp4"})
     try:
@@ -476,6 +479,8 @@ def test_http_has_agent_entry_and_no_legacy_text_endpoints(tmp_path, monkeypatch
     monkeypatch.setattr(app,"load_config",lambda:copy.deepcopy(cfg))
     monkeypatch.setattr(app,"caps_of",lambda cfg=None:copy.deepcopy(CAPS))
     srv=app.ThreadingHTTPServer(("127.0.0.1",0),app.Handler)
+    from types import SimpleNamespace
+    srv.studio_login=SimpleNamespace(require=lambda *a,**k:None)
     thread=threading.Thread(target=srv.serve_forever,daemon=True);thread.start()
     url=f"http://127.0.0.1:{srv.server_port}"
     try:

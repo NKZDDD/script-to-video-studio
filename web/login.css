@@ -1,0 +1,22 @@
+body.studio-locked {overflow:hidden}
+body.studio-locked #studio-agent-prototype {visibility:hidden;pointer-events:none}
+#login-screen {display:none;position:fixed;inset:0;z-index:10000;overflow:auto;padding:32px 20px;background:#f4f6fb;color:#182940;font-family:system-ui,"Microsoft YaHei",sans-serif;box-sizing:border-box}
+body.studio-locked #login-screen {display:grid;place-items:center}
+.studio-login-card {width:min(100%,420px);box-sizing:border-box;background:#fff;border:1px solid #e0e6f0;border-radius:18px;padding:36px;box-shadow:0 12px 48px #1829400c}
+.studio-login-brand {display:flex;align-items:center;gap:10px;font-size:16px;font-weight:650}
+.studio-login-brand span {display:grid;place-items:center;background:#2865e8;border-radius:10px;color:white;width:36px;height:36px;font-size:24px}
+#login-title {font-size:25px;line-height:1.4;margin:28px 0 8px}
+.studio-login-note {color:#6d7e94;font-size:13px;line-height:1.7}
+#studio-login-form {display:grid;gap:10px;margin-top:24px}
+#studio-login-form label {font-size:14px;margin-top:6px}
+#studio-login-form input {box-sizing:border-box;width:100%;padding:12px;font-size:15px;color:#182940;border:1px solid #ccd7e8;border-radius:8px;background:#fff}
+#studio-login-form input:focus {outline:2px solid #aac6ff;border-color:#2865e8}
+#studio-login-form button {padding:12px;border:0;border-radius:8px;font-size:15px;cursor:pointer;background:#2865e8;color:white}
+#studio-login-form button:disabled {opacity:.6;cursor:wait}
+#studio-login-form #login-retry {background:#edf2fc;color:#2456aa}
+#studio-login-form [hidden] {display:none}
+#login-message {font-size:13px;line-height:1.6;min-height:22px;margin:4px 0;color:#6d7e94;overflow-wrap:anywhere}
+#login-message.is-error {color:#bd3030}
+.studio-login-foot {margin:24px 0 0;border-top:1px solid #edf0f5;padding-top:18px}
+#studio-account {white-space:nowrap;font-size:12px}
+@media(max-width:600px){.studio-login-card{padding:26px}#login-screen{padding:20px 14px}}
