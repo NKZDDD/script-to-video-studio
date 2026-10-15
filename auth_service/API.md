@@ -124,3 +124,22 @@ else:
 ```
 
 示例 SDK 只提供接口调用。Studio 登录页、启动拦截、心跳、系统凭据保存和批次行为尚需接入。部署本服务不会自动让现有 EXE 要求登录。
+# 网页管理接口（1.1.0）
+
+网页入口 `GET /admin/`。管理员由终端 `add-admin` 创建，和下列 Studio 普通账号认证接口完全独立。
+
+管理接口前缀 `/admin/api/`，要求 HTTPS。所有 POST 须为 JSON、携带与站点相同的 Origin；除登录外还须携带 HttpOnly Cookie 对应的 `X-CSRF-Token`。登录与 `GET me` 返回 CSRF 值，凭证本身只在 Secure / SameSite=Strict Cookie 中返回，8 小时绝对过期。
+
+| 方法与路径 | 用途 |
+|---|---|
+| POST login | `{username,password}` 管理员登录 |
+| GET me | 当前管理员和 CSRF token |
+| POST logout | 撤销管理会话 |
+| GET users?q=&page=1 | 普通账号列表，每页 50 条，按账号搜索 |
+| POST users | 创建普通账号；username、password、expires_at（UTC 秒/null）、max_devices（0 不限） |
+| POST users/{name}/settings | 按提交字段更新 enabled、expires_at、max_devices |
+| POST users/{name}/password | `{password}` 重置密码并撤销旧登录 |
+| POST users/{name}/revoke | 撤销普通账号的全部登录 |
+| GET users/{name}/sessions | 最近 100 条设备登录记录；不返回凭证或哈希 |
+
+管理员重置密码仅通过终端 `password-admin`，会撤销旧管理会话。普通账号和客户端 Bearer 凭证不具有管理权限。所有接口继续使用本文的统一错误结构，页面不会返回密码哈希。

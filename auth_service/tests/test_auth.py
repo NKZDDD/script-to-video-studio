@@ -251,10 +251,11 @@ def test_body_bound_and_content_type(env):
                        headers={"Content-Type": "application/json"}).status_code == 422
 
 
-def test_no_admin_or_provider_proxy_endpoints(env):
+def test_no_public_account_management_or_provider_proxy_endpoints(env):
     client = env[0]
-    for path in ("/docs", "/openapi.json", "/admin", "/api/v1/users", "/v1/images/generations"):
+    for path in ("/docs", "/openapi.json", "/api/v1/users", "/v1/images/generations"):
         assert client.get(path).status_code == 404
+    assert client.get('/admin/api/users').status_code == 401
 
 
 def test_new_database_version_rejected(tmp_path):

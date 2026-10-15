@@ -31,6 +31,17 @@ CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY, at INTEGER NOT NULL,
     event TEXT NOT NULL, user_id TEXT, session_id TEXT
 );
+CREATE TABLE IF NOT EXISTS administrators (
+    username TEXT PRIMARY KEY, password_hash TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    token_hash TEXT PRIMARY KEY, username TEXT NOT NULL REFERENCES administrators(username),
+    expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_audit (
+    id INTEGER PRIMARY KEY, at INTEGER NOT NULL, administrator TEXT NOT NULL,
+    action TEXT NOT NULL, target TEXT NOT NULL
+);
 """
 
 

@@ -57,7 +57,14 @@ class Guard:
 
         if self.require_https and scope["scheme"] != "https" and scope["path"] != "/health":
             return await respond(400, "https_required", "请使用 HTTPS 地址访问")
-        if headers.get(b"origin"):
+        admin_path = scope['path'] == '/admin' or scope['path'].startswith('/admin/')
+        if admin_path:
+            expected = (scope['scheme'] + '://').encode() + headers.get(b'host', b'')
+            origin = headers.get(b'origin')
+            if (headers.get(b'sec-fetch-site') == b'cross-site' or
+                    (origin and origin != expected) or (scope['method'] == 'POST' and not origin)):
+                return await respond(403, 'origin_forbidden', '请从本站管理页面操作')
+        elif headers.get(b"origin"):
             # This API is for Studio's Python backend, not cross-site browser JS.
             return await respond(403, "browser_origin_forbidden", "请由 Studio 后端调用登录接口")
         if scope["method"] == "POST" and headers.get(b"content-type", b"").split(b";")[0].lower() != b"application/json":
@@ -89,6 +96,10 @@ class Guard:
                 message["headers"] = list(message.get("headers", [])) + [
                     (b"cache-control", b"no-store"), (b"pragma", b"no-cache"),
                     (b"x-content-type-options", b"nosniff")]
+                if admin_path:
+                    message['headers'] += [
+                        (b'content-security-policy', b"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
+                        (b'x-frame-options', b'DENY'), (b'referrer-policy', b'no-referrer')]
             await send(message)
 
         await self.app(scope, bounded_receive, no_cache)
@@ -106,6 +117,8 @@ def create_app(settings=None, *, clock=None):
     app = FastAPI(title="Respect Studio 登录服务", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(Guard, require_https=settings.require_https)
+    from .admin import router
+    app.include_router(router)
 
     @app.exception_handler(AuthError)
     async def auth_error(request, exc):

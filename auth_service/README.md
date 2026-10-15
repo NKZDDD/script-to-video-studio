@@ -1,4 +1,4 @@
-# Respect Studio 登录校验服务端 1.0.0
+# Respect Studio 登录校验服务端 1.1.0
 
 给宝塔 Linux 部署的独立登录服务。服务商 Key 继续由 Studio 客户端填写，生成仍由客户端直接调用服务商。本服务不接收服务商 Key、项目内容、提示词或素材。
 
@@ -12,11 +12,14 @@
 - 密码使用 Argon2id 哈希；随机登录凭证只在数据库保存 SHA-256 哈希。
 - SQLite SQL 数据库，WAL 模式，数据独立保存在 `data/`，无需另装 MySQL。
 - 固定依赖、自动化测试、宝塔 Nginx 反向代理配置、systemd 开机启动及每日清理。
-- 管理通过服务器终端完成，不提供公网管理员登录页面，不包含默认账号密码。
+- 网页管理后台 `/admin/`：创建账号、搜索、修改期限与设备上限、启停、密码重置、查看登录设备、撤销全部登录。
+- 后台管理员与普通账号独立，首次管理员通过服务器终端创建；不包含默认账号密码。
 
 本地程序可以被修改，此方案用于正常客户端的账号管理，不保证防破解。服务端不会调用或转发生产请求。
 
 ## 1. 上传和安装
+
+已经部署 1.0.0 的服务器，按 [网页后台升级说明](ADMIN-UPGRADE.md) 更新，保留原 `data/` 数据库及 `.venv/`。
 
 环境：宝塔 Linux、Nginx、systemd、Python **3.11 或以上**（建议 3.12），Linux glibc 2.28 或以上，至少预留约 1 GB 可用内存。Argon2 每次密码校验约使用 64 MiB，单进程限制最多 4 次并行密码校验。旧 CentOS 7 不属于本包的部署目标；安装前可用 `ldd --version` 查看 glibc。
 
@@ -112,6 +115,24 @@ runuser -u studioauth -- .venv/bin/python -m studio_auth.manage set customer01 -
 数据库里的状态每次校验都会检查；客户端何时表现出停用，取决于它的校验频率。建议客户端每 60 秒校验，并在开始新生产操作前在线校验。
 
 ## 4. Studio 对接
+
+### 网页管理后台
+
+打开 `https://你的域名/admin/`。首次在部署目录执行：
+
+```bash
+runuser -u studioauth -- .venv/bin/python -m studio_auth.manage add-admin operator
+```
+
+交互输入两次至少 12 位的密码。`operator` 是后台管理员，与 Studio 使用账号分开；普通账号不能进入后台。登录后可在网页创建普通账号，无需再用终端逐个添加。
+
+管理员登录最长 8 小时，退出立即失效。管理员忘记密码时在终端执行 `password-admin operator`，重置会撤销该管理员全部管理会话。当前不提供网页创建管理员或自助注册。
+
+网页写操作要求同源 Origin 和 CSRF 校验；Cookie 使用 Secure、HttpOnly、SameSite=Strict。反向代理必须保留 `Host $host` 和 `X-Forwarded-Proto $scheme`，不要把 Host 写为 127.0.0.1。原 Studio Python 登录接口仍拒绝浏览器 Origin。
+
+时间按浏览器所在电脑时区显示和输入；设备上限 0 为不限。数据库自动增加独立的管理员、管理会话及管理审计表，已有普通账号和登录会话保留。管理审计只记录操作人、动作、目标账号、时间，不记录密码；定时清理保留最近 90 天。
+
+### 客户端调用
 
 见 `API.md` 和 `examples/studio_auth_client.py`。
 

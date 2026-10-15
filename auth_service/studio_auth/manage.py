@@ -37,6 +37,9 @@ def main():
     parser.add_argument("--db", help="数据库绝对路径；默认读取 STUDIO_AUTH_DB 或 data/auth.sqlite3")
     cmds = parser.add_subparsers(dest="command", required=True)
     cmds.add_parser("init", help="初始化数据库，不创建默认账号")
+    for command in ('add-admin', 'password-admin'):
+        sub = cmds.add_parser(command, help='创建或重置网页后台管理员')
+        sub.add_argument('username')
     add = cmds.add_parser("add", help="创建账号，交互输入密码")
     add.add_argument("username")
     add.add_argument("--expires", required=True, help="带时区的 ISO 日期，或 never")
@@ -58,7 +61,11 @@ def main():
         os.environ["STUDIO_AUTH_DB"] = args.db
     service = AuthService(Settings.from_env())
     command = args.command
-    if command == "init":
+    if command in ('add-admin', 'password-admin'):
+        from .admin import set_admin
+        set_admin(service, args.username, read_password(), create=command == 'add-admin')
+        print('管理员已保存，旧管理会话已撤销；请打开域名 /admin/')
+    elif command == "init":
         print("数据库已初始化：", service.store.path)
     elif command == "add":
         end = expiry(args.expires)

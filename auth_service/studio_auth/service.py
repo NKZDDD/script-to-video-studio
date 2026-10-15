@@ -234,3 +234,5 @@ class AuthService:
             db.execute("DELETE FROM sessions WHERE expires_at<=?", (now,))
             db.execute("DELETE FROM rate_limits WHERE started_at<=?", (now-self.settings.rate_window,))
             db.execute("DELETE FROM audit WHERE at<?", (now-90*86400,))
+            db.execute('DELETE FROM admin_sessions WHERE expires_at<=?', (now,))
+            db.execute('DELETE FROM admin_audit WHERE at<?', (now-90*86400,))
