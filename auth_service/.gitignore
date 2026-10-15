@@ -1,0 +1,8 @@
+data/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.sqlite3*
+*.log
+!requirements-test.txt

@@ -1,0 +1,16 @@
+[Unit]
+Description=Clean expired Respect Studio authentication records
+
+[Service]
+Type=oneshot
+User=studioauth
+Group=studioauth
+WorkingDirectory=@APP_DIR@
+Environment=STUDIO_AUTH_DB=@APP_DIR@/data/auth.sqlite3
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@APP_DIR@/.venv/bin/python -m studio_auth.manage prune
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=@APP_DIR@/data

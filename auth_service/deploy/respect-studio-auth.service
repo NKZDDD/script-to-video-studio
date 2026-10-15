@@ -1,0 +1,26 @@
+[Unit]
+Description=Respect Studio online account verification
+After=network.target
+
+[Service]
+Type=simple
+User=studioauth
+Group=studioauth
+WorkingDirectory=@APP_DIR@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=STUDIO_AUTH_DB=@APP_DIR@/data/auth.sqlite3
+Environment=STUDIO_AUTH_REQUIRE_HTTPS=1
+EnvironmentFile=-@APP_DIR@/deploy/runtime.env
+ExecStart=@APP_DIR@/.venv/bin/python -m uvicorn studio_auth.app:create_app --factory --host 127.0.0.1 --port 8781 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --limit-concurrency 64 --timeout-keep-alive 5 --timeout-graceful-shutdown 15 --no-access-log
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=@APP_DIR@/data
+
+[Install]
+WantedBy=multi-user.target
