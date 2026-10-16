@@ -294,10 +294,12 @@ def _provider_api_key(provider_id: str, provider_cfg: dict, capability: str,
     """取某种能力真正该用的 key；超模没有可跨能力复用的通用 key。"""
     pid = resolve_provider_id(provider_id or "")
     slot = _provider_key_slot(pid, capability, model)
-    if capability != 'llm':
-        provider_cfg = cloud_config.provider(pid, provider_cfg)
     field = _CHAOMO_KEY_FIELDS.get(slot) if pid == "chaomo" else "api_key"
-    return str((provider_cfg or {}).get(field or "api_key") or "").strip()
+    if capability != 'llm':
+        provider_cfg = cloud_config.provider(pid, provider_cfg, field or 'api_key')
+    generic_managed = capability != 'llm' and cloud_config.managed(pid)
+    return str((provider_cfg or {}).get(field or "api_key") or
+               ((provider_cfg or {}).get('api_key') if generic_managed else '') or "").strip()
 
 
 def _account_form(provider_id: str) -> dict:
@@ -628,6 +630,8 @@ def preflight_models(chains: dict) -> list:
             if not model:
                 continue
             cache_key = (pid, _provider_key_slot(pid, _media_capability(kind), model))
+            if cloud_config.managed(pid):
+                cache[cache_key] = set((cloud_config.catalog(pid) or {}).get('models', []))
             if cache_key not in cache:
                 try:
                     cache[cache_key] = set(build_provider(
@@ -662,10 +666,11 @@ def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
              or (cfg.get("providers") or {}).get(sel.get("provider") or "", {}))
     out = dict(saved)
     out.update({k: v for k, v in sel.items() if v not in (None, "")})
-    out = cloud_config.provider(pid, out)
     out["provider"] = pid
     capability = _media_capability(kind)
     slot = _provider_key_slot(pid, capability, out.get("model", ""))
+    field = _CHAOMO_KEY_FIELDS.get(slot, "api_key") if pid == "chaomo" else "api_key"
+    out = cloud_config.provider(pid, out, field)
     key = _provider_api_key(pid, out, capability, out.get("model", ""))
     if not key:
         label = _KEY_LABELS[slot]
@@ -686,7 +691,7 @@ def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
     # 「被审核拒绝后改写重试」是全局设的，某一家想单独调就在这家里写
     # 同名字段覆盖 —— 不带下来的话，设置页那个输入框就是个假旋钮。
     out["defaults"] = dict(cfg.get("defaults") or {})
-    return out
+    return cloud_config.resolve(pid, out, out.get('model', ''))
 
 
 def build_llm(cfg: dict, override: dict = None) -> LLM:
@@ -2746,7 +2751,7 @@ class Handler(BaseHTTPRequestHandler):
             auth_route = path in ("/api/auth/login", "/api/auth/logout", "/api/auth/verify")
             if not auth_route:
                 self._login().require(cookie, force=path in (
-                    "/api/agent/start", "/api/agent/assemble", "/api/agent/subtitle", "/api/agent/models/refresh"))
+                    "/api/agent/start", "/api/agent/assemble", "/api/agent/subtitle", "/api/agent/models/refresh", "/api/agent/config/refresh"))
             if self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json":
                 raise LoginRequired("json_required", "请使用 JSON 请求", 415)
             if n < 0 or (auth_route and n > 16384):

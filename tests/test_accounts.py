@@ -301,7 +301,7 @@ class WiringTests(unittest.TestCase):
         import inspect
         from core import produce as P
         src = inspect.getsource(P.make_video_worker)
-        self.assertIn("accounts.configure(pid", src)
+        self.assertIn("accounts.configure(_account_pool_id(provider_cfg)", src)
         self.assertIn("pool.slot(log=log, cancel=cancel", src)
         self.assertIn("accounts.bump(pid", src)
 

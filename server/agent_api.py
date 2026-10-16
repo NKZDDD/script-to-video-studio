@@ -258,6 +258,18 @@ def post(app, path, body):
         if "agent_features" in body and (set(body["agent_features"]) - set(A.FEATURES) or any(not isinstance(x, bool) for x in body["agent_features"].values())):
             raise ValueError("只有可选功能包可以隐藏")
         return app.api_post("/api/config", body)
+    if path == "/api/agent/config/refresh":
+        from core import cloud_config
+        rows = []
+        for pid in cloud_config.assigned_ids():
+            try:
+                result = cloud_config.refresh_models(pid)
+            except Exception:
+                result = {'ok': False, 'msg': '模型更新失败，请检查该 Key 配置后重试'}
+            rows.append({'provider': pid, 'ok': result.get('ok', False),
+                         'partial': result.get('partial', False), 'msg': result.get('msg', ''),
+                         'count': len(result.get('models', []))})
+        return {'ok': True, 'rows': rows}
     if path == "/api/agent/models/refresh":
         return app.api_post("/api/models/refresh", body)
     if path == "/api/agent/providers/reload":

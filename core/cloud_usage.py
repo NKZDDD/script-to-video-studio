@@ -63,6 +63,7 @@ def begin():
     now = int(time.time())
     e = dict(event_id=str(uuid.uuid4()), sequence=1, provider=ctx['provider'][:64], model=ctx['model'][:200],
              kind=ctx['kind'], source=ctx['source'], assignment_id=ctx.get('assignment_id', ''),
+             key_id=ctx.get('key_id', ''), key_name=ctx.get('key_name', ''),
              task_id='', status='attempted', resumed=False, started_at=now, updated_at=now)
     ctx['event'] = e
     persist(ctx['owner'], e)

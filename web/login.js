@@ -1,23 +1,27 @@
 'use strict';
 (() => {
  const $=s=>document.querySelector(s);
- let authenticated=false,resolveReady,checking=null,revision=0;
+ let authenticated=false,resolveReady,checking=null,revision=0,hasUnlocked=false;
  const ready=new Promise(resolve=>resolveReady=resolve);
  const account=document.createElement('button');account.id='studio-account';account.className='rv-button';account.type='button';
  document.querySelector('.rv-nav').append(account);
+ const refresh=document.createElement('button');refresh.type='button';refresh.className='rv-button';refresh.textContent='刷新后台配置';refresh.hidden=true;document.querySelector('.rv-nav').append(refresh);
+ refresh.addEventListener('click',()=>window.dispatchEvent(new Event('studio-config-refresh')));
  const message=(text,error=false)=>{const el=$('#login-message');el.textContent=text;el.classList.toggle('is-error',error);};
  const lock=(text='请登录后继续使用',retry=false)=>{
    revision++;
-   authenticated=false;document.body.classList.add('studio-locked');
+   authenticated=false;refresh.hidden=true;document.body.classList.add('studio-locked');
    const dialog=$('#dialog');if(dialog?.open)dialog.close();
    message(text,true);$('#login-retry').hidden=!retry;
  };
  const unlock=data=>{
-   authenticated=true;document.body.classList.remove('studio-locked');$('#login-password').value='';
+   const reentered=hasUnlocked&&!authenticated;hasUnlocked=true;
+   authenticated=true;refresh.hidden=false;document.body.classList.remove('studio-locked');$('#login-password').value='';
    account.textContent=(data.user?.username||'已登录')+' · 退出';
    account.title=data.user?.expires_at?'有效期至 '+new Date(data.user.expires_at*1000).toLocaleString():'账号无到期日';
    if(data.usage?.error||data.usage?.pending){account.textContent+=' · 用量待同步';account.title+='；'+(data.usage.error||`待同步 ${data.usage.pending} 条用量记录，联网后自动补传`);}
    resolveReady();
+   if(reentered)window.dispatchEvent(new Event('studio-config-refresh'));
  };
  async function request(action,body){
    const response=await fetch('/api/auth/'+action,body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});

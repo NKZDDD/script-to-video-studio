@@ -5,6 +5,15 @@ import sqlite3
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS key_library (
+    id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL,
+    config TEXT NOT NULL, revision TEXT NOT NULL, enabled INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_keys (
+    user_id TEXT NOT NULL REFERENCES users(id), key_id TEXT NOT NULL REFERENCES key_library(id),
+    position INTEGER NOT NULL, PRIMARY KEY(user_id,key_id)
+);
 CREATE TABLE IF NOT EXISTS provider_assignments (
     user_id TEXT NOT NULL REFERENCES users(id), provider TEXT NOT NULL,
     config TEXT NOT NULL, revision TEXT NOT NULL, updated_at INTEGER NOT NULL,
@@ -69,6 +78,9 @@ class Store:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
             db.execute("PRAGMA user_version=1")
+        from .key_library import migrate
+        with self.connect(write=True) as db:
+            migrate(db)
         if os.name == "posix":
             self.path.chmod(0o600)
 

@@ -24,13 +24,24 @@ CHAOMO = {"llm_api_key": "sk-a", "image_1k_api_key": "sk-b",
 
 
 def _keys(pc, prov_keys=None):
-    """照搬 fetch 里挑 Key 的那一段 —— 那段在函数体中间，抠不出来单测，
-    所以这里复刻规则，并由下面那条测试盯着源码别改歪。"""
-    ks = [str(v).strip() for k, v in (pc or {}).items()
-          if "key" in k.lower() and str(v).strip()]
-    if prov_keys:
-        ks += [str(v).strip() for v in prov_keys.values() if str(v).strip()]
-    return list(dict.fromkeys(ks))
+    """Capture credentials actually used by fetch, without network access."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    from core import model_catalog as MC
+    session = SimpleNamespace(api_key=pc.get('api_key', ''), base_url='https://provider.test')
+    session._headers = lambda: {'X-Key': session.api_key}
+    session._proxies = lambda: {}
+    provider = SimpleNamespace(session=session, keys=prov_keys)
+    seen = []
+    def get(*args, **kwargs):
+        seen.append(kwargs['headers']['X-Key'])
+        return SimpleNamespace(status_code=200, json=lambda: {'data':[{'id':'test-model'}]})
+    http = MagicMock()
+    http.__enter__.return_value.get.side_effect = get
+    with patch.object(MC.providers, 'build', return_value=provider), patch.object(MC.requests, 'Session', return_value=http):
+        MC.fetch('chaomo', pc)
+    return [key for key in seen if key]
+
 
 
 class CatalogKeyTests(unittest.TestCase):
@@ -67,13 +78,11 @@ class CatalogKeyTests(unittest.TestCase):
         b = identity("chaomo", {k: CHAOMO[k] for k in reversed(list(CHAOMO))})
         self.assertEqual(a, b)
 
-    def test_the_source_still_walks_every_key(self):
-        """盯着源码别改回只认 `api_key`。"""
-        import inspect
-        from core import model_catalog as MC
-        src = inspect.getsource(MC.fetch)
-        self.assertIn("'key' in k.lower()", src)
-        self.assertNotIn("keys = [prov.session.api_key]", src)
+    def test_all_credentials_are_used_but_key_labels_are_not(self):
+        self.assertEqual(_keys(dict(CHAOMO, key_id='identifier', key_name='名称',
+                                    _cloud_keys=[{'api_key':'nested-secret'}])),
+                         ['sk-a', 'sk-b', 'sk-c', 'sk-d'])
+
 
 
 if __name__ == "__main__":

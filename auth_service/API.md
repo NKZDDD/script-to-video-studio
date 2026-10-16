@@ -154,3 +154,14 @@ else:
 | GET users/{name}/sessions | 最近 100 条设备登录记录；不返回凭证或哈希 |
 
 管理员重置密码仅通过终端 `password-admin`，会撤销旧管理会话。普通账号和客户端 Bearer 凭证不具有管理权限。所有接口继续使用本文的统一错误结构，页面不会返回密码哈希。
+
+## 1.3.0 Key 库
+
+- `GET /admin/api/keys`：返回可命名 Key 库和服务商中文名称，不含凭据。
+- `POST /admin/api/keys`：新建/编辑，字段 `id`（编辑时填写）、`provider`、`name`、`enabled`、`base_url`、`api_key`、可选 `models`（模型 ID 数组）。保留旧分组字段兼容迁移。空密钥保留，`models:[]` 恢复自动拉取；服务商不可在已有记录上修改。
+- `GET/POST /admin/api/users/{name}/keys`：读取或替换账号授权，POST 为 `{key_ids:[...]}`；重复或无效 ID 整体拒绝。同模型重叠按列表顺序选择，不做失败换 Key。
+- 有效 `verify` 返回 `provider_config[provider].keys`，每项含 `key_id`、`key_name`、`assignment_id`、凭据、地址及可选 `models`。顶层首项字段保留旧协议兼容，但完整多 Key 功能必须更新客户端。停用记录不下发。
+- 用量事件增加可选 `key_id`、`key_name`；查询增加 `key_id` 筛选，汇总按具体 Key 分组，CSV 包含这两列。旧事件缺失字段按空值处理，不猜测归属。
+- 库最多 2000 条；单账号最多 256 条、48 家服务商、每家 32 条。显式模型绑定最多 100 个、每个 ID 最长 200 字符，仍受请求体大小限制。
+
+所有新增管理接口沿用独立管理员会话、HTTPS、Origin 和 CSRF 校验。修改库中共享 Key 会影响已授权的所有账号；旧批次保持已冻结配置。

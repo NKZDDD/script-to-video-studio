@@ -6,7 +6,7 @@
 <section id="login" class="login card"><p class="eyebrow">管理员入口</p><h1>登录账号管理后台</h1><p class="muted">使用服务器上创建的管理员账号。</p><form id="login-form"><label>管理员账号<input name="username" required minlength="3" maxlength="64" autocomplete="username"></label><label>密码<input name="password" type="password" required maxlength="128" autocomplete="current-password"></label><button class="primary">登录后台</button></form><p class="muted foot">Studio 普通账号用于客户端登录，不能管理其他账号。</p></section>
 <p id="message" role="status" aria-live="polite" hidden></p>
 <section id="workspace" hidden>
-<div class="heading"><div><p class="eyebrow">授权管理</p><h1>Studio 使用账号</h1><p class="muted">管理使用期限、登录设备和账号状态。</p></div><button id="create" class="primary">＋ 创建账号</button></div>
+<div class="heading"><div><p class="eyebrow">授权管理</p><h1>Studio 使用账号</h1><p class="muted">管理使用期限、登录设备和账号状态。</p></div><div class="actions"><button id="key-library">Key 库</button><button id="create" class="primary">＋ 创建账号</button></div></div>
 <section class="card"><form id="search-form" class="toolbar"><input id="query" placeholder="搜索账号" aria-label="搜索账号" maxlength="64"><button>搜索</button><button id="refresh" type="button" class="quiet">刷新列表</button><span id="count" class="muted"></span></form>
 <div class="table-wrap"><table><thead><tr><th>账号</th><th>状态</th><th>到期时间</th><th>设备上限</th><th>操作</th></tr></thead><tbody id="users"></tbody></table></div><div class="pager"><span id="page-label"></span><button id="prev">上一页</button><button id="next">下一页</button></div></section>
 <p class="muted foot">时间按当前电脑时区显示。停用账号或撤销登录后，客户端将在下次校验时拒绝新操作；已启动批次继续执行。</p>

@@ -759,6 +759,11 @@ def _who_line(provider_cfg: dict, model: str) -> str:
     return " / ".join(bits)
 
 
+def _account_pool_id(cfg):
+    usage = cfg.get('_usage') or {}
+    return cfg['provider'] + (':' + usage['key_hash'] if usage.get('key_id') else '')
+
+
 def _resume_pending(pj, task, provider_cfg, prov, kind, log, cancel, interval, timeout):
     """已提交的 ID 优先于新材料；这里只取回，不上传、不校验新的生成参数。"""
     rec = submitted.load(pj.root, task["output"])
@@ -784,7 +789,7 @@ def _resume_pending(pj, task, provider_cfg, prov, kind, log, cancel, interval, t
                         cancel=cancel, interval=interval, timeout=timeout)
 
     if rec.get("account"):
-        pool = accounts.pool(provider_cfg["provider"])
+        pool = accounts.pool(_account_pool_id(provider_cfg))
         if pool is None or rec["account"] not in pool.labels():
             raise ApiError(f"任务 {rec['task_id']} 的原账号「{rec['account']}」不可用。"
                            "请恢复原账号后取回，或手动放弃旧任务；不会换账号重新提交。",
@@ -847,6 +852,9 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
     `llm_factory` 给了的话，被审核拒绝时会把提示词交给分析引擎改写再重发
     （见 soften.py）。不给就是关掉这个功能，按原来的方式直接失败。
     """
+    if '_key_candidates' in provider_cfg:
+        from .key_routing import worker as key_worker
+        return key_worker(pj, provider_cfg, lambda c: make_image_worker(pj, c, kind, llm_factory))
     prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
                           provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
     model = provider_cfg.get("model", "")
@@ -979,6 +987,9 @@ def _poll_of(prov, provider_cfg: dict, kind: str,
 
 def make_video_worker(pj: Project, provider_cfg: dict,
                       llm_factory: Optional[Callable] = None) -> Callable:
+    if '_key_candidates' in provider_cfg:
+        from .key_routing import worker as key_worker
+        return key_worker(pj, provider_cfg, lambda c: make_video_worker(pj, c, llm_factory))
     prov = build_provider(provider_cfg["provider"], provider_cfg["api_key"],
                           provider_cfg.get("base_url", ""), provider_cfg.get("proxy", ""))
     model = provider_cfg.get("model", "")
@@ -993,9 +1004,9 @@ def make_video_worker(pj: Project, provider_cfg: dict,
     # 按账号计费、一个账号只能同时跑一条的家（HVTALD）：按账号排队。
     # 声明在服务商自己身上，这里只问一句。别家 pool 是 None，走老路。
     pid = provider_cfg["provider"]
-    n_acct = (accounts.configure(pid, provider_cfg["api_key"])
+    n_acct = (accounts.configure(_account_pool_id(provider_cfg), provider_cfg["api_key"])
               if getattr(prov, "per_account_serial", False) else 0)
-    pool = accounts.pool(pid) if n_acct else None
+    pool = accounts.pool(_account_pool_id(provider_cfg)) if n_acct else None
     if n_acct:
         # **把并发闸门的上限压到账号数。**
         #

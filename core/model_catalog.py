@@ -52,7 +52,7 @@ def identity(pid, pc):
     排序后再算：字典顺序不该影响指纹，否则改一次配置就白拉一次。
     """
     keys = sorted(f"{k}={v}" for k, v in (pc or {}).items()
-                  if 'key' in k.lower() and str(v).strip())
+                  if (k == 'api_key' or k.endswith('_api_key')) and str(v).strip())
     values = [pid, pc.get('base_url') or providers.REGISTRY[pid].default_base_url,
               *keys]
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()
@@ -82,7 +82,7 @@ def fetch(pid, pc):
     # 坤鸡按令牌分组过滤（实拉只回 1 个），超模按 1K/4K 分组 ——
     # 只用一把等于只看见那一把能看见的那部分。合并起来才是这个账号的全集。
     keys = [str(v).strip() for k, v in (pc or {}).items()
-            if 'key' in k.lower() and str(v).strip()]
+            if (k == 'api_key' or k.endswith('_api_key')) and str(v).strip()]
     if getattr(prov, 'keys', None):                 # 坤鸡把多把 Key 挂在类上
         keys += [str(v).strip() for v in prov.keys.values() if str(v).strip()]
     keys = list(dict.fromkeys(keys)) or [prov.session.api_key]
@@ -282,11 +282,11 @@ def apply_catalog(cap, result, source):
     for kind, names in grouped.items():
         block = cap[kind]
         got = names + unknown
-        if not got and (block.get('models') or []):
+        if not result.get('strict') and not got and (block.get('models') or []):
             kept.append(kind)
             continue                    # 原样留着，别把这一类清空
         # 服务商明确保留的兼容/分组型号不能被旧快照或单个 Key 的目录抹掉。
-        block['models'] = list(dict.fromkeys(got + list(block.get('catalog_keep_models') or [])))
+        block['models'] = list(dict.fromkeys(got + ([] if result.get('strict') else list(block.get('catalog_keep_models') or []))))
         if block.get('default_model') not in block['models']:
             block['default_model'] = next(iter(block['models']), '')
         for row in rows:
@@ -327,6 +327,12 @@ def capabilities(cfg):
     for i, cap in enumerate(caps):
         pid = cap['id']
         pc = _provider_cfg(cfg, pid)
+        from . import cloud_config
+        if cloud_config.managed(pid):
+            current = cloud_config.catalog(pid)
+            if current is not None:
+                caps[i] = apply_catalog(cap, current, '后台授权 Key 对应模型')
+            continue
         current = cache.get(pid, {})
         if current.get('identity') == identity(pid, pc) and current.get('ok'):
             caps[i] = apply_catalog(cap, current, '当前 Key 拉取')
@@ -337,6 +343,9 @@ def capabilities(cfg):
 
 def refresh(pid, cfg):
     pid = providers.resolve_id(pid)
+    from . import cloud_config
+    if cloud_config.managed(pid):
+        return cloud_config.refresh_models(pid)
     pc = _provider_cfg(cfg, pid)
     result = fetch(pid, pc)
     if result['ok']:

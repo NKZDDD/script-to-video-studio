@@ -121,6 +121,8 @@ def create_app(settings=None, *, clock=None):
     app.include_router(router)
     from .provisioning import router as provisioning_router
     app.include_router(provisioning_router)
+    from .key_library import router as key_library_router
+    app.include_router(key_library_router)
 
     @app.exception_handler(AuthError)
     async def auth_error(request, exc):

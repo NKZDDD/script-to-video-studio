@@ -175,7 +175,7 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None, *, 
                 row = saved[kind]
                 # Existing IDs always use their recorded provider; changing the next provider is allowed.
                 if kind not in pcs:
-                    pc = resolve_cfg(cfg, {"provider": pending["provider"], "model": pending.get("model", "")},
+                    pc = resolve_cfg(cfg, {"provider": pending["provider"], "model": pending.get("model", ""), "_resume_only": True},
                                      "video" if kind == "video" else "asset")
                     pc["soften_rounds"], pc["agent_mode"] = 0, True
                     pcs[kind] = pc
@@ -364,7 +364,7 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None, l
                 media = 'video' if task['kind'] == 'video' else 'asset'
                 key = (media, record['provider'], record.get('model', ''))
                 if key not in resume_configs:
-                    resume_configs[key] = resolve_cfg(cfg, {'provider': key[1], 'model': key[2]}, media)
+                    resume_configs[key] = resolve_cfg(cfg, {'provider': key[1], 'model': key[2], '_resume_only': True}, media)
         settings_ = result["_settings"]
         job = jobs.create("production", len(tasks), sum(settings_[k]["concurrency"] for k in result["_providers"]),
                           project_root=pj.root, project_name=pj.meta().get("title", ""))
