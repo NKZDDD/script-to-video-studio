@@ -1,5 +1,7 @@
 # 已部署服务器升级网页后台
 
+升级到 1.2.0（服务商配置下发及用量对账），请使用 [新版升级说明](KEY-USAGE-UPGRADE.md)。以下保留首次安装网页后台的操作说明。
+
 适用目录：`/www/wwwroot/respect-studio-auth`；Python 环境沿用原 `.venv`。这次更新服务端，无需修改 Studio 的认证地址。
 
 ## 1. 先备份数据库

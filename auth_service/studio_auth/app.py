@@ -119,6 +119,8 @@ def create_app(settings=None, *, clock=None):
     app.add_middleware(Guard, require_https=settings.require_https)
     from .admin import router
     app.include_router(router)
+    from .provisioning import router as provisioning_router
+    app.include_router(provisioning_router)
 
     @app.exception_handler(AuthError)
     async def auth_error(request, exc):
@@ -158,7 +160,10 @@ def create_app(settings=None, *, clock=None):
         parts = authorization.split()
         if len(parts) != 2 or parts[0].lower() != "bearer" or not 40 <= len(parts[1]) <= 128:
             raise AuthError(401, "invalid_session", "请先登录")
-        return request.app.state.auth.verify(parts[1], body.device_id)
+        result = request.app.state.auth.verify(parts[1], body.device_id)
+        from .provisioning import configuration
+        result['provider_config'] = configuration(request.app.state.auth, result['user']['id'])
+        return result
 
     @app.post("/api/v1/auth/refresh")
     def refresh(body: Refresh, request: Request):

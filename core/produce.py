@@ -18,7 +18,7 @@ import os
 import re
 from typing import Callable, Optional
 
-from . import accounts, audio_refs, diagnose, ledger, probe, soften, submitted, uploader, video_inputs
+from . import accounts, audio_refs, diagnose, ledger, probe, soften, submitted, uploader, video_inputs, cloud_usage
 from .apiutil import TASK_FATAL, ApiError, resolve_ref
 from .video_refs import primary_refs, ref_file, uses_handoff
 from .providers import ImageTask, VideoTask, build as build_provider
@@ -773,6 +773,11 @@ def _resume_pending(pj, task, provider_cfg, prov, kind, log, cancel, interval, t
                        kind=TASK_FATAL, err_code="submitted_pending")
     out = pj.p(*task["output"].split("/"))
     meta = {k: v for k, v in rec.items() if k not in ("output", "key", "task_id", "resume", "submitted_at")}
+    old_usage, now_usage = rec.get('_usage') or {}, provider_cfg.get('_usage') or {}
+    if old_usage.get('key_hash') and now_usage.get('key_hash') != old_usage['key_hash']:
+        raise ApiError('原任务的服务商凭据已变更，请恢复原 Key 后取回；原任务 ID 已保留，不会重新生成',
+                       kind=TASK_FATAL, err_code='submitted_pending')
+    meta.update(_usage=now_usage, _usage_kind='video' if kind == 'video' else 'image')
 
     def retrieve(use):
         return _deliver(pj, task, out, use, rec, meta=meta, run=None, log=log,
@@ -801,6 +806,7 @@ def _resume_pending(pj, task, provider_cfg, prov, kind, log, cancel, interval, t
     return {"output": task["output"], "resumed": True}
 
 
+@cloud_usage.tracked
 def _deliver(pj: Project, task: dict, out: str, prov, rec: Optional[dict], *, meta: dict,
              run: Callable, log: Callable, cancel: Callable, interval: int, timeout: int) -> dict:
     """生成或续查；明确失败解除 ID，但本批不重提；取回异常保留 ID。"""
@@ -918,7 +924,8 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
         log(f"{_who_line(provider_cfg, model)}　参考图×{len(srcs)}")
         meta = _deliver(
             pj, task, out, prov, rec, log=log, cancel=cancel, interval=interval, timeout=timeout,
-            meta={"provider": provider_cfg["provider"], "model": model, "identity": ident},
+            meta={"provider": provider_cfg["provider"], "model": model, "identity": ident,
+                  '_usage': provider_cfg.get('_usage', {}), '_usage_kind': 'image'},
             run=lambda: generate(
                 lambda p: submitted.new_attempt() or prov.generate_image(
                     ImageTask(prompt=p, refs=refs, size=want, model=model,
@@ -1173,7 +1180,8 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         if rec and pool is not None and rec.get("account") not in pool.labels():
             raise ApiError(f"原任务 {rec['task_id']} 的账号不可用，请恢复原账号或手动放弃任务。",
                            kind=TASK_FATAL, err_code="submitted_pending")
-        track = {"provider": pid, "model": model, "identity": ident}
+        track = {"provider": pid, "model": model, "identity": ident,
+                 '_usage': provider_cfg.get('_usage', {}), '_usage_kind': 'video'}
 
         acct_label = ""
         if pool is None:

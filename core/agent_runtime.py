@@ -353,6 +353,18 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None, l
                        if result["elsewhere"] else "已选产物均有效，已复用，无需生成")
             return dict(public_preview(result), ok=True, message=message)
         tasks = copy.deepcopy(result["_tasks"])
+        # Resolve recovery credentials before background threads start. A later
+        # logout/account switch must not redirect an existing batch to another key.
+        resume_configs = {}
+        for task in tasks:
+            if task.get('resume_only'):
+                record = submitted.load(pj.root, task['output'])
+                if not record:
+                    raise ValueError('原任务记录已变化，请重新查看生产计划')
+                media = 'video' if task['kind'] == 'video' else 'asset'
+                key = (media, record['provider'], record.get('model', ''))
+                if key not in resume_configs:
+                    resume_configs[key] = resolve_cfg(cfg, {'provider': key[1], 'model': key[2]}, media)
         settings_ = result["_settings"]
         job = jobs.create("production", len(tasks), sum(settings_[k]["concurrency"] for k in result["_providers"]),
                           project_root=pj.root, project_name=pj.meta().get("title", ""))
@@ -424,7 +436,7 @@ def start(pj, cfg, caps, resolve_cfg, jobs, only=None, expected_revision=None, l
                     key = (record['provider'], record.get('model', ''))
                     groups.setdefault(key, []).append(t)
                 for (provider, model), group in groups.items():
-                    original = resolve_cfg(cfg, {'provider': provider, 'model': model}, 'video' if kind == 'video' else 'asset')
+                    original = dict(resume_configs[('video' if kind == 'video' else 'asset', provider, model)])
                     original['agent_mode'], original['soften_rounds'] = True, 0
                     execute(original, group)
                 remaining = [t for t in items if not t.get('resume_only')]

@@ -16,6 +16,7 @@
    authenticated=true;document.body.classList.remove('studio-locked');$('#login-password').value='';
    account.textContent=(data.user?.username||'已登录')+' · 退出';
    account.title=data.user?.expires_at?'有效期至 '+new Date(data.user.expires_at*1000).toLocaleString():'账号无到期日';
+   if(data.usage?.error||data.usage?.pending){account.textContent+=' · 用量待同步';account.title+='；'+(data.usage.error||`待同步 ${data.usage.pending} 条用量记录，联网后自动补传`);}
    resolveReady();
  };
  async function request(action,body){

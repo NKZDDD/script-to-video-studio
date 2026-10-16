@@ -5,6 +5,17 @@ import sqlite3
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS provider_assignments (
+    user_id TEXT NOT NULL REFERENCES users(id), provider TEXT NOT NULL,
+    config TEXT NOT NULL, revision TEXT NOT NULL, updated_at INTEGER NOT NULL,
+    PRIMARY KEY(user_id,provider)
+);
+CREATE TABLE IF NOT EXISTS usage_reports (
+    user_id TEXT NOT NULL REFERENCES users(id), event_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL, payload TEXT NOT NULL, received_at INTEGER NOT NULL,
+    PRIMARY KEY(user_id,event_id)
+);
+CREATE INDEX IF NOT EXISTS usage_received ON usage_reports(user_id,received_at);
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,

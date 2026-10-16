@@ -33,7 +33,8 @@ def browse(value=''):
 
 
 def change_data(app, value):
-    with LOCK:
+    from . import cloud_usage
+    with LOCK, cloud_usage._lock:
         if app.JOBS.active_count():
             raise ValueError('请等待运行中的批次结束或先停止，再修改数据目录')
         src, dst = Path(paths.data_dir()).resolve(), directory(value)
@@ -53,6 +54,7 @@ def change_data(app, value):
                 shutil.copytree(source, dst/name)
             elif source.is_file():
                 shutil.copy2(source, dst/name)
+        cloud_usage.copy_outbox(dst)
         write_json(str(dst/'config.json'), cfg)
         write_json(str(src/paths.DATA_REDIRECT), {'data_dir': str(dst)})
         paths.set_data_dir(str(dst))

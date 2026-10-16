@@ -23,6 +23,7 @@ from core import paths
 from core import relay as _relay
 from core.store import Project, list_projects, read_json, write_json
 from core.studio_login import LoginManager, LoginRequired, COOKIE as LOGIN_COOKIE
+from core import cloud_config
 
 _LOGIN_INIT = threading.Lock()
 
@@ -122,7 +123,7 @@ def caps_of(cfg: Optional[dict] = None) -> list:
     """
     from core import model_catalog                      # noqa: PLC0415
     try:
-        return model_catalog.capabilities(cfg if cfg is not None else load_config())
+        return model_catalog.capabilities(cloud_config.catalog_config(cfg if cfg is not None else load_config()))
     except Exception as exc:                            # noqa: BLE001
         print(f"[模型清单] 实拉/快照都没用上，退回代码里写死的那份：{exc}")
         return list_capabilities()
@@ -293,6 +294,8 @@ def _provider_api_key(provider_id: str, provider_cfg: dict, capability: str,
     """取某种能力真正该用的 key；超模没有可跨能力复用的通用 key。"""
     pid = resolve_provider_id(provider_id or "")
     slot = _provider_key_slot(pid, capability, model)
+    if capability != 'llm':
+        provider_cfg = cloud_config.provider(pid, provider_cfg)
     field = _CHAOMO_KEY_FIELDS.get(slot) if pid == "chaomo" else "api_key"
     return str((provider_cfg or {}).get(field or "api_key") or "").strip()
 
@@ -545,9 +548,11 @@ def _merge_group_keys(provider_id: str, incoming: dict, saved: dict) -> dict:
 
 def _provider_key_status(provider_id: str, provider_cfg: dict) -> dict:
     """只返回有没有配置，不把密钥本身送到浏览器。"""
+    provider_cfg = cloud_config.provider(provider_id, provider_cfg)
     out = {cap: bool(_provider_api_key(provider_id, provider_cfg, cap))
            for cap in ("llm", "image_1k", "image_4k", "video")}
     out["image"] = out["image_1k"] or out["image_4k"]
+    out['source'] = 'managed' if cloud_config.managed(provider_id) else 'personal'
     # 分把填的家：逐把报「配了没有」，页面用它显示「已保存，留空不改」。
     # 不报的话每个框都写着「粘贴 key」，人会以为没存上，然后重新粘一遍 ——
     # 而重新粘的时候很容易只粘一把，把另外几把冲掉。
@@ -647,6 +652,7 @@ def preflight_models(chains: dict) -> list:
     return problems
 
 
+@cloud_config.consistent
 def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
     """页面选择 + config 里保存的凭据 → 完整服务商配置。"""
     # 别名归一：同一家常有几个叫法（鹤 / 派系 / pis 都是 api.paisio.online），
@@ -656,6 +662,7 @@ def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
              or (cfg.get("providers") or {}).get(sel.get("provider") or "", {}))
     out = dict(saved)
     out.update({k: v for k, v in sel.items() if v not in (None, "")})
+    out = cloud_config.provider(pid, out)
     out["provider"] = pid
     capability = _media_capability(kind)
     slot = _provider_key_slot(pid, capability, out.get("model", ""))
@@ -665,6 +672,7 @@ def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
         raise ValueError(f"服务商 {pid} 未配置{label} Key（在「服务商」页签保存）")
     # worker 仍只接收统一的 api_key；在进入 worker 前完成按能力路由。
     out["api_key"] = key
+    out['_usage'] = cloud_config.attribution(pid, out)
     # **哪个分组要带下去。** 算出来却扔掉的话，日志和失败记录里只有模型名，
     # 看不出这一次用的是哪一把 Key —— 而有几家（超模的 1K/4K、坤鸡的令牌分组）
     # 的行为是**按分组**不一样的：实遇超模 1K 分组把内嵌图片字段截在 4096 字符，
@@ -918,7 +926,7 @@ def api_get(path: str, q: dict) -> dict:
                         f"跟随系统/环境代理 {mask_url(env_p)}" if env_p else
                         "直连（系统与环境都没有代理）"),
                 },
-                "providers_configured": {pid: any(status.values())
+                "providers_configured": {pid: any(v is True for v in status.values())
                                          for pid, status in key_status.items()},
                 "provider_keys_configured": key_status,
                 # 各家保存过的**非密钥**设置。以前只回一个「配了没」的布尔值，
@@ -1541,7 +1549,7 @@ def api_post(path: str, body: dict) -> dict:
         rows = []
         for pid in pids:
             try:
-                r = model_catalog.refresh(pid, cfg)
+                r = model_catalog.refresh(pid, cloud_config.catalog_config(cfg))
             except Exception as exc:                    # noqa: BLE001
                 r = {"ok": False, "msg": f"拉取时出错：{exc}"}
             rows.append({"provider": pid, "ok": bool(r.get("ok")),

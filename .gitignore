@@ -73,3 +73,6 @@ bin/
 # 打包时的模型清单快照 —— 实拉结果，天天变，不进仓库。
 # 打包前用 tools/刷新模型快照.py 生成；打包脚本发现它就 --add-data 带进去。
 model-snapshot.json
+
+# 本机账号用量补传数据库及 SQLite 附属文件，不随源码或发布包分发。
+/usage-outbox.sqlite3*

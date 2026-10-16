@@ -57,6 +57,11 @@ def remember(task_id, **resume) -> None:
     if not cur or not task_id:
         return
     cur["remembered"] = True
+    from . import cloud_usage
+    cloud_usage.note('submitted', task_id)
+    reference = cloud_usage.reference()
+    if reference:
+        cur['meta']['_usage_ref'] = reference
     write_json(cur["path"], {**cur["meta"], "task_id": str(task_id), "resume": resume,
                              "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S")})
 
@@ -77,6 +82,15 @@ def new_attempt() -> None:
             raise ApiError(f"任务 {rec['task_id']} 已提交，不能自动重新生成；请先手动放弃旧任务。",
                            kind=TASK_FATAL, err_code="submitted_pending")
         cur["remembered"] = False
+        from . import cloud_usage
+        cloud_usage.begin()
+
+
+def update_usage(root, output, reference):
+    rec = load(root, output)
+    if rec and reference:
+        rec['_usage_ref'] = reference
+        write_json(_path(root, output), rec)
 
 
 def current_record() -> Optional[dict]:

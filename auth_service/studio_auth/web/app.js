@@ -4,7 +4,7 @@ let csrf='',page=1,rows=[],editing=null,total=0;
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const date=v=>v==null?'永久有效':new Date(v*1000).toLocaleString();
 function message(text,error=false){$('#message').textContent=text;$('#message').classList.toggle('error',error);$('#message').hidden=!text;}
-function locked(){csrf='';$('#login').hidden=false;$('#workspace').hidden=true;$('#identity').hidden=true;$('#editor').close();}
+function locked(){csrf='';$('#login').hidden=false;$('#workspace').hidden=true;$('#identity').hidden=true;$('#editor').close();document.querySelector('#provisioning')?.close();}
 async function api(path,body){
  const response=await fetch('/admin/api/'+path,body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});
  let data;try{data=await response.json();}catch{throw Error('服务没有返回有效结果，请检查连接后重试');}
@@ -12,7 +12,7 @@ async function api(path,body){
 }
 async function authorized(data){csrf=data.csrf_token;$('#admin-name').textContent=data.username;$('#login').hidden=true;$('#workspace').hidden=false;$('#identity').hidden=false;$('#login-form').reset();message('');await load();}
 async function load(){const d=await api('users?q='+encodeURIComponent($('#query').value.trim())+'&page='+page);rows=d.users;total=d.total;$('#count').textContent=`共 ${total} 个账号`;
- $('#users').innerHTML=rows.map((u,i)=>{const expired=u.expires_at!==null&&u.expires_at<=d.server_time,status=!u.enabled?'已停用':expired?'已到期':'正常';return `<tr><td>${esc(u.username)}</td><td><span class="badge ${status==='正常'?'':'bad'}">${status}</span></td><td>${esc(date(u.expires_at))}</td><td>${u.max_devices||'不限'}</td><td>${[['edit','编辑'],['toggle',u.enabled?'停用':'启用'],['password','重置密码'],['sessions','登录设备'],['revoke','撤销登录']].map(([action,label])=>`<button data-action="${action}" data-index="${i}">${label}</button>`).join('')}</td></tr>`;}).join('')||'<tr><td colspan="5" class="muted">没有匹配的账号，点击“创建账号”开始。</td></tr>';
+ $('#users').innerHTML=rows.map((u,i)=>{const expired=u.expires_at!==null&&u.expires_at<=d.server_time,status=!u.enabled?'已停用':expired?'已到期':'正常';return `<tr><td>${esc(u.username)}</td><td><span class="badge ${status==='正常'?'':'bad'}">${status}</span></td><td>${esc(date(u.expires_at))}</td><td>${u.max_devices||'不限'}</td><td>${[['edit','编辑'],['toggle',u.enabled?'停用':'启用'],['password','重置密码'],['sessions','登录设备'],['revoke','撤销登录'],['providers','服务商配置'],['usage','用量对账']].map(([action,label])=>`<button data-action="${action}" data-index="${i}">${label}</button>`).join('')}</td></tr>`;}).join('')||'<tr><td colspan="5" class="muted">没有匹配的账号，点击“创建账号”开始。</td></tr>';
  $('#page-label').textContent=`第 ${page} 页 / 共 ${Math.max(1,Math.ceil(total/50))} 页`;$('#prev').disabled=page<=1;$('#next').disabled=page*50>=total;
 }
 async function safe(fn){try{await fn();}catch(e){message(e.message,true);}}

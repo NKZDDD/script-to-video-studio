@@ -123,8 +123,19 @@ else:
     start_local_production()  # 服务商 Key 和调用继续留在本机
 ```
 
-示例 SDK 只提供接口调用。Studio 登录页、启动拦截、心跳、系统凭据保存和批次行为尚需接入。部署本服务不会自动让现有 EXE 要求登录。
+示例 SDK 只提供接口调用。Studio 源码已接入登录页、启动拦截和心跳；旧 EXE 需要更新客户端，部署本服务不会自动修改旧 EXE。
 # 网页管理接口（1.1.0）
+
+## 1.2.0 配置下发与用量对账补充
+
+`POST /api/v1/auth/verify` 验证成功时新增 `provider_config` 对象，按服务商 ID 返回已分配的 Key 字段、`base_url`、`assignment_id`。只向该有效登录账号下发；禁止浏览器 Origin 调用，不提供跨账号查询。响应必须只保留在客户端后端内存，不写入本机配置。
+
+- `GET /admin/api/users/{name}/providers`：列出服务商、已配置字段名和版本，不返回 Key 值。
+- `POST /admin/api/users/{name}/providers`：独立管理员权限、Origin 和 CSRF 校验；字段为 `provider`、`base_url`、`api_key`、`image_1k_api_key`、`image_4k_api_key`、`video_api_key`、`remove`。Key 留空保留；`remove:true` 移除整家分配。地址必须为无认证参数的 HTTPS URL。
+- `POST /api/v1/auth/usage`：普通账号 Bearer 凭证，正文 `{device_id, events:[...]}`，每批最多 20 条且整个请求不超过 16 KiB。服务端由登录身份确定账号，不接受客户端指定其他用户。
+- `GET /admin/api/users/{name}/usage`：独立管理员权限；支持 `page`、`provider`、`source`、`since`、`until`。时间为 Unix 秒，按客户端报告的开始时间筛选。`export=true` 导出最多 10000 条 CSV，超过限制明确报错。
+
+用量事件字段：`event_id`（UUID）、`sequence`（递增版本）、`provider`、`model`、`kind`（image/video）、`source`（managed/personal/unknown）、`assignment_id`、`task_id`、`status`（attempted/submitted/completed/failed/pending/unknown）、`resumed`、`started_at`、`updated_at`。不接受额外字段。`user_id + event_id` 唯一；较旧版本忽略、同 ID 核心归属字段变化拒绝。提交时间、来源及状态均为客户端声明，不构成可信账单。已提交 ID 的取回沿用原事件；无历史事件的旧任务 `resumed:true, source:unknown` 单独展示。
 
 网页入口 `GET /admin/`。管理员由终端 `add-admin` 创建，和下列 Studio 普通账号认证接口完全独立。
 

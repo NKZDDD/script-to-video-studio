@@ -1,4 +1,4 @@
-"""Studio online login. Provider credentials never enter this module."""
+"""Online login and in-memory account configuration; cloud secrets are never saved locally."""
 from __future__ import annotations
 
 from http.cookies import SimpleCookie, CookieError
@@ -66,8 +66,8 @@ class LoginManager:
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST")
         try:
             with self.opener.open(request, timeout=15) as response:
-                raw = response.read(65537)
-                if len(raw) > 65536:
+                raw = response.read(4194305)
+                if len(raw) > 4194304:
                     raise ValueError("oversized auth response")
                 data = json.loads(raw)
             if not isinstance(data, dict):
@@ -96,6 +96,8 @@ class LoginManager:
             return False
 
     def _clear(self):
+        from . import cloud_config
+        cloud_config.clear(self)
         self.tokens = self.user = None
         self.local_session = ""
         self.checked_until = self.retry_at = 0
@@ -149,9 +151,35 @@ class LoginManager:
         if data.get("valid") is not True or not isinstance(data.get("user"), dict):
             self.checked_until = 0
             raise LoginRequired("invalid_auth_response", "登录服务未确认授权，请重试", 503)
-        self.user = {k: data["user"].get(k) for k in ("username", "expires_at")}
+        from . import cloud_config, cloud_usage
+        self.user = {k: data["user"].get(k) for k in ("id", "username", "expires_at")}
+        try:
+            cloud_config.install(self, self.user.get('id') or '', data.get('provider_config', {}))
+        except ValueError:
+            self._clear()
+            raise LoginRequired('invalid_auth_response', '后台服务商配置格式不正确，请联系管理员', 503) from None
         self.checked_until = time.monotonic() + 60
         self.last_error, self.retry_at = None, 0
+        if self.user.get('id'):
+            cloud_usage.start_sender(self)
+
+    def send_usage(self):
+        from . import cloud_usage
+        with self.lock:
+            if not self.tokens or not self.user or not self.user.get('id'):
+                return
+            uid = self.user['id']
+            events = cloud_usage.pending(uid)
+            if not events:
+                return
+            body = {'device_id': self.device_id(), 'events': events}
+            while len(json.dumps(body, ensure_ascii=False).encode('utf-8')) > 14000:
+                events.pop()
+            if time.monotonic() >= self.checked_until:
+                self._verify()
+            result = self._post('usage', body, self.tokens['access_token'])
+            if result.get('accepted') == [e['event_id'] for e in events]:
+                cloud_usage.acknowledge(uid, events)
 
     def require(self, cookie, force=False):
         with self.lock:
@@ -166,7 +194,9 @@ class LoginManager:
         with self.lock:
             try:
                 self.require(cookie, force=force)
-                return {"authenticated": True, "user": self.user, "service": AUTH_URL}
+                from . import cloud_usage
+                return {"authenticated": True, "user": self.user, "service": AUTH_URL,
+                        "usage": cloud_usage.status(self.user.get('id'))}
             except LoginRequired as exc:
                 return {"authenticated": False, "code": exc.code, "message": str(exc),
                         "can_retry": bool(self.tokens and self.matches(cookie)), "service": AUTH_URL}
