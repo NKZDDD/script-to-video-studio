@@ -32,8 +32,6 @@ from core.providers.julun import (FACE_MODES, PORTRAIT_ALTERNATIVES,
 DOC = {
     "SD 2.0":        {"dur": (4, 15), "img": 9,  "vid": 0,  "aud": 0,  "guard": False},
     # 2026-09-28 /api/pricing：933 时长由 4–15 更新为 4–30。
-    "SD 2.0-933":    {"dur": (4, 30), "img": 9,  "vid": 3,  "aud": 3,  "guard": False},
-    "SD 2.5":        {"dur": (4, 30), "img": 9,  "vid": 0,  "aud": 0,  "guard": True},
     "SD 2.5-101010": {"dur": (4, 30), "img": 10, "vid": 10, "aud": 10, "guard": True},
     "SD 2.5-301010": {"dur": (4, 30), "img": 30, "vid": 10, "aud": 10, "guard": True},
 }
@@ -142,7 +140,7 @@ class JulunHmTests(unittest.TestCase):
         named = " ".join(f"@Image{i}" for i in range(1, 31))
         _body("SD 2.5-301010", named, n_img=30)            # 正好 30，放行
         with self.assertRaises(ApiError) as c:
-            _body("SD 2.5", named[:200], n_img=10)
+            _body("SD 2.0", named[:200], n_img=10)
         self.assertIn("参考图最多 9 张", str(c.exception))
         with self.assertRaises(ApiError) as c:
             _body("SD 2.0", "@Image1", n_img=1, n_vid=1)

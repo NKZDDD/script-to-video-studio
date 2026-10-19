@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""巨轮（julun.cc）。文档：《AI 开放平台接口对接文档》v2.1，2026-08-26。
+"""巨轮（julun.cc）。当前型号以 2026-10-19《JL 全站视频 API 对接文档》为准。
+
+CURRENT_SPEC 使用新标准请求，grok 保留已接入的首尾帧角色协议。
+以下为历史专用协议说明，仅适用于仍使用对应 format 的旧型号。
 
   · 文本 `/v1/chat/completions`（OpenAI 兼容，走 core/llm.py，本类不管）
   · 图片 `POST /v1/images/generations`（OpenAI 兼容，**同步**）
@@ -59,6 +62,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from typing import Callable, Optional
 from urllib.parse import urljoin, urlsplit
 
@@ -75,7 +79,7 @@ try:
 except ImportError:
     submitted = None
 
-PATCH_VERSION = "20261008.1"
+PATCH_VERSION = "20261019.1"
 Q10_MODEL = "Q10-SD2.5 全参"
 MX_MODEL = "SD2.5720MX"
 RUNNING_STATES = getattr(_api, "RUNNING_STATES", (
@@ -191,6 +195,53 @@ SPEC.update({
         "url_media", (10, 15), ["768p"], R6 + ["3:2", "2:3"], 9, 3, 3, ""),
 })
 
+# 2026-10-19 全站文档。None 表示该项未公布，不能套用相似名字的上限。
+# 当前标准接口使用 images/videos/audios；历史专用协议仍留在 SPEC 中供旧任务使用。
+CURRENT_SPEC = {
+    "2.0FSATjl": ("standard", None, [], [], None, None, None, "旧 Fast Super；额外规格未公布，不套用 JL- 型号规则"),
+    "grok-imagine-video-1.5（按次）": ("grok", (6, None), ["480p", "720p"], ["16:9", "9:16", "1:1"], 7, 0, 0, "6 秒起；保留首尾帧角色协议；未公布时长上限"),
+    "minimax_h3": ("standard", (5, 15), ["480p", "768p"], ["16:9", "9:16"], 8, 0, 3, ""),
+    "minimax-h3 2k": ("standard", (10, 15), ["2k"], [], 6, None, None, "1–6 图，10–15 秒"),
+    "minimax-h3 768p": ("standard", (10, 15), ["768p"], [], 6, None, None, "1–6 图，10–15 秒"),
+    "MINIMAX-H3-2.0采样-933": ("standard", (4, 15), ["2k"], [], 9, 3, 3, ""),
+    "MINIMAX-H3-768p-933": ("standard", (4, 15), ["768p"], [], 9, 3, 3, ""),
+    "SD 2.0-933": ("standard", (4, 30), ["720p"], [], 9, 0, 3, "face 为可选布尔值，默认关闭"),
+    "SD 2.5": ("standard", (4, 30), ["720p"], [], None, None, None, "支持图/视频/音频，数量未公布；face 为可选布尔值"),
+    "SD-2.0-mini720p": ("standard", None, [], [], None, None, None, "具体规格未公布，按通用参数发送"),
+    "sd2-mini": ("standard", (4, 15), ["720p"], R5, 9, 0, 3, "不支持参考视频"),
+    "SD2.0FSDT": ("standard", (12, 12), ["720p", "1080p", "2k"], [], None, None, None, "固定 12 秒"),
+    "sd2.5": ("standard", None, [], [], None, None, None, "具体规格未公布，按通用参数发送"),
+    "sd2.5_30": ("standard", (4, 30), ["720p"], R6, 30, 0, 10, "音频须 MP3；不支持参考视频；face 为可选布尔值"),
+    "seedance-2.0": ("standard", (5, 15, [5, 10, 15]), [], [], 9, None, None, "文生视频或 1–9 图；5/10/15 秒"),
+    "seedance-2.0-mini-slow": ("standard", (4, 15), ["720p"], [], 9, 0, 3, ""),
+    "seedance-2.0-slow": ("standard", (4, 15), ["720p"], [], 9, 0, 3, ""),
+    "seedance-2.5-480p": ("standard", None, ["480p"], [], None, None, None, "支持图/视频/音频；时长和数量未公布"),
+    "seedance-2.5-720p": ("standard", (4, 30), ["720p"], [], 30, 10, 10, ""),
+    "seedance-2.5-deal": ("standard", (4, 30), ["720p"], R5, 30, 10, 10, "2026-10-19 文档与公开规格一致：720p，4–30 秒"),
+    "seedance-2.5-pro": ("standard", (4, 30), ["720p"], [], 30, 10, 10, ""),
+    "seedance-2.5-pro-720": ("standard", (4, 30), ["720p"], [], 30, None, 10, "参考视频支持情况未公布"),
+    "seedance-2.5-slow": ("standard", None, [], [], None, None, None, "具体规格未公布，按通用参数发送"),
+    "Seedance-933": ("standard", (4, 15), ["720p"], [], 9, 0, 3, "不支持参考视频"),
+    "seedance2.0-933-V": ("standard", (5, 15), ["720p"], [], 9, 3, 3, ""),
+    "seedance2.5-V": ("standard", (5, 30), ["720p"], [], 30, 10, 10, "支持全部比例"),
+    "wan3.0-vedio-deal": ("standard", (5, 30), ["480p"], [], 10, 0, 5, "按文档保留 vedio 拼写；已重新在售"),
+    "X-SD25-301010": ("standard", None, ["720p"], [], 30, 10, 10, "时长范围未公布"),
+    "X-SD25-301010-se": ("standard", None, ["720p"], [], 30, 10, 10, "时长范围未公布"),
+}
+for _m, _res in (("JL-minimax-video-h3-2k", "2k"), ("JL-minimax-video-h3-768p", "768p")):
+    CURRENT_SPEC[_m] = ("standard", (4, 15), [_res], [], 9, 3, 3, "公开目录补充：参考素材合计最多 12 项")
+for _family in ("JL-seedance-2.0", "JL-seedance-2.0-fast"):
+    for _res in ("480p", "720p"):
+        CURRENT_SPEC[_family + "-" + _res] = ("standard", (4, 15), [_res], [], 9, 3, None,
+            "公开目录补充：音频由服务商转换为视频参考；未公布音频数量上限")
+for _res in ("480p", "720p", "1080p"):
+    CURRENT_SPEC["JL-seedance-2.5-" + _res] = ("standard", (4, 30), [_res], [], 30, 10, 10, "")
+for _m in ("SD2.5-JL", "SDFAST-JL", "SDMINI-JL"):
+    CURRENT_SPEC[_m] = ("standard", (5, 30, [5, 10, 15, 30]), [], [], 9, None, None, "1–9 张参考图，5/10/15/30 秒")
+for _m in ("seedance-2.0-fastJL", "seedance-2.0-miniJL", "seedance-2.0JL"):
+    CURRENT_SPEC[_m] = ("standard", (4, 15), ["720p"], ["9:16"], None, None, None, "固定竖屏；支持图/视频/音频，数量未公布")
+SPEC.update(CURRENT_SPEC)
+
 # 2026-09-14 实拉 `/v1/models` 确认**已经下线**的（选中就是 404）。
 # 留个名字在这儿，是因为老项目的 tasks.json 里可能还存着它们 ——
 # 看见这些名字时知道去哪儿找原因，而不是以为拼错了。
@@ -201,7 +252,7 @@ RETIRED = (
     # 2026-09-17 再拉：这两个 09-14 还在，今天不在了。**平台自己拼错的
     # "vedio" 不是原因** —— 我们本来就是照抄的名字。
     # 回来了也不用改代码：有 Key 的机器实拉的清单会盖掉这份声明。
-    "wan3.0-vedio-deal", "wan3.0-video-prime-deal",
+    "wan3.0-video-prime-deal",
 )
 
 # 实拉里有、而我们**没有它的规格**的。列出来是为了页面上能选到 ——
@@ -224,7 +275,7 @@ UNSPECED = [
 ]
 
 # 肖像保护：文档点名的三条出路。撞上那句报错时接给用户看。
-PORTRAIT_GUARDED = ("SD 2.5", "SD 2.5-101010", "SD 2.5-301010")
+PORTRAIT_GUARDED = ("SD 2.5-101010", "SD 2.5-301010")
 PORTRAIT_ALTERNATIVES = ("sd2.5-9img", "sd2-mini", "SD 2.0")
 
 # `face` 只放行文档列的这几种形状。**`"face": true` 会走上游的"旧抠脸"
@@ -319,6 +370,18 @@ def fit_duration(model: str, want: int, *, log=None) -> int:
     编一个范围去夹，夹出来的值看着合法、其实不是人要的（见 `_UNKNOWN`）。
     """
     rule = spec_of(model)[1]
+    if model in CURRENT_SPEC:
+        try:
+            sec = int(want)
+            valid = not isinstance(want, bool) and float(want) == sec and sec > 0
+        except (ValueError, TypeError, OverflowError):
+            valid = False
+        if not valid:
+            raise ApiError(f"巨轮 {model} 时长必须是正整数秒", kind=TASK_FATAL)
+        if rule and (sec < rule[0] or (rule[1] is not None and sec > rule[1])
+                     or (len(rule) > 2 and sec not in rule[2])):
+            raise ApiError(f"巨轮 {model} 时长不符合文档范围 {rule}，收到 {sec} 秒；请修改时长，不会自动截短。", kind=TASK_FATAL)
+        return sec
     if not rule:                                   # 表外：原样发
         return int(want or 0) or 5
     lo, hi = rule[0], rule[1]
@@ -540,7 +603,7 @@ class JulunProvider(Provider):
             },
             "video": {
                 "models": VIDEO_MODELS,
-                "catalog_keep_models": [MX_MODEL],
+                "catalog_keep_models": list(CURRENT_SPEC) + [MX_MODEL],
                 "default_model": "sd2.5",
                 "ratios": R6,
                 "durations": list(range(4, 31)),
@@ -550,10 +613,11 @@ class JulunProvider(Provider):
                 "ref_mode": "url",
                 "model_options": {
                     m: dict(
-                        durations=list(s[1][2]) if len(s[1]) > 2 else list(range(s[1][0], s[1][1] + 1)),
+                        **({"durations": list(s[1][2]) if len(s[1]) > 2 else list(range(s[1][0], s[1][1] + 1))}
+                           if s[1] and s[1][1] is not None else {}),
                         **({"resolutions": list(s[2])} if s[2] else {}),
                         **({"ratios": list(s[3])} if s[3] else {}),
-                        **({"max_refs": s[4]} if s[4] is not None else {}),
+                        **({"max_refs": s[4]} if s[4] is not None else {"max_refs": None, "refs_unlimited": True}),
                         **({"max_video_refs": s[5]} if s[5] is not None else {}),
                         **({"max_audio_refs": s[6]} if s[6] is not None else {}),
                         notes=s[7],
@@ -563,15 +627,25 @@ class JulunProvider(Provider):
                               "ratios": s[3], "max_images": s[4], "max_videos": s[5],
                               "max_audios": s[6], "note": s[7]}
                           for m, s in SPEC.items()},
-                "notes": "⚠ **五种请求格式按模型分派**（metadata / url_media / openai_refs / "
-                         "grok / simple），选模型即选格式。每个模型的时长、比例、素材上限"
+                "notes": "2026-10-19 全站视频文档：新型号使用标准接口，旧型号保留专用格式。"
+                         "每个模型的时长、比例、素材上限"
                          "都不一样，见 specs —— 本类在**提交前**校验，超了当场报，"
                          "不让排队时间白花。参考素材必须公网可访问（可用 upload_asset() "
-                         "换成平台 URL，**保留 72 小时**）。失败任务不扣费、自动退款。",
+                         "换成平台 URL，**约保留 72 小时**）。未公布的规格不在本地猜测上限。",
             },
             "notes": "模型名带空格、中文和**全角括号**（grok-imagine-video-1.5（按次）），"
                      "照抄别手打。域名不通时可临时用 http://107.148.118.228:3000。",
         }
+
+    def filter_catalog(self, rows):
+        """只用模型接口和在售目录的交集；目录失败不冒充刷新成功。"""
+        data = self.session.request("GET", "/api/pricing", retries=1, timeout=20)
+        if not isinstance(data, dict) or data.get("success") is False or not isinstance(data.get("data"), list):
+            raise ApiError("巨轮价格目录格式不正确，未更新模型列表", kind=TASK_FATAL)
+        active = {r.get("model_name") for r in data["data"] if isinstance(r, dict) and r.get("model_name")}
+        if data["data"] and not active:
+            raise ApiError("巨轮价格目录缺少模型名称，未更新模型列表", kind=TASK_FATAL)
+        return [r for r in rows if r["id"] in active]
 
     # -- 上传素材（本地 → 平台 URL，72 小时）-----------------------------
     def upload_asset(self, path: str, *, log: Callable = print) -> str:
@@ -640,6 +714,8 @@ class JulunProvider(Provider):
         refs = list(task.refs or [])
         vids = [v for v in (task.extra.get("video_refs") or task.extra.get("videos") or []) if v]
         auds = [a for a in (task.extra.get("audio_refs") or task.extra.get("audios") or []) if a]
+        if model in CURRENT_SPEC and any(not str(u).startswith(('https://', 'http://')) for u in vids + auds):
+            raise ApiError("巨轮参考视频和音频必须先上传为公网 HTTP(S) 直链", kind=TASK_FATAL)
         if model == MX_MODEL and any(not str(u).startswith(('https://', 'http://')) for u in vids + auds):
             raise ApiError("巨轮 SD2.5720MX 的参考视频和音频必须是公网 HTTP(S) URL，请先上传素材。", kind=TASK_FATAL)
 
@@ -652,6 +728,12 @@ class JulunProvider(Provider):
                 status=0, kind="task_fatal")
 
         problems = []
+        if model in ("SD2.5-JL", "SDFAST-JL", "SDMINI-JL", "minimax-h3 2k", "minimax-h3 768p") and not refs:
+            problems.append("该型号文档要求至少 1 张参考图")
+        if model.startswith("JL-minimax-video-h3-") and len(refs) + len(vids) + len(auds) > 12:
+            problems.append("参考图片、视频和音频合计最多 12 项")
+        if model == "sd2.5_30" and any(os.path.splitext(urlsplit(str(a)).path)[1].lower() not in ('', '.mp3') for a in auds):
+            problems.append("sd2.5_30 的参考音频必须是 MP3 直链，请先转换后上传")
         # **表外的模型不校验。** 没有它的规格，每一条校验都是拿编出来的数去拦 ——
         # 而拦错了报的是「不符合规格表」，人会去改一个本来就对的参数。
         # 照发出去，不合法的话平台会拒，那句拒绝是响的。
@@ -697,7 +779,23 @@ class JulunProvider(Provider):
                 status=0, kind="task_fatal")
 
         path = "/v1/videos"
-        if fmt == "metadata":
+        if fmt == "standard":
+            body = {"model": model, "prompt": task.prompt, "seconds": sec, "aspect_ratio": ratio}
+            if task.resolution or res_list:
+                body["resolution"] = res
+            for field, values in (("images", refs), ("videos", vids), ("audios", auds)):
+                if values:
+                    body[field] = values
+            for field in ("negative_prompt", "enable_audio", "face", "additional_parameters"):
+                if field not in task.extra:
+                    continue
+                value = task.extra[field]
+                if field in ("enable_audio", "face") and not isinstance(value, bool):
+                    raise ApiError(f"巨轮 {field} 必须是布尔值 true/false", kind=TASK_FATAL)
+                if field == "additional_parameters" and not isinstance(value, dict):
+                    raise ApiError("巨轮 additional_parameters 必须是对象", kind=TASK_FATAL)
+                body[field] = value
+        elif fmt == "metadata":
             meta = {"duration": sec, "ratio": ratio, "resolution": res}
             content = list(refs)
             for v in vids:
@@ -745,8 +843,8 @@ class JulunProvider(Provider):
                 body["input_reference"] = refs[0]
             elif refs:
                 if task.extra.get("first_last"):
-                    if len(refs) < 2:
-                        raise ApiError("首尾帧要 2 张图", status=0, kind="task_fatal")
+                    if len(refs) != 2:
+                        raise ApiError("首尾帧必须恰好 2 张图，不与多参考图混用", status=0, kind="task_fatal")
                     # 文档：first_frame 与 last_frame **必须成对**，
                     # 且**不能与 reference_image 混用**
                     extra["reference_images"] = [
@@ -789,6 +887,7 @@ class JulunProvider(Provider):
         log(f"巨轮 {model}（{fmt} 格式）→ POST {path}")
         try:
             data = self.session.request("POST", path, json_body=body,
+                                        **({"headers": {"Idempotency-Key": uuid.uuid4().hex}} if model in CURRENT_SPEC else {}),
                                         retries=2, timeout=300)
         except ApiError as exc:
             # 肖像保护在本地判不了（取决于图里是谁），只能撞上了再把出路接上。
@@ -820,6 +919,8 @@ class JulunProvider(Provider):
         if submitted is not None:
             submitted.remember(task_id, custom="julun", **({"model": model} if model == MX_MODEL else {}))
 
+        if model in CURRENT_SPEC and poll_interval > 0:
+            poll_interval = max(10, poll_interval)
         url = self._poll(task_id, poll_interval, poll_timeout, log=log, cancel=cancel,
                          **({"model": model} if model == MX_MODEL else {}))
         self.session.save_item(url, dest, log=log, cancel=cancel)
@@ -830,6 +931,8 @@ class JulunProvider(Provider):
             return super().resume(record, dest, log=log, cancel=cancel,
                                   poll_interval=poll_interval, poll_timeout=poll_timeout)
         model = record.get('model') or (record.get('resume') or {}).get('model', '')
+        if model in CURRENT_SPEC and poll_interval > 0:
+            poll_interval = max(10, poll_interval)
         url = self._poll(record["task_id"], poll_interval, poll_timeout, log=log, cancel=cancel,
                          **({"model": model} if model == MX_MODEL else {}))
         self.session.save_item(url, dest, log=log, cancel=cancel)

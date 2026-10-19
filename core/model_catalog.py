@@ -138,7 +138,17 @@ def fetch(pid, pc):
             failures.append('接口返回的不是模型 JSON')
     if not rows:
         return {'ok': False, 'msg': '；'.join(dict.fromkeys(failures)) or '模型清单为空'}
+    strict = False
+    filter_catalog = getattr(prov, 'filter_catalog', None)
+    if callable(filter_catalog):
+        try:
+            rows = {r['id']: r for r in filter_catalog(list(rows.values()))}
+            strict = True
+        except Exception:
+            # 不把可能含凭据的供应商错误回显到浏览器，也不覆盖上次成功目录。
+            return {'ok': False, 'msg': '模型已读取，但在售价格目录读取失败；本次未更新，请稍后重试'}
     return {'ok': True, 'models': sorted(rows), 'rows': [rows[k] for k in sorted(rows)],
+            **({'strict': True} if strict else {}),
             'updated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
             'partial': bool(failures),
             'msg': '部分分组拉取失败，已合并成功分组' if failures else '模型清单已更新'}

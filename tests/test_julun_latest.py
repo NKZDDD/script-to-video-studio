@@ -42,30 +42,37 @@ def test_actual_submission_keeps_selected_duration_and_references(model, seconds
     assert (body.get("images") or body.get("image_refs") or body.get("image_urls")) == refs
     assert saved == [("https://cdn.example/final.mp4", "fixture.mp4")]
     cap = p.capabilities()["video"]["model_options"][model]
-    assert seconds in cap["durations"]
+    if model == "sd2.5":
+        assert "durations" not in cap  # New document does not publish a range.
+    else:
+        assert seconds in cap["durations"]
 
 
 def test_catalog_refresh_retains_updated_options():
     cap = apply_catalog(JulunProvider().capabilities(),
                         {"rows": [{"id": m} for m in THIRTY]}, "fixture")
     for model in THIRTY:
-        assert 30 in cap["video"]["model_options"][model]["durations"]
+        options = cap["video"]["model_options"][model]
+        if model == "sd2.5":
+            assert "durations" not in options
+        else:
+            assert 30 in options["durations"]
     for model in ("seedance_v2.5", "seedance_v2.0-933", "seedance-2.5-deal"):
         assert model in VIDEO_MODELS
 
 
-def test_deal_user_override_keeps_30s_and_480p():
+def test_deal_updated_document_keeps_30s_and_720p():
     p = JulunProvider()
     opts = p.capabilities()["video"]["model_options"]["seedance-2.5-deal"]
     assert opts["durations"] == list(range(4, 31))
-    assert opts["resolutions"] == ["480p"]
+    assert opts["resolutions"] == ["720p"]
     said = []
     _, body = p.build_video_body(VideoTask(model="seedance-2.5-deal", prompt="风景", duration=30),
                                  log=said.append)
-    assert body["seconds"] == 30 and body["resolution"] == "480p"
+    assert body["seconds"] == 30 and body["resolution"] == "720p"
     assert said == []
     with pytest.raises(apiutil.ApiError, match="清晰度"):
-        p.build_video_body(VideoTask(model="seedance-2.5-deal", prompt="风景", resolution="720p"))
+        p.build_video_body(VideoTask(model="seedance-2.5-deal", prompt="风景", resolution="480p"))
 
 
 def test_no_video_refs_for_sd25_30_and_no_dropped_media_on_pro():
@@ -76,14 +83,14 @@ def test_no_video_refs_for_sd25_30_and_no_dropped_media_on_pro():
     task.model = "seedance-2.5-pro-720"
     task.extra["audio_refs"] = ["https://cdn.example/a.wav"]
     _, body = JulunProvider().build_video_body(task)
-    assert body["video_urls"] == task.extra["video_refs"]
-    assert body["audio_urls"] == task.extra["audio_refs"]
+    assert body["videos"] == task.extra["video_refs"]
+    assert body["audios"] == task.extra["audio_refs"]
 
 
 def test_fifteen_second_models_do_not_advertise_30():
     opts = JulunProvider().capabilities()["video"]["model_options"]
     for model in ("SD 2.0", "seedance-2.0-fast-15s", "Seedance-933",
-                  "sd2.0-933-720p-fast-x5-15s", "grok-imagine-video-1.5（按次）"):
+                  "sd2.0-933-720p-fast-x5-15s"):
         assert max(opts[model]["durations"]) == 15
 
 

@@ -26,7 +26,7 @@ def _stub(p, reply=None, replies=None):
     seen = {}
 
     def fake(method, path, json_body=None, params=None, files=None,
-             retries=3, timeout=None):
+             retries=3, timeout=None, headers=None):
         seen.update(method=method, path=path, body=json_body, files=files)
         if replies:
             for pre, val in replies.items():
@@ -59,7 +59,7 @@ class RegistryTests(unittest.TestCase):
         cap = JulunProvider().capabilities()
         for k in ("id", "name", "supports", "image", "video"):
             self.assertIn(k, cap)
-        self.assertEqual(cap["video"]["specs"]["sd2.5"]["format"], "openai_refs")
+        self.assertEqual(cap["video"]["specs"]["sd2.5"]["format"], "standard")
         # **别钉死条数。** 这家会加渠道（2026-09-14 加了 HM 的 seedance_v2.x
         # 五个），钉死的话每加一批就红一次，而红的是测试不是代码。
         # 钉「该有的都在」和「每个都有规格」就够了。
@@ -81,8 +81,8 @@ class RegistryTests(unittest.TestCase):
         self.assertNotIn("Quality V4 · 480p/720p (可@图/视频/音频)", VIDEO_MODELS)
         # 平台自己把 video 拼成了 vedio —— 当时**照抄**了（改对了就是 404）。
         # 2026-09-17 再拉时这两个 wan3.0 已经不在了，所以进了 RETIRED。
-        self.assertIn("wan3.0-vedio-deal", RETIRED)
-        self.assertNotIn("wan3.0-vedio-deal", VIDEO_MODELS)
+        self.assertNotIn("wan3.0-vedio-deal", RETIRED)
+        self.assertIn("wan3.0-vedio-deal", VIDEO_MODELS)
         # 2026-09-17 新冒出来的三个。这家的 /v1/models **只回 id**，
         # 一个规格字段都没有 —— 所以它们进 UNSPECED（页面选得到、不校验），
         # 不进 SPEC：往 SPEC 里填一套猜的时长/比例，就是拿编出来的数去夹
@@ -109,7 +109,7 @@ class FormatDispatchTests(unittest.TestCase):
     def test_every_model_maps_to_a_known_format(self):
         # 加格式要同时加这里 —— 漏了的话新格式会落到 build_video_body 的
         # else 分支（simple），发去 /v1/video/generations，而那个端点不认它。
-        known = {"metadata", "url_media", "openai_refs", "grok", "simple", "hm"}
+        known = {"metadata", "url_media", "openai_refs", "grok", "simple", "hm", "standard"}
         # 清单里有一部分是**故意没规格的**（实拉里有、但我们没拿到它的约束）——
         # 它们走 `_UNKNOWN`：照填的发、不校验。所以只检查有规格的那些。
         from core.providers.julun import UNSPECED, is_known
@@ -154,8 +154,8 @@ class FormatDispatchTests(unittest.TestCase):
             model="seedance-2.5-deal", refs=URLS, duration=12, ratio="16:9",
             extra={"audio_refs": ["https://cdn/a.wav"]}))
         self.assertEqual(body["seconds"], 12)
-        self.assertEqual(body["image_urls"], URLS)
-        self.assertEqual(body["audio_urls"], ["https://cdn/a.wav"])
+        self.assertEqual(body["images"], URLS)
+        self.assertEqual(body["audios"], ["https://cdn/a.wav"])
         self.assertNotIn("metadata", body)
         self.assertNotIn("duration", body)
 
@@ -206,13 +206,13 @@ class FormatDispatchTests(unittest.TestCase):
         self.assertEqual([i["role"] for i in imgs], ["first_frame", "last_frame"])
         self.assertNotIn("input_reference", body)
 
-    def test_h3_uses_its_own_endpoint(self):
+    def test_h3_uses_updated_standard_endpoint(self):
         p = JulunProvider()
         path, body = p.build_video_body(_vt(
             model="minimax-h3 768p", refs=URLS[:1], duration=15))
-        self.assertEqual(path, "/v1/video/generations")
+        self.assertEqual(path, "/v1/videos")
         self.assertEqual(body["seconds"], 15)
-        self.assertEqual(body["image_urls"], URLS[:1])
+        self.assertEqual(body["images"], URLS[:1])
 
 
 class DurationTests(unittest.TestCase):
@@ -227,7 +227,8 @@ class DurationTests(unittest.TestCase):
     def test_discrete_choices_snap_to_nearest(self):
         self.assertEqual(fit_duration("sd-2-c8", 4), 10)
         self.assertEqual(fit_duration("sd-2-c8", 15), 15)
-        self.assertEqual(fit_duration("minimax-h3 2k", 8), 10)
+        with self.assertRaises(ApiError):
+            fit_duration("minimax-h3 2k", 8)
         self.assertEqual(fit_duration("Quality V4 · 480p/720p (可@图/视频/音频)", 12), 10)
 
     def test_wan30th_allows_up_to_30(self):
@@ -244,7 +245,7 @@ class DurationTests(unittest.TestCase):
         """纠正必须落到真正发出去的 body 里，不能只在日志里说说。"""
         p = JulunProvider()
         _, body = p.build_video_body(_vt(model="sd2.5", refs=URLS, duration=10))
-        self.assertEqual(body["duration"], 10)
+        self.assertEqual(body["seconds"], 10)
 
 
 class LoudFailureTests(unittest.TestCase):
