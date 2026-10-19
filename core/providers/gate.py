@@ -5,8 +5,7 @@
   · GET  /public/model_group/info       公开模型及参数 Schema
   · POST /v1/images/generations        图片生成/编辑
   · POST /api/multimodal/create_task   创建异步视频任务
-  · GET  /v1/videos/{id}               查询视频任务
-  · GET  /v1/videos/{id}/content       下载视频
+  · POST /api/multimodal/get_result   用完整 model + taskId 查询，下载返回的视频链接
 
 视频 Schema 中 Seedance 2.5 支持 4–30 秒、30 图、10 视频、10 音频；2.0 系列
 支持 4–15 秒、9 图、3 视频、3 音频。视频 reference 字段为纯字符串数组。
@@ -32,6 +31,15 @@ VIDEO_MODELS = [
     "seedance-2.0-fast-official", "seedance-2.0-mini", "seedance-2.0-standard",
     "seedance-2.5", "seedance-2.0-fast",
 ]
+# 2026-10-19 用户要求的测试映射：通道后缀沿用对应无后缀模型参数。
+# 只在查能力时映射，提交、查询和续传记录必须保留完整模型名。
+GATE_MODEL_ALIASES = {
+    base + suffix: base
+    for base in ("seedance-2.0-fast", "seedance-2.0-mini",
+                 "seedance-2.0-standard", "seedance-2.5")
+    for suffix in ("-tobpersonal-formoss", "-tobpersonal-formoss-zhongzhuan")
+}
+VIDEO_MODELS += list(GATE_MODEL_ALIASES)
 IMAGE_SIZES = ["1024x1536", "1536x1024", "1024x1024"]
 RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "adaptive"]
 
@@ -102,6 +110,7 @@ GATE_DONE, GATE_FAIL = ("success",), ("failed",)
 
 def gate_spec(model: str) -> dict:
     """认不出的按 2.0 系最保守的一套走，别拿猜的上限放行。"""
+    model = GATE_MODEL_ALIASES.get(model, model)
     return GATE_VIDEO_SPEC.get(model, GATE_VIDEO_SPEC["seedance-2.0-mini"])
 
 
@@ -185,6 +194,7 @@ class GateProvider(Provider):
             },
             "video": {
                 "models": VIDEO_MODELS,
+                "catalog_keep_models": list(GATE_MODEL_ALIASES),
                 "default_model": "seedance-2.5",
                 "ratios": RATIOS,
                 "durations": list(range(4, 31)),
