@@ -649,7 +649,7 @@ class ContractComplianceTests(unittest.TestCase):
                      # v7.0 的四条结构检查，条条是静默失败（图出得来、
                      # 任务标成功、空间是错的），所以条条要写进契约。
                      "区域图只能引一张整板", "整板不许引区域图",
-                     "视频只引区域图", "三个 role 各自最多一个",
+                     "视频不引整板", "三个 role 各自最多一个",
                      "kind 只认三个值"):
             self.assertIn(word, txt, f"契约里没写「{word}」")
         # 声明表里加了一条却没渲染出去，等于没声明。

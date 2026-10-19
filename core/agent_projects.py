@@ -15,7 +15,7 @@ import shutil
 import time
 import uuid
 
-from . import paths, probe, submitted
+from . import paths, probe, submitted, independent_c
 from .reference_contract import MARKER as REFERENCE_MARKER, RULES as REFERENCE_RULES
 from .store import LOCK, Project, read_json, read_text, write_json, write_text
 
@@ -71,6 +71,7 @@ def file_manifest(folder: Path) -> dict:
 def schema_document() -> dict:
     ref = {"type": "object", "required": ["asset_id", "file_ref", "image_n"],
            "properties": {"asset_id": {"type": "string"}, "file_ref": {"type": "string"},
+                          "role": {"enum": ["IN_B", "IN_C", "OUT_A"]}, "board": {"type": "string"},
                           "image_n": {"type": "integer", "minimum": 1}}}
     task = {"type": "object", "required": ["key", "output", "prompt_ref", "params", "reference_images"],
             "properties": {"key": {"type": "string"}, "output": {"type": "string"},
@@ -78,6 +79,7 @@ def schema_document() -> dict:
                            "reference_images": {"type": "array", "items": ref},
                            "handoff_refs": {"type": "array", "items": ref},
                            "episode": {"type": "string"}, "board": {"type": "string"},
+                           "handoff_mode": {"enum": [independent_c.MODE]},
                            "region": {"enum": ["A", "B", "C"]}}}
     schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": SCHEMA,
             "type": "object", "required": ["schema", "project_id", "revision", "resources"] + [k + "_tasks" for k in KINDS],
@@ -163,7 +165,7 @@ semantic 可选 {', '.join(SEMANTICS)}；一个 task 对应一个资源，AUD �
 reference_images 各项包含 asset_id（资源 ID）、file_ref（对应任务输出）。图片 image_n=1..N；视频先上传 handoff_refs，再上传 reference_images，两组合起来的 image_n 必须是连续 1..N。
 先声明上游任务，再引用输出；父资源关系与实际参考依赖均不得循环。已有外部图片应登记为资源和任务后由用户手动放图。
 交接板整板不直接给视频；区域任务必须有 board=整板任务 key、region=A/B/C，且以该整板为唯一参考，独立生成而非裁切。
-handoff_refs 项另带 role=IN_B/IN_C/OUT_A，board=整板 key，必须引用对应区域，同一 IN 边界的 B/C 来自同一整板。
+原 ABC 模式的 handoff_refs 项另带 role=IN_B/IN_C/OUT_A，board=整板 key，必须引用对应区域，同一 IN 边界的 B/C 来自同一整板。独立 C → AB 模式按下文可选扩展执行。
 视频必须填写 episode（例如 EP01），且与对应资源的唯一 episodes 条目一致；params 至少包含 ratio/duration。图片 params 至少包含 size。能力未知先提出修订，禁止静默截短、裁图或丢参考。
 剧情文字可以出现；subtitles 只控制字幕。AUD 不变成收费音频任务。没有强制旧故事板阶段。
 
@@ -180,6 +182,8 @@ Studio 拥有 00_项目说明、07_检查与记录、selections.json、active-pl
 检测通过只表示结构就绪，不代表视觉质量通过，也不触发付费生成。
 
 {REFERENCE_RULES}
+
+{independent_c.RULES}
 """
 
 
@@ -347,17 +351,24 @@ def validate_release(pj: Project, revision: str) -> tuple:
                 raise ValueError(f"区域图必须且仅引用指定整板：{t['key']}")
         if t["kind"] == "video":
             ins = set()
-            if any(keys[rids[r["asset_id"]]["task_key"]]["kind"] in ("region", "board") for r in t["reference_images"]):
-                raise ValueError(f"区域图必须通过 handoff_refs 指定边界用途：{t['key']}")
+            if any(keys[rids[r["asset_id"]]["task_key"]]["kind"] in ("region", "board") or independent_c.is_independent(keys[rids[r["asset_id"]]["task_key"]]) for r in t["reference_images"]):
+                raise ValueError(f"区域图及独立 C 必须通过 handoff_refs 指定边界用途，整板不得直接用于视频：{t['key']}")
             for r in t["handoff_refs"]:
                 dep = keys[rids[r["asset_id"]]["task_key"]]
                 role = r.get("role")
+                if independent_c.is_independent(dep) and role == "IN_C":
+                    continue  # Shared extension validation checks the AB -> C source below.
                 if dep["kind"] != "region" or role not in ("IN_B", "IN_C", "OUT_A") or dep.get("region") != role[-1] or r.get("board") != dep.get("board"):
                     raise ValueError(f"视频交接引用须为对应区域且标明同源整板：{t['key']}")
                 if role.startswith("IN_"):
                     ins.add(dep["board"])
             if len(ins) > 1 or any(keys[d]["kind"] == "board" for d in graph[t["key"]]):
                 raise ValueError(f"视频不能混用入站整板或直接引用整板：{t['key']}")
+    nodes = [dict(t, board=t.get("board") or t.get("parent"), refs=graph[t["key"]], handoff=[
+        dict(r, key=rids[r["asset_id"]]["task_key"]) for r in t.get("handoff_refs", [])]) for t in rows]
+    issues = independent_c.audit(nodes)
+    if issues:
+        raise ValueError(issues[0]["code"] + "：" + issues[0]["msg"])
     no_cycles(graph, "生产依赖")
     return plan, blobs, ready
 
@@ -440,11 +451,13 @@ def update_reference_contract(pj: Project) -> None:
         if not path.is_file():
             return
         original = path.read_bytes()
-        if REFERENCE_MARKER.encode("utf-8") in original:
+        additions = [rules for marker, rules in ((REFERENCE_MARKER, REFERENCE_RULES),
+                     (independent_c.MARKER, independent_c.RULES)) if marker.encode("utf-8") not in original]
+        if not additions:
             return
         temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
         try:
-            temp.write_bytes(original + ("\n\n" + REFERENCE_RULES).encode("utf-8"))
+            temp.write_bytes(original + "".join("\n\n" + rules for rules in additions).encode("utf-8"))
             os.replace(temp, path)
         finally:
             temp.unlink(missing_ok=True)
@@ -488,6 +501,6 @@ def revision_request(pj: Project, keys: list, note: str) -> dict:
     text = f"# Agent 定向修订\n\n项目根：`{pj.root}`\n当前发布：{current['publication'].get('revision', 'legacy')}\n\n原因：{note}\n\n"
     text += "仅修订下列任务及受影响下游，按原契约发布新版本；不要覆盖旧发布或成品。\n\n"
     text += "\n".join(f"- {t['key']}：{t['prompt_ref']}" for t in tasks)
-    text += "\n\n先读原项目已有契约，不要用其他项目的契约替换项目编号、根目录或锁定配置。\n\n" + REFERENCE_RULES
+    text += "\n\n先读原项目已有契约，不要用其他项目的契约替换项目编号、根目录或锁定配置。\n\n" + REFERENCE_RULES + "\n\n" + independent_c.RULES
     write_text(str(inside(pj.root, rel)), text)
     return {"rel": rel, "text": text}

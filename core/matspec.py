@@ -24,6 +24,7 @@ import json
 from typing import Optional
 
 from .reference_contract import RULES as REFERENCE_RULES
+from . import independent_c
 
 # ====================================================================
 # 这里有**两套字段**，而且名字不一样。混着写就是 codex 实测撞上的那个歧义：
@@ -66,6 +67,8 @@ MATERIAL_FIELDS = {
          "  · 交接板 A/B 区图的形状和用它出片的那一段 `ratio` 不一致时，视频那一步"
          "要裁或者加黑边，而那一步不会说话 —— 导入时会提醒一句，不拦。"),
         ("reference_images", False, "有序参考图，见下面「参考图怎么写」"),
+        ("handoff_mode", False, '独立 C 专用：写 `"independent_c"`，不填 region/board/parent，'
+         '落入场景状态图。原 ABC 流程不填。AB 整板真实引用它，视频以 IN_C 引用它；详见独立 C 扩展。'),
         # ---- 下面三个只有 ABC 交接板用（电影级 v7.0）----
         ("region", False,
          "**只有交接板的区域图写它**：`A` / `B` / `C`。写了就落 "
@@ -102,12 +105,12 @@ MATERIAL_FIELDS = {
          "本段引用的**交接板区域图**，按 `image_n` 顺序上传，"
          "就是模型看到的 Image 1..N 的前几张。每项加一个 `role`：" + chr(10) +
          "  · `IN_B` —— 入板的 B 区独立图，定本段**首镜**" + chr(10) +
-         "  · `IN_C` —— 入板的 C 区独立图，定本段**开场空间**" + chr(10) +
+         "  · `IN_C` —— 原 ABC 的 C 区图，或独立 C 模式的上游空间图，定本段**开场空间**" + chr(10) +
          "  · `OUT_A` —— 出板的 A 区独立图，定本段**结尾**" + chr(10) +
          "  **不是必填，可以一个都没有。** 交接板只给需要承接的边界做："
          "首段没有入板、末段没有出板、天然转场两边都不做 —— "
          "那些情况这里就是空的，**不算缺项**。" + chr(10) +
-         "  **引的必须是区域图，不是整板。** 整板只留在上游，不喂给视频。" + chr(10) +
+         "  **引的是区域图，或显式声明的独立 C（仅 IN_C）。** 整板只留在上游，不喂给视频。" + chr(10) +
          "  三个 role 各自最多一个：它们是三个不同时刻，语义不能互换，"
          "同一个 role 给两张的话程序分不出该信哪张。" + chr(10) +
          "  老材料写 `storyboard_refs` 也照旧认（同义），"
@@ -141,6 +144,7 @@ REF_FIELDS = [
     # 在 `reference_images` 里它仍然不读。
     ("role", False, "**只有 `handoff_refs` 里读它**：`IN_B` / `IN_C` / `OUT_A`。"
                     "放在 `reference_images` 里不读"),
+    ("board", False, "handoff_refs 可标明整板 key；独立 C 的 IN_C 可省略，若填写须与 IN_B 的 AB 整板及其独立 C 来源一致。"),
 ]
 
 # 写着不报错，但**程序一个都不读**，也不影响出图出片。想自己核对就写，
@@ -295,7 +299,7 @@ AUDIT = [
     ("board 要指到真整板", "区域图的 `board` 必须是本材料里一条**不带 region** "
                            "的 ABC。指到别的东西 → 出图时报「参考图不存在」，"
                            "而那张图压根没人做"),
-    ("视频只引区域图", "`handoff_refs` 引的必须是带 `region` 的那种。"
+    ("视频不引整板", "`handoff_refs` 引区域图；IN_C 也可引 handoff_mode=independent_c 的独立 C。"
                        "引到整板 → 一张三区图整个喂给视频模型，"
                        "画面会去学那张板的分格排版，**片子出得来、构图是错的**"),
     ("三个 role 各自最多一个", "`IN_B` / `IN_C` / `OUT_A` 是三个不同时刻，"
@@ -350,6 +354,7 @@ _TYPES = {
     "handoff_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
     "storyboard_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
     "region": {"type": "string", "enum": ["A", "B", "C"]},
+    "handoff_mode": {"type": "string", "enum": [independent_c.MODE]},
     "board": {"type": "string"}, "boundary": {"type": "string"},
 }
 
@@ -623,6 +628,8 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a(jsonl_schema(system))
     a("```")
     a("")
+    if system != "v61":
+        a(independent_c.RULES)
     a("## 第一行：申报头（必须有）")
     a("")
     a("材料第一行是一条 `{\"kind\": \"manifest\", ...}`，"

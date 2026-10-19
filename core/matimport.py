@@ -38,6 +38,7 @@ import json
 import os
 import re
 from typing import Optional
+from . import independent_c
 
 # ---------------------------------------------------------------- 分割
 
@@ -357,6 +358,7 @@ def _from_json(no: int, r: dict) -> dict:
         if aid:
             handoff.append({"key": aid,
                             "role": str(x.get("role") or "").strip().upper(),
+                            "board": str(x.get("board") or "").strip(),
                             "image_n": int(x.get("image_n") or 0)})
     return {
         "no": no, "filename": fn,
@@ -372,6 +374,7 @@ def _from_json(no: int, r: dict) -> dict:
         "boundary": str(r.get("boundary") or "").strip(),
         "region": str(r.get("region") or "").strip().upper(),
         "board": str(r.get("board") or r.get("parent") or "").strip(),
+        "handoff_mode": str(r.get("handoff_mode") or "").strip(),
     }
 
 
@@ -467,7 +470,7 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
     #      「这一段该不该有交接板」不查 —— 那是按剧情定的（首段没入板、
     #      末段没出板、天然转场两边都没有），程序不懂内容。
     boards = {u["stem"] for u in units
-              if u["kind"] == "image" and not u.get("region")
+              if u["kind"] == "image" and not u.get("region") and not independent_c.is_independent(u)
               and "ABC" in str(u["stem"]).upper()}
     regions = {u["stem"]: u for u in units if u.get("region")}
 
@@ -541,6 +544,13 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
                             "msg": f"{who} 的 `handoff_refs` 一个 `role` 都没写 —— "
                                    f"程序照发，但 IN_B / IN_C / OUT_A 的语义就没了，"
                                    f"排错时看不出哪张管首镜、哪张管空间"})
+
+    nodes = []
+    for u in units:
+        kind = ("video" if u["kind"] == "video" else "scstate" if independent_c.is_independent(u)
+                else "region" if u.get("region") else "board" if u["stem"] in boards else "asset")
+        nodes.append(dict(u, key=u["stem"], kind=kind, refs=[k for _, k in u["refs"]]))
+    out.extend(independent_c.audit(nodes))
 
     # 段号连续：缺一段 = 成片短一截，而拼接不会说话
     byep: dict = {}
@@ -858,6 +868,8 @@ def out_path(u: dict) -> str:
     up = stem.upper()
     if u.get("kind") == "video":
         return f"05_分段视频/{u['filename']}"
+    if independent_c.is_independent(u):
+        return f"03b_场景状态图/{u['filename']}"
     # **区域派生图按 `region` 字段认，不按 key 前缀。**
     # 整板和它的三张派生图同属 ABC 家族、key 也长得像（派生的只是多个 `_A_`），
     # 靠前缀分不开。而分错的后果是派生图落进整板目录 ——
@@ -946,6 +958,8 @@ def build(units: list, size: str = "", ratio: str = "",
              "prompt_ref": pr, "reference_images": refs,
              "no_image_refs": [], "output": rel,
              "from_material": True}
+        if u.get("handoff_mode"):
+            t["handoff_mode"] = u["handoff_mode"]
         if u["kind"] == "video":
             t["params"] = {"duration": u["seconds"] or duration,
                            "ratio": u["ratio"] or ratio or "9:16"}
@@ -980,6 +994,10 @@ def build(units: list, size: str = "", ratio: str = "",
                  # 三者语义不能互换，所以角色要带过去，不像故事板那样留空。
                  "role": role_of.get(r["asset_id"], ""),
                  "file_ref": r["file_ref"]} for i, r in enumerate(spine, 1)]
+            board_of = {h["key"]: h["board"] for h in u.get("handoff", []) if h.get("board")}
+            for h in t["handoff_refs"]:
+                if h["sheet_id"] in board_of:
+                    h["board"] = board_of[h["sheet_id"]]
             # 老字段留给旧 exe；新版出片、调度和明细优先读 handoff_refs，
             # 即使它为空也不退回故事板。空列表表示本段没有交接板依赖。
             t["storyboard_refs"] = [
