@@ -71,13 +71,14 @@ class Guard:
             return await respond(415, "json_required", "请求必须使用 application/json")
         if headers.get(b"content-encoding", b"identity").lower() != b"identity":
             return await respond(415, "encoding_unsupported", "不接受压缩请求体")
+        limit = 2097152 if scope['path'] in ('/admin/api/keys/import/preview', '/admin/api/keys/import/commit') else 16384
         chunks, length = [], 0
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
                 return
             length += len(message.get("body", b""))
-            if length > 16384:
+            if length > limit:
                 return await respond(413, "body_too_large", "请求体过大")
             chunks.append(message.get("body", b""))
             if not message.get("more_body", False):
@@ -123,6 +124,8 @@ def create_app(settings=None, *, clock=None):
     app.include_router(provisioning_router)
     from .key_library import router as key_library_router
     app.include_router(key_library_router)
+    from .config_import import router as config_import_router
+    app.include_router(config_import_router)
 
     @app.exception_handler(AuthError)
     async def auth_error(request, exc):

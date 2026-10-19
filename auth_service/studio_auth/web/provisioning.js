@@ -14,9 +14,13 @@ function pError(e){const n=provisionDialog.querySelector('#provision-error');if(
 async function keyLibrary(){
  const d=await api('keys');providerNames=d.providers;
  shell('Key 库',`<p class="help">统一保存并命名，再到账号中勾选授权。客户端分别读取每把 Key 的模型，选择模型时自动使用对应 Key；不会因失败自动更换 Key。</p>
+ <div class="actions"><button id="config-import">导入 config.json…</button><input id="config-file" type="file" accept=".json,application/json" hidden></div><p id="import-result" role="status"></p>
  <div class="table-wrap"><table><thead><tr><th>名称</th><th>服务商</th><th>模型来源 / 状态</th><th>操作</th></tr></thead><tbody>${d.keys.map((k,i)=>`<tr><td>${esc(k.name)}</td><td>${esc(providerLabel(k.provider))}</td><td>${k.models.length?'绑定 '+k.models.length+' 个模型':'按 Key 自动拉取'} · ${k.enabled?'启用':'停用'}</td><td><button data-key-edit="${i}">编辑</button></td></tr>`).join('')||'<tr><td colspan="4">尚无 Key，请在下方新建。</td></tr>'}</tbody></table></div>
  <h3 id="key-heading">新增 Key</h3><form id="key-edit"><input type="hidden" name="id"><label>Key 名称<input name="name" required maxlength="100" placeholder="例如：巨轮视频模型组 A"></label><label>服务商<select name="provider">${Object.entries(providerNames).map(([id,label])=>`<option value="${esc(id)}">${esc(label)}</option>`).join('')}<option value="__custom__">自定义外挂…</option></select></label><label id="custom-provider" hidden>外挂服务商 ID<input name="custom_provider" maxlength="64" pattern="[a-zA-Z0-9_-]{1,64}"></label><label>Base URL<input name="base_url" type="url" placeholder="留空使用 Studio 内置 HTTPS 地址"></label><label class="check"><input name="enabled" type="checkbox" checked>启用此 Key</label><div id="key-secrets"></div><label>绑定模型（可选，一行一个完整模型 ID）<textarea name="models" rows="4" placeholder="留空：客户端用这把 Key 拉取模型。若服务商清单不区分 Key 权限或没有模型接口，在这里填写准确的模型 ID。"></textarea></label><p class="help">每把 Key 建成独立条目。编辑时密钥留空保留，不回显。停用后停止下发，已运行批次继续使用当时配置。绑定模型优先于自动拉取。</p><div class="actions"><button type="button" id="key-new">清空并新建</button><button class="primary">保存 Key</button></div></form>`);
  const f=provisionDialog.querySelector('#key-edit');
+ const fileInput=provisionDialog.querySelector('#config-file');
+ provisionDialog.querySelector('#config-import').onclick=()=>fileInput.click();
+ fileInput.onchange=async()=>{const file=fileInput.files[0];fileInput.value='';if(file)try{await importKeyConfig(file);}catch(e){pError(e);}};
  function secrets(configured=[]){
   const fields=configured.length?configured:['api_key'];
   provisionDialog.querySelector('#key-secrets').innerHTML=fields.map(k=>`<label>${esc(keyFields[k]||k)}<textarea name="${esc(k)}" rows="2" autocomplete="off" maxlength="${k==='api_key'?8000:2000}" placeholder="${configured.includes(k)?'已保存；留空保留':'填写凭据'}"></textarea></label>`).join('');
@@ -34,6 +38,24 @@ async function keyLibrary(){
  f.onsubmit=async e=>{
   e.preventDefault();const button=f.querySelector('button.primary');button.disabled=true;
   try{const v=Object.fromEntries(new FormData(f));v.provider=f.elements.provider.value==='__custom__'?v.custom_provider:f.elements.provider.value;delete v.custom_provider;v.enabled=f.elements.enabled.checked;v.models=v.models.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);await api('keys',v);f.reset();await keyLibrary();}catch(e){pError(e);}finally{button.disabled=false;}
+ };
+}
+async function importKeyConfig(file){
+ if(file.size>524288)throw Error('配置文件最多 512 KB，请拆分后导入');
+ let content=await file.text();
+ const d=await api('keys/import/preview',{content});
+ shell('导入 Key 配置预览',`<p class="help">只导入 providers 中的服务商 Key、HTTPS 地址和明确填写的 models。每个凭据字段单独建条目，不覆盖已有 Key，不修改项目路径、其他配置或账号授权。Key 内容不回显；导入后可编辑名称，再到账号中勾选分配。</p>${d.warnings.map(w=>`<p class="help">${esc(w)}</p>`).join('')}<div class="table-wrap"><table><thead><tr><th>导入</th><th>名称 / 服务商</th><th>模型 / 地址</th><th>状态</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td><input type="checkbox" data-import-index="${r.index}" aria-label="导入 ${esc(r.name)}" ${r.duplicate?'disabled':'checked'}></td><td>${esc(r.name)}<br><small>${esc(providerLabel(r.provider))} · ${esc(keyFields[r.field])}</small></td><td>${r.models.length?esc(r.models.join('、')):'按 Key 拉取模型'}<br><small>${esc(r.base_url||'使用客户端内置地址')}</small></td><td>${r.duplicate?'重复，跳过':'新建'}</td></tr>`).join('')}</tbody></table></div><div class="actions"><button id="import-cancel">返回 Key 库</button><button id="import-confirm" class="primary">导入所选</button></div>`);
+ // The selected file exists only in this dialog's closure, never in browser storage.
+ const clear=()=>{content='';};provisionDialog.addEventListener('close',clear,{once:true});
+ provisionDialog.querySelector('#import-cancel').onclick=()=>{clear();provisionDialog.removeEventListener('close',clear);safe(keyLibrary);};
+ const confirm=provisionDialog.querySelector('#import-confirm');
+ const selected=()=>[...provisionDialog.querySelectorAll('[data-import-index]:checked')].map(c=>+c.dataset.importIndex);
+ const toggle=()=>{confirm.disabled=!selected().length;};toggle();
+ provisionDialog.querySelectorAll('[data-import-index]').forEach(c=>c.onchange=toggle);
+ confirm.onclick=async()=>{
+  confirm.disabled=true;
+  try{const r=await api('keys/import/commit',{content,selected:selected()});clear();provisionDialog.removeEventListener('close',clear);await keyLibrary();provisionDialog.querySelector('#import-result').textContent=`已导入 ${r.added} 条，跳过重复 ${r.skipped} 条。请到账号中勾选分配，客户端再点击“刷新后台配置”。`;}
+  catch(e){pError(e);toggle();}
  };
 }
 async function provisionProviders(name){

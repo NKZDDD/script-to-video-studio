@@ -165,3 +165,10 @@ else:
 - 库最多 2000 条；单账号最多 256 条、48 家服务商、每家 32 条。显式模型绑定最多 100 个、每个 ID 最长 200 字符，仍受请求体大小限制。
 
 所有新增管理接口沿用独立管理员会话、HTTPS、Origin 和 CSRF 校验。修改库中共享 Key 会影响已授权的所有账号；旧批次保持已冻结配置。
+
+## 1.3.1 config 导入
+
+- `POST /admin/api/keys/import/preview`：`{content:"config.json 文件文本"}`，返回不含密钥的 `rows` 和 `warnings`。每行含 `index`、`name`、`provider`、`field`、`base_url`、`models`、`duplicate`。不写入。
+- `POST /admin/api/keys/import/commit`：`{content:"同一文件文本",selected:[0,1]}`，重新解析校验、按索引选取，事务新建，返回 `added`、`skipped`、`key_ids`；不覆盖记录或分配账号。
+- 仅以上两个路径的请求体上限为 2 MiB（容纳 JSON 转义），`content` 最多 524288 字符；页面文件上限 512 KB。其他接口保持 16 KiB。一次最多 256 条。
+- 输入必须为含 `providers` 对象的 Studio 配置，重复 JSON 字段拒绝。只读取支持的凭据字段及 HTTPS 地址、显式模型绑定；错误响应不包含原始值。重复导入不启用已停用 Key。
