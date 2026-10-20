@@ -20,18 +20,31 @@ def test_release_admin_auth_csrf_and_public_discovery(env):
     assert c.get("/api/v1/updates/latest?flavor=other").status_code == 400
 
 
-def test_release_rejects_remote_download_and_rollback(env):
+def test_release_accepts_r2_download_but_rejects_rollback(env):
     c, _, _ = env
     login(c)
     row = release()
-    row["url"] = "https://other.example/downloads/Studio.exe"
-    assert post(c, "releases", row).status_code == 400
+    row["url"] = "https://pub-example.r2.dev/studio-updates/all/Studio.exe"
+    assert post(c, "releases", row).status_code == 200
     row["url"] = "https://auth.example.test/downloads/Studio.exe"
     assert post(c, "releases", row).status_code == 200
     row["version"] = "2026.10.19.0"
     assert post(c, "releases", row).status_code == 400
     row["url"] = "file:///tmp/evil.exe"
     assert post(c, "releases", row).status_code == 422
+
+
+def test_release_rejects_non_public_downloads_and_temporary_urls(env):
+    c, _, _ = env
+    login(c)
+    for url in ("http://cdn.example/Studio.exe", "https://127.0.0.1/Studio.exe",
+                "https://localhost/Studio.exe", "https://box.local/Studio.exe",
+                "https://cdn.example:8080/Studio.exe", "https://cdn.example/../Studio.exe",
+                "https://bucket.r2.cloudflarestorage.com/Studio.exe",
+                "https://cdn.example/Studio.exe?signature=secret", "https://user:pass@cdn.example/Studio.exe"):
+        row = release()
+        row["url"] = url
+        assert post(c, "releases", row).status_code == 422, url
 
 
 def build(version="2026.10.20.1", digest="b", mandatory=True):
@@ -87,3 +100,38 @@ def test_optional_release_keeps_minimum_and_known_builds(env):
 def test_new_client_must_wait_for_build_registration(env):
     c, _, _ = env
     assert not c.get("/api/v1/updates/latest", headers=headers()).json()["client"]["allowed"]
+
+
+def test_recommended_and_minimum_versions_are_independent_and_can_be_raised_later(env):
+    c, _, _ = env
+    login(c)
+    for v, digest in (("2026.10.20.1", "b"), ("2026.10.20.2", "c")):
+        assert post(c, "releases", build(v, digest, False)).status_code == 200
+    row = build("2026.10.20.3", "d", False)
+    row["minimum_version"] = "2026.10.20.2"
+    assert post(c, "releases", row).status_code == 200
+    assert not c.get("/api/v1/updates/latest", headers=headers()).json()["client"]["allowed"]
+    data = c.get("/api/v1/updates/latest", headers=headers("2026.10.20.2", "c")).json()
+    assert data["client"]["allowed"] and data["release"]["version"] == "2026.10.20.3"
+    assert data["release"]["minimum_version"] == "2026.10.20.2"
+    assert len(c.get("/admin/api/releases").json()["builds"]) == 3
+    # Promote the minimum without building/uploading another installer.
+    row["minimum_version"] = row["version"]
+    assert post(c, "releases", row).status_code == 200
+    assert not c.get("/api/v1/updates/latest", headers=headers("2026.10.20.2", "c")).json()["client"]["allowed"]
+    assert c.get("/api/v1/updates/latest", headers=headers("2026.10.20.3", "d")).json()["client"]["allowed"]
+
+
+def test_invalid_minimum_never_publishes_or_registers_a_build(env):
+    c, _, _ = env
+    login(c)
+    assert post(c, "releases", build()).status_code == 200
+    row = build("2026.10.20.3", "d", False)
+    for minimum in ("2026.10.20.0", "2026.10.20.2", "2026.10.20.4"):
+        row["minimum_version"] = minimum
+        assert post(c, "releases", row).status_code == 400
+    row["mandatory"] = True
+    row["minimum_version"] = "2026.10.20.1"
+    assert post(c, "releases", row).status_code == 400
+    data = c.get("/admin/api/releases").json()
+    assert len(data["builds"]) == 1 and data["releases"][0]["version"] == "2026.10.20.1"

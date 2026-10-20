@@ -1,4 +1,4 @@
-"""Small release catalog. Large installers are served by Nginx /downloads/."""
+"""Version policy and build registry. Installers are served by R2/CDN or Nginx."""
 import json
 import re
 from urllib.parse import urlparse
@@ -23,14 +23,20 @@ class Release(BaseModel):
     notes: str = Field(default="", max_length=5000)
     build_sha256: str = Field(default="", pattern=r"^([a-f0-9]{64})?$")
     mandatory: bool = False
+    minimum_version: str | None = Field(default=None, pattern=r"^\d{1,5}(\.\d{1,5}){3}$")
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, value):
         u = urlparse(value)
-        if (u.scheme != "https" or not u.hostname or u.username or u.password or
-                u.query or u.fragment or not re.fullmatch(r"/downloads/[A-Za-z0-9_.-]+\.exe", u.path)):
-            raise ValueError("请使用本站 HTTPS /downloads/安装包.exe 地址（文件名使用英文和数字）")
+        host = u.hostname or ""
+        if (u.scheme != "https" or u.port not in (None, 443) or
+                not re.fullmatch(r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}", host) or
+                host.endswith((".localhost", ".local", ".internal", ".r2.cloudflarestorage.com")) or
+                u.username or u.password or u.query or u.fragment or
+                not re.fullmatch(r"/[A-Za-z0-9_./-]+\.exe", u.path) or
+                ".." in u.path.split("/") or "//" in u.path):
+            raise ValueError("请使用安装包的公网 HTTPS 直链；支持 R2 公开域名、自定义域名，不使用临时签名或重定向")
         return value
 
 
@@ -44,21 +50,30 @@ def list_releases(request: Request):
     current(request)
     with request.app.state.auth.store.connect() as db:
         rows = db.execute("SELECT payload FROM client_releases ORDER BY flavor").fetchall()
-    return {"releases": [json.loads(row["payload"]) for row in rows]}
+        builds = db.execute("SELECT flavor,version FROM client_builds").fetchall()
+    return {"releases": [json.loads(row["payload"]) for row in rows],
+            "builds": [dict(row) for row in builds]}
 
 
 @router.post("/admin/api/releases")
 def publish(body: Release, request: Request):
     actor, _ = current(request, csrf=True)
-    if urlparse(body.url).netloc != request.url.netloc:
-        raise AuthError(400, "invalid_download", "安装包须放在当前登录服务同域名 /downloads/ 下")
     auth = request.app.state.auth
     with auth.store.connect(write=True) as db:
         old = db.execute("SELECT payload FROM client_releases WHERE flavor=?", (body.flavor,)).fetchone()
         if old and tuple(map(int, body.version.split("."))) < tuple(map(int, json.loads(old["payload"])["version"].split("."))):
             raise AuthError(400, "version_regression", "不能发布更低版本；需要修复时请增加版本号")
         previous = json.loads(old["payload"]) if old else {}
-        if (body.mandatory or previous.get("enforce_build")) and not body.build_sha256:
+        old_minimum = previous.get("minimum_version", "0.0.0.0")
+        minimum = body.minimum_version or (body.version if body.mandatory else old_minimum)
+        numbers = lambda value: tuple(map(int, value.split(".")))
+        if body.mandatory and body.minimum_version and minimum != body.version:
+            raise AuthError(400, "minimum_conflict", "强制本次版本与单独指定最低版本不能同时使用")
+        if numbers(minimum) > numbers(body.version):
+            raise AuthError(400, "minimum_above_latest", "最低可用版本不能高于推荐版本")
+        if numbers(minimum) < numbers(old_minimum):
+            raise AuthError(400, "minimum_regression", "不能降低已生效的最低版本；修复后请发布更高版本")
+        if (minimum != "0.0.0.0" or body.mandatory or previous.get("enforce_build")) and not body.build_sha256:
             raise AuthError(400, "build_required", "请导入新版打包生成的 release.json，缺少构建校验码")
         known = db.execute("SELECT build_sha256 FROM client_builds WHERE flavor=? AND version=?",
                            (body.flavor, body.version)).fetchone()
@@ -67,13 +82,18 @@ def publish(body: Release, request: Request):
         if body.build_sha256:
             db.execute("INSERT OR IGNORE INTO client_builds VALUES(?,?,?)",
                        (body.flavor, body.version, body.build_sha256))
+        if minimum != "0.0.0.0" and not db.execute(
+                "SELECT 1 FROM client_builds WHERE flavor=? AND version=?",
+                (body.flavor, minimum)).fetchone():
+            raise AuthError(400, "minimum_unregistered", "最低版本必须选择已登记构建或本次推荐版本")
         payload = body.model_dump()
-        payload["minimum_version"] = body.version if body.mandatory else previous.get("minimum_version", "0.0.0.0")
+        payload["minimum_version"] = minimum
+        payload["mandatory"] = minimum == body.version
         payload["enforce_build"] = bool(body.build_sha256 or previous.get("enforce_build"))
         db.execute("INSERT INTO client_releases(flavor,payload) VALUES(?,?) "
                    "ON CONFLICT(flavor) DO UPDATE SET payload=excluded.payload",
                    (body.flavor, json.dumps(payload, ensure_ascii=False)))
-    record(request, actor, "publish_client", body.flavor + ":" + body.version)
+    record(request, actor, "publish_client", body.flavor + ":" + body.version + ":min=" + minimum)
     return {"ok": True}
 
 

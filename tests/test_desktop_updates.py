@@ -16,7 +16,11 @@ def release(**kw):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("url", "https://other.example/downloads/Studio.exe"),
+    ("url", "https://127.0.0.1/downloads/Studio.exe"),
+    ("url", "https://localhost/downloads/Studio.exe"),
+    ("url", "https://bucket.r2.cloudflarestorage.com/Studio.exe"),
+    ("url", "https://cdn.example:8080/Studio.exe"),
+    ("url", "https://cdn.example/../Studio.exe"),
     ("url", "http://login.respect.chat/downloads/Studio.exe"),
     ("url", "https://login.respect.chat/downloads/Studio.exe?token=secret"),
     ("sha256", "no"), ("bytes", 0), ("bytes", True),
@@ -27,6 +31,17 @@ def test_reject_untrusted_release(field, value):
     row[field] = value
     with pytest.raises(ValueError):
         updates.validate_release(row)
+
+
+@pytest.mark.parametrize("url", [
+    "https://pub-example.r2.dev/studio-updates/all/Studio.exe",
+    "https://downloads.respect.chat/studio-updates/all/Studio.exe",
+    updates.AUTH_URL + "/downloads/Studio.exe",
+])
+def test_authenticated_catalog_can_use_public_https_download_hosts(url):
+    row = release()
+    row["url"] = url
+    assert updates.validate_release(row)["url"] == url
 
 
 def test_download_verifies_size_hash_and_never_follows_redirects(tmp_path, monkeypatch):
@@ -43,6 +58,7 @@ def test_download_verifies_size_hash_and_never_follows_redirects(tmp_path, monke
     monkeypatch.setattr(updates.paths, "data_dir", lambda: str(tmp_path))
     m = updates.UpdateManager()
     m.release = release()
+    m.release["url"] = "https://pub-example.r2.dev/studio-updates/all/Studio.exe"
     m._download(m.release)
     assert m.phase == "ready" and m.installer.read_bytes() == b"MZtest-installer"
     assert calls[0]["allow_redirects"] is False

@@ -174,17 +174,23 @@ else:
 - 输入必须为含 `providers` 对象的 Studio 配置，重复 JSON 字段拒绝。只读取支持的凭据字段及 HTTPS 地址、显式模型绑定；错误响应不包含原始值。重复导入不启用已停用 Key。
 
 
-## 客户端版本策略（1.5.0）
+## 客户端版本策略（1.6.0，兼容 1.5.0 发布请求）
 
 `GET /api/v1/updates/latest?flavor=all` 返回 `release`、`policy_protocol:1`、`client:{allowed,code,message}`。客户端应发送以下 ASCII 请求头，登录、verify、refresh 也必须发送：
 
 ```
-X-Studio-Version: 2026.10.20.1
+X-Studio-Version: 2026.10.20.2
 X-Studio-Flavor: all
 X-Studio-Build: <release.json 中的 build_sha256>
 ```
 
-后台发布接口 `/admin/api/releases` 在原字段基础上增加 `build_sha256`（构建清单的 SHA256）和 `mandatory`（布尔）。返回的发布信息另含服务端维护的 `minimum_version`、`enforce_build`，这两个字段不接受客户端修改。同版本校验码不可替换；强制升级提高最低版本，普通发布不会降低。安装包须先上传到本站 HTTPS /downloads/。
+管理员 `POST /admin/api/releases` 接收 `version`（推荐版本）、`flavor`、`url`、`sha256`、`bytes`、`notes`、`build_sha256`（构建清单的 SHA256）和可选 `minimum_version`（最低可用版本）。省略最低版本时保留当前值。最低版本不能下降、不能高于推荐版本，且必须为同体系已登记构建或本次推荐版本。同版本构建校验码不能替换，推荐版本不能回退。`enforce_build` 仍由服务端维护，不能在请求中修改。
+
+兼容旧请求 `mandatory:true`，等同最低版本设为本次 `version`；如同时传入不一致的 `minimum_version` 则拒绝。新后台使用独立的最低版本选择框，返回的 `mandatory` 表示最低版本是否等于当前推荐版本。
+
+管理员 `GET /admin/api/releases` 返回 `releases` 和 `builds:[{flavor,version}]`，供最低版本下拉框选择。这些修改均需管理员会话、同源和 CSRF 校验。
+
+安装包 URL 支持公网 HTTPS 的 R2 公开域名、自定义域名、原本站 `/downloads/`，仅接受直接返回 EXE 的地址，不允许临时签名查询串、明文 HTTP、内网 IP、非标准端口、R2 S3 API 域名或路径穿越。认证服务不下载文件，不需要 R2 Key；发布端上传工具核对完整公网下载 SHA256，客户端仍独立检查字节数和 SHA256、不跟随重定向、不向下载域名发送登录凭据。旧安装版 2026.10.20.1 及以前无法直接接收 R2 地址，切换时需手动安装一次新版。
 
 一旦任一体系登记构建，缺少/伪造体系、未登记版本、版本低于最低值、指纹不符的 login/verify/refresh 返回 HTTP 426，错误码 `update_required` 或 `client_unregistered`。已登录会话也必须通过验证才能取得 provider_config。logout 和 usage 仍允许已授权会话清理及补传记录；不会借此下发 Key。为便于服务端先升级，尚未登记任何构建时兼容旧客户端；新版带版本头的客户端必须完成登记才放行。
 

@@ -1,4 +1,4 @@
-"""Studio installer updates. Only a verified release from our HTTPS origin is executable."""
+"""The login service publishes policy; verified installers may be hosted on R2/CDN."""
 from __future__ import annotations
 
 import hashlib
@@ -35,15 +35,24 @@ def version(value):
     return tuple(map(int, value.split(".")))
 
 
-def validate_release(data, origin=AUTH_URL):
+def validate_download_url(value):
+    u = urlparse(value)
+    host = u.hostname or ""
+    if (u.scheme != "https" or u.port not in (None, 443) or
+            not re.fullmatch(r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}", host) or
+            host.endswith((".localhost", ".local", ".internal", ".r2.cloudflarestorage.com")) or
+            u.username or u.password or u.query or u.fragment or
+            not re.fullmatch(r"/[A-Za-z0-9_./-]+\.exe", u.path) or
+            ".." in u.path.split("/") or "//" in u.path):
+        raise ValueError("请填写安装包的公网 HTTPS 直链（R2 公开域名或自定义域名），不使用临时签名或重定向")
+    return value
+
+
+def validate_release(data):
     if not isinstance(data, dict):
         raise ValueError("更新服务返回格式不正确")
     version(data.get("version"))
-    parsed, expected = urlparse(str(data.get("url", ""))), urlparse(origin)
-    if (parsed.scheme != "https" or parsed.netloc != expected.netloc or
-            parsed.username or parsed.password or parsed.query or parsed.fragment or
-            not parsed.path.startswith("/downloads/") or not parsed.path.endswith(".exe")):
-        raise ValueError("安装包必须来自登录服务同域名的 HTTPS /downloads/ 地址")
+    validate_download_url(str(data.get("url", "")))
     if not re.fullmatch(r"[a-f0-9]{64}", str(data.get("sha256", ""))):
         raise ValueError("安装包 SHA256 无效")
     if type(data.get("bytes")) is not int or not 0 < data["bytes"] <= MAX_INSTALLER:

@@ -103,8 +103,8 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
     release = {"version": VERSION, "flavor": "all",
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
-               "build_sha256": build_hash, "mandatory": True,
-               "notes": "启动与提交任务前检查版本；后台可强制更新；校验发布构建；启用 RespectAI 图标。"}
+               "build_sha256": build_hash, "mandatory": False,
+               "notes": "支持 R2 下载更新；后台分别设置推荐版本和最低可用版本；保留启动、提交前检查及构建校验。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))
