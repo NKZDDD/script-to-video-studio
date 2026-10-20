@@ -195,3 +195,13 @@ X-Studio-Build: <release.json 中的 build_sha256>
 一旦任一体系登记构建，缺少/伪造体系、未登记版本、版本低于最低值、指纹不符的 login/verify/refresh 返回 HTTP 426，错误码 `update_required` 或 `client_unregistered`。已登录会话也必须通过验证才能取得 provider_config。logout 和 usage 仍允许已授权会话清理及补传记录；不会借此下发 Key。为便于服务端先升级，尚未登记任何构建时兼容旧客户端；新版带版本头的客户端必须完成登记才放行。
 
 版本和指纹是公开的客户端声明，不能提供防破解或设备可信证明；详见 CLIENT-UPDATE-UPGRADE.md。
+
+## 1.6.1 暂停／恢复版本校验
+
+管理员 `POST /admin/api/releases/enforcement`：`{"enabled":false}` 暂停，`{"enabled":true}` 恢复，沿用管理员认证、同源和 CSRF 校验；返回 `enforcement_enabled`。管理员版本列表也返回此布尔字段，独立于每个体系的发布信息。
+
+默认开启，数据库持久化，所有体系共同生效，重启或发布新版本不会自行恢复。暂停不修改推荐版本、最低版本和构建记录；恢复后重新使用原规则。操作写入管理员审计，命令行操作标记为 `local-cli`。
+
+暂停时公开更新接口返回 `enforcement_enabled:false`、`release:null`、`policy_protocol:1` 和 `client:{allowed:true,code:"version_check_paused",...}`。暂时隐藏推荐是为了让只支持同域下载的旧安装版不被 R2 URL 解析挡住；管理员仍可查看和发布版本。login/verify/refresh 不再检查版本和构建，但密码、会话、停用、到期、设备限制和 Key 分配检查保持正常。不会因公开接口的 `allowed:true` 就取得登录凭据或服务商 Key。
+
+客户端仍需连接登录服务，已安装程序的本地文件完整性检查保持原样；这不是离线模式。

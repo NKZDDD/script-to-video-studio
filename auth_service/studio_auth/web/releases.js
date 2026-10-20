@@ -5,6 +5,9 @@
  document.querySelector('#key-library').before(button);
  const dialog=document.createElement('dialog');
  dialog.innerHTML=`<div class="dialog-title"><h2>发布 Studio 更新</h2><button type="button" data-close>关闭</button></div>
+ <section class="card"><p data-enforcement-status role="status"></p>
+ <button type="button" data-enforcement-toggle>读取版本校验状态…</button>
+ <p class="help">过渡期间可暂停所有体系的版本及构建校验，旧包仍须登录并通过账号有效期和 Key 授权。暂停时也隐藏更新推荐，保留已发布版本；发完新包后恢复原规则。只发布新版不会自动恢复。</p></section>
  <p class="help">先将安装包上传 R2 并完成下载校验，再导入 release.json。上传文件不会自动发布，点击下方按钮后版本规则才生效。</p>
  <form id="release-form">
  <label>发布体系<select name="flavor"><option value="all">全体系</option><option value="v34">电影级十七章</option><option value="v61">通用十二环节</option></select></label>
@@ -22,7 +25,15 @@
  <p data-status role="status"></p><button class="primary">发布更新设置</button></form>`;
  document.body.append(dialog);
  const form=dialog.querySelector('form'), status=dialog.querySelector('[data-status]');
- let catalog={releases:[],builds:[]};
+ let catalog={releases:[],builds:[],enforcement_enabled:true};
+ const toggle=dialog.querySelector('[data-enforcement-toggle]');
+ const showEnforcement=()=>{
+   const enabled=catalog.enforcement_enabled!==false;
+   toggle.textContent=enabled?'暂停版本校验':'恢复版本校验';
+   dialog.querySelector('[data-enforcement-status]').textContent=enabled?
+     '版本校验已开启：执行最低版本和构建登记规则。':
+     '版本校验已暂停：旧包可正常登录；账号和 Key 授权检查仍开启。';
+ };
  const compare=(a,b)=>{
    const x=a.split('.').map(Number), y=b.split('.').map(Number);
    for(let i=0;i<4;i++)if(x[i]!==y[i])return x[i]-y[i];
@@ -46,7 +57,16 @@
      form.elements[key].value=r?.[key]??(key==='flavor'?'all':'');
    minimumOptions(r?.minimum_version||(r?.mandatory?r.version:previous()?.minimum_version)||'0.0.0.0');
  };
- const refresh=async()=>{catalog=await api('releases');catalog.builds||=[];};
+ const refresh=async()=>{catalog=await api('releases');catalog.builds||=[];showEnforcement();};
+ toggle.onclick=async()=>{
+   toggle.disabled=true;
+   try {
+     const enabled=catalog.enforcement_enabled===false;
+     await api('releases/enforcement',{enabled});await refresh();
+     status.textContent=enabled?'已恢复原版本规则，客户端下次校验时生效。':'已暂停版本校验。原版本记录已保留，发布新版也不会自动恢复。';
+   } catch(error){status.textContent=error.message;}
+   finally{toggle.disabled=false;}
+ };
  dialog.querySelector('[data-close]').onclick=()=>dialog.close();
  button.onclick=()=>safe(async()=>{
    await refresh();fill(catalog.releases.find(r=>r.flavor==='all'));
@@ -59,6 +79,8 @@
    const data={};for(const key of ['flavor','version','url','sha256','build_sha256','notes','minimum_version'])data[key]=form.elements[key].value.trim();
    data.bytes=Number(form.elements.bytes.value);
    await api('releases',data);await refresh();fill(catalog.releases.find(r=>r.flavor===data.flavor));
-   status.textContent='已发布。客户端启动、登录和提交新任务时会校验；已有批次不会被强制中断。';
+   status.textContent=catalog.enforcement_enabled===false?
+     '已保存版本设置；版本校验仍处于暂停状态，发完新包后请点击“恢复版本校验”。':
+     '已发布。客户端启动、登录和提交新任务时会校验；已有批次不会被强制中断。';
  }catch(error){status.textContent=error.message;}finally{submit.disabled=false;}};
 })();

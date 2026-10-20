@@ -5,6 +5,10 @@ import sqlite3
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS client_version_policy (
+    id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
+);
+INSERT OR IGNORE INTO client_version_policy VALUES(1,1);
 CREATE TABLE IF NOT EXISTS client_releases (
     flavor TEXT PRIMARY KEY, payload TEXT NOT NULL
 );
@@ -120,6 +124,17 @@ class Store:
                 source.backup(dest)
             finally:
                 dest.close()
+
+    def set_client_version_check(self, enabled, actor, now):
+        with self.connect(write=True) as db:
+            db.execute("UPDATE client_version_policy SET enabled=? WHERE id=1", (int(enabled),))
+            db.execute("INSERT INTO admin_audit(at,administrator,action,target) VALUES(?,?,?,?)",
+                       (now, actor, "client_version_check", "enabled" if enabled else "paused"))
+
+
+def client_version_check_enabled(db):
+    row = db.execute("SELECT enabled FROM client_version_policy WHERE id=1").fetchone()
+    return row is None or bool(row["enabled"])
 
 
 def audit(db, now, event, user_id=None, session_id=None):

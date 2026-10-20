@@ -207,3 +207,12 @@ def test_corrupt_build_can_repair_same_version_but_not_unlock(monkeypatch):
     monkeypatch.setattr(updates.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: started.append(kw)))
     m.download()
     assert started
+
+
+def test_server_can_pause_version_gate_without_changing_the_client(monkeypatch):
+    # The service hides recommendations so older clients do not reject an R2 URL.
+    response_for(monkeypatch, {"release":None, "policy_protocol":1, "enforcement_enabled":False,
+        "client":{"allowed":True, "code":"version_check_paused", "message":"transition"}})
+    m = updates.UpdateManager()
+    assert m.require_allowed()["X-Studio-Version"] == updates.VERSION
+    assert m.allowed and m.release is None and m.phase == "current"

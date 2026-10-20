@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .admin import WEB, current, record
 from .service import AuthError
+from .store import client_version_check_enabled
 
 router = APIRouter()
 
@@ -40,6 +41,11 @@ class Release(BaseModel):
         return value
 
 
+class Enforcement(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    enabled: bool
+
+
 @router.get("/admin/releases.js")
 def script():
     return FileResponse(WEB / "releases.js", media_type="text/javascript")
@@ -51,8 +57,17 @@ def list_releases(request: Request):
     with request.app.state.auth.store.connect() as db:
         rows = db.execute("SELECT payload FROM client_releases ORDER BY flavor").fetchall()
         builds = db.execute("SELECT flavor,version FROM client_builds").fetchall()
+        enabled = client_version_check_enabled(db)
     return {"releases": [json.loads(row["payload"]) for row in rows],
-            "builds": [dict(row) for row in builds]}
+            "builds": [dict(row) for row in builds], "enforcement_enabled": enabled}
+
+
+@router.post("/admin/api/releases/enforcement")
+def enforcement(body: Enforcement, request: Request):
+    actor, _ = current(request, csrf=True)
+    auth = request.app.state.auth
+    auth.store.set_client_version_check(body.enabled, actor, auth.now())
+    return {"ok": True, "enforcement_enabled": body.enabled}
 
 
 @router.post("/admin/api/releases")
@@ -102,16 +117,25 @@ def latest(request: Request, flavor: str = "all"):
     if flavor not in ("all", "v34", "v61"):
         raise AuthError(400, "invalid_flavor", "未知客户端体系")
     with request.app.state.auth.store.connect() as db:
+        enabled = client_version_check_enabled(db)
         row = db.execute("SELECT payload FROM client_releases WHERE flavor=?", (flavor,)).fetchone()
-    release = json.loads(row["payload"]) if row else None
-    return {"release": release, "policy_protocol": 1, "client": client_status(request, flavor)}
+    # Old installers reject R2 URLs before checking allowed. Hide the recommendation
+    # during migration as well as bypassing version checks, without deleting it.
+    release = json.loads(row["payload"]) if row and enabled else None
+    return {"release": release, "policy_protocol": 1, "enforcement_enabled": enabled,
+            "client": client_status(request, flavor, enforced=enabled)}
 
 
-def client_status(request, flavor=None):
+def client_status(request, flavor=None, *, enforced=None):
     """Only our service can enforce this rule; caller-reported hashes are spoofable."""
     flavor = flavor or request.headers.get("x-studio-flavor", "")
     v, digest = request.headers.get("x-studio-version", ""), request.headers.get("x-studio-build", "")
     with request.app.state.auth.store.connect() as db:
+        if enforced is None:
+            enforced = client_version_check_enabled(db)
+        if not enforced:
+            return {"allowed": True, "code": "version_check_paused",
+                    "message": "版本校验已临时暂停，仍需通过账号登录和授权检查"}
         rows = db.execute("SELECT flavor,payload FROM client_releases").fetchall()
         releases = {r["flavor"]: json.loads(r["payload"]) for r in rows}
         current_release = releases.get(flavor)

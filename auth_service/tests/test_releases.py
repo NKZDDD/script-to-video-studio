@@ -135,3 +135,109 @@ def test_invalid_minimum_never_publishes_or_registers_a_build(env):
     assert post(c, "releases", row).status_code == 400
     data = c.get("/admin/api/releases").json()
     assert len(data["builds"]) == 1 and data["releases"][0]["version"] == "2026.10.20.1"
+
+
+def test_pause_requires_admin_csrf_and_strict_boolean(env):
+    c, _, _ = env
+    assert post(c, "releases/enforcement", {"enabled":False}, csrf="bad").status_code == 401
+    login(c)
+    assert post(c, "releases/enforcement", {"enabled":False}, csrf="bad").status_code == 403
+    for value in ("false", 0, None):
+        assert post(c, "releases/enforcement", {"enabled":value}).status_code == 422
+    assert c.get("/admin/api/releases").json()["enforcement_enabled"] is True
+
+
+def test_pause_allows_legacy_auth_but_preserves_credentials_account_checks_and_config_scope(env):
+    from test_admin import PASSWORD
+    c, auth, clock = env
+    login(c)
+    assert post(c, "users/customer/providers", dict(
+        provider="julun", api_key="test-key-only", base_url="https://example.test")).status_code == 200
+    assert post(c, "releases", build()).status_code == 200
+    request = dict(username="customer", password=PASSWORD, device_id="legacy-device-123456")
+    assert c.post("/api/v1/auth/login", json=request).status_code == 426
+    assert post(c, "releases/enforcement", {"enabled":False}).status_code == 200
+    data = c.get("/api/v1/updates/latest").json()
+    assert data["client"]["allowed"] and data["release"] is None
+    assert data["client"]["code"] == "version_check_paused" and data["policy_protocol"] == 1
+    assert c.post("/api/v1/auth/login", json={**request,"password":"incorrect"}).status_code == 401
+    assert c.post("/api/v1/auth/verify", json={"device_id":request["device_id"]}).status_code == 401
+    tokens = c.post("/api/v1/auth/login", json=request).json()
+    verified = c.post("/api/v1/auth/verify", json={"device_id":request["device_id"]},
+        headers={"Authorization":"Bearer "+tokens["access_token"]})
+    assert verified.status_code == 200
+    assert verified.json()["provider_config"]["julun"]["api_key"] == "test-key-only"
+    renewed = c.post("/api/v1/auth/refresh", json={"device_id":request["device_id"],
+                                                 "refresh_token":tokens["refresh_token"]})
+    assert renewed.status_code == 200
+    auth.create_user("another", PASSWORD)
+    other = c.post("/api/v1/auth/login", json={**request, "username":"another"}).json()
+    assert c.post("/api/v1/auth/verify", json={"device_id":request["device_id"]},
+        headers={"Authorization":"Bearer "+other["access_token"]}).json()["provider_config"] == {}
+    auth.manage_user("customer", expires_at=clock[0])
+    assert c.post("/api/v1/auth/login", json=request).status_code == 403
+    auth.manage_user("another", enabled=False)
+    assert c.post("/api/v1/auth/login", json={**request,"username":"another"}).status_code == 403
+
+
+def test_pause_persists_across_restart_and_publication_then_resume_restores_catalog(env):
+    c, auth, _ = env
+    login(c)
+    row = build()
+    row["url"] = "https://pub-test.r2.dev/studio-updates/all/Studio.exe"
+    assert post(c, "releases", row).status_code == 200
+    assert post(c, "releases/enforcement", {"enabled":False}).status_code == 200
+    auth.store.initialize()
+    # A paused deployment may still prepare/publish the next release.
+    row.update(version="2026.10.20.2", build_sha256="c"*64)
+    assert post(c, "releases", row).status_code == 200
+    for flavor in ("all", "v34", "v61"):
+        public = c.get("/api/v1/updates/latest?flavor="+flavor, headers=headers(flavor=flavor)).json()
+        assert public["release"] is None and public["client"]["allowed"]
+    admin = c.get("/admin/api/releases").json()
+    assert admin["enforcement_enabled"] is False
+    assert admin["releases"][0]["version"] == row["version"] and len(admin["builds"]) == 2
+    assert post(c, "releases/enforcement", {"enabled":True}).status_code == 200
+    public = c.get("/api/v1/updates/latest").json()
+    assert not public["client"]["allowed"] and public["release"]["url"] == row["url"]
+    assert not c.get("/api/v1/updates/latest", headers=headers()).json()["client"]["allowed"]
+    assert c.get("/api/v1/updates/latest", headers=headers("2026.10.20.2","c")).json()["client"]["allowed"]
+    with auth.store.connect() as db:
+        assert [r["target"] for r in db.execute(
+            "SELECT target FROM admin_audit WHERE action='client_version_check' ORDER BY id")] == ["paused","enabled"]
+
+
+def test_existing_database_migrates_with_enforcement_enabled(env):
+    c, auth, _ = env
+    login(c)
+    post(c, "releases", build())
+    with auth.store.connect(write=True) as db:
+        db.execute("DROP TABLE client_version_policy")
+    auth.store.initialize()
+    assert c.get("/admin/api/releases").json()["enforcement_enabled"] is True
+    assert not c.get("/api/v1/updates/latest").json()["client"]["allowed"]
+
+
+def test_cli_pause_resume_and_status_preserve_database(env, monkeypatch, capsys):
+    from studio_auth import manage
+    c, auth, _ = env
+    login(c)
+    post(c, "releases", build())
+    monkeypatch.setenv("STUDIO_AUTH_DB", str(auth.store.path))
+    for action, enabled in (("pause",False), ("status",False), ("resume",True)):
+        monkeypatch.setattr("sys.argv", ["manage", "client-version-check", action])
+        manage.main()
+        assert c.get("/admin/api/releases").json()["enforcement_enabled"] is enabled
+    assert c.get("/admin/api/releases").json()["releases"][0]["version"] == build()["version"]
+    assert "数据库" in capsys.readouterr().out
+
+
+def test_cli_pause_refuses_wrong_database_path(tmp_path, monkeypatch):
+    import pytest
+    from studio_auth import manage
+    missing = tmp_path/"missing.sqlite3"
+    monkeypatch.setenv("STUDIO_AUTH_DB", str(missing))
+    monkeypatch.setattr("sys.argv", ["manage", "client-version-check", "pause"])
+    with pytest.raises(ValueError, match="数据库不存在"):
+        manage.main()
+    assert not missing.exists()

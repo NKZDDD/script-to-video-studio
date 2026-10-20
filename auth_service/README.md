@@ -1,8 +1,8 @@
-# Respect Studio 登录校验服务端 1.6.0
+# Respect Studio 登录校验服务端 1.6.1
 
 给宝塔 Linux 部署的账号管理服务。后台可按账号分配图片/视频服务商 Key，登录后下发给客户端；未分配的服务商继续使用个人 Key。生成仍由客户端直接调用服务商。服务端接收管理员配置的 Key 和客户端用量记录，不接收项目内容、提示词或素材。
 
-已部署服务器更新 1.6.0，请按 [Studio 客户端更新升级说明](CLIENT-UPDATE-UPGRADE.md) 操作，保留原数据库和运行环境。支持 R2 下载地址，后台分别设置推荐版本和最低可用版本；保留启动检查、提交前检查与构建校验。先上传并验证安装包、发布版本规则，再分发客户端。原有 Key 库与 config.json 导入功能保持兼容；相关配置见 [Key 库与模型对应升级说明](KEY-LIBRARY-UPGRADE.md)。
+已部署服务器更新 1.6.1，请按 [Studio 客户端更新升级说明](CLIENT-UPDATE-UPGRADE.md) 操作，保留原数据库和运行环境。支持 R2 下载地址，后台分别设置推荐版本和最低可用版本；保留启动检查、提交前检查与构建校验。新包尚未分发时，可按 [暂停版本校验说明](VERSION-CHECK-PAUSE.md) 暂停校验，仍要求账号登录和授权，发完新包再恢复。原有 Key 库与 config.json 导入功能保持兼容；相关配置见 [Key 库与模型对应升级说明](KEY-LIBRARY-UPGRADE.md)。
 
 本包是**服务端**，不是 Studio EXE 更新。Studio 源码已接入 `https://login.respect.chat`；使用登录功能需要重新构建客户端，旧 EXE 不会自动改变。客户端行为见 [Studio 登录说明](../docs/studio-login.md)。`examples/studio_auth_client.py` 是独立对接示例。
 
