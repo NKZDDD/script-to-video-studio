@@ -273,7 +273,7 @@ def selfcheck(exe: str) -> bool:
         matched = report.get("resources") == expected_resources
         print(f"  {'✓' if matched else '✗'} 页面、技能、模板资源 {len(expected_resources)} 份与源码逐字节核对")
         ok = ok and matched
-        for url, filename in (("/", "agent.html"), ("/agent.js", "agent.js"), ("/agent.css", "agent.css"), ("/login.js", "login.js"), ("/login.css", "login.css")):
+        for url, filename in (("/", "agent.html"), ("/agent.js", "agent.js"), ("/agent.css", "agent.css"), ("/login.js", "login.js"), ("/login.css", "login.css"), ("/updates.js", "updates.js")):
             with io.open(os.path.join(HERE, "web", filename), encoding="utf-8") as f:
                 matched = get(url).replace("\r\n", "\n") == f.read()
             print(f"  {'✓' if matched else '✗'} 新工作台 HTTP 资源 {filename}")

@@ -2597,6 +2597,9 @@ class Handler(BaseHTTPRequestHandler):
         path, q = unquote(u.path), parse_qs(u.query)
         try:
             self._local_origin()
+            if path == "/api/updates/status":
+                from core.updates import MANAGER, active_jobs
+                return self._json(dict(MANAGER.status(), active_jobs=active_jobs(JOBS)))
             if path == "/api/auth/status":
                 return self._json(self._login().status(self.headers.get("Cookie", "")))
             if path.startswith("/api/") or path.startswith("/file"):
@@ -2624,7 +2627,7 @@ class Handler(BaseHTTPRequestHandler):
                     ctype += "; charset=utf-8"
                 return self._send_file(full, ctype)
             name = "agent.html" if path in ("/", "", "/index.html") else path.lstrip("/")
-            if name not in ("agent.html", "agent.css", "agent.js", "login.css", "login.js", "favicon.ico"):
+            if name not in ("agent.html", "agent.css", "agent.js", "login.css", "login.js", "updates.js", "favicon.ico", "respect-logo.png"):
                 return self._json({"error": "404"}, 404)
             full = os.path.join(WEB_DIR, name)
             if os.path.isfile(full):
@@ -2649,12 +2652,13 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(u.path)
             cookie = self.headers.get("Cookie", "")
             auth_route = path in ("/api/auth/login", "/api/auth/logout", "/api/auth/verify")
-            if not auth_route:
+            update_route = path in ("/api/updates/check", "/api/updates/download", "/api/updates/install", "/api/updates/stop")
+            if not auth_route and not update_route:
                 self._login().require(cookie, force=path in (
-                    "/api/agent/start", "/api/agent/assemble", "/api/agent/models/refresh", "/api/agent/config/refresh"))
+                    "/api/agent/start", "/api/agent/reroll", "/api/agent/assemble", "/api/agent/models/refresh", "/api/agent/config/refresh"))
             if self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json":
                 raise LoginRequired("json_required", "请使用 JSON 请求", 415)
-            if n < 0 or (auth_route and n > 16384):
+            if n < 0 or ((auth_route or update_route) and n > 16384):
                 raise LoginRequired("invalid_request", "登录请求过大或长度不正确", 413)
             if raw is None:
                 raw = self.rfile.read(n) if n else b""
@@ -2669,6 +2673,21 @@ class Handler(BaseHTTPRequestHandler):
                     f"网页端不会出这个问题。") from exc
             if not isinstance(body, dict):
                 raise ValueError("请求体必须是 JSON 对象")
+            if update_route:
+                from core.updates import MANAGER, active_jobs
+                if path.endswith("/check"):
+                    result = MANAGER.check()
+                elif path.endswith("/download"):
+                    result = MANAGER.download()
+                elif path.endswith("/install"):
+                    result = MANAGER.install(JOBS)
+                else:
+                    for row in JOBS.list(active_only=True, limit=None):
+                        job = JOBS.get(row["id"])
+                        if job:
+                            job.cancel()
+                    result = MANAGER.status()
+                return self._json(dict(result, active_jobs=active_jobs(JOBS)))
             if path == "/api/auth/login":
                 result, session = self._login().login(body)
                 return self._json(result, headers={"Set-Cookie": f"{LOGIN_COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict"})

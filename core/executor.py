@@ -301,7 +301,7 @@ class JobManager:
             self.jobs[job.id] = job
             if len(self.jobs) > 80:                   # 只回收已结束的
                 done = [j for j in sorted(self.jobs.values(), key=lambda x: x.started_at)
-                        if _is_final(j)][:20]
+                        if _is_final(j) and j.finished_at is not None][:20]
                 for j in done:
                     self.jobs.pop(j.id, None)
         return job

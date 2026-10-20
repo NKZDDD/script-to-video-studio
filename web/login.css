@@ -20,3 +20,19 @@ body.studio-locked #login-screen {display:grid;place-items:center}
 .studio-login-foot {margin:24px 0 0;border-top:1px solid #edf0f5;padding-top:18px}
 #studio-account {white-space:nowrap;font-size:12px}
 @media(max-width:600px){.studio-login-card{padding:26px}#login-screen{padding:20px 14px}}
+.studio-login-brand img {width:48px;height:48px;object-fit:contain;border-radius:8px}
+.rv-mark img {width:36px;height:36px;object-fit:contain}
+body.studio-updating {overflow:hidden}
+body.studio-updating #studio-agent-prototype,body.studio-updating #login-screen {visibility:hidden;pointer-events:none}
+#update-screen {display:none;position:fixed;inset:0;z-index:11000;overflow:auto;padding:32px 20px;background:#f4f6fb;color:#182940;font-family:system-ui,"Microsoft YaHei",sans-serif;box-sizing:border-box}
+body.studio-updating #update-screen {display:grid;place-items:center}
+#update-screen .studio-login-card {width:min(100%,540px)}
+#update-screen h1 {font-size:24px;line-height:1.5;margin:24px 0 8px}
+#update-screen [data-message] {line-height:1.8;overflow-wrap:anywhere}
+#update-screen [data-notes] {white-space:pre-wrap}
+.update-actions {display:flex;gap:10px;flex-wrap:wrap;margin:24px 0}
+.update-actions button {border:1px solid #d2def0;border-radius:8px;background:#fff;color:#2456aa;padding:10px 14px;cursor:pointer}
+.update-actions button[data-action="download"],.update-actions button[data-action="install"] {background:#2865e8;color:#fff;border-color:#2865e8}
+.update-actions button:disabled {opacity:.5;cursor:wait}
+#update-screen [hidden] {display:none}
+#update-screen progress {width:100%}

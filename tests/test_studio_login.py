@@ -192,3 +192,28 @@ def test_http_host_origin_and_plaintext_form_rejected(http_server):
     with pytest.raises(HTTPError) as exc:
         request("/api/auth/login", {}, **{"Content-Type": "text/plain"})
     assert exc.value.code == 415
+
+
+@pytest.mark.parametrize("path", ["/api/agent/start", "/api/agent/reroll", "/api/agent/assemble"])
+def test_all_new_job_entries_force_online_check(http_server, path):
+    request, _, stub, _ = http_server
+    request("/api/auth/login", {"username": "alice", "password": "test-password"}).close()
+    stub.offline = True
+    with pytest.raises(HTTPError) as exc:
+        request(path, {})
+    assert exc.value.code == 503
+
+
+def test_update_recovery_is_accessible_before_login_but_same_origin(http_server, monkeypatch):
+    from core import updates
+    request, *_ = http_server
+    m = updates.UpdateManager()
+    monkeypatch.setattr(updates, "MANAGER", m)
+    monkeypatch.setattr(m, "check", lambda: dict(m.status(), code="update_required"))
+    with request("/api/updates/check", {}) as r:
+        assert json.load(r)["code"] == "update_required"
+    with request("/api/updates/status") as r:
+        assert not json.load(r)["allowed"]
+    with pytest.raises(HTTPError) as exc:
+        request("/api/updates/install", {}, Origin="https://evil.example")
+    assert exc.value.code == 403

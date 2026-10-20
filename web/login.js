@@ -26,6 +26,7 @@
  async function request(action,body){
    const response=await fetch('/api/auth/'+action,body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
    const data=await response.json();
+   if(response.status===426)window.StudioUpdates.refresh();
    if(!response.ok)throw Error(data.error||'登录服务暂不可用');
    return data;
  }
@@ -33,7 +34,7 @@
    if(checking)return checking;
    const version=revision;
    checking=(async()=>{
-     try{const data=await request(force?'verify':'status',force?{}:undefined);if(version!==revision)return;if(data.authenticated)unlock(data);else lock(data.message||'请登录后继续使用',data.can_retry);}
+     try{const data=await request(force?'verify':'status',force?{}:undefined);if(version!==revision)return;if(data.authenticated)unlock(data);else {lock(data.message||'请登录后继续使用',data.can_retry);if(['update_required','client_unregistered','client_damaged','update_check_failed'].includes(data.code))window.StudioUpdates.refresh();}}
      catch(e){if(version===revision)lock(e.message||'无法连接本机 Studio，请确认程序仍在运行',true);}
      finally{checking=null;}
    })();return checking;
@@ -56,5 +57,5 @@
  window.StudioLogin={ready,isAuthenticated:()=>authenticated,lock};
  setInterval(()=>{if(authenticated)check(true);},60000);
  window.addEventListener('focus',()=>{if(authenticated)check();});
- check();
+ window.StudioUpdates.ready.then(()=>check());
 })();

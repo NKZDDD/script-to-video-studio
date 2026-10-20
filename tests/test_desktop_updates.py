@@ -74,13 +74,33 @@ def test_install_preserves_running_jobs_and_rechecks_file(tmp_path, monkeypatch)
     assert called == [m.installer] and updates.INSTALLING
 
 
+def test_cancelled_jobs_must_drain_before_install_or_close():
+    from core.executor import JobManager
+    jobs = JobManager()
+    first = jobs.create("image", 1, 1)
+    first.cancel()
+    assert jobs.active_count() == 0
+    assert updates.active_jobs(jobs) == 1
+    # History pruning must not lose a cancelled worker which is still running.
+    for _ in range(90):
+        finished = jobs.create("image", 1, 1)
+        finished.status, finished.finished_at = "done", 123
+    assert first.id in jobs.jobs
+    m = updates.UpdateManager()
+    with pytest.raises(ValueError, match="生产任务"):
+        m.install(jobs)
+    first.finished_at = 123
+    assert updates.active_jobs(jobs) == 0
+
+
 def test_no_downgrade_or_wrong_cached_installer_after_check(monkeypatch):
     import json
     row = release()
     row["version"] = "2020.1.1.0"
     class Response:
         status_code = 200
-        raw = io.BytesIO(json.dumps({"release": row}).encode())
+        raw = io.BytesIO(json.dumps({"release": row, "policy_protocol": 1,
+                                     "client": {"allowed": True, "code": "ok"}}).encode())
         def __enter__(self): return self
         def __exit__(self, *a): pass
     monkeypatch.setattr(updates.requests, "get", lambda *a, **k: Response())
@@ -90,3 +110,84 @@ def test_no_downgrade_or_wrong_cached_installer_after_check(monkeypatch):
     assert m.phase == "current" and m.installer is None
     with pytest.raises(ValueError):
         m.download()
+
+
+def response_for(monkeypatch, data):
+    import json
+    class Response:
+        status_code = 200
+        def __init__(self): self.raw = io.BytesIO(json.dumps(data).encode())
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    monkeypatch.setattr(updates.requests, "get", lambda *a, **k: Response())
+
+
+@pytest.mark.parametrize("payload", [
+    {"release": None},
+    {"policy_protocol": 1, "release": None, "client": {}},
+    {"policy_protocol": 1, "release": None, "client": {"allowed": "true"}},
+])
+def test_missing_or_malformed_policy_never_unlocks(monkeypatch, payload):
+    from core.studio_login import LoginRequired
+    response_for(monkeypatch, payload)
+    m = updates.UpdateManager()
+    assert not m.status()["allowed"]
+    with pytest.raises(LoginRequired):
+        m.require_allowed()
+    assert not m.allowed and m.phase == "error"
+
+
+def test_mandatory_version_download_available_without_auth(monkeypatch):
+    from core.studio_login import LoginRequired
+    response_for(monkeypatch, {"release": release(), "policy_protocol": 1,
+        "client": {"allowed": False, "code": "update_required", "message": "must update"}})
+    m = updates.UpdateManager()
+    with pytest.raises(LoginRequired) as exc:
+        m.require_allowed()
+    assert exc.value.status == 426
+    assert m.phase == "available" and m.release and not m.allowed
+
+
+def test_latest_is_also_checked_while_downloading(monkeypatch):
+    response_for(monkeypatch, {"release": release(), "policy_protocol": 1,
+        "client": {"allowed": False, "code": "update_required", "message": "must update"}})
+    m = updates.UpdateManager()
+    m.allowed = True
+    m.phase, m.release = "downloading", release()
+    m.check()
+    assert not m.allowed and m.phase == "downloading"
+
+
+def test_heartbeat_preserves_verified_download(monkeypatch):
+    row = release()
+    response_for(monkeypatch, {"release": row, "policy_protocol": 1, "client": {"allowed": True}})
+    m = updates.UpdateManager()
+    m.phase, m.release, m.installer = "ready", row, Path("checked.exe")
+    m.check()
+    assert m.phase == "ready" and m.installer == Path("checked.exe")
+
+
+def test_auth_request_reuses_identity_from_the_same_online_check(monkeypatch):
+    response_for(monkeypatch, {"release": release(), "policy_protocol": 1, "client": {"allowed": True}})
+    calls = []
+    def identity():
+        calls.append(True)
+        return {"version": updates.VERSION, "flavor": "all", "build_sha256": "f"*64}
+    monkeypatch.setattr(updates, "identity", identity)
+    m = updates.UpdateManager()
+    assert m.require_allowed()["X-Studio-Build"] == "f"*64
+    assert len(calls) == 1
+
+
+def test_corrupt_build_can_repair_same_version_but_not_unlock(monkeypatch):
+    row = release()
+    row["version"] = updates.VERSION
+    response_for(monkeypatch, {"release": row, "policy_protocol": 1, "client": {"allowed": True}})
+    monkeypatch.setattr(updates, "identity", lambda: (_ for _ in ()).throw(ValueError("broken")))
+    m = updates.UpdateManager()
+    assert m.check()["allowed"] is False and m.phase == "available"
+    assert m.code == "client_damaged"
+    started = []
+    monkeypatch.setattr(updates.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: started.append(kw)))
+    m.download()
+    assert started

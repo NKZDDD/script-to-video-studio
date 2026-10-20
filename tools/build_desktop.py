@@ -11,6 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from core.updates import VERSION
+from core.client_build import MANIFEST, fingerprint
 
 
 def main():
@@ -51,8 +52,8 @@ a = Analysis([str(root/'run.py')], pathex=[str(root)], binaries=binaries, datas=
              hiddenimports=hiddenimports,
              excludes={legacy.EXCLUDE + ['PySide2','PySide6','PyQt6','qtpy','django']!r})
 pyz = PYZ(a.pure)
-gui = EXE(pyz, a.scripts, [], exclude_binaries=True, name='Respect-Studio', console=False)
-cli = EXE(pyz, a.scripts, [], exclude_binaries=True, name='Respect-Studio-CLI', console=True)
+gui = EXE(pyz, a.scripts, [], exclude_binaries=True, name='Respect-Studio', console=False, icon=str(root/'web/favicon.ico'))
+cli = EXE(pyz, a.scripts, [], exclude_binaries=True, name='Respect-Studio-CLI', console=True, icon=str(root/'web/favicon.ico'))
 out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
 """
     spec.write_text(text, encoding="utf-8")
@@ -65,6 +66,14 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                         "--distpath", str(build / "dist"), "--workpath", str(build / "work"),
                         str(spec)], cwd=ROOT, env=env, check=True)
     payload = build / "dist/Respect-Studio"
+    files = {}
+    for file in sorted(payload.rglob("*")):
+        if file.is_file() and file.name != MANIFEST:
+            with file.open("rb") as fp:
+                files[file.relative_to(payload).as_posix()] = hashlib.file_digest(fp, "sha256").hexdigest()
+    build_hash = fingerprint(files)
+    (payload / MANIFEST).write_text(json.dumps({"version": VERSION, "files": files,
+        "build_sha256": build_hash}, ensure_ascii=False, indent=2), encoding="utf-8")
     # Runtime and --no-browser tests run through the companion with real stdout.
     if not legacy.selfcheck(str(payload / "Respect-Studio-CLI.exe")):
         raise RuntimeError("Packaged runtime check failed")
@@ -87,13 +96,15 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
     subprocess.run([str(args.makensis), "/INPUTCHARSET", "UTF8",
                     "/DVERSION=" + VERSION, "/DPAYLOAD=" + str(payload),
                     "/DOUTPUT=" + str(output), "/DREMOVE_LIST=" + str(remove), "/DBOOTSTRAPPER=" + str(bootstrapper),
+                    "/DAPP_ICON=" + str(ROOT / "web/favicon.ico"),
                     str(ROOT / "tools/studio-installer.nsi")], env=env, check=True)
     with output.open("rb") as fp:
         checksum = hashlib.file_digest(fp, "sha256").hexdigest()
     release = {"version": VERSION, "flavor": "all",
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
-               "notes": "独立桌面窗口、安装器与软件更新；保留生产配置和项目，移除内置字幕功能。"}
+               "build_sha256": build_hash, "mandatory": True,
+               "notes": "启动与提交任务前检查版本；后台可强制更新；校验发布构建；启用 RespectAI 图标。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))

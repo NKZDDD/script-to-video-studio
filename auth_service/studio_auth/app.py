@@ -159,11 +159,15 @@ def create_app(settings=None, *, clock=None):
 
     @app.post("/api/v1/auth/login")
     def login(body: Login, request: Request):
+        from .releases import require_client
+        require_client(request)
         return request.app.state.auth.login(body.username, body.password, body.device_id,
                                             body.device_name, request.client.host if request.client else "unknown")
 
     @app.post("/api/v1/auth/verify")
     def verify(body: Verify, request: Request, authorization: str = Header(default="", max_length=256)):
+        from .releases import require_client
+        require_client(request)
         parts = authorization.split()
         if len(parts) != 2 or parts[0].lower() != "bearer" or not 40 <= len(parts[1]) <= 128:
             raise AuthError(401, "invalid_session", "请先登录")
@@ -174,6 +178,8 @@ def create_app(settings=None, *, clock=None):
 
     @app.post("/api/v1/auth/refresh")
     def refresh(body: Refresh, request: Request):
+        from .releases import require_client
+        require_client(request)
         return request.app.state.auth.refresh(body.refresh_token, body.device_id,
                                               request.client.host if request.client else "unknown")
 

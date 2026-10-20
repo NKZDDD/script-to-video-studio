@@ -16,6 +16,8 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "Respect Studio"
 BrandingText "Respect Studio"
 !define MUI_ABORTWARNING
+!define MUI_ICON "${APP_ICON}"
+!define MUI_UNICON "${APP_ICON}"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\Respect-Studio.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "启动 Respect Studio"
 !insertmacro MUI_PAGE_WELCOME

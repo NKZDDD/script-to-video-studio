@@ -172,3 +172,20 @@ else:
 - `POST /admin/api/keys/import/commit`：`{content:"同一文件文本",selected:[0,1]}`，重新解析校验、按索引选取，事务新建，返回 `added`、`skipped`、`key_ids`；不覆盖记录或分配账号。
 - 仅以上两个路径的请求体上限为 2 MiB（容纳 JSON 转义），`content` 最多 524288 字符；页面文件上限 512 KB。其他接口保持 16 KiB。一次最多 256 条。
 - 输入必须为含 `providers` 对象的 Studio 配置，重复 JSON 字段拒绝。只读取支持的凭据字段及 HTTPS 地址、显式模型绑定；错误响应不包含原始值。重复导入不启用已停用 Key。
+
+
+## 客户端版本策略（1.5.0）
+
+`GET /api/v1/updates/latest?flavor=all` 返回 `release`、`policy_protocol:1`、`client:{allowed,code,message}`。客户端应发送以下 ASCII 请求头，登录、verify、refresh 也必须发送：
+
+```
+X-Studio-Version: 2026.10.20.1
+X-Studio-Flavor: all
+X-Studio-Build: <release.json 中的 build_sha256>
+```
+
+后台发布接口 `/admin/api/releases` 在原字段基础上增加 `build_sha256`（构建清单的 SHA256）和 `mandatory`（布尔）。返回的发布信息另含服务端维护的 `minimum_version`、`enforce_build`，这两个字段不接受客户端修改。同版本校验码不可替换；强制升级提高最低版本，普通发布不会降低。安装包须先上传到本站 HTTPS /downloads/。
+
+一旦任一体系登记构建，缺少/伪造体系、未登记版本、版本低于最低值、指纹不符的 login/verify/refresh 返回 HTTP 426，错误码 `update_required` 或 `client_unregistered`。已登录会话也必须通过验证才能取得 provider_config。logout 和 usage 仍允许已授权会话清理及补传记录；不会借此下发 Key。为便于服务端先升级，尚未登记任何构建时兼容旧客户端；新版带版本头的客户端必须完成登记才放行。
+
+版本和指纹是公开的客户端声明，不能提供防破解或设备可信证明；详见 CLIENT-UPDATE-UPGRADE.md。

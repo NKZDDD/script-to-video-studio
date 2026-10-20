@@ -27,7 +27,7 @@ def resource_inventory() -> dict:
     """Hashes from the actual source/bundle, never from the user's data directory."""
     from . import paths
     base = Path(paths.BUNDLE_DIR)
-    files = [base / "web" / name for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css")]
+    files = [base / "web" / name for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css", "updates.js", "respect-logo.png", "favicon.ico")]
     files += list((base / "prompts").glob("*.md"))
     files += [p for p in (base / "skills" / "production-skill").rglob("*")
               if p.is_file() and "__pycache__" not in p.parts]
@@ -135,12 +135,16 @@ def _check_ffmpeg() -> str:
 
 def _check_agent_assets() -> str:
     from . import paths, agent_projects
-    for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css"):
+    for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css", "updates.js", "respect-logo.png", "favicon.ico"):
         if not os.path.isfile(paths.res("web", name)):
             raise FileNotFoundError(f"Agent 页面资源缺失：{name}")
     manifest = agent_projects.file_manifest(agent_projects.skill_source())
     if len(manifest) < 51 or "SKILL.md" not in manifest:
         raise FileNotFoundError("完整生产技能包缺失")
+    if paths.FROZEN:
+        from .client_build import MANIFEST, identity
+        if Path(paths.PROGRAM_DIR, MANIFEST).exists():
+            identity()
     return f"Agent 页面资源齐全；完整技能包 {len(manifest)} 文件"
 
 

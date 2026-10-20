@@ -86,7 +86,7 @@ def run(server, url, jobs):
 
     def closing():
         with updates.LIFECYCLE:
-            if jobs.active_count():
+            if updates.active_jobs(jobs):
                 show_error("仍有任务运行。请在工作台停止批次或等待完成，再关闭 Studio。")
                 return False
             updates.INSTALLING = True  # prevent a concurrent start after the close check
@@ -103,6 +103,7 @@ def run(server, url, jobs):
     thread.start()
     try:
         webview.start(gui="edgechromium" if os.name == "nt" else None,
+                      icon=paths.res("web", "favicon.ico"),
                       private_mode=False, storage_path=str(Path(paths.data_dir()) / "webview"),
                       localization={"global.quit": "退出", "global.cancel": "取消",
                                     "global.ok": "确定", "global.saveFile": "保存文件"})

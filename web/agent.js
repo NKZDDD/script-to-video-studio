@@ -19,7 +19,7 @@ const fileLink = (rel,label) => `<a href="${esc(fileURL(rel))}" target="_blank" 
 async function api(path, body) {
  const response = await fetch('/api/agent/'+path, body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  const data = await response.json();
- if(data.login_required){window.StudioLogin.lock(data.error||'请重新登录',response.status===503);throw Error(data.error||'请重新登录');}
+ if(data.login_required){window.StudioLogin.lock(data.error||'请重新登录',response.status===503);if(response.status===426)window.StudioUpdates.refresh();throw Error(data.error||'请重新登录');}
  if(!response.ok || data.error) throw Error(data.error||`请求失败 ${response.status}`);
  return data;
 }

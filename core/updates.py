@@ -13,11 +13,20 @@ import requests
 
 from . import build_info, paths
 from .studio_login import AUTH_URL
+from .client_build import VERSION, identity, headers
 
-VERSION = "2026.10.20.0"
 LIFECYCLE = threading.RLock()
 INSTALLING = False
 MAX_INSTALLER = 2 * 1024**3
+
+
+def active_jobs(jobs):
+    # cancel() changes the status immediately, but provider calls may still be
+    # returning their task IDs. Wait for worker completion before exiting.
+    if hasattr(jobs, "jobs"):
+        with jobs._lock:
+            return sum(job.finished_at is None for job in jobs.jobs.values())
+    return jobs.active_count()
 
 
 def version(value):
@@ -52,21 +61,41 @@ class UpdateManager:
         self.phase = "idle"
         self.message = "点击检查更新"
         self.received = 0
+        self.allowed = False
+        self.code = "checking_version"
+        self.gate_message = "正在确认应用版本，请稍候"
+        self.check_lock = threading.Lock()
+        self.verified_headers = {}
 
     def status(self):
         with self.lock:
             return {"current": VERSION, "release": self.release, "phase": self.phase,
                     "message": self.message, "received": self.received,
+                    "allowed": self.allowed, "code": self.code, "gate_message": self.gate_message,
                     "desktop": bool(getattr(self, "install_callback", None))}
 
     def check(self):
+        with self.check_lock:
+            return self._check()
+
+    def _check(self):
         with self.lock:
-            if self.phase in ("checking", "downloading", "installing"):
+            if self.phase == "installing":
                 return self.status()
-            self.phase, self.message = "checking", "正在检查版本"
+            downloading = self.phase == "downloading"
+            was_ready = self.phase == "ready"
+            if not downloading:
+                self.phase, self.message = "checking", "正在检查版本"
+        identity_error = None
         try:
+            try:
+                info = identity()
+            except ValueError as exc:
+                identity_error = str(exc)
+                info = {"version": VERSION, "flavor": build_info.only() or "all", "build_sha256": "damaged"}
             with requests.get(AUTH_URL + "/api/v1/updates/latest",
                               params={"flavor": build_info.only() or "all"},
+                              headers=headers(info),
                               timeout=(10, 20), allow_redirects=False, stream=True) as response:
                 if response.status_code == 404:
                     raise ValueError("服务端尚未部署更新接口，请先升级登录服务")
@@ -78,24 +107,49 @@ class UpdateManager:
                     raise ValueError("版本信息过大")
                 import json
                 data = json.loads(raw)
+            if data.get("policy_protocol") != 1 or not isinstance(data.get("client"), dict):
+                raise ValueError("登录服务未支持强制更新校验，请管理员先升级服务端至 1.5.0 并发布版本")
+            client = data["client"]
+            if type(client.get("allowed")) is not bool:
+                raise ValueError("服务端未确认客户端版本")
             release = validate_release(data["release"]) if data.get("release") else None
             with self.lock:
-                # Never install a stale cached artifact after a new check.
-                self.release, self.installer, self.received = release, None, 0
-                available = release and version(release["version"]) > version(VERSION)
-                self.phase = "available" if available else "current"
-                self.message = "有新版本可下载" if available else "当前已是最新发布版本"
+                keep_ready = was_ready and self.release == release and self.installer
+                if not downloading and not keep_ready:
+                    self.release, self.installer, self.received = release, None, 0
+                self.allowed = client["allowed"] and not identity_error
+                self.verified_headers = headers(info) if self.allowed else {}
+                self.code = "client_damaged" if identity_error else str(client.get("code", "version_unconfirmed"))
+                self.gate_message = identity_error or str(client.get("message", "版本未确认"))
+                available = release and (version(release["version"]) > version(VERSION) or
+                                         (not self.allowed and version(release["version"]) == version(VERSION)))
+                if not downloading:
+                    self.phase = "ready" if keep_ready else ("available" if available else "current")
+                    self.message = ("安装包已校验，可安装" if keep_ready else
+                                    ("有新版本可下载" if available else "当前已是最新发布版本")) if self.allowed else self.gate_message
         except Exception as exc:
             with self.lock:
-                self.phase = "error"
-                self.message = str(exc) if isinstance(exc, ValueError) else "检查更新失败；请确认登录服务已升级、网络正常后重试"
+                message = str(exc) if isinstance(exc, ValueError) else "检查更新失败；请确认登录服务已升级、网络正常后重试"
+                if not downloading:
+                    self.phase, self.message = "error", message
+                self.allowed, self.code, self.gate_message = False, "update_check_failed", message
+                self.verified_headers = {}
         return self.status()
+
+    def require_allowed(self):
+        from .studio_login import LoginRequired
+        self.check()
+        with self.lock:
+            if not self.allowed:
+                raise LoginRequired(self.code, self.gate_message, 426)
+            return dict(self.verified_headers)
 
     def download(self):
         with self.lock:
             if self.phase in ("checking", "downloading", "installing"):
                 return self.status()
-            if not self.release or version(self.release["version"]) <= version(VERSION):
+            if not self.release or version(self.release["version"]) < version(VERSION) or (
+                    self.allowed and version(self.release["version"]) == version(VERSION)):
                 raise ValueError("请先检查新版本")
             self.phase, self.message, self.received = "downloading", "正在下载安装包", 0
             self.installer = None
@@ -144,7 +198,7 @@ class UpdateManager:
     def install(self, jobs):
         global INSTALLING
         with LIFECYCLE, self.lock:
-            if jobs.active_count():
+            if active_jobs(jobs):
                 raise ValueError("仍有生产任务运行，请等批次结束或先停止批次，再安装更新")
             if not getattr(self, "install_callback", None):
                 raise ValueError("当前为浏览器模式；请从安装版 Studio 窗口中安装更新")

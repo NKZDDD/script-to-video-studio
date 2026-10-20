@@ -8,6 +8,10 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS client_releases (
     flavor TEXT PRIMARY KEY, payload TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS client_builds (
+    flavor TEXT NOT NULL, version TEXT NOT NULL, build_sha256 TEXT NOT NULL,
+    PRIMARY KEY(flavor,version)
+);
 CREATE TABLE IF NOT EXISTS key_library (
     id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL,
     config TEXT NOT NULL, revision TEXT NOT NULL, enabled INTEGER NOT NULL,
