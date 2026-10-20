@@ -216,3 +216,19 @@ def test_server_can_pause_version_gate_without_changing_the_client(monkeypatch):
     m = updates.UpdateManager()
     assert m.require_allowed()["X-Studio-Version"] == updates.VERSION
     assert m.allowed and m.release is None and m.phase == "current"
+
+
+@pytest.mark.parametrize("public_version", [None, "2026.10.20.1"])
+def test_registered_test_build_can_run_without_being_recommended(monkeypatch, public_version):
+    row = release() if public_version else None
+    if row:
+        row["version"] = public_version
+    response_for(monkeypatch, {"release":row, "policy_protocol":1,
+        "enforcement_enabled":True, "client":{"allowed":True, "code":"ok"}})
+    info = {"version":updates.VERSION, "flavor":"all", "build_sha256":"f"*64}
+    monkeypatch.setattr(updates, "identity", lambda: info)
+    m = updates.UpdateManager()
+    assert m.require_allowed()["X-Studio-Build"] == info["build_sha256"]
+    assert m.allowed and m.phase == "current"
+    with pytest.raises(ValueError):
+        m.download()

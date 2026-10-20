@@ -1,10 +1,10 @@
 # 新包尚未分发：临时暂停版本校验
 
-需要服务端 **1.6.1**，客户端不用重新打包。本次默认仍开启校验，由管理员明确暂停。
+需要服务端 **1.6.1 或更新版本**，客户端不用重新打包。默认仍开启校验，由管理员明确暂停；后续升级保留已选状态。
 
 ## 现在先解除旧包阻断
 
-把服务端 1.6.1 ZIP 里 `respect-studio-auth/` 的内容合并覆盖到 `/www/wwwroot/respect-studio-auth/`，保留原 `data/`、`.venv/`、`.env`、`deploy/runtime.env`。
+把本次服务端 ZIP 里 `respect-studio-auth/` 的内容合并覆盖到 `/www/wwwroot/respect-studio-auth/`，保留原 `data/`、`.venv/`、`.env`、`deploy/runtime.env`。已运行 1.6.1 或更新版本时无需重复覆盖，可直接执行暂停命令。
 
 在宝塔终端复制下面整段（不含 `[root@...]` 提示符）：
 
@@ -22,7 +22,7 @@ systemctl restart respect-studio-auth
 curl --retry 5 --retry-connrefused --retry-delay 1 -fsS http://127.0.0.1:8781/health
 ```
 
-应返回版本 `1.6.1`。再确认暂停状态：
+应返回本次部署的版本（至少 `1.6.1`）。再确认暂停状态：
 
 ```bash
 .venv/bin/python -m studio_auth.manage --db /www/wwwroot/respect-studio-auth/data/auth.sqlite3 client-version-check status
@@ -44,7 +44,7 @@ cd /www/wwwroot/respect-studio-auth &&
 .venv/bin/python -m studio_auth.manage --db /www/wwwroot/respect-studio-auth/data/auth.sqlite3 client-version-check resume
 ```
 
-已经运行 1.6.1 时，切换开关无需重启。暂停会持久保存；重启、上传安装包、发布新推荐版本都不会自动恢复。
+已经运行 1.6.1 或更新版本时，切换开关无需重启。暂停会持久保存；重启、上传安装包、登记测试构建、发布新推荐版本都不会自动恢复。
 
 ## 暂停的范围
 

@@ -241,3 +241,98 @@ def test_cli_pause_refuses_wrong_database_path(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="数据库不存在"):
         manage.main()
     assert not missing.exists()
+
+
+def registration(version="2026.10.20.3", digest="d", flavor="all"):
+    return dict(version=version, build_sha256=digest*64, flavor=flavor)
+
+
+def test_build_registration_requires_admin_csrf_and_valid_identity(env):
+    c, _, _ = env
+    assert post(c, "releases/builds", registration(), csrf="bad").status_code == 401
+    login(c)
+    assert post(c, "releases/builds", registration(), csrf="bad").status_code == 403
+    for changes in ({"version":"latest"}, {"flavor":"unknown"}, {"build_sha256":""},
+                    {"build_sha256":"source"}, {"minimum_version":"0.0.0.0"}, {"mandatory":True}):
+        assert post(c, "releases/builds", {**registration(), **changes}).status_code == 422
+    assert c.get("/admin/api/releases").json()["builds"] == []
+
+
+def test_test_registration_preserves_public_release_floor_and_is_persistent(env):
+    c, auth, _ = env
+    login(c)
+    assert post(c, "releases", build()).status_code == 200
+    public_before = c.get("/api/v1/updates/latest", headers=headers()).json()
+    for _ in range(2):  # Re-importing the same build is idempotent.
+        assert post(c, "releases/builds", registration()).status_code == 200
+    auth.store.initialize()
+    assert c.get("/api/v1/updates/latest", headers=headers()).json() == public_before
+    test = c.get("/api/v1/updates/latest", headers=headers("2026.10.20.3", "d")).json()
+    assert test["client"]["allowed"] and test["release"] == public_before["release"]
+    assert len(c.get("/admin/api/releases").json()["builds"]) == 2
+    for h in (headers("2026.10.20.3", "e"), headers("2026.10.20.4", "d"),
+              headers("2026.10.20.3", "d", "v34")):
+        assert not c.get("/api/v1/updates/latest", headers=h).json()["client"]["allowed"]
+    with auth.store.connect() as db:
+        assert db.execute("SELECT count(*) FROM admin_audit WHERE action='register_client_build' "
+                          "AND target='all:2026.10.20.3'").fetchone()[0] == 2
+
+
+def test_test_build_can_authenticate_before_any_publication_without_affecting_legacy(env):
+    from test_admin import PASSWORD
+    c, auth, _ = env
+    login(c)
+    legacy = c.get("/api/v1/updates/latest").json()
+    for flavor in ("all", "v34", "v61"):
+        assert post(c, "releases/builds", registration(flavor=flavor)).status_code == 200
+        h = headers("2026.10.20.3", "d", flavor)
+        data = c.get("/api/v1/updates/latest?flavor="+flavor, headers=h).json()
+        assert data["release"] is None and data["client"]["allowed"]
+        request = dict(username="customer", password=PASSWORD, device_id="test-device-123456")
+        assert c.post("/api/v1/auth/login", headers=h, json={**request,"password":"incorrect"}).status_code == 401
+        response = c.post("/api/v1/auth/login", headers=h, json=request)
+        assert response.status_code == 200
+        tokens = response.json()
+        assert c.post("/api/v1/auth/verify", headers={**h,"Authorization":"Bearer "+tokens["access_token"]},
+                      json={"device_id":request["device_id"]}).status_code == 200
+        assert c.post("/api/v1/auth/refresh", headers=h, json={"refresh_token":tokens["refresh_token"],
+                      "device_id":request["device_id"]}).status_code == 200
+    assert c.get("/api/v1/updates/latest").json() == legacy
+    assert c.get("/admin/api/releases").json()["releases"] == []
+    auth.manage_user("customer", enabled=False)
+    assert c.post("/api/v1/auth/login", headers=h, json=request).status_code == 403
+
+
+def test_registration_does_not_bypass_floor_or_change_paused_state(env):
+    c, _, _ = env
+    login(c)
+    assert post(c, "releases", build()).status_code == 200
+    assert post(c, "releases/builds", registration("2026.10.19.0")).status_code == 200
+    old = c.get("/api/v1/updates/latest", headers=headers("2026.10.19.0", "d")).json()
+    assert not old["client"]["allowed"] and old["client"]["code"] == "update_required"
+    assert post(c, "releases/enforcement", {"enabled":False}).status_code == 200
+    before = c.get("/api/v1/updates/latest").json()
+    assert post(c, "releases/builds", registration()).status_code == 200
+    assert c.get("/api/v1/updates/latest").json() == before
+    assert c.get("/admin/api/releases").json()["enforcement_enabled"] is False
+    assert post(c, "releases/enforcement", {"enabled":True}).status_code == 200
+    test = c.get("/api/v1/updates/latest", headers=headers("2026.10.20.3", "d")).json()
+    assert test["client"]["allowed"] and test["release"]["version"] == "2026.10.20.1"
+
+
+def test_registered_test_can_be_published_but_never_replaced_by_another_build(env):
+    c, _, _ = env
+    login(c)
+    assert post(c, "releases", build()).status_code == 200
+    assert post(c, "releases/builds", registration()).status_code == 200
+    before = c.get("/admin/api/releases").json()
+    for path, row in (("releases/builds", registration(digest="e")),
+                      ("releases", build("2026.10.20.3", "e", False)),
+                      ("releases/builds", registration("2026.10.20.1", "e"))):
+        response = post(c, path, row)
+        assert response.status_code == 400 and response.json()["error"]["code"] == "build_conflict"
+        assert c.get("/admin/api/releases").json() == before
+    assert post(c, "releases", build("2026.10.20.3", "d", False)).status_code == 200
+    data = c.get("/api/v1/updates/latest", headers=headers()).json()
+    assert data["client"]["allowed"] and data["release"]["version"] == "2026.10.20.3"
+    assert data["release"]["minimum_version"] == "2026.10.20.1"

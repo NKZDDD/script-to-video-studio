@@ -192,7 +192,7 @@ X-Studio-Build: <release.json 中的 build_sha256>
 
 安装包 URL 支持公网 HTTPS 的 R2 公开域名、自定义域名、原本站 `/downloads/`，仅接受直接返回 EXE 的地址，不允许临时签名查询串、明文 HTTP、内网 IP、非标准端口、R2 S3 API 域名或路径穿越。认证服务不下载文件，不需要 R2 Key；发布端上传工具核对完整公网下载 SHA256，客户端仍独立检查字节数和 SHA256、不跟随重定向、不向下载域名发送登录凭据。旧安装版 2026.10.20.1 及以前无法直接接收 R2 地址，切换时需手动安装一次新版。
 
-一旦任一体系登记构建，缺少/伪造体系、未登记版本、版本低于最低值、指纹不符的 login/verify/refresh 返回 HTTP 426，错误码 `update_required` 或 `client_unregistered`。已登录会话也必须通过验证才能取得 provider_config。logout 和 usage 仍允许已授权会话清理及补传记录；不会借此下发 Key。为便于服务端先升级，尚未登记任何构建时兼容旧客户端；新版带版本头的客户端必须完成登记才放行。
+一旦任一体系正式发布含构建校验码的版本，缺少/伪造体系、未登记版本、版本低于最低值、指纹不符的 login/verify/refresh 返回 HTTP 426，错误码 `update_required` 或 `client_unregistered`。已登录会话也必须通过验证才能取得 provider_config。logout 和 usage 仍允许已授权会话清理及补传记录；不会借此下发 Key。为便于服务端先升级，尚未正式启用任何体系的构建校验时兼容旧客户端；新版带版本头的客户端必须完成登记才放行。单独登记测试构建不会开启对旧客户端的拦截。
 
 版本和指纹是公开的客户端声明，不能提供防破解或设备可信证明；详见 CLIENT-UPDATE-UPGRADE.md。
 
@@ -205,3 +205,11 @@ X-Studio-Build: <release.json 中的 build_sha256>
 暂停时公开更新接口返回 `enforcement_enabled:false`、`release:null`、`policy_protocol:1` 和 `client:{allowed:true,code:"version_check_paused",...}`。暂时隐藏推荐是为了让只支持同域下载的旧安装版不被 R2 URL 解析挡住；管理员仍可查看和发布版本。login/verify/refresh 不再检查版本和构建，但密码、会话、停用、到期、设备限制和 Key 分配检查保持正常。不会因公开接口的 `allowed:true` 就取得登录凭据或服务商 Key。
 
 客户端仍需连接登录服务，已安装程序的本地文件完整性检查保持原样；这不是离线模式。
+
+## 1.6.2 单独登记测试构建
+
+管理员 `POST /admin/api/releases/builds` 接收且仅接收 `{"flavor":"all","version":"2026.10.20.3","build_sha256":"64位小写十六进制校验码"}`，需管理员会话、同源和 CSRF 校验。返回 `{"ok":true}`，写入 `register_client_build` 审计。校验码必须取自实际打包清单，不能只填写一个任意版本号。
+
+只写 `client_builds`，不修改推荐版本、下载地址、最低版本或暂停状态，不向公开接口提供测试包下载信息。重复登记同一版本和校验码成功；同体系同版本的校验码不能替换，正式发布也遵守此限制。管理员列表 `builds` 包含全部已登记构建，包括历史正式版和测试版；列表本身不代表更新推荐。
+
+即使尚未发布任何推荐，已登记测试构建也能通过 updates/latest、login、verify、refresh 的版本检查，随后仍执行账号授权。已有最低版本继续生效，低于门槛的测试包仍被拒绝；其他未登记版本和不匹配的体系/校验码仍被拒绝。全局暂停时保持原暂停行为，恢复后测试登记仍有效。测试通过后，用同一清单向原 `POST /admin/api/releases` 正式发布才会改变更新推荐。

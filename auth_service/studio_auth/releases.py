@@ -46,6 +46,23 @@ class Enforcement(BaseModel):
     enabled: bool
 
 
+class BuildRegistration(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    version: str = Field(pattern=r"^\d{1,5}(\.\d{1,5}){3}$")
+    flavor: str = Field(pattern=r"^(all|v34|v61)$")
+    build_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+def register_build(db, flavor, version, digest):
+    known = db.execute("SELECT build_sha256 FROM client_builds WHERE flavor=? AND version=?",
+                       (flavor, version)).fetchone()
+    if known and known["build_sha256"] != digest:
+        raise AuthError(400, "build_conflict", "同一版本不能替换构建校验码，请增加版本号重新打包")
+    if digest:
+        db.execute("INSERT OR IGNORE INTO client_builds(flavor,version,build_sha256) VALUES(?,?,?)",
+                   (flavor, version, digest))
+
+
 @router.get("/admin/releases.js")
 def script():
     return FileResponse(WEB / "releases.js", media_type="text/javascript")
@@ -70,6 +87,15 @@ def enforcement(body: Enforcement, request: Request):
     return {"ok": True, "enforcement_enabled": body.enabled}
 
 
+@router.post("/admin/api/releases/builds")
+def register(body: BuildRegistration, request: Request):
+    actor, _ = current(request, csrf=True)
+    with request.app.state.auth.store.connect(write=True) as db:
+        register_build(db, body.flavor, body.version, body.build_sha256)
+    record(request, actor, "register_client_build", body.flavor + ":" + body.version)
+    return {"ok": True}
+
+
 @router.post("/admin/api/releases")
 def publish(body: Release, request: Request):
     actor, _ = current(request, csrf=True)
@@ -90,13 +116,7 @@ def publish(body: Release, request: Request):
             raise AuthError(400, "minimum_regression", "不能降低已生效的最低版本；修复后请发布更高版本")
         if (minimum != "0.0.0.0" or body.mandatory or previous.get("enforce_build")) and not body.build_sha256:
             raise AuthError(400, "build_required", "请导入新版打包生成的 release.json，缺少构建校验码")
-        known = db.execute("SELECT build_sha256 FROM client_builds WHERE flavor=? AND version=?",
-                           (body.flavor, body.version)).fetchone()
-        if known and known["build_sha256"] != body.build_sha256:
-            raise AuthError(400, "build_conflict", "同一版本不能替换构建校验码，请增加版本号重新打包")
-        if body.build_sha256:
-            db.execute("INSERT OR IGNORE INTO client_builds VALUES(?,?,?)",
-                       (body.flavor, body.version, body.build_sha256))
+        register_build(db, body.flavor, body.version, body.build_sha256)
         if minimum != "0.0.0.0" and not db.execute(
                 "SELECT 1 FROM client_builds WHERE flavor=? AND version=?",
                 (body.flavor, minimum)).fetchone():
@@ -143,20 +163,21 @@ def client_status(request, flavor=None, *, enforced=None):
         if flavor not in ("all", "v34", "v61") or request.headers.get("x-studio-flavor") != flavor:
             return {"allowed": not any_enforced and not v, "code": "client_unregistered",
                     "message": "客户端缺少版本登记，请安装最新 Studio"}
-        if not current_release or not current_release.get("enforce_build"):
-            # Once any distribution is enforced, an unknown flavor cannot bypass it.
+        if not v and (not current_release or not current_release.get("enforce_build")):
+            # Test registration must not start enforcement for legacy clients.
+            # Once a public distribution is enforced, unknown flavors stay blocked.
             return {"allowed": not any_enforced and not v, "code": "client_unregistered",
                     "message": "此客户端体系尚未登记，请管理员发布对应安装包"}
         if not re.fullmatch(r"\d{1,5}(?:\.\d{1,5}){3}", v):
             return {"allowed": False, "code": "client_unregistered", "message": "客户端版本无效，请安装最新 Studio"}
-        minimum = current_release.get("minimum_version", "0.0.0.0")
+        minimum = (current_release or {}).get("minimum_version", "0.0.0.0")
         if tuple(map(int, v.split("."))) < tuple(map(int, minimum.split("."))):
             return {"allowed": False, "code": "update_required",
                     "message": f"当前版本已停用，必须升级至 {minimum} 或更高版本"}
         known = db.execute("SELECT build_sha256 FROM client_builds WHERE flavor=? AND version=?", (flavor, v)).fetchone()
         if not known or known["build_sha256"] != digest:
             return {"allowed": False, "code": "client_unregistered",
-                    "message": "客户端版本或发布校验码未通过，请安装后台发布的正式版本"}
+                    "message": "客户端版本或构建校验码未通过，请管理员登记此构建或安装已发布版本"}
     return {"allowed": True, "code": "ok", "message": "客户端版本和发布校验码已确认"}
 
 
