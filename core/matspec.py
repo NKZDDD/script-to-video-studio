@@ -69,6 +69,8 @@ MATERIAL_FIELDS = {
         ("reference_images", False, "有序参考图，见下面「参考图怎么写」"),
         ("handoff_mode", False, '独立 C 专用：写 `"independent_c"`，不填 region/board/parent，'
          '落入场景状态图。原 ABC 流程不填。AB 整板真实引用它，视频以 IN_C 引用它；详见独立 C 扩展。'),
+        ("handoff_type", False, '兼容旧材料：未填 handoff_mode 时，`"scene_c"` / `"independent_c"` 按独立 C 识别。'
+         '新材料优先使用 handoff_mode；其他值不会被当成独立 C。'),
         # ---- 下面三个只有 ABC 交接板用（电影级 v7.0）----
         ("region", False,
          "**只有交接板的区域图写它**：`A` / `B` / `C`。写了就落 "
@@ -355,6 +357,7 @@ _TYPES = {
     "storyboard_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
     "region": {"type": "string", "enum": ["A", "B", "C"]},
     "handoff_mode": {"type": "string", "enum": [independent_c.MODE]},
+    "handoff_type": {"type": "string"},
     "board": {"type": "string"}, "boundary": {"type": "string"},
 }
 

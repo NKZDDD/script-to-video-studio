@@ -80,6 +80,7 @@ def schema_document() -> dict:
                            "handoff_refs": {"type": "array", "items": ref},
                            "episode": {"type": "string"}, "board": {"type": "string"},
                            "handoff_mode": {"enum": [independent_c.MODE]},
+                           "handoff_type": {"type": "string", "description": "兼容 scene_c / independent_c 独立 C 标记；优先使用 handoff_mode"},
                            "region": {"enum": ["A", "B", "C"]}}}
     schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": SCHEMA,
             "type": "object", "required": ["schema", "project_id", "revision", "resources"] + [k + "_tasks" for k in KINDS],

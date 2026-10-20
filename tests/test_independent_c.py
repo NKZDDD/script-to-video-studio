@@ -73,6 +73,64 @@ def test_example_import_publish_dependencies_and_contract(pj):
         assert RULES in archive.read('00_项目说明/production-contract.md').decode('utf8')
 
 
+@pytest.mark.parametrize('alias', ['scene_c', 'independent_c'])
+@pytest.mark.parametrize('system', ['v34', 'v61'])
+def test_jsonl_alias_routes_c_and_preserves_board_guard(alias, system):
+    data = rows()
+    data[1].pop('handoff_mode')
+    data[1]['handoff_type'] = alias
+    units = parsed(data)
+    assert M.audit(units) == []
+    built = M.build(units, system=system)['tasks']
+    assert built['scstate_tasks'][0]['handoff_mode'] == MODE
+    assert built['scstate_tasks'][0]['key'] == data[1]['key']
+    assert len(built['board_tasks']) == 1
+    data[-1]['handoff_refs'][1]['key'] = data[2]['key']
+    assert 'VIDEO_USES_BOARD' in {i['code'] for i in M.audit(parsed(data))}
+
+
+@pytest.mark.parametrize('alias', ['scene_c', 'independent_c'])
+@pytest.mark.parametrize('case,code', [
+    ('valid', None), ('role', 'INDEPENDENT_C_ROLE'),
+    ('region', 'INDEPENDENT_C_SHAPE'), ('source', 'INDEPENDENT_C_SOURCE'),
+    ('mode', 'HANDOFF_MODE_UNKNOWN'),
+])
+def test_alias_keeps_jsonl_and_release_validation(pj, alias, case, code):
+    data = rows()
+    data[1].pop('handoff_mode')
+    data[1]['handoff_type'] = alias
+    p = plan(pj)
+    c = p['scstate_tasks'][0]
+    c.pop('handoff_mode')
+    c['handoff_type'] = alias
+    if case == 'role':
+        data[-1]['handoff_refs'][1]['role'] = 'OUT_A'
+        p['video_tasks'][1]['handoff_refs'][1]['role'] = 'OUT_A'
+    elif case == 'region':
+        data[1]['region'] = c['region'] = 'C'
+    elif case == 'source':
+        data[2]['reference_images'] = []
+        p['board_tasks'][0]['reference_images'] = []
+    elif case == 'mode':
+        data[1]['handoff_mode'] = c['handoff_mode'] = 'misspelled'
+    publish(pj, p)
+    if code:
+        assert code in {i['code'] for i in M.audit(parsed(data))}
+        with pytest.raises(ValueError):
+            A.validate_release(pj, 'r0001')
+    else:
+        assert M.audit(parsed(data)) == []
+        A.validate_release(pj, 'r0001')
+
+
+@pytest.mark.parametrize('alias', ['ab_board', 'ab_panel', 'scene_c_typo'])
+def test_other_handoff_types_do_not_bypass_board_guard(alias):
+    data = rows()
+    data[1].pop('handoff_mode')
+    data[1]['handoff_type'] = alias
+    assert 'VIDEO_USES_BOARD' in {i['code'] for i in M.audit(parsed(data))}
+
+
 @pytest.mark.parametrize('case,code', [('region','INDEPENDENT_C_SHAPE'),('role','INDEPENDENT_C_ROLE'),
                                     ('source','INDEPENDENT_C_SOURCE'),('parent','AB_REGION_SOURCE'),
                                     ('mode','HANDOFF_MODE_UNKNOWN'),('duplicate','INDEPENDENT_C_DUP')])

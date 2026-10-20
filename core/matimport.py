@@ -374,7 +374,7 @@ def _from_json(no: int, r: dict) -> dict:
         "boundary": str(r.get("boundary") or "").strip(),
         "region": str(r.get("region") or "").strip().upper(),
         "board": str(r.get("board") or r.get("parent") or "").strip(),
-        "handoff_mode": str(r.get("handoff_mode") or "").strip(),
+        "handoff_mode": independent_c.mode(r),
     }
 
 

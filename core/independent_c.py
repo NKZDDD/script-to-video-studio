@@ -1,13 +1,14 @@
 """Explicit independent-C handoff extension shared by both material readers."""
 
 MODE = "independent_c"
-MARKER = "<!-- studio-independent-c-v1 -->"
-RULES = """<!-- studio-independent-c-v1 -->
+MARKER = "<!-- studio-independent-c-v2 -->"
+RULES = """<!-- studio-independent-c-v2 -->
 ## 可选交接方式：独立 C → AB 双联板
 
 仅在用户选择该方式时使用；原 ABC 三区整板流程继续有效。本节是 Studio 已支持的程序契约扩展：独立 C 不受旧版“C 必须派生自 ABC、B/C 必须同一整板”条款限制，其他创作和项目锁定要求不变。
 
 - 独立 C 图片增加 `handoff_mode: "independent_c"`，不填 `region`、`board` 或 `parent`。不靠文件名或提示词猜它的身份。它可引用人物、场景和状态资产，但不能反向引用整板/区域图。
+- 兼容旧材料的 `handoff_type: "scene_c"` 或 `handoff_type: "independent_c"`；未填 handoff_mode 时按独立 C 识别。新材料优先写 handoff_mode。显式填写的 handoff_mode 优先，非法值仍报错；ab_board、ab_panel 不作为独立 C。
 - JSONL 仍写 `kind: "image"`，独立 C 落入 `03b_场景状态图/`；发布包放入 `scstate_tasks`，资源 semantic 为 SCSTATE。不是从 AB 裁出的区域 C。
 - AB 双联整板仍用原整板字段，JSONL key 仍属 ABC 家族，发布包放入 `board_tasks`。其 `reference_images` 必须真实引用一张已声明的独立 C，可另带必要身份等参考；一次生成 A/B 双联板。
 - A/B 区域图沿用 `region: "A"/"B"` 与 `board`，各自唯一图片参考为同一张 AB 整板。引用独立 C 的 AB 板不再派生区域 C。
@@ -19,20 +20,28 @@ RULES = """<!-- studio-independent-c-v1 -->
 """
 
 
+def mode(row):
+    """Resolve explicit legacy aliases without hiding an invalid canonical mode."""
+    explicit = str(row.get("handoff_mode") or "").strip()
+    if explicit:
+        return explicit
+    return MODE if row.get("handoff_type") in ("scene_c", MODE) else ""
+
+
 def is_independent(row):
-    return row.get("handoff_mode") == MODE
+    return mode(row) == MODE
 
 
 def audit(nodes):
     """nodes: key/kind/refs(key list)/handoff(key,role,optional board) plus fields."""
-    if not any(n.get("handoff_mode") for n in nodes):
+    if not any(mode(n) for n in nodes):
         return []  # Original ABC contract remains with the existing readers.
     by_key = {n["key"]: n for n in nodes}
     out = []
     def fail(n, code, text):
         out.append({"level": "error", "code": code, "msg": f"{n['key']}：{text}"})
     for n in nodes:
-        if n.get("handoff_mode") not in (None, "", MODE):
+        if mode(n) not in ("", MODE):
             fail(n, "HANDOFF_MODE_UNKNOWN", "handoff_mode 只支持 independent_c；原 ABC 流程不填此字段")
         if is_independent(n):
             if n["kind"] != "scstate" or n.get("region") or n.get("board"):
