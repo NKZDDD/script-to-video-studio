@@ -211,27 +211,10 @@ def test_打包成exe时不给出假的python候选(monkeypatch):
 # 接进流水线
 # --------------------------------------------------------------------------
 
-def test_没开就不进计划():
-    """进了计划再跳过的话，「先看会做什么」会列出一步字幕，
-    人以为要做，跑完发现没有，而全程没有一处说过它是关着的。"""
-    from core import pipeline, pipeline_v34
-    for mod in (pipeline, pipeline_v34):
-        assert mod._subtitle_on() in (True, False)     # 不抛就行
 
 
-def test_字幕不算进分析调用次数():
-    """它内部可能调 LLM，但那是它的 key、它的账。
-    算进「至少几次分析调用」会让那个数变成假的。"""
-    from core import system_v34 as V
-    d3 = next(s for s in V.STAGES if s["id"] == "d3")
-    assert d3["kind"] == "local"
 
 
-def test_d3排在d2后面():
-    """字幕加在成片上，不是加在分段视频上 —— 顺序反了就无从下手。"""
-    from core import system_v34 as V
-    ids = [s["id"] for s in V.STAGES]
-    assert ids.index("d3") > ids.index("d2")
 
 
 def test_设置项在config里有默认值():
@@ -243,11 +226,6 @@ def test_设置项在config里有默认值():
         assert k in cfg["subtitle"], f"config 里缺 subtitle.{k}"
 
 
-def test_key不回前端():
-    """上面 llm.api_key 就是漏了才补的，别在这儿再漏一次。"""
-    from server import app
-    src = open(app.__file__, encoding="utf-8").read()
-    assert 'sb.pop("llm_api_key", None)' in src
 
 
 # --------------------------------------------------------------------------
@@ -470,10 +448,6 @@ def test_迁移不动用户真选的样式():
     assert sub["style"] == "中文竖屏标准版"
 
 
-def test_load_config读进来就纠正():
-    """页面上显示的、跑的时候用的，都得是纠正后的值。"""
-    from server.app import load_config
-    assert load_config()["subtitle"]["style"] != "default"
 
 
 # --------------------------------------------------------------------------
@@ -727,16 +701,6 @@ def test_status按剧读设置(tmp_path):
     assert st["todo"] == 0 and "没开" in st["reason"]
 
 
-def test_流水线按剧决定要不要排字幕(tmp_path):
-    """只看全局的话，这部剧关了字幕照样会被排进计划 ——
-    不报错，只是做出来的东西不对。"""
-    from core import pipeline, pipeline_v34
-    import inspect
-    for mod in (pipeline, pipeline_v34):
-        sig = inspect.signature(mod._subtitle_on)
-        assert "pj" in sig.parameters, f"{mod.__name__}._subtitle_on 不认项目"
-        src = inspect.getsource(mod.plan)
-        assert "_subtitle_on(pj)" in src, f"{mod.__name__}.plan 没把项目传进去"
 
 
 def test_剧级面板有取消勾选就送null():
@@ -786,29 +750,10 @@ def _branch_src(mod_path: str, marker: str, end: str) -> str:
                         for ln in src[i:j].splitlines())
 
 
-def test_v34字幕分支不把整轮判失败():
-    br = _branch_src("core/pipeline_v34.py", 'elif sid == "d3":', "\n            else:")
-    assert "failed.append" not in br, "字幕失败被记进 failed —— 整轮会判失败"
-    assert 'return "failed"' not in br, "字幕失败直接 return failed"
-    assert 'state="warn"' in br, "字幕有问题时没标 warn，人看不出这一步有事"
 
 
-def test_通用体系字幕分支也一样():
-    br = _branch_src("core/pipeline.py", 'elif s["kind"] == "subtitle":',
-                     "\n            # ---- 拼接")
-    assert "failed.append" not in br
-    assert 'return "failed"' not in br
-    assert 'state="warn"' in br
 
 
-def test_两套体系的字幕分支都真的调run():
-    """分支里忘了调 run 的表现是「这一步秒过、标 ok、什么都没做」。"""
-    for path, marker, end in (
-            ("core/pipeline_v34.py", 'elif sid == "d3":', "\n            else:"),
-            ("core/pipeline.py", 'elif s["kind"] == "subtitle":',
-             "\n            # ---- 拼接")):
-        br = _branch_src(path, marker, end)
-        assert "_sub.run(pj" in br, f"{path} 的字幕分支没调 subtitle.run"
 
 
 def test_warn状态在前端有独立样式():

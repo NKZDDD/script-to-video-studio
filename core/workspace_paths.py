@@ -47,8 +47,7 @@ def change_data(app, value):
         writable(dst)
         cfg = app.load_config()
         # Projects stay where they are. Copy only mutable application data, not the EXE/repository.
-        from .captions import USER_DIR_NAME
-        for name in ('providers', 'prompts', 'model-catalog.json', 'pricing.json', 'account_usage.json', 'studio-device.json', USER_DIR_NAME):
+        for name in ('providers', 'prompts', 'model-catalog.json', 'pricing.json', 'account_usage.json', 'studio-device.json', "字幕样式-自定义"):
             source = src/name
             if source.is_dir():
                 shutil.copytree(source, dst/name)

@@ -142,7 +142,7 @@ function wizard() {
  let html='';
  if(S.step===0)html=`<h3>项目放在哪里，原文从哪里来</h3><div class="rv-fields">${field('项目名称',input('title',w.title,'text','required maxlength="100"'),'编号自动生成，避免跨项目冲突。')}${field('标签',input('tags',w.tags),'用逗号分隔，用于项目搜索。')}${field('生产父目录',input('base',w.base,'text','required'),'将自动建立“名称_项目编号”子目录；确认后显示实际绝对路径。')}${field('原文类型',select('source_type',['剧本','小说','大纲','已有资产'],w.source_type))}${field('集数策略',select('episode_strategy',['按原文','指定集数'],w.episode_strategy))}${field('指定集数',input('episode_count',w.episode_count,'number','min="1" max="999"'),'仅在选择指定集数时采用。')}<label class="rv-span">原文<textarea name="source" rows="7" placeholder="粘贴原始剧本或选择文件；留空可先创建，后续补齐原文。">${esc(w.source)}</textarea></label><div class="rv-file-field"><span>读取原文文件</span>${fileButton('source-file','选择文件…','.txt,.md,.jsonl,.docx,.pdf')}<small>支持 txt、md、jsonl、docx、pdf，读出的文字会填进上面的原文框。</small></div>${w.batch!==undefined&&w.batch!==false&&w.batch!==''?field('批量项目名（每行一个）',`<textarea name="batch" rows="5">${esc(w.batch)}</textarea>`):''}</div>`;
  if(S.step===1)html=`<h3>画面和创作边界</h3><div class="rv-fields">${field('拍成什么形式',select('medium',['真人影视','3D 漫剧','二维动画','混合形式'],w.medium))}${field('视觉风格',input('style',w.style))}${field('文化与地域',input('culture',w.culture))}${field('剧情改编',select('adaptation',['忠于原文','保留事实，优化节奏与镜头','允许适度改编'],w.adaptation))}<label class="rv-span">额外要求<textarea name="notes" rows="5">${esc(w.notes)}</textarea></label></div>`;
- if(S.step===2)html=`<h3>视频、声音与语言</h3><div class="rv-fields">${field('图片服务商',providerSelect('image','image_provider',w.image_provider))}${field('图片模型',input('image_model',w.image_model))}${field('视频服务商',providerSelect('video','video_provider',w.video_provider))}${field('视频模型',input('video_model',w.video_model))}${field('成片比例',select('ratio',['16:9','9:16','1:1','4:3','3:4','21:9'],w.ratio))}${field('每段目标时长（秒）',input('duration',w.duration,'number','min="1" max="600"'),'目标值，生产前会按具体模型校验，不能静默截短。')}${field('声音',select('audio',['模型原生音频','无声视频','外部后期配音'],w.audio))}${field('对白语言',input('dialogue_language',w.dialogue_language))}${field('提示词语言',input('prompt_language',w.prompt_language))}<label class="rv-inline"><input name="subtitles" type="checkbox" ${w.subtitles?'checked':''}> 需要后期字幕</label></div><p class="rv-notice">这里锁定创作目标，不发生成请求。密钥在设置中填写；未知或不兼容的模型会在生产前阻止提交。</p>`;
+ if(S.step===2)html=`<h3>视频、声音与语言</h3><div class="rv-fields">${field('图片服务商',providerSelect('image','image_provider',w.image_provider))}${field('图片模型',input('image_model',w.image_model))}${field('视频服务商',providerSelect('video','video_provider',w.video_provider))}${field('视频模型',input('video_model',w.video_model))}${field('成片比例',select('ratio',['16:9','9:16','1:1','4:3','3:4','21:9'],w.ratio))}${field('每段目标时长（秒）',input('duration',w.duration,'number','min="1" max="600"'),'目标值，生产前会按具体模型校验，不能静默截短。')}${field('声音',select('audio',['模型原生音频','无声视频','外部后期配音'],w.audio))}${field('对白语言',input('dialogue_language',w.dialogue_language))}${field('提示词语言',input('prompt_language',w.prompt_language))}</div><p class="rv-notice">这里锁定创作目标，不发生成请求。密钥在设置中填写；未知或不兼容的模型会在生产前阻止提交。</p>`;
  if(S.step===3)html=`<h3>完整技能包与资产范围</h3><div class="rv-skill"><strong>完整生产技能包</strong><span class="rv-badge rv-good">创建时固定文件与校验和</span></div><p>身份 → 造型 / 连续状态；场景 → 场景状态；按需交接板 → A / B / C 独立区域图 → 分段视频。共享资产在所有集里复用。</p><div class="rv-fields">${field('服装规划',select('costume',['按剧情需要','独立服装资产','直接完整造型'],w.costume))}${field('交接策略',select('handoff',['按边界需要','逐边界人工复核'],w.handoff))}${[['reuse','规划时复用匹配的共享资产'],['atlas','增加资产图册'],['offline_board','增加离线画面草图'],['emotion_curve','增加情绪曲线'],['report','增加审计报告']].map(([k,l])=>`<label class="rv-inline"><input type="checkbox" name="${k}" ${w[k]?'checked':''}> ${l}</label>`).join('')}</div><p class="rv-caption">核心人物、场景、道具等按剧情需要规划；声音身份作为元数据。完整规则、脚本和许可一起复制进项目，不只复制入口文件。</p>`;
  if(S.step===4)html=`<h3>确认项目契约</h3><dl><dt>项目</dt><dd>${esc(w.title)}</dd><dt>生产父目录</dt><dd><code>${esc(w.base)}</code></dd><dt>原文</dt><dd>${w.source.trim()?`${w.source.length} 字`:'尚未提供，创建后须补齐'}</dd><dt>创作</dt><dd>${esc(w.medium)} · ${esc(w.style)} · ${esc(w.adaptation)}</dd><dt>视频</dt><dd>${esc(w.ratio)} · ${esc(w.duration)} 秒 · ${esc(w.audio)}</dd><dt>语言</dt><dd>对白 ${esc(w.dialogue_language)} / 提示词 ${esc(w.prompt_language)}</dd></dl><div class="rv-notice">创建后生成 AGENT_TASK.md、本机生产契约、结构定义、选项锁和完整技能快照。将模板交给 Agent；Studio 自动接收新发布，生产由您启动。</div><details><summary>查看全部选项</summary><pre>${esc(JSON.stringify(wizardOptions(),null,2))}</pre></details>`;
  main.innerHTML=heading('新项目','创建生产项目','默认值可逐步修改，最后确认后写入契约。',btn('返回项目','back-projects'))+`<div class="rv-steps">${steps.map((s,i)=>`<button type="button" class="${i===S.step?'active':''}" data-action="wizard-step" data-step="${i}">${i+1} · ${s}</button>`).join('')}</div><form id="wizard-form" class="rv-formpage">${html}<div class="rv-row wizard-footer">${btn('上一步','wizard-prev',S.step?'':'disabled')}${btn(S.step===4?'创建项目与 Agent 模板':'下一步',S.step===4?'wizard-create':'wizard-next','',true)}</div></form>`;
@@ -441,7 +441,7 @@ const outCat=(t,r)=>t.kind==='video'?'video':['scstate','board','region','storyb
 function outputs() {
  const kind=OUT_CATS.some(([k])=>k===S.filters.outputKind)?S.filters.outputKind:'';
  main.innerHTML=heading(S.data.meta.title,'产物与验收','查看实际文件；文件校验通过后仍需检查画面、连续性与声音。',btn('回到生产树','production'))+
- `<div class="rv-toolbar"><input id="output-search" type="search" aria-label="搜索产物" placeholder="搜索名称、文件名或任务编号" value="${esc(S.filters.output||'')}"><select id="output-kind" aria-label="产物分类">${option('','全部分类',kind)}${OUT_CATS.map(([k,n])=>option(k,n,kind)).join('')}</select>${S.boot.features.post?btn('合成成片（单集 / 多集 / 全集）','assemble')+btn('字幕识别与烧录','subtitle'):''}${S.boot.features.legacy_import&&S.data.publication.legacy?btn('旧材料导入','import'):''}</div><div id="output-list"></div><div id="master-list"></div>`;
+ `<div class="rv-toolbar"><input id="output-search" type="search" aria-label="搜索产物" placeholder="搜索名称、文件名或任务编号" value="${esc(S.filters.output||'')}"><select id="output-kind" aria-label="产物分类">${option('','全部分类',kind)}${OUT_CATS.map(([k,n])=>option(k,n,kind)).join('')}</select>${S.boot.features.post?btn('合成成片（单集 / 多集 / 全集）','assemble'):''}${S.boot.features.legacy_import&&S.data.publication.legacy?btn('旧材料导入','import'):''}</div><div id="output-list"></div><div id="master-list"></div>`;
  outputList();loadMasters();
 }
 async function loadMasters() {
@@ -467,8 +467,25 @@ function outputList() {
 }
 function settings() {
  main.innerHTML=heading('工作台设置','生产必需配置，始终可见','所有已接入服务商继续可用。设置中只保留图片、视频与本机生产能力。')+
- `<div class="rv-toolbar">${[['providers','服务商与密钥'],['limits','并发与重试'],['llm','提示词改写 LLM'],['upload','参考图上传'],['features','功能包与路径']].map(([v,l])=>btn(l,'settings-tab',`data-tab="${v}"`,v===S.tab)).join('')}</div><div id="settings-content"></div>`;
- if(S.tab==='providers')providerForm();else if(S.tab==='limits')limitForm();else if(S.tab==='llm')llmForm();else if(S.tab==='upload')uploadForm();else featureForm();
+ `<div class="rv-toolbar">${[['providers','服务商与密钥'],['limits','并发与重试'],['llm','提示词改写 LLM'],['upload','参考图上传'],['features','功能包与路径'],['updates','软件更新']].map(([v,l])=>btn(l,'settings-tab',`data-tab="${v}"`,v===S.tab)).join('')}</div><div id="settings-content"></div>`;
+ if(S.tab==='providers')providerForm();else if(S.tab==='limits')limitForm();else if(S.tab==='llm')llmForm();else if(S.tab==='upload')uploadForm();else if(S.tab==='updates')updateForm();else featureForm();
+}
+async function updateForm(data) {
+ clearTimeout(updateForm.timer);
+ try{
+  const d=data||await get('updates');
+  if(S.page!=='settings'||S.tab!=='updates')return;
+  const r=d.release,busy=['checking','downloading','installing'].includes(d.phase);
+  $('#settings-content').innerHTML=`<section class="rv-panel"><h3>Respect Studio · ${esc(d.current)}</h3>
+   <p>检查新版本，下载安装包后再安装。更新保留配置、外挂和项目文件。</p>
+   <p role="status">${esc(d.message)}</p>${r?`<p>发布版本：<strong>${esc(r.version)}</strong> · ${(r.bytes/1048576).toFixed(1)} MB</p><p style="white-space:pre-wrap">${esc(r.notes)}</p>`:''}
+   ${d.phase==='downloading'?`<progress max="${Number(r?.bytes)||1}" value="${Number(d.received)||0}"></progress><p>${(d.received/1048576).toFixed(1)} MB 已下载</p>`:''}
+   <div class="rv-actions">${btn('检查更新','update-check',busy?'disabled':'')}
+   ${r&&['available','error'].includes(d.phase)?btn('下载新版','update-download','',true):''}
+   ${d.phase==='ready'?btn('退出并安装更新','update-install',d.desktop?'':'disabled',true):''}</div>
+   <p class="rv-caption">生产期间可以检查和下载；安装前请等待批次完成或停止批次。${d.desktop?'':'当前是浏览器模式，安装操作请从 Studio 独立窗口打开。'}</p></section>`;
+  if(busy)updateForm.timer=setTimeout(()=>updateForm(),1500);
+ }catch(e){notice(e.message,true);}
 }
 function llmForm() {
  const l=S.boot.llm||{};
@@ -536,6 +553,9 @@ const actions={
  'save-source':async()=>{await post('source',{source:$('#source-edit').value});closeDialog();notice('已保存原文，Agent 可直接读取。');},
  'providers':()=>{S.tab='providers';show('settings');},
  'settings-tab':e=>{S.tab=e.dataset.tab;settings();},
+ 'update-check':async()=>{notice('正在检查新版本');await updateForm(await post('updates/check'));},
+ 'update-download':async()=>updateForm(await post('updates/download')),
+ 'update-install':async()=>{if(confirm('安装更新会退出 Studio。确定当前任务已结束并开始安装？'))await updateForm(await post('updates/install'));},
  'reveal':e=>{const i=e.parentElement.querySelector('input');i.type=i.type==='password'?'text':'password';e.textContent=i.type==='password'?'显示':'隐藏';},
  'add-account':()=>{const cap=S.boot.capabilities.find(c=>c.id===S.provider),i=$$('[data-account]').length,fs=document.createElement('fieldset');fs.dataset.account=i;fs.innerHTML=`<legend>账号 ${i+1}</legend><div class="rv-fields">${cap.account_form.per.map(([k,l,secret,note])=>field(esc(l),input('account.'+i+'.'+k,'',secret?'password':'text'),esc(note))).join('')}</div>`;$('#accounts').append(fs);},
  'save-provider':saveProvider,
@@ -592,8 +612,6 @@ const actions={
  'asm-down':e=>{const i=+e.dataset.i,r=S.asm.rows;if(i<r.length-1)[r[i+1],r[i]]=[r[i],r[i+1]];renderAssemble();},
  'asm-remove':e=>{S.asm.rows.splice(+e.dataset.i,1);renderAssemble();},
  'asm-insert':()=>{const x=S.asm.extras.find(x=>x.rel===$('#asm-extra')?.value);if(!x)throw Error('先选一个要插入的视频');S.asm.rows.push({rel:x.rel,key:x.name,task:false,ok:true,include:true});renderAssemble();},
- 'subtitle':async()=>{const d=await get('post-options',{root:S.root});const o=d.options;dialog('字幕识别与烧录',`<form id="subtitle-form"><div class="rv-fields">${field('成片',`<select name="file">${d.files.map(f=>option(f,f,'')).join('')}</select>`)}${field('识别引擎',select('asr',['bijian','jianying','faster-whisper','whisper-cpp'],o.asr))}${field('识别语言',input('language',o.language))}${field('字幕模式',select('subtitle_mode',['hard','soft'],o.subtitle_mode))}${field('字幕样式',`<select name="style">${option('','默认样式',o.style)}${d.styles.map(s=>option(s.name,s.name,o.style)).join('')}</select>`)}</div><p>已有同名 SRT 时直接复用，可先交给 Agent 修订；否则先识别再合成。hard 为烧录字幕，soft 为软字幕轨。保留原成片，生成带字幕的新文件。</p><p class="rv-caption">必剪 / 剪映使用相应识别服务；faster-whisper / whisper-cpp 使用本机模型。文字优化和翻译交给 Agent。</p>${btn('开始字幕处理','subtitle-run',d.files.length?'':'disabled',true)}</form>`);},
- 'subtitle-run':async()=>{const d=await post('subtitle',Object.fromEntries(new FormData($('#subtitle-form'))));closeDialog();await loadProject(S.root,false);show('production');notice('字幕后期已启动，可在任务明细查看或停止。');},
  'assemble-run':async()=>{const items=S.asm.rows.filter(r=>r.include&&r.ok).map(r=>r.rel);if(!items.length)throw Error('清单里至少勾选一段有效视频');const d=await post('assemble',{episodes:S.asm.chosen,items});S.watchJobs.add(d.job_id);closeDialog();await loadProject(S.root,false);if(S.page==='production')renderJobs();notice(`已在后台开始合成 ${d.episodes.length} 集、${d.count} 段，可以接着做别的事。进度和成片链接在生产页的批次列表或右上角「任务总览」里看，每合完一集就能打开那一集；中途可以停止。`);},
  'reroll':async e=>{if(!confirm('重新抽卡会把现在这条视频移到备份（05_分段视频/_抽卡备份/），然后马上用同样的提示词和参考图重新生成、重新计费。别的批次还在跑也不用等，只等这一段自己的参考图。继续吗？'))return;const d=await post('reroll',{key:e.dataset.key});await loadProject();notice(`已把原视频移到 ${d.backup}，这一段已经开始重新生成，进度看生产批次的「任务明细」。`);},
  'import':()=>dialog('旧材料导入',`<p>仅影响当前旧项目，Agent 项目使用自动发布。</p><textarea id="import-text" rows="14" placeholder="粘贴完整材料"></textarea>${btn('导入旧材料','import-run','',true)}`),

@@ -556,33 +556,6 @@ def test_cancelling_queued_job_does_not_wait_for_unrelated_provider():
     t.join(2);assert result==[False]
 
 
-def test_subtitles_never_inherit_old_text_model_configuration(pj,monkeypatch):
-    from core import agent_post as P
-    meta=pj.meta();meta["subtitle"]={"optimize":True,"translate":True};pj.save_meta(meta)
-    master=Path(pj.p("06_成片","EP01_MASTER.mp4"));master.write_bytes(b"\x00\x00\x00\x18ftypisom"+b"\x00"*8192)
-    monkeypatch.setattr(P.subtitle,"find_cli",lambda:["fake-caption"])
-    monkeypatch.setattr(P.captions,"install",lambda:None)
-    monkeypatch.setattr(P.captions,"ensure_ffmpeg",lambda:None)
-    cmds=[]
-    class Proc:
-        returncode=0
-        def __init__(self,cmd,**kw):
-            cmds.append(cmd)
-            dest=Path(cmd[cmd.index("-o")+1])
-            if "transcribe" in cmd:dest.write_text("1\n00:00:00,000 --> 00:00:01,000\n对白\n",encoding="utf-8")
-            else:dest.write_bytes(master.read_bytes())
-        def poll(self):return 0
-    monkeypatch.setattr(P.subprocess,"Popen",Proc)
-    jobs=JobManager();d=P.run(pj,{"file":"06_成片/EP01_MASTER.mp4"},jobs);j=jobs.get(d["job_id"]);wait_job(j)
-    assert j.status=="done",j.snapshot()
-    cfg=Path(pj.p("07_检查与记录","jobs",j.id,"caption.toml")).read_text(encoding="utf-8")
-    import tomllib
-    parsed = tomllib.loads(cfg)
-    assert parsed["subtitle"]["optimize"] is False and parsed["subtitle"]["translate"] is False
-    assert not parsed.get("llm", {}).get("api_key")
-    assert pj.meta()["subtitle"]["optimize"] is True
-    assert len(cmds)==2 and P.options(pj)["asr"]=="bijian"
-    assert master.with_name("EP01_MASTER_SUB.mp4").exists()
 
 
 def test_packaged_agent_resources_are_complete():

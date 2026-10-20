@@ -111,9 +111,9 @@ class PackagingTests(unittest.TestCase):
 
     def test_the_folder_is_packed(self):
         """★ 不 --add-data 进去的话，exe 里这个目录压根不存在。"""
-        self.assertIn("字幕样式", read_text("打包exe.py"))
+        self.assertIn("字幕样式", read_text("subtitle_app/build.py"))
 
     def test_run_installs_them_on_caption(self):
-        src = read_text("run.py")
-        i = src.index("def _caption")
+        src = read_text("subtitle_app/main.py")
+        i = src.index("def caption_cli")
         self.assertIn("captions.install", src[i:i + 3000])

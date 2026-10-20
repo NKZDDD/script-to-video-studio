@@ -130,6 +130,9 @@ def llm_factory(app, cfg):
 
 
 def get(app, path, q):
+    if path == "/api/agent/updates":
+        from core.updates import MANAGER
+        return MANAGER.status()
     cfg = app.load_config()
     if path == "/api/agent/bootstrap":
         return bootstrap(app, cfg)
@@ -183,12 +186,6 @@ def get(app, path, q):
     if path == "/api/agent/prompt-edit":
         from core import prompt_edits
         return prompt_edits.read(pj, (q.get("key") or [""])[0])
-    if path == "/api/agent/post-options":
-        from core import agent_post, subtitle
-        if not cfg.get("agent_features", {}).get("post"):
-            raise ValueError("字幕与后期功能包未开启")
-        return {"options": agent_post.options(pj), "styles": subtitle.list_styles(),
-                "files": [pj.rel(str(f)) for f in sorted(Path(pj.p("06_成片")).glob("*.mp4")) if "_SUB" not in f.stem]}
     if path == "/api/agent/assemble-plan":
         if not cfg.get("agent_features", {}).get("post"):
             raise ValueError("请先开启成片合成功能包")
@@ -207,6 +204,15 @@ def get(app, path, q):
 
 
 def post(app, path, body):
+    if path.startswith("/api/agent/updates/"):
+        from core.updates import MANAGER
+        if path.endswith("/check"):
+            return MANAGER.check()
+        if path.endswith("/download"):
+            return MANAGER.download()
+        if path.endswith("/install"):
+            return MANAGER.install(app.JOBS)
+        raise ValueError("未知更新操作")
     cfg = app.load_config()
     caps = app.caps_of(cfg)
     if path == '/api/agent/paths/browse':
@@ -476,11 +482,6 @@ def post(app, path, body):
             raise ValueError("先选要删除的产物")
         with LOCK:
             return recycle.delete(pj, list(dict.fromkeys(keys)), R.busy(app.JOBS, pj.root))
-    if path == "/api/agent/subtitle":
-        if not cfg.get("agent_features", {}).get("post"):
-            raise ValueError("字幕与后期功能包未开启")
-        from core import agent_post
-        return agent_post.run(pj, body, app.JOBS)
     raise ValueError("未知的 Agent 接口")
 
 

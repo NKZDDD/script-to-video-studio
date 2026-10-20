@@ -27,12 +27,12 @@ SEMANTICS = {"CHAR": "人物身份", "LOOK": "造型与服装", "COST": "独立�
              "GRP": "群体", "CRE": "生物", "LOC": "场景", "PROP": "道具",
              "VEH": "载具", "VFX": "特效", "SCSTATE": "场景状态",
              "ABC": "交接板", "REGION": "区域图", "VIDEO": "分段视频", "AUD": "声音身份"}
-FEATURES = {"advanced": "高级参数", "batch": "批量创建", "post": "字幕与后期",
+FEATURES = {"advanced": "高级参数", "batch": "批量创建", "post": "成片合成",
             "logs": "详细日志", "legacy_import": "旧材料导入"}
 DEFAULTS = {"source_type": "剧本", "episode_strategy": "按原文", "episode_count": 1,
             "medium": "真人影视", "style": "电影感", "culture": "按原文",
             "adaptation": "忠于原文", "notes": "", "ratio": "16:9", "duration": 30,
-            "audio": "模型原生音频", "subtitles": False, "dialogue_language": "中文",
+            "audio": "模型原生音频", "dialogue_language": "中文",
             "prompt_language": "中文", "reuse": True, "costume": "按剧情需要",
             "handoff": "按边界需要", "atlas": False, "offline_board": False,
             "emotion_curve": False, "report": False, "image_provider": "",
@@ -168,7 +168,7 @@ reference_images 各项包含 asset_id（资源 ID）、file_ref（对应任务�
 交接板整板不直接给视频；区域任务必须有 board=整板任务 key、region=A/B/C，且以该整板为唯一参考，独立生成而非裁切。
 原 ABC 模式的 handoff_refs 项另带 role=IN_B/IN_C/OUT_A，board=整板 key，必须引用对应区域，同一 IN 边界的 B/C 来自同一整板。独立 C → AB 模式按下文可选扩展执行。
 视频必须填写 episode（例如 EP01），且与对应资源的唯一 episodes 条目一致；params 至少包含 ratio/duration。图片 params 至少包含 size。能力未知先提出修订，禁止静默截短、裁图或丢参考。
-剧情文字可以出现；subtitles 只控制字幕。AUD 不变成收费音频任务。没有强制旧故事板阶段。
+剧情文字可以出现；Studio 不提供后期字幕识别与烧录。AUD 不变成收费音频任务。没有强制旧故事板阶段。
 
 最后原子写 READY.json（临时文件写完再替换）：
 ```json

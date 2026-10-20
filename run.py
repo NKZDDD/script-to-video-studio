@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""启动本地生产台：python run.py  →  浏览器打开 http://127.0.0.1:8770"""
+"""Studio 入口：安装版使用独立窗口；源码可加 --desktop 或 --no-browser。"""
 
 from __future__ import annotations
 
@@ -21,65 +21,14 @@ if hasattr(sys.stdout, "reconfigure"):
 from core import paths  # noqa: E402
 
 
-def _caption(argv: list) -> int:
-    """把参数原样交给 videocaptioner 的 CLI。
-
-    为什么做成直通子命令，而不是让人另装一个 videocaptioner：
-    打进这个 exe 之后目标机器上没有 Python，`videocaptioner` 那个命令不存在，
-    只有从我们这里进得去。所以是 `<本程序>.exe caption transcribe a.mp4`。
-
-    **动手前先把 ffmpeg 喂给它。** 它靠 PATH 找 ffmpeg / ffprobe，而我们的
-    ffmpeg 是 imageio-ffmpeg 带进来的、埋在临时解压目录里，PATH 上没有 ——
-    不喂的话它一上来就报「ffmpeg not found」，而机器上明明有一个。
-    """
-    # **这条路上的提示一律打 stderr。**
-    # 打 stdout 会污染机器读的输出：`caption --version` 是被 core/subtitle
-    # 抓 stdout 解析版本号的，我那两句 ffmpeg 提示混进去之后，版本号变成
-    # 「⚠ 有 ffmpeg 没有 ffprobe…」那一句混进去之后，版本号变成了
-    # 警告 + 版本号两行，页面上照原样显示，看着像程序疯了
-    # （实遇 2026-08-27 的自检输出）。
-    # 页面上照原样显示，看着像程序疯了（实遇 2026-08-27 自检输出）。
-    def _note(*a):
-        print(*a, file=sys.stderr)
-
-    # ffmpeg 按标准名摆到 PATH 上（一处实现，见 core/captions）
-    from core import captions                             # noqa: PLC0415
-    ff, fp = captions.ensure_ffmpeg(_note)
-    if ff and not fp:
-        _note("  ⚠ 有 ffmpeg 没有 ffprobe（imageio-ffmpeg 只带前者）——"
-              "配音那几步会失败，转写和压制不受影响。")
-        _note("    要用配音就装一份完整的 ffmpeg，或者把 ffprobe.exe 放到 exe 旁边。")
-    # 自带的四份字幕样式装进它的样式目录 —— 它只认 json，而我们带的是 ASS txt，
-    # 所以要转一次（见 core/captions）。同名的不覆盖。
-    from core import captions                             # noqa: PLC0415
-    captions.install(_note)
-    try:
-        from videocaptioner.cli.main import main as vc_main   # noqa: PLC0415
-    except Exception as exc:                                  # noqa: BLE001
-        _note(f"  ✗ 这一版里没有 videocaptioner：{exc}")
-        _note("    源码方式跑：pip install --ignore-requires-python videocaptioner "
-              "audioop-lts")
-        return 2
-    # 它按 sys.argv 解析，所以这里替它铺好 —— 直接传参数它不认
-    sys.argv = ["videocaptioner"] + list(argv)
-    try:
-        with captions.utf8_subprocess_logs():
-            return int(vc_main() or 0)
-    except SystemExit as e:            # argparse 的正常退出路径
-        return int(e.code or 0)
-
-
 def main() -> int:
-    # `caption` 走直通，**在 argparse 之前拦掉** —— 后面的参数是它的，
-    # 交给我们的 parser 只会被判成「不认识的参数」。
-    if len(sys.argv) > 1 and sys.argv[1] == "caption":
-        return _caption(sys.argv[2:])
     ap = argparse.ArgumentParser(description="Respect短剧制作平台")
     ap.add_argument("--host", default="127.0.0.1")
     # 默认端口按体系分开 —— 电影级 8770、通用 8771，**两个包要能同时开着**。
     # 0 = 用这一版自己的默认值（见 build_info.DEFAULT_PORTS）。
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--desktop", action="store_true", help="在独立 Studio 窗口中打开")
     ap.add_argument("--package-selfcheck", action="store_true",
                     help=argparse.SUPPRESS)
     ap.add_argument("--data", default="", metavar="目录",
@@ -89,6 +38,10 @@ def main() -> int:
     args = ap.parse_args()
     if args.data:
         paths.set_data_dir(args.data)
+    from core import desktop
+    desktop.setup_logs()
+    if paths.FROZEN:
+        desktop.hide_child_consoles()
 
     if args.package_selfcheck:
         from core.packagecheck import run_package_check   # noqa: PLC0415
@@ -123,6 +76,17 @@ def main() -> int:
     if args.port and port != args.port:
         print(f"\n  ⚠ {args.port} 被占了，改用 {port}")
     print(f"\n  生产台已启动 → {url}")
+    if (args.desktop or paths.FROZEN) and not args.no_browser:
+        from server.app import JOBS
+        try:
+            return desktop.run(srv, url, JOBS)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            srv.server_close()
+            desktop.show_error("Studio 窗口启动失败。请确认已安装 Microsoft Edge WebView2 Runtime。\n"
+                               "详细原因在数据目录 logs/desktop.log。")
+            return 1
     print("  Ctrl+C 停止\n")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()

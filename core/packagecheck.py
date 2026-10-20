@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Callable
 
 RUNTIME_MODULES = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore",
-                   "videocaptioner.cli.main", "audioop", "psutil",
-                   "core.agent_projects", "core.agent_runtime", "core.agent_post", "core.agent_handoff",
+                   "psutil", "webview",
+                   "core.agent_projects", "core.agent_runtime", "core.agent_handoff",
                    "core.assemble", "core.bulk_place", "core.recycle", "core.submitted",
                    "server.agent_api", "core.studio_login"]
 
@@ -29,7 +29,6 @@ def resource_inventory() -> dict:
     base = Path(paths.BUNDLE_DIR)
     files = [base / "web" / name for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css")]
     files += list((base / "prompts").glob("*.md"))
-    files += list((base / "字幕样式").glob("*.txt"))
     files += [p for p in (base / "skills" / "production-skill").rglob("*")
               if p.is_file() and "__pycache__" not in p.parts]
     return {p.relative_to(base).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()

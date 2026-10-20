@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""字幕：videocaptioner 打进包里，从 `<本程序>.exe caption ...` 进去。
+"""独立 subtitle_app 的 VideoCaptioner 运行库兼容性测试。
 
-用户原话（2026-08-27）：「我需要直接 pip install videocaptioner，连同我最新的
-修改一起打包 exe，videocaptioner 要确保可以正常使用」。
+Studio 已移除字幕入口；其移除契约由 test_studio_subtitle_removed.py 覆盖。
 
-三件查出来的事实（都影响能不能用）：
+独立工具仍需验证的运行库约束：
 
 1. 它声明 `Requires-Python <3.13`，而本机是 3.13.0。真正的原因是
    **`audioop` 在 3.13 被从标准库删了**（PEP 594）而 pydub 导它 ——
@@ -22,113 +21,10 @@ import unittest
 from core.store import read_text
 
 
-class PassthroughTests(unittest.TestCase):
-
-    def _src(self):
-        return read_text("run.py")
-
-    def test_caption_is_intercepted_before_argparse(self):
-        """★ 后面的参数是它的 —— 交给我们的 parser 只会被判成「不认识的参数」。"""
-        src = self._src()
-        i = src.index("def main() -> int:")
-        j = src.index("ArgumentParser", i)
-        self.assertIn('sys.argv[1] == "caption"', src[i:j])
-
-    def test_it_rewrites_sys_argv(self):
-        """★ videocaptioner 的 main() 按 sys.argv 解析，直接传参数它不认。"""
-        src = self._src()
-        i = src.index("def _caption")
-        self.assertIn('sys.argv = ["videocaptioner"]', src[i:i + 2600])
-
-    def test_systemexit_is_not_an_error(self):
-        """★ argparse 的正常退出走 SystemExit —— 不接住的话
-        `caption --help` 会被当成崩了。"""
-        src = self._src()
-        i = src.index("def _caption")
-        self.assertIn("except SystemExit", src[i:i + 2600])
-
-    def test_it_says_what_to_do_when_missing(self):
-        """★ 源码方式跑时没装它 —— 报「没有这个模块」不如直接给装的命令。"""
-        src = self._src()
-        i = src.index("def _caption")
-        blk = src[i:i + 2600]
-        self.assertIn("ignore-requires-python", blk)
-        self.assertIn("audioop-lts", blk)
 
 
-class FfmpegShimTests(unittest.TestCase):
-
-    def test_it_copies_to_the_standard_name(self):
-        """★ imageio-ffmpeg 那个二进制不叫 ffmpeg.exe，而它用 which('ffmpeg')
-        找 —— 只把目录塞进 PATH 是找不到的（实测：doctor 照旧报 not found）。
-
-        实现挪到了 `core/captions.ensure_ffmpeg`（原来只长在 caption 直通里，
-        源码方式和字幕环节都享受不到）。
-        """
-        import inspect
-        from core import captions
-        src = inspect.getsource(captions.ensure_ffmpeg)
-        self.assertIn('"ffmpeg.exe"', src)
-        self.assertIn("shutil.copy2", src)
-
-    def test_it_does_not_recopy_when_the_name_already_matches(self):
-        """机器上装的是真 ffmpeg 时别多拷一份。"""
-        import inspect
-        from core import captions
-        self.assertIn("os.path.basename(exe).lower() != want",
-                      inspect.getsource(captions.ensure_ffmpeg))
-
-    def test_missing_ffprobe_is_named_explicitly(self):
-        """★ imageio-ffmpeg **只带 ffmpeg 不带 ffprobe**。
-        不说清就是让它自己报一句没头没尾的 not found。"""
-        src = read_text("run.py")
-        i = src.index("def _caption")
-        self.assertIn("ffprobe", src[i:i + 2600])
 
 
-class PackagingTests(unittest.TestCase):
-
-    def _src(self):
-        return read_text("打包exe.py")
-
-    def test_it_is_a_hard_requirement(self):
-        src = self._src()
-        self.assertIn('"videocaptioner"', src)
-        self.assertIn('"audioop"', src)
-
-    def test_the_cli_module_is_smoke_checked(self):
-        """★ 「模块在包里」和「跑得起来」是两件事：它在 import 阶段就碰
-        pydub → audioop，少了 backport 直接崩，而 /api/modules 只证明
-        import 成功。所以自检里真跑一次 `caption --version`。"""
-        src = self._src()
-        self.assertIn('"videocaptioner.cli.main"', src)
-        self.assertIn('"caption", "--version"', src)
-
-    def test_the_gui_stack_is_excluded(self):
-        """★ pyqt5 是它的无条件依赖，而我们是网页界面，用不上。"""
-        src = self._src()
-        self.assertIn("EXCLUDE", src)
-        for m in ("PyQt5", "qfluentwidgets"):
-            self.assertIn(f'"{m}"', src)
-
-    def test_submodules_are_collected(self):
-        """★ 它按子命令动态 import，静态分析扫不全。"""
-        self.assertIn('"--collect-submodules", "videocaptioner"', self._src())
-
-    def test_no_local_subprocess_import_in_selfcheck(self):
-        """★ 函数里再 `import subprocess` 会把这个名字变成局部变量，
-        于是函数开头那处 subprocess.Popen 直接 UnboundLocalError ——
-        exe 构建完了、自检还没开始就崩（刚踩过）。"""
-        # 用 AST 判，**别匹配源码文本** —— 注释里解释这件事的那句话本身就含
-        # 「import subprocess」，按文本断言会撞上自己的注释（这个项目里
-        # 同一类误伤已经出现过三次：撞变量声明、撞注释）。
-        import ast
-        tree = ast.parse(read_text("打包exe.py"))
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, ast.FunctionDef) and n.name == "selfcheck")
-        got = [a.name for n in ast.walk(fn)
-               if isinstance(n, ast.Import) for a in n.names]
-        self.assertNotIn("subprocess", got)
 
 
 class FindCliInFrozenTests(unittest.TestCase):
@@ -233,25 +129,6 @@ class SelftestVerdictTests(unittest.TestCase):
         self.assertEqual((stop, aside), ([], []))
 
 
-class StdoutHygieneTests(unittest.TestCase):
-    """★ 直通路上的提示一律走 stderr。
-
-    实遇（2026-08-27）：那两句 ffmpeg 提示打在 stdout 上，而
-    `core/subtitle.version()` 是抓 stdout 解析版本号的 —— 于是版本号变成
-    「⚠ 有 ffmpeg 没有 ffprobe…\nvideocaptioner 1.4.2」，页面照原样显示。
-    """
-
-    def test_the_passthrough_prints_notices_to_stderr(self):
-        src = read_text("run.py")
-        i = src.index("def _caption")
-        blk = src[i:src.index("def main()", i)]
-        self.assertIn("file=sys.stderr", blk)
-        # 直通里不许有**打到 stdout 的** print —— 一个就够污染 --version。
-        # `_note` 自己那行是 print(..., file=sys.stderr)，放过。
-        bare = [l.strip() for l in blk.splitlines()
-                if l.strip().startswith("print(")
-                and "sys.stderr" not in l]
-        self.assertEqual(bare, [], bare)
 
 
 class FfmpegShimIsSharedTests(unittest.TestCase):
@@ -264,5 +141,5 @@ class FfmpegShimIsSharedTests(unittest.TestCase):
         self.assertTrue(callable(getattr(captions, "ensure_ffmpeg", None)))
 
     def test_both_callers_use_it(self):
-        self.assertIn("captions.ensure_ffmpeg", read_text("run.py"))
+        self.assertIn("captions.ensure_ffmpeg", read_text("subtitle_app/main.py"))
         self.assertIn("captions.ensure_ffmpeg", read_text("core/subtitle.py"))

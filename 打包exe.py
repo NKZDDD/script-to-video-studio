@@ -90,18 +90,8 @@ REQUIRED = {
              "而报错写的是「pip install pypdf」，exe 用户照不了",
     "imageio_ffmpeg": "拼接成片的兜底 ffmpeg —— 目标机器装了系统 ffmpeg "
                       "也行，但不能赌它装了",
-    # ---- 字幕：v34-cinematic 这条线加的 ----
-    "videocaptioner": "字幕（转写 / 优化 / 翻译 / 压制）—— "
-                      "从 `<本程序>.exe caption ...` 进去。本机装法："
-                      "pip install --ignore-requires-python "
-                      "videocaptioner audioop-lts",
-    # audioop 在 Python 3.13 被从标准库删了（PEP 594），而 pydub 导它 ——
-    # 这就是 videocaptioner 声明 Requires-Python <3.13 的真正原因。
-    # audioop-lts 是官方 backport，装上之后 3.13 跑得通（实测）。
-    # **缺了不是报缺模块，是 videocaptioner 一上来就崩在 import 上。**
-    "audioop": "Python 3.13 删掉的标准库模块，pydub 要它 —— "
-               "装 audioop-lts 提供（缺了 videocaptioner 直接崩）",
     "psutil": "当前线程、CPU / 内存与并发建议，Agent 工作台必备",
+    "webview": "独立窗口（使用系统 WebView2）",
 }
 
 # 这几个缺了只是少一点体验，不挡功能。
@@ -109,37 +99,26 @@ OPTIONAL = {
 }
 
 # 这些包 PyInstaller 有时扫不出来（运行时才 import 的），显式点名
-HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg", "psutil",
-          # videocaptioner 那条链上运行时才 import 的几个
-          "audioop", "pydub", "langdetect", "json_repair", "diskcache",
-          "tenacity", "platformdirs", "GPUtil"]
+HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg", "psutil"]
 
-# **排掉桌面 GUI 那一堆。** videocaptioner 把 pyqt5 / pyqt-fluent-widgets
-# 写成了无条件依赖（它自己的 `gui` extra 是空摆设），而我们只用它的 CLI ——
-# 不排的话 PyInstaller 顺着 `caption gui` 那个分支把整个 Qt 拖进来，
-# 包大一倍多，而那个子命令在我们这儿压根用不上（我们是网页界面）。
 # --hidden-import 只带入口模块，不保证子模块、证书、Pillow 插件或 ffmpeg.exe。
 # 这些发布库必须用 --collect-all 做完整收集。
 #
 # 这个常量在合并 main 时**定义丢了、用法留着** —— 下面 435 行还在 for 它。
 # 表现是打包脚本自检全绿、依赖全 ✓，走到拼命令那一行才 NameError。
-COLLECT_ALL = ["requests", "certifi", "urllib3", "charset_normalizer",
+COLLECT_ALL = ["webview", "requests", "certifi", "urllib3", "charset_normalizer",
                "boto3", "botocore", "s3transfer", "PIL",
-               "pypdf", "imageio_ffmpeg",
-               # 字幕这条线：videocaptioner 自带模型配置和资源文件，
-               # 光 --collect-submodules 只收 .py，配置读不到就崩在运行时。
-               "videocaptioner"]
+               "pypdf", "imageio_ffmpeg"]
 
-EXCLUDE = ["PyQt5", "qfluentwidgets", "qframelesswindow", "PyQt5.QtWebEngine"]
+EXCLUDE = ["PyQt5", "qfluentwidgets", "qframelesswindow", "PyQt5.QtWebEngine", "PySide2", "PySide6", "PyQt6",
+           "videocaptioner", "core.subtitle", "core.captions", "core.agent_post", "audioop", "pydub",
+           "django", "PyInstaller", "pytest", "pandas", "numpy", "matplotlib", "scipy", "IPython"]
 
 # 打完之后要**在 exe 里**确认这几个模块真的能 import。
 #
 # 「打包机器上装了」和「进了包」是两件事：PyInstaller 扫不到的运行时
 # import 会被漏掉，而漏掉不报错。所以必须让 exe 自己回答。
-MUST_IMPORT = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore", "psutil",
-               # 这两个是「打包漏了不会报错、只会缺」的典型：
-               # 字幕那条路平时不走，缺了要到有人点字幕才发现
-               "videocaptioner.cli.main", "audioop"]
+MUST_IMPORT = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore", "psutil", "webview"]
 
 
 def check_page() -> bool:
@@ -292,7 +271,7 @@ def selfcheck(exe: str) -> bool:
 
         # Hash equality catches a stale asset as well as a missing one.
         matched = report.get("resources") == expected_resources
-        print(f"  {'✓' if matched else '✗'} 页面、技能、模板、字幕样式资源 {len(expected_resources)} 份与源码逐字节核对")
+        print(f"  {'✓' if matched else '✗'} 页面、技能、模板资源 {len(expected_resources)} 份与源码逐字节核对")
         ok = ok and matched
         for url, filename in (("/", "agent.html"), ("/agent.js", "agent.js"), ("/agent.css", "agent.css"), ("/login.js", "login.js"), ("/login.css", "login.css")):
             with io.open(os.path.join(HERE, "web", filename), encoding="utf-8") as f:
@@ -315,46 +294,6 @@ def selfcheck(exe: str) -> bool:
             print(f"  {'✓' if blocked else '✗'} 未登录接口保护 {route}")
             ok = ok and blocked
 
-        # 4b. 自带字幕样式：打进去了没有。**漏了不报错** ——
-        #     字幕照出，只是用的是 videocaptioner 的默认样子。
-        try:
-            r = subprocess.run([str(exe), "caption", "style", "--help"],
-                               capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=180)
-            txt = (r.stdout or "") + (r.stderr or "")
-            hit = "已装入" in txt or "样式" in txt
-            print(f"  {'✓' if r.returncode == 0 else '✗'} 字幕样式 "
-                  + ("自带 4 份已随包" if r.returncode == 0 else "跑不起来"))
-            ok = ok and r.returncode == 0
-        except Exception as exc:                         # noqa: BLE001
-            print(f"  ✗ 字幕样式检查失败：{exc}")
-            ok = False
-
-        # 4. 字幕直通：**「模块在包里」和「跑得起来」是两件事。**
-        #    videocaptioner 在 import 阶段就会碰 pydub → audioop，
-        #    3.13 上少了 backport 就直接崩 —— 而 /api/modules 那一关
-        #    只证明 import 成功，证明不了它的 CLI 能解析参数、能起来。
-        #    所以真跑一次 `caption --version`。
-        # 别在这儿 `import subprocess` —— 模块级已经导过了，函数里再导一次
-        # 会把整个函数里的这个名字变成局部变量，于是**函数开头那处
-        # subprocess.Popen 直接 UnboundLocalError**（刚踩过：exe 构建完了、
-        # 自检还没开始就崩）。
-        try:
-            r = subprocess.run([str(exe), "caption", "--version"],
-                               capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=180)
-            line = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
-            hit = next((l for l in line if "videocaptioner" in l.lower()), "")
-            print(f"  {'✓' if hit else '✗'} 字幕直通 "
-                  + (hit.strip() if hit else "跑不起来"))
-            if not hit:
-                print("     → 看看 EXCLUDE 是不是把它真正要的东西一起排掉了，"
-                      "或者这台机器没装 audioop-lts")
-                print((r.stdout or "")[-600:], (r.stderr or "")[-600:])
-                ok = False
-        except Exception as exc:                         # noqa: BLE001
-            print(f"  ✗ 字幕直通跑不起来：{exc}")
-            ok = False
     finally:
         _stop(proc)
         shutil.rmtree(data, ignore_errors=True)
@@ -468,10 +407,6 @@ def main() -> int:
         "--add-data", f"{os.path.join(HERE, 'web')}{sep}web",
         "--add-data", f"{os.path.join(HERE, 'skills', 'production-skill')}{sep}skills/production-skill",
         "--add-data", f"{os.path.join(HERE, 'prompts')}{sep}prompts",
-        # 自带字幕样式（ASS V4+ 块）。**必须打进去** —— 目标机器上
-        # videocaptioner 的样式目录第一次跑才建，里面一份都没有，
-        # 而缺样式的表现不是报错，是「字幕出来是它的默认样子」。
-        "--add-data", f"{os.path.join(HERE, '字幕样式')}{sep}字幕样式",
         # 打包时的模型清单快照。**目标机器第一次启动还没配 Key，拉不到清单** ——
         # 没有它的话页面上的模型下拉只有代码里写死的那份，而那份换得比什么都快
         # （无限画布 24 小时内从 5 个变 11 个；鹤一次下线 9 个，其中 sd2-720p
@@ -489,8 +424,6 @@ def main() -> int:
     # PyInstaller 的静态分析看不见它们，不点名就一个都不打进去。
     # 后果不是报错，是 exe 里「一家服务商都没有」，页面下拉框空白。
     cmd += ["--collect-submodules", "core.providers"]
-    # videocaptioner 内部按子命令动态 import，静态分析扫不全
-    cmd += ["--collect-submodules", "videocaptioner"]
     for m in EXCLUDE:
         cmd += ["--exclude-module", m]
     cmd.append(os.path.join(HERE, "run.py"))

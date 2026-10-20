@@ -4,23 +4,7 @@ Pillow>=10.0
 pypdf>=4.0
 imageio-ffmpeg>=0.5
 psutil>=5.9
+pywebview==6.2.1; sys_platform == "win32"
 
 # 这些不是“打包时可省略”的增强项：正式发布包必须具备对象存储上传、
 # 参考图压缩、PDF 解析和环节12拼接能力。打包脚本会再次逐项核验。
-
-# ---- 字幕（可选，但打包时是硬要求）----------------------------------
-#
-# 字幕整环外包给 VideoCaptioner。它是**独立的命令行程序**，本仓库一行它的
-# 代码都没有（GPL-3.0，拷进来会传染整个项目的许可证）—— 只有 subprocess。
-#
-# **不能直接 pip install。** 它声明 Requires-Python <3.13，而真正的原因是
-# audioop 在 Python 3.13 被从标准库删了（PEP 594）而 pydub 导它。
-# 装官方 backport 之后 3.13 跑得通（实测全部子命令）。所以：
-#
-#     pip install --ignore-requires-python videocaptioner audioop-lts
-#
-# 少了它 `打包exe.py` 会**硬停**（它在 REQUIRED 里）—— 因为打包漏了不报错，
-# 只在有人点字幕那一刻失败。装法只写在提交说明里不算，得写在这儿。
-#
-# videocaptioner==1.4.2   ← 用上面那条命令装，别放开这一行（pip 会拒）
-# audioop-lts            ← Python 3.13+ 才需要；3.10-3.12 上标准库自带

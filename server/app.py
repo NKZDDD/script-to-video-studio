@@ -161,17 +161,6 @@ def load_config() -> dict:
                  ("access_key", ""), ("secret_key", ""), ("public_base_url", ""),
                  ("prefix", "respect"), ("public_acl", False), ("mode", "always")):
         up.setdefault(k, v)
-    # 字幕：整个环节外包给 VideoCaptioner（独立的命令行程序，要自己
-    # pip install）。不开不影响跑，成片照旧出，只是没有字幕轨。
-    # 键名和它的 config.toml 对齐，见 core/subtitle.py。
-    from core import subtitle as _sub                # noqa: PLC0415
-    sub = cfg.setdefault("subtitle", {})
-    for k, v in _sub.DEFAULTS.items():
-        sub.setdefault(k, v)
-    # 读进来就把失效的取值纠正掉，下一次任何一处保存都会落盘。
-    # 和上面 llm.max_tokens 那一段同一个理由：只改 DEFAULTS 的话，
-    # 已经存进 config.json 的旧值会一直盖住它，而那正是所有老用户。
-    _sub.migrate(sub)
     cfg.setdefault("defaults", {
         "duration": 15, "ratio": "9:16", "image_size": "1024x1536",
         # 只留「真的要人来定」的：出图尺寸、画面比例、单段秒数（视频模型一次
@@ -906,12 +895,7 @@ def api_get(path: str, q: dict) -> dict:
         lm["api_key_set"] = bool((cfg.get("llm") or {}).get("api_key"))
         lm.pop("api_key", None)
         pub["llm"] = lm
-        # 字幕那组也有一把 key（给 VideoCaptioner 用的）。同样只回「配了没」——
-        # 上面 llm 那一条就是漏了才补的，别在这儿再漏一次。
-        sb = dict(pub.get("subtitle") or {})
-        sb["llm_api_key_set"] = bool((cfg.get("subtitle") or {}).get("llm_api_key"))
-        sb.pop("llm_api_key", None)
-        pub["subtitle"] = sb
+        pub.pop("subtitle", None)
         from core import system_v34 as V34
         from core.llm import _env_proxy, mask_url
         env_p = _env_proxy()
@@ -1739,90 +1723,6 @@ def api_post(path: str, body: dict) -> dict:
             llm_concurrency=int(body.get("llm_concurrency")
                                 or (cfg.get("defaults") or {}).get("llm_concurrency", 6)))
         return {"ok": True, "job_id": job.id}
-
-    if path == "/api/project/subtitle":
-        """本剧的字幕：读 schema + 三层值，或者保存覆盖。
-
-        三层一起下发（内置 → 全局 → 本剧），因为面板要显示
-        「跟随全局（当前 X）」—— 只给最终值的话，人看不出某一项是
-        自己设的还是继承来的，而这两者在改了全局之后表现完全不同。
-        """
-        from core import captions as _cap             # noqa: PLC0415
-        from core import subtitle as _sub             # noqa: PLC0415
-        pj = proj_of(body)
-        if body.get("values") is not None:
-            _sub.save_project(pj, body["values"])
-        glob = _sub.merged(cfg)                       # 不带 pj = 全局那一层
-        own = _sub.project_values(pj)
-        eff = _sub.merged(cfg, pj)
-        return {
-            "fields": _sub.PROJECT_FIELDS,
-            "global": {k: glob.get(k) for k in _sub.PROJECT_KEYS},
-            "own": own,                               # 只有显式覆盖的
-            "effective": {k: eff.get(k) for k in _sub.PROJECT_KEYS},
-            "styles": _sub.list_styles(),
-            "fonts": _cap.system_fonts(),
-            "tweak_fields": _sub.STYLE_FIELDS,
-            "preset": _sub.preset_values(str(eff.get("style") or "")),
-            "not_available": _sub.STYLE_NOT_AVAILABLE,
-            "problems": _sub.config_problems(eff),
-            # LLM 那几项是全局的，剧级面板只显示「配了没」，不给改 ——
-            # 免得人在剧里找 key 找不到。
-            "llm_ready": bool(glob.get("llm_api_key")),
-            "installed": bool(_sub.find_cli()),
-        }
-
-    if path == "/api/subtitle/styles":
-        # 下拉框的候选。从 VideoCaptioner 那边实拉，**不列我们自己的
-        # `字幕样式/` 目录** —— 用户在那边加的、改的、删的都算数，
-        # 列我们的目录会出现「页面上有、实际选不中」。
-        from core import captions as _cap           # noqa: PLC0415
-        from core import subtitle as _sub           # noqa: PLC0415
-        cur = _sub.merged(load_config())
-        name = str(body.get("style") or cur.get("style") or "")
-        return {"styles": _sub.list_styles(),
-                # 表单结构由后端给，前端只管渲染 —— 加一个旋钮时不用
-                # 前后端各改一遍（两边对不上的表现是「页面上有、存不下」）。
-                "fields": _sub.STYLE_FIELDS,
-                "fonts": _cap.system_fonts(),
-                # 所选样式的当前值：微调框的 placeholder 用它，
-                # 让人看得见「不填的话是多少」，而不是对着空框猜。
-                "preset": _sub.preset_values(name),
-                # 哪几份是用户自己传的 —— 只有这些能删。自带的四份和
-                # VideoCaptioner 自己的不给删（删了没法找回来）。
-                "user_styles": _cap.user_styles(),
-                "user_dir": _cap.user_dir(),
-                "not_available": _sub.STYLE_NOT_AVAILABLE}
-
-    if path == "/api/subtitle/style/upload":
-        """收一份用户自己的字幕样式。
-
-        落到 `<数据目录>/字幕样式-自定义/`，同时装进 VideoCaptioner。
-        两处都要：只装进 VideoCaptioner 的话，换机器/清了它的目录就没了，
-        而那个目录在 %LOCALAPPDATA% 深处，没人会想到去备份。
-        """
-        from core import captions as _cap           # noqa: PLC0415
-        return _cap.add_style(body.get("filename") or "", body.get("text") or "")
-
-    if path == "/api/subtitle/style/delete":
-        from core import captions as _cap           # noqa: PLC0415
-        return _cap.remove_style(body.get("name") or "")
-
-    if path == "/api/subtitle/selftest":
-        # 零成本：只问 VideoCaptioner 装没装、它自己的依赖齐不齐
-        # （走它的 doctor 子命令）。不识别、不调接口、不花钱。
-        from core import subtitle as _sub            # noqa: PLC0415
-        cur = load_config()
-        # 页面上刚填还没保存的值也要参与检查 —— 不然「填完点自检」
-        # 检的是上一次保存的东西，人以为自己填错了。
-        merged_cfg = dict(cur)
-        merged_cfg["subtitle"] = dict(cur.get("subtitle") or {})
-        merged_cfg["subtitle"].update(
-            {k: v for k, v in (body.get("subtitle") or {}).items()
-             if not (k == "llm_api_key" and not str(v).strip())})
-        r = _sub.selftest(merged_cfg)
-        r["config_problems"] = _sub.config_problems(_sub.merged(merged_cfg))
-        return r
 
     if path == "/api/upload/selftest":
         """传一个小文件再用普通 HTTP 取回来，确认服务商真的能读到。
@@ -2751,7 +2651,7 @@ class Handler(BaseHTTPRequestHandler):
             auth_route = path in ("/api/auth/login", "/api/auth/logout", "/api/auth/verify")
             if not auth_route:
                 self._login().require(cookie, force=path in (
-                    "/api/agent/start", "/api/agent/assemble", "/api/agent/subtitle", "/api/agent/models/refresh", "/api/agent/config/refresh"))
+                    "/api/agent/start", "/api/agent/assemble", "/api/agent/models/refresh", "/api/agent/config/refresh"))
             if self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json":
                 raise LoginRequired("json_required", "请使用 JSON 请求", 415)
             if n < 0 or (auth_route and n > 16384):
@@ -2782,7 +2682,13 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(u.path)
             if not path.startswith("/api/agent/"):
                 return self._json({"error": "内部分析接口已停用，请把修订要求交给 Agent"}, 410)
-            return self._json(agent_api.post(sys.modules[__name__], path, body))
+            from core import updates
+            # Serialize starts with the final idle check before exit/install.
+            with updates.LIFECYCLE:
+                if updates.INSTALLING:
+                    raise ValueError("Studio 正在退出或安装更新，请稍后重新打开")
+                result = agent_api.post(sys.modules[__name__], path, body)
+            return self._json(result)
         except LoginRequired as exc:
             self.close_connection = True
             return self._login_error(exc)
