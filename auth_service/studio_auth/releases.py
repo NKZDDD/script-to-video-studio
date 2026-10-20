@@ -68,6 +68,11 @@ def script():
     return FileResponse(WEB / "releases.js", media_type="text/javascript")
 
 
+@router.get("/admin/releases.css")
+def stylesheet():
+    return FileResponse(WEB / "releases.css", media_type="text/css")
+
+
 @router.get("/admin/api/releases")
 def list_releases(request: Request):
     current(request)

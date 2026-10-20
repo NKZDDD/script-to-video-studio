@@ -1,0 +1,145 @@
+/* Scoped to version management; account and Key screens retain their layout. */
+#release-manager {
+  --release-blue: #007aff;
+  --release-ink: #1d1d1f;
+  --release-muted: #6e6e73;
+  --release-line: #e5e5ea;
+  width: min(980px, calc(100vw - 48px));
+  height: min(810px, calc(100dvh - 48px));
+  max-height: none;
+  padding: 0;
+  border: 1px solid #ffffffb3;
+  border-radius: 24px;
+  background: #f5f5f7;
+  color: var(--release-ink);
+  box-shadow: 0 24px 80px #00000029, 0 2px 12px #0000000a;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+#release-manager[open] { display: flex; flex-direction: column; }
+#release-manager::backdrop { background: #12121c52; backdrop-filter: blur(5px); }
+#release-manager h2, #release-manager h3, #release-manager h4, #release-manager p { margin: 0; }
+#release-manager h2 { font-size: 24px; letter-spacing: -.6px; font-weight: 650; }
+#release-manager h3 { font-size: 21px; letter-spacing: -.4px; font-weight: 650; }
+#release-manager h4 { font-size: 15px; font-weight: 600; }
+#release-manager .release-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  padding: 24px 28px 20px; background: #ffffffbd; flex: 0 0 auto;
+}
+#release-manager .release-eyebrow { font-size: 10px; font-weight: 650; letter-spacing: 1.6px; color: #86868b; margin-bottom: 5px; }
+#release-manager .release-header-actions { display: flex; align-items: center; gap: 16px; }
+#release-manager button {
+  min-height: 40px; padding: 9px 16px; border: 0; border-radius: 10px;
+  color: var(--release-blue); background: #eaf3ff; font: inherit; font-weight: 550;
+  transition: background .15s, box-shadow .15s;
+}
+#release-manager button:hover { background: #dfedff; }
+#release-manager button:disabled { opacity: .45; cursor: wait; }
+#release-manager button.primary { background: var(--release-blue); color: #fff; }
+#release-manager button.primary:hover { background: #0068dc; }
+#release-manager button.release-close { background: #e9e9ed; color: #6e6e73; border-radius: 50%; width: 32px; height: 32px; min-height: 32px; padding: 0; font-size: 25px; font-weight: 400; line-height: 1; }
+#release-manager .release-state { display: inline-flex; align-items: center; gap: 6px; color: #247d4b; background: #eaf6ee; border-radius: 20px; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+#release-manager .release-state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+#release-manager .release-state[data-paused=true] { color: #966100; background: #fff3da; }
+#release-manager .release-tabs { display: grid; grid-template-columns: repeat(4,1fr); gap: 3px; margin: 0 28px 20px; padding: 4px; background: #e9e9ed; border-radius: 12px; flex: 0 0 auto; }
+#release-manager .release-tabs button { min-width: 0; min-height: 36px; padding: 7px 8px; border-radius: 8px; color: #636368; background: transparent; font-size: 13px; }
+#release-manager .release-tabs button[aria-selected=true] { color: #1d1d1f; background: #fff; box-shadow: 0 2px 5px #00000012, 0 0 0 1px #00000003; }
+#release-manager .release-tabs button:not([aria-selected=true]):hover { background: #ffffff66; }
+#release-manager :focus-visible { outline: 3px solid #007aff66; outline-offset: 3px; }
+#release-manager .release-panel, #release-manager .release-module-form { display: flex; flex: 1 1 0; flex-direction: column; min-height: 0; min-width: 0; margin: 0; }
+#release-manager .release-panel-body { flex: 1 1 0; min-height: 0; padding: 4px 28px 28px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #c6c6cc transparent; }
+#release-manager .release-section-heading { margin: 0 0 24px; }
+#release-manager .release-section-heading p { margin-top: 6px; color: var(--release-muted); font-size: 13px; }
+#release-manager .release-group { background: #fff; border: 1px solid var(--release-line); border-radius: 16px; overflow: hidden; }
+#release-manager .release-policy-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 22px; }
+#release-manager .release-policy-row p { color: var(--release-muted); font-size: 13px; margin-top: 5px; }
+#release-manager .release-policy-row button { flex: 0 0 auto; }
+#release-manager .release-group-note { padding: 14px 22px; background: #fafafa; border-top: 1px solid #f0f0f2; color: var(--release-muted); font-size: 12px; line-height: 1.7; }
+#release-manager .release-section-label { display: flex; align-items: baseline; justify-content: space-between; margin: 28px 2px 12px; }
+#release-manager .release-section-label span { color: #86868b; font-size: 12px; }
+#release-manager .release-overview-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
+#release-manager .release-overview-card { padding: 20px; }
+#release-manager .release-overview-card h4 { margin-bottom: 22px; }
+#release-manager .release-overview-card > div { margin: 12px 0; }
+#release-manager .release-overview-card span { display: block; color: #86868b; font-size: 11px; margin-bottom: 3px; }
+#release-manager .release-overview-card strong { font-size: 15px; font-weight: 550; font-variant-numeric: tabular-nums; }
+#release-manager button.release-text-button { min-height: 36px; background: transparent; padding: 4px 0; font-size: 13px; margin-top: 8px; }
+#release-manager .release-caption { color: var(--release-muted); font-size: 12px; line-height: 1.75; margin-top: 14px; }
+#release-manager .release-import { position: relative; display: flex; align-items: center; gap: 14px; padding: 18px 20px; background: #fff; border: 1px solid var(--release-line); border-radius: 16px; margin: 0 0 16px; cursor: pointer; }
+#release-manager .release-import:hover { border-color: #b6d6fd; }
+#release-manager .release-import:focus-within { outline: 3px solid #007aff66; outline-offset: 2px; }
+#release-manager .release-import-icon { flex: 0 0 42px; display: grid; place-items: center; width: 42px; height: 46px; background: #eef5ff; border-radius: 11px; color: var(--release-blue); }
+#release-manager .release-import-icon svg { width: 23px; height: 23px; }
+#release-manager .release-import-copy { flex: 1; min-width: 0; }
+#release-manager .release-import-copy strong { display: block; font-size: 14px; font-weight: 550; }
+#release-manager .release-import-copy small { display: block; margin-top: 3px; font-size: 12px; color: var(--release-muted); overflow-wrap: anywhere; }
+#release-manager .release-file-action { color: var(--release-blue); font-size: 13px; white-space: nowrap; }
+#release-manager input.release-file { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+#release-manager .release-form-group { padding: 20px; margin-bottom: 16px; }
+#release-manager .release-field-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px 20px; }
+#release-manager .release-full { grid-column: 1 / -1; }
+#release-manager form label { min-width: 0; color: #48484a; font-size: 13px; font-weight: 500; }
+#release-manager .release-form-group label { display: flex; flex-direction: column; gap: 8px; margin: 0; }
+#release-manager input, #release-manager select, #release-manager textarea { width: 100%; min-width: 0; min-height: 42px; padding: 10px 12px; border: 1px solid #e3e3e8; border-radius: 9px; font: inherit; font-weight: 400; color: var(--release-ink); background: #fafafb; box-shadow: none; }
+#release-manager input:focus, #release-manager select:focus, #release-manager textarea:focus { outline: 2px solid #007aff55; outline-offset: 1px; border-color: #88bfff; background: #fff; }
+#release-manager input::placeholder, #release-manager textarea::placeholder { color: #929299; }
+#release-manager input[readonly] { background: #f0f0f3; color: #6e6e73; }
+#release-manager textarea { resize: vertical; line-height: 1.6; }
+#release-manager .release-code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+#release-manager .release-optional { color: #86868b; font-weight: 400; font-size: 11px; }
+#release-manager .release-note { padding: 16px 20px; border-radius: 14px; background: #eaf2fc; color: #3b6289; font-size: 12px; line-height: 1.7; }
+#release-manager .release-note strong { color: #285c91; font-weight: 600; }
+#release-manager .release-note p { margin-top: 3px; }
+#release-manager .release-metadata summary { cursor: pointer; padding: 16px 20px; font-weight: 550; font-size: 13px; }
+#release-manager .release-metadata summary span { float: right; color: #86868b; font-size: 12px; font-weight: 400; }
+#release-manager .release-metadata[open] summary { border-bottom: 1px solid var(--release-line); margin-bottom: 0; }
+#release-manager .release-metadata .release-form-group { margin: 0; }
+#release-manager .release-panel-footer { flex: 0 0 auto; padding: 16px 28px; border-top: 1px solid var(--release-line); background: #ffffffed; }
+#release-manager .release-footer-actions { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+#release-manager .release-footer-actions > span { font-size: 12px; color: var(--release-muted); }
+#release-manager .release-feedback { color: #237346; font-size: 12px; line-height: 1.6; padding: 10px 12px; border-radius: 8px; background: #edf7f0; margin-bottom: 12px; overflow-wrap: anywhere; }
+#release-manager .release-feedback:empty { display: none; }
+#release-manager .release-feedback[data-error=true] { color: #b42318; background: #fff0ed; }
+#release-manager [data-policy-status]:not(:empty) { margin: 12px 0 0; }
+#release-manager .release-record-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 14px; color: var(--release-muted); font-size: 12px; }
+#release-manager .release-record-toolbar label { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+#release-manager .release-record-toolbar select { width: 180px; background: #fff; }
+#release-manager .release-build-list { list-style: none; margin: 0; padding: 0; }
+#release-manager .release-build-list li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 18px 20px; }
+#release-manager .release-build-list li+li { border-top: 1px solid #ededf0; }
+#release-manager .release-build-list strong { display: block; font-size: 15px; font-weight: 550; font-variant-numeric: tabular-nums; }
+#release-manager .release-build-list small { display: block; color: var(--release-muted); font-size: 12px; margin-top: 3px; }
+#release-manager .release-record-badge { padding: 4px 9px; border-radius: 6px; color: #6e6e73; background: #f1f1f4; font-size: 11px; white-space: nowrap; }
+#release-manager .release-record-badge[data-recommended=true] { color: #0065d5; background: #eaf3ff; }
+#release-manager li.release-empty { display: block; padding: 40px 24px; text-align: center; color: var(--release-muted); font-size: 13px; }
+@media(max-width:700px) {
+  #release-manager { width: calc(100vw - 20px); height: calc(100dvh - 20px); border-radius: 20px; }
+  #release-manager .release-header { padding: 20px 18px 16px; }
+  #release-manager h2 { font-size: 21px; }
+  #release-manager .release-header-actions { gap: 10px; }
+  #release-manager .release-tabs { margin: 0 16px 16px; }
+  #release-manager .release-tabs button { font-size: 12px; padding: 7px 3px; }
+  #release-manager .release-panel-body { padding: 2px 18px 22px; }
+  #release-manager .release-panel-footer { padding: 14px 18px; }
+  #release-manager .release-section-heading { margin-bottom: 18px; }
+  #release-manager h3 { font-size: 19px; }
+  #release-manager .release-field-grid { grid-template-columns: 1fr; gap: 16px; }
+  #release-manager .release-overview-grid { grid-template-columns: 1fr; gap: 12px; }
+  #release-manager .release-overview-card { padding: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+  #release-manager .release-overview-card h4 { margin: 0 0 6px; grid-column: 1 / -1; }
+  #release-manager .release-overview-card > div { margin: 0; }
+  #release-manager .release-overview-card button { justify-self: start; margin: 0; grid-column: 1 / -1; }
+  #release-manager .release-policy-row { padding: 18px; gap: 14px; }
+  #release-manager .release-group-note { padding: 12px 18px; }
+  #release-manager .release-import { padding: 16px; gap: 10px; }
+  #release-manager .release-import-icon { flex-basis: 34px; width: 34px; height: 40px; }
+  #release-manager .release-import-copy strong { font-size: 13px; }
+  #release-manager .release-file-action { font-size: 12px; }
+  #release-manager .release-form-group { padding: 18px; }
+  #release-manager .release-footer-actions > span { max-width: 45%; font-size: 11px; }
+  #release-manager .release-record-toolbar label { font-size: 0; }
+  #release-manager .release-record-toolbar select { width: 160px; font-size: 13px; }
+}
+@media(prefers-reduced-motion:reduce) { #release-manager button { transition: none; } }
