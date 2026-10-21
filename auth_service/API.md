@@ -213,3 +213,11 @@ X-Studio-Build: <release.json 中的 build_sha256>
 只写 `client_builds`，不修改推荐版本、下载地址、最低版本或暂停状态，不向公开接口提供测试包下载信息。重复登记同一版本和校验码成功；同体系同版本的校验码不能替换，正式发布也遵守此限制。管理员列表 `builds` 包含全部已登记构建，包括历史正式版和测试版；列表本身不代表更新推荐。
 
 即使尚未发布任何推荐，已登记测试构建也能通过 updates/latest、login、verify、refresh 的版本检查，随后仍执行账号授权。已有最低版本继续生效，低于门槛的测试包仍被拒绝；其他未登记版本和不匹配的体系/校验码仍被拒绝。全局暂停时保持原暂停行为，恢复后测试登记仍有效。测试通过后，用同一清单向原 `POST /admin/api/releases` 正式发布才会改变更新推荐。
+## 版本统计（服务端 1.6.4）
+
+`GET /admin/api/releases/statistics` 仅管理员会话可访问，响应禁止缓存。
+参数：`days=7|30|90|0`（默认 30，0 为全部）、`flavor=*|all|v34|v61|unknown`、`segment=all|old|required|attention`、`version`、`search`（账号）、`page`（从 1 开始，每页 50 条）。`version=unknown` 筛选未上报有效版本。
+
+返回 `summary` 去重账号计数与覆盖数、`distribution` 按版本/体系/状态的账号和设备记录数、`details` 当前页设备明细及 `total/page/page_size`。版本、账号搜索与 segment 只筛明细；观察期与体系同时筛汇总和明细。`enforcement_enabled` 为 false 时，低于最低版本计数表示恢复规则后涉及的账号。
+
+仅成功登录、verify、refresh 采集；未认证/被门槛提前阻断的请求和匿名更新检查不计入。只保留账号＋设备＋体系的最近版本，人数不可跨版本相加。无历史回填，不提供反破解保证。设备摘要以账号范围内的短标识返回，不返回凭证或原始设备 ID。

@@ -18,6 +18,7 @@
  </div>
  <nav class="release-tabs" role="tablist" aria-label="版本管理模块">
    <button type="button" role="tab" id="release-tab-overview" aria-controls="release-overview" aria-selected="true" data-view="overview">版本概览</button>
+   <button type="button" role="tab" id="release-tab-statistics" aria-controls="release-statistics" aria-selected="false" tabindex="-1" data-view="statistics">版本统计</button>
    <button type="button" role="tab" id="release-tab-test" aria-controls="release-test" aria-selected="false" tabindex="-1" data-view="test">测试登记</button>
    <button type="button" role="tab" id="release-tab-publish" aria-controls="release-publish" aria-selected="false" tabindex="-1" data-view="publish">正式发布</button>
    <button type="button" role="tab" id="release-tab-builds" aria-controls="release-builds" aria-selected="false" tabindex="-1" data-view="builds">构建记录</button>
@@ -33,6 +34,33 @@
      <div class="release-section-label"><h4>当前发布</h4><span>按体系管理</span></div>
      <div class="release-overview-grid" data-release-overview></div>
      <p class="release-caption">测试包只需在「测试登记」中登记。准备向用户分发时，再进入「正式发布」。</p>
+   </div>
+ </section>
+ <section class="release-panel" id="release-statistics" role="tabpanel" aria-labelledby="release-tab-statistics" tabindex="0" hidden>
+   <div class="release-panel-body">
+     <div class="release-section-heading"><h3>了解用户的升级进度</h3><p>按账号去重，查看最近一次通过登录或会话校验的版本。</p></div>
+     <div class="release-stats-toolbar">
+       <label>观察范围<select data-stats-days><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option><option value="0">全部记录</option></select></label>
+       <label>客户端体系<select data-stats-flavor><option value="*">所有体系</option>${flavorOptions}<option value="unknown">未上报体系</option></select></label>
+       <button type="button" data-stats-refresh>刷新统计</button>
+     </div>
+     <p class="release-feedback" data-stats-message role="status"></p>
+     <div data-stats-content hidden>
+       <div class="release-stats-grid" data-stats-summary></div>
+       <p class="release-caption" data-stats-coverage></p>
+       <div class="release-section-label"><h4>版本分布</h4><button type="button" class="release-text-button" data-stats-publish>去设置更新 →</button></div>
+       <ul class="release-group release-build-list release-distribution" data-stats-distribution></ul>
+       <div class="release-section-label"><h4>账号与设备明细</h4><span data-stats-total></span></div>
+       <div class="release-stats-toolbar">
+         <label>查看账号<select data-stats-segment><option value="all">全部上报账号</option><option value="old">仍有旧版设备</option><option value="required">低于强制门槛</option><option value="attention">版本或构建待核实</option></select></label>
+         <label>搜索账号<input type="search" data-stats-search maxlength="64" placeholder="输入账号，按回车"></label>
+       </div>
+       <div class="release-stats-selection" data-stats-selection hidden><span></span><button type="button" data-stats-clear>清除版本筛选</button></div>
+       <ul class="release-group release-build-list release-device-list" data-stats-details></ul>
+       <div class="release-stats-pagination"><button type="button" data-stats-prev>上一页</button><span data-stats-page></span><button type="button" data-stats-next>下一页</button></div>
+       <p class="release-caption">只统计仍有效的账号。设备记录按「账号＋设备＋体系」去重，版本人数与各卡片人数可能重叠，不能相加。灰色覆盖数用于区分未上线和未采集。</p>
+       <p class="release-caption">从服务端升级后开始采集，无历史版本可补录。版本与校验码由客户端上报，可被伪造；统计是排查线索，不能证明是否破解。被版本门槛提前拦截、未通过身份验证的请求不计入账号人数。</p>
+     </div>
    </div>
  </section>
  <section class="release-panel" id="release-test" role="tabpanel" aria-labelledby="release-tab-test" tabindex="0" hidden>
@@ -93,6 +121,7 @@
      dialog.querySelector('#'+tab.getAttribute('aria-controls')).hidden=!active;
      if(active&&focus)tab.focus();
    }
+   if(view==='statistics')loadStatistics();
  };
  for(const tab of tabs)tab.onclick=()=>showView(tab.dataset.view);
  dialog.querySelector('[role=tablist]').onkeydown=e=>{
@@ -102,6 +131,63 @@
  };
  const feedback=(element,text,error=false)=>{element.textContent=text;element.dataset.error=String(error);};
  let catalog={releases:[],builds:[],enforcement_enabled:true};
+ const stats=selector=>dialog.querySelector('[data-stats-'+selector+']');
+ let statsPage=1, statsVersion='', statsRequest=0;
+ const stateNames={current:'当前推荐',outdated:'低于推荐',required:'低于强制门槛',ahead:'高于推荐 · 已登记',unpublished:'已登记 · 未发布',unknown:'上报信息不足',unregistered:'构建未登记',mismatch:'构建校验码不符'};
+ const time=value=>new Date(value*1000).toLocaleString('zh-CN',{hour12:false});
+ const element=(tag,text,className='')=>{const el=document.createElement(tag);el.textContent=text;el.className=className;return el;};
+ const emptyList=(list,text)=>list.append(element('li',text,'release-empty'));
+ const loadStatistics=async(focusDetails=false)=>{
+   const ticket=++statsRequest;
+   const query=new URLSearchParams({days:stats('days').value,flavor:stats('flavor').value,segment:stats('segment').value,search:stats('search').value.trim(),version:statsVersion,page:String(statsPage)});
+   stats('content').hidden=true;feedback(stats('message'),'正在读取统计…');
+   try{
+     const data=await api('releases/statistics?'+query);
+     if(ticket!==statsRequest)return;
+     statsPage=data.page;const s=data.summary;
+     catalog.enforcement_enabled=data.enforcement_enabled;showEnforcement();
+     const summary=stats('summary');summary.replaceChildren();
+     for(const [key,label,count,note] of [['all','上报账号',s.accounts,`${s.installations} 条设备记录`],['old','仍有旧版设备',s.old,'低于当前推荐版本'],['required','低于强制门槛',s.required,data.enforcement_enabled?'当前最低版本规则':'规则已暂停 · 恢复后适用'],['attention','版本或构建待核实',s.attention,'缺少信息、未登记或校验码不符']]){
+       const card=element('button','','release-stat-card');card.type='button';card.dataset.metric=key;
+       card.setAttribute('aria-pressed',String(stats('segment').value===key));
+       card.append(element('span',label),element('strong',String(count)),element('small',note));
+       card.onclick=()=>{stats('segment').value=key;statsVersion='';stats('search').value='';statsPage=1;loadStatistics(true);};summary.append(card);
+     }
+     stats('coverage').textContent=`截至 ${time(data.as_of)} · 全站有效账号 ${s.eligible_accounts}，其中尚未采集 ${s.unobserved_accounts}；所选体系在本观察期内未再上报 ${s.inactive_accounts}。已排除停用或到期账号 ${s.excluded_accounts}。`;
+     const distribution=stats('distribution');distribution.replaceChildren();
+     for(const row of data.distribution){
+       const item=document.createElement('li'),copy=document.createElement('div'),action=element('button','查看账号');action.type='button';
+       copy.append(element('strong',row.version||'版本未知'),element('small',`${flavors[row.flavor]||'未上报体系'} · ${stateNames[row.state]}`));
+       const counts=element('div','','release-stats-counts');counts.append(element('strong',`${row.accounts} 个账号`),element('small',`${row.installations} 条设备记录`));
+       action.onclick=()=>{stats('flavor').value=row.flavor;statsVersion=row.version||'unknown';stats('segment').value='all';stats('search').value='';statsPage=1;loadStatistics(true);};
+       item.append(copy,counts,action);distribution.append(item);
+     }
+     if(!data.distribution.length)emptyList(distribution,'本范围内暂无已验证的客户端上报，用户下次登录或校验后会出现。');
+     stats('selection').hidden=!statsVersion;stats('selection').querySelector('span').textContent='版本筛选：'+(statsVersion==='unknown'?'版本未知':statsVersion);
+     const details=stats('details');details.replaceChildren();
+     for(const row of data.details){
+       const item=document.createElement('li'),copy=document.createElement('div'),meta=element('div','','release-device-meta');
+       copy.append(element('strong',row.username),element('small',`${row.device_name} · 设备 ${row.device_label}`));
+       const states=[stateNames[row.state]];if(row.required&&row.state!=='required')states.push('低于强制门槛');else if(row.old&&row.state!=='outdated'&&row.state!=='required')states.push('低于推荐');
+       meta.append(element('strong',`${row.version||'版本未知'} · ${flavors[row.flavor]||'未上报体系'}`),element('small',states.join(' · ')),element('small','最后上报 '+time(row.last_seen_at)));
+       item.append(copy,meta);details.append(item);
+     }
+     if(!data.details.length)emptyList(details,'没有符合筛选条件的设备记录。');
+     stats('total').textContent=`${data.total} 条设备记录`;
+     stats('page').textContent=`${data.page} / ${Math.max(1,Math.ceil(data.total/data.page_size))}`;
+     stats('prev').disabled=data.page<=1;stats('next').disabled=data.page*data.page_size>=data.total;
+     stats('content').hidden=false;feedback(stats('message'),'');
+     if(focusDetails&&!dialog.querySelector('#release-statistics').hidden)stats('segment').closest('.release-stats-toolbar').scrollIntoView({block:'start'});
+   }catch(error){if(ticket===statsRequest)feedback(stats('message'),error.message,true);}
+ };
+ for(const field of ['days','flavor'])stats(field).onchange=()=>{statsPage=1;statsVersion='';loadStatistics();};
+ stats('segment').onchange=()=>{statsPage=1;loadStatistics(true);};
+ stats('search').onchange=()=>{statsPage=1;loadStatistics(true);};
+ stats('search').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();statsPage=1;loadStatistics(true);}};
+ stats('clear').onclick=()=>{statsVersion='';statsPage=1;loadStatistics(true);};
+ stats('refresh').onclick=()=>loadStatistics();
+ stats('prev').onclick=()=>{statsPage--;loadStatistics(true);};stats('next').onclick=()=>{statsPage++;loadStatistics(true);};
+ stats('publish').onclick=()=>{const flavor=flavors[stats('flavor').value]?stats('flavor').value:'all';fill(catalog.releases.find(r=>r.flavor===flavor)||{flavor});feedback(status,'请根据统计确认版本策略，保存后才会生效。');showView('publish');};
  const toggle=dialog.querySelector('[data-enforcement-toggle]');
  const showEnforcement=()=>{
    const enabled=catalog.enforcement_enabled!==false;

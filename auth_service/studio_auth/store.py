@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS session_user ON sessions(user_id);
+CREATE TABLE IF NOT EXISTS client_observations (
+    user_id TEXT NOT NULL REFERENCES users(id), device_hash TEXT NOT NULL,
+    flavor TEXT NOT NULL, version TEXT NOT NULL, build_sha256 TEXT NOT NULL,
+    device_name TEXT NOT NULL, first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+    PRIMARY KEY(user_id,device_hash,flavor)
+);
+CREATE INDEX IF NOT EXISTS client_seen ON client_observations(last_seen_at);
 CREATE TABLE IF NOT EXISTS used_refresh (
     token_hash TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE

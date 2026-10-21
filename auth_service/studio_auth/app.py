@@ -128,6 +128,8 @@ def create_app(settings=None, *, clock=None):
     app.include_router(config_import_router)
     from .releases import router as releases_router
     app.include_router(releases_router)
+    from .version_stats import router as version_stats_router, observe
+    app.include_router(version_stats_router)
 
     @app.exception_handler(AuthError)
     async def auth_error(request, exc):
@@ -161,8 +163,10 @@ def create_app(settings=None, *, clock=None):
     def login(body: Login, request: Request):
         from .releases import require_client
         require_client(request)
-        return request.app.state.auth.login(body.username, body.password, body.device_id,
+        result = request.app.state.auth.login(body.username, body.password, body.device_id,
                                             body.device_name, request.client.host if request.client else "unknown")
+        observe(request, result, body.device_id)
+        return result
 
     @app.post("/api/v1/auth/verify")
     def verify(body: Verify, request: Request, authorization: str = Header(default="", max_length=256)):
@@ -172,6 +176,7 @@ def create_app(settings=None, *, clock=None):
         if len(parts) != 2 or parts[0].lower() != "bearer" or not 40 <= len(parts[1]) <= 128:
             raise AuthError(401, "invalid_session", "请先登录")
         result = request.app.state.auth.verify(parts[1], body.device_id)
+        observe(request, result, body.device_id)
         from .provisioning import configuration
         result['provider_config'] = configuration(request.app.state.auth, result['user']['id'])
         return result
@@ -180,8 +185,10 @@ def create_app(settings=None, *, clock=None):
     def refresh(body: Refresh, request: Request):
         from .releases import require_client
         require_client(request)
-        return request.app.state.auth.refresh(body.refresh_token, body.device_id,
+        result = request.app.state.auth.refresh(body.refresh_token, body.device_id,
                                               request.client.host if request.client else "unknown")
+        observe(request, result, body.device_id)
+        return result
 
     @app.post("/api/v1/auth/logout")
     def logout(body: Refresh, request: Request):
