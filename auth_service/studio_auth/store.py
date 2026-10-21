@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS client_observations (
     PRIMARY KEY(user_id,device_hash,flavor)
 );
 CREATE INDEX IF NOT EXISTS client_seen ON client_observations(last_seen_at);
+CREATE TABLE IF NOT EXISTS r2_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL,
+    revision TEXT NOT NULL, enabled INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_r2 (
+    user_id TEXT PRIMARY KEY REFERENCES users(id), enabled INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS used_refresh (
     token_hash TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE

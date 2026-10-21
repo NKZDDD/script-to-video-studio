@@ -213,6 +213,20 @@ X-Studio-Build: <release.json 中的 build_sha256>
 只写 `client_builds`，不修改推荐版本、下载地址、最低版本或暂停状态，不向公开接口提供测试包下载信息。重复登记同一版本和校验码成功；同体系同版本的校验码不能替换，正式发布也遵守此限制。管理员列表 `builds` 包含全部已登记构建，包括历史正式版和测试版；列表本身不代表更新推荐。
 
 即使尚未发布任何推荐，已登记测试构建也能通过 updates/latest、login、verify、refresh 的版本检查，随后仍执行账号授权。已有最低版本继续生效，低于门槛的测试包仍被拒绝；其他未登记版本和不匹配的体系/校验码仍被拒绝。全局暂停时保持原暂停行为，恢复后测试登记仍有效。测试通过后，用同一清单向原 `POST /admin/api/releases` 正式发布才会改变更新推荐。
+## R2 配置与上传授权（服务端 1.7.0）
+
+管理员 `GET/POST /admin/api/storage` 查看/设置全局 R2，字段为 `endpoint`、`bucket`、`public_base_url`、`prefix`、`access_key`、`secret_key`、`enabled`。GET 只返回非密钥配置和密钥已保存标记；POST 密钥留空保留原值，首次必须填写。保存生成新修订号，写操作要求管理员会话、同源与 CSRF。旧 config 的导入在浏览器提取 upload 字段后发送本接口，不上传整个文件。
+
+管理员 `GET/POST /admin/api/users/{name}/storage` 查询/设置账号授权；POST 为 `{"enabled":true}` 或 false。已有账号默认无授权，取消不删除已上传文件。
+
+`POST /api/v1/auth/verify` 增加 `storage_config`：未分配时为 `{"assigned":false}`；已分配包含 assigned、available、revision、endpoint、bucket、public_base_url、prefix、max_bytes，无长期密钥。
+
+`POST /api/v1/auth/storage/sign` 使用 Bearer 登录令牌和标准 Studio 版本头；JSON 为 `device_id`、`revision`（32位小写十六进制）、`sha256`（64位小写十六进制）、`bytes`（1–26214400整数）、`content_type`。服务端校验版本、账号、会话、设备和 R2 授权，按账号限制签名请求。revision 过期返回 409 storage_changed；无授权/停用返回 403 storage_denied；格式、类型、大小错误返回 422。
+
+成功返回 `upload_url`、`public_url`、`headers:{"Content-Type":...}`、`bytes`、`revision`、`expires_at`。客户端按相同长度和类型 PUT 字节到 upload_url，成功后才持久化 public_url。PUT 不带登录令牌，不跟随重定向；临时签名禁止写入日志/任务文件。签名绑定长度和类型，有效期最多300秒且不超过账号/会话期限，可在有效期内重复使用。
+
+只允许 PNG/JPEG/WebP/GIF、支持的 MP3/M4A/WAV/OGG/FLAC/AAC 音频 MIME 和不超过1024字节的 text/plain 连通性测试。服务端自行生成 `prefix/user_id/revision/sha256.ext` 路径。公开读取 URL 没有此上传期限，R2 清理规则由管理员管理。安装包发布上传不走此接口。
+
 ## 版本统计（服务端 1.6.4）
 
 `GET /admin/api/releases/statistics` 仅管理员会话可访问，响应禁止缓存。

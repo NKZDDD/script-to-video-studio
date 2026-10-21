@@ -675,7 +675,8 @@ def resolve_provider_cfg(cfg: dict, sel: dict, kind: str = "") -> dict:
     out["key_slot_label"] = _KEY_LABELS.get(slot, slot)
     # 参考图上传配置是全局共用的（一个对象存储服务所有服务商），
     # 但某家自己的上传端点能不能用是按家配的
-    out["upload"] = dict(cfg.get("upload") or {})   # 上传配置全局共用一份
+    from core import uploader
+    out["upload"] = uploader.effective_config(cfg.get("upload") or {}, allow_unavailable=True)
     # 全局默认也带上：worker 只拿得到这一份配置，拿不到整个 config。
     # 「被审核拒绝后改写重试」是全局设的，某一家想单独调就在这家里写
     # 同名字段覆盖 —— 不带下来的话，设置页那个输入框就是个假旋钮。
@@ -889,6 +890,8 @@ def api_get(path: str, q: dict) -> dict:
         if up.get("access_key"):
             up["access_key"] = up["access_key"][:4] + "…"
         pub["upload"] = up
+        from core import cloud_storage
+        up["managed"] = cloud_storage.status()
         # llm.api_key 之前是原文发给前端的 —— providers 整块剔了、upload 的
         # 密钥也抹了，就漏了这一个。页面只需要知道「配了没」。
         lm = dict(pub.get("llm") or {})
@@ -1723,6 +1726,10 @@ def api_post(path: str, body: dict) -> dict:
             llm_concurrency=int(body.get("llm_concurrency")
                                 or (cfg.get("defaults") or {}).get("llm_concurrency", 6)))
         return {"ok": True, "job_id": job.id}
+
+    if path == "/api/upload/refresh":
+        from core import cloud_storage
+        return {"ok": True, "storage": cloud_storage.status()}
 
     if path == "/api/upload/selftest":
         """传一个小文件再用普通 HTTP 取回来，确认服务商真的能读到。
@@ -2655,7 +2662,7 @@ class Handler(BaseHTTPRequestHandler):
             update_route = path in ("/api/updates/check", "/api/updates/download", "/api/updates/install", "/api/updates/stop")
             if not auth_route and not update_route:
                 self._login().require(cookie, force=path in (
-                    "/api/agent/start", "/api/agent/reroll", "/api/agent/assemble", "/api/agent/models/refresh", "/api/agent/config/refresh"))
+                    "/api/agent/start", "/api/agent/reroll", "/api/agent/assemble", "/api/agent/models/refresh", "/api/agent/config/refresh", "/api/upload/refresh", "/api/agent/upload/selftest", "/api/upload/selftest"))
             if self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json":
                 raise LoginRequired("json_required", "请使用 JSON 请求", 415)
             if n < 0 or ((auth_route or update_route) and n > 16384):

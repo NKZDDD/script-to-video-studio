@@ -40,10 +40,20 @@ _FATAL_WORDS = ("NoSuchBucket", "InvalidAccessKeyId", "SignatureDoesNotMatch",
 
 
 def configured(cfg: Optional[dict]) -> bool:
-    cfg = cfg or {}
+    try:
+        cfg = effective_config(cfg)
+    except ApiError:
+        return False
+    if cfg.get('_storage_source') == 'managed':
+        return True
     return bool((cfg.get("bucket") or "").strip()
                 and (cfg.get("access_key") or "").strip()
                 and (cfg.get("secret_key") or "").strip())
+
+
+def effective_config(cfg, *, allow_unavailable=False):
+    from . import cloud_storage
+    return cloud_storage.effective(cfg, allow_unavailable=allow_unavailable)
 
 
 # ---------------------------------------------------------------- 缓存
@@ -128,6 +138,10 @@ def public_url(cfg: dict, key: str) -> str:
 
 def put(cfg: dict, data: bytes, key: str) -> str:
     """上传一份字节，返回公网 URL。"""
+    cfg = effective_config(cfg)
+    if cfg.get('_storage_source') == 'managed':
+        from . import cloud_storage
+        return cloud_storage.upload(cfg, data, mimetypes.guess_type(key)[0] or 'application/octet-stream')
     bucket = (cfg.get("bucket") or "").strip()
     if not bucket:
         raise ApiError("对象存储没填 bucket（设置 → 参考图上传）", kind=TASK_FATAL)
@@ -154,6 +168,7 @@ def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 0,
     """
     if not os.path.isfile(path):
         raise ApiError(f"参考图文件不存在: {path}")
+    cfg = effective_config(cfg)
     if not configured(cfg):
         raise ApiError(
             "这个模型的参考图只收公网链接，但还没配对象存储，本机的故事板传不上去。"
@@ -162,6 +177,8 @@ def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 0,
             kind=TASK_FATAL)
 
     h = _sha(path, max_side, fmt)
+    if cfg.get('_storage_source') == 'managed':
+        h = hashlib.sha256((cfg['_storage_owner'] + ':' + cfg['revision'] + ':' + h).encode()).hexdigest()[:32]
     hit = _cache_get(project_root, h)
     if hit:
         return hit
@@ -195,6 +212,10 @@ def selftest(cfg: dict, log: Callable = print) -> dict:
     R2 的 S3 API 域名（那个域名不对外）。上传都会成功，但服务商取图 403，
     到时候是一批任务失败，不如现在花两秒测出来。
     """
+    try:
+        cfg = effective_config(cfg)
+    except ApiError as exc:
+        return {"ok": False, "step": "授权", "msg": str(exc)}
     if not configured(cfg):
         return {"ok": False, "step": "配置", "msg": "bucket / access_key / secret_key 没填全"}
     payload = b"respect-studio-uploader-selftest"

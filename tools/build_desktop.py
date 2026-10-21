@@ -104,7 +104,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "支持 R2 下载更新；后台分别设置推荐版本和最低可用版本；保留启动、提交前检查及构建校验。"}
+               "notes": "支持登录后接收后台 R2 授权；图片及参考音频使用临时链接直传，存储密钥留在服务端；设置页可刷新与测试。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))

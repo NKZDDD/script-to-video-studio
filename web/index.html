@@ -748,6 +748,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       程序会自动把图传上去换链接——<b>R2 / 阿里云 OSS / 腾讯云 COS / AWS S3 / MinIO</b> 都是这一套。
       先 <code>pip install boto3</code>。同一张图全剧只传一次（按内容缓存），重跑也不重传。
     </p>
+    <p id="upManaged" class="muted"></p><button class="btn ghost sm" id="refreshUploadConfig">刷新后台 R2 配置</button>
     <div class="grid g2">
       <div><label>Endpoint <span class="muted">R2: https://&lt;账号id&gt;.r2.cloudflarestorage.com；AWS 留空</span></label>
         <input id="upEndpoint" placeholder="https://xxx.r2.cloudflarestorage.com"></div>
@@ -4568,7 +4569,8 @@ const UP_FIELDS = {upEndpoint:'endpoint', upRegion:'region', upBucket:'bucket',
                    upPrefix:'prefix', upAccess:'access_key', upSecret:'secret_key',
                    upPublic:'public_base_url'};
 function renderUpload() {
-  const u = BOOT.config.upload || {};
+  const u = BOOT.config.upload || {}, m=u.managed||{};
+  $('#upManaged').textContent=m.assigned?(m.available?'当前使用后台 R2：'+m.public_base_url+'。下方为个人备用配置，密钥由后台管理。':'后台 R2 已停用或配置不完整，请联系管理员后刷新。'):'当前使用个人对象存储配置。';
   for (const [el, key] of Object.entries(UP_FIELDS)) {
     // **两个密钥回传的都是掩码，都别塞回输入框** —— 留空表示不改。
     //
@@ -4581,7 +4583,7 @@ function renderUpload() {
   }
   $('#upMode').value = u.mode || 'always';
   const ready = u.bucket && u.access_key_set && u.secret_key_set;
-  $('#upState').textContent = ready
+  $('#upState').textContent = m.assigned ? (m.available?'后台 R2 已配置，可测试连接':'后台 R2 不可用') : ready
     ? (u.public_base_url ? `已配置（${u.bucket}）——建议点一次「测试连接」`
                          : '⚠️ 缺「公开访问域名」，服务商很可能取不到图')
     : (u.bucket ? '还缺密钥' : '未配置 —— 只收公网链接的模型暂时用不了');
@@ -4597,6 +4599,12 @@ function collectUpload() {
   upload.mode = $('#upMode').value;
   return upload;
 }
+$('#refreshUploadConfig').onclick = async () => {
+  const r=await api.post('/api/upload/refresh',{});
+  if(r.error){$('#upResult').textContent=r.error;return;}
+  BOOT=await api.get('/api/bootstrap');renderUpload();
+  $('#upResult').textContent='后台 R2 配置已刷新';
+};
 $('#saveUpload').onclick = async () => {
   await api.post('/api/config', {upload: collectUpload()});
   BOOT = await api.get('/api/bootstrap'); renderUpload();

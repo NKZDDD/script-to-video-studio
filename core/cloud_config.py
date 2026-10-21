@@ -53,6 +53,8 @@ def install(manager, owner, configs):
 
 
 def clear(manager):
+    from . import cloud_storage
+    cloud_storage.clear(manager)
     global _manager, _owner, _configs
     with _lock:
         if _manager is manager:

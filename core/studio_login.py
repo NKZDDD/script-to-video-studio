@@ -60,7 +60,7 @@ class LoginManager:
 
     def _post(self, action, body, access=None):
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if action in ("login", "verify", "refresh"):
+        if action in ("login", "verify", "refresh", "storage/sign"):
             from . import updates
             # Re-use the verified identity for this request only, not persisted credentials.
             headers.update(updates.MANAGER.require_allowed())
@@ -155,17 +155,38 @@ class LoginManager:
         if data.get("valid") is not True or not isinstance(data.get("user"), dict):
             self.checked_until = 0
             raise LoginRequired("invalid_auth_response", "登录服务未确认授权，请重试", 503)
-        from . import cloud_config, cloud_usage
+        from . import cloud_config, cloud_usage, cloud_storage
         self.user = {k: data["user"].get(k) for k in ("id", "username", "expires_at")}
         try:
             cloud_config.install(self, self.user.get('id') or '', data.get('provider_config', {}))
+            cloud_storage.install(self, self.user.get('id') or '', data.get('storage_config'))
         except ValueError:
             self._clear()
-            raise LoginRequired('invalid_auth_response', '后台服务商配置格式不正确，请联系管理员', 503) from None
+            raise LoginRequired('invalid_auth_response', '后台服务商或 R2 配置格式不正确，请联系管理员', 503) from None
         self.checked_until = time.monotonic() + 60
         self.last_error, self.retry_at = None, 0
         if self.user.get('id'):
             cloud_usage.start_sender(self)
+
+    def storage_ticket(self, body, owner):
+        for attempt in range(2):
+            with self.lock:
+                if not self.tokens or not self.user or self.user.get('id') != owner:
+                    raise LoginRequired()
+                if time.monotonic() >= self.checked_until:
+                    self._verify()
+                token = self.tokens['access_token']
+                request = dict(body, device_id=self.device_id())
+            try:
+                return self._post('storage/sign', request, token)
+            except LoginRequired as exc:
+                if exc.code != 'access_expired' or attempt:
+                    raise
+                with self.lock:
+                    if not self.tokens or not self.user or self.user.get('id') != owner:
+                        raise LoginRequired()
+                    if self.tokens['access_token'] == token:
+                        self._verify()
 
     def send_usage(self):
         from . import cloud_usage

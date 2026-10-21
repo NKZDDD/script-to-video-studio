@@ -265,7 +265,7 @@ def post(app, path, body):
             raise ValueError("只有可选功能包可以隐藏")
         return app.api_post("/api/config", body)
     if path == "/api/agent/config/refresh":
-        from core import cloud_config
+        from core import cloud_config, cloud_storage
         rows = []
         for pid in cloud_config.assigned_ids():
             try:
@@ -275,7 +275,9 @@ def post(app, path, body):
             rows.append({'provider': pid, 'ok': result.get('ok', False),
                          'partial': result.get('partial', False), 'msg': result.get('msg', ''),
                          'count': len(result.get('models', []))})
-        return {'ok': True, 'rows': rows}
+        return {'ok': True, 'rows': rows, 'storage': cloud_storage.status()}
+    if path == "/api/agent/upload/selftest":
+        return app.api_post("/api/upload/selftest", {})
     if path == "/api/agent/models/refresh":
         return app.api_post("/api/models/refresh", body)
     if path == "/api/agent/providers/reload":

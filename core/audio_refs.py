@@ -133,6 +133,7 @@ def resolve(pj, task, upload, log):
             continue
         path = A.inside(pj.root, src)
         # Separate from image encoder/cache: audio must never be re-encoded as an image.
+        upload = uploader.effective_config(upload)
         data = path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         destination = json.dumps({k: upload.get(k, '') for k in ('endpoint', 'bucket', 'prefix', 'public_base_url')}, sort_keys=True)

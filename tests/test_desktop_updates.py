@@ -10,7 +10,10 @@ from core import updates
 
 def release(**kw):
     raw = b"MZtest-installer"
-    return dict(version="2026.10.21.0", flavor="all",
+    # Keep the update fixture newer than the build under test as releases advance.
+    parts = updates.VERSION.split('.')
+    parts[-1] = str(int(parts[-1]) + 1)
+    return dict(version='.'.join(parts), flavor="all",
                 url=updates.AUTH_URL + "/downloads/Studio.exe",
                 bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(), notes="", **kw)
 

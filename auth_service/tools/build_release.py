@@ -8,6 +8,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 TOP = {"README.md", "API.md", "ADMIN-UPGRADE.md", "KEY-USAGE-UPGRADE.md", "KEY-LIBRARY-UPGRADE.md", "CLIENT-UPDATE-UPGRADE.md", "VERSION-CHECK-PAUSE.md", "TEST-BUILD-UPGRADE.md", "VERSION-UI-UPGRADE.md", "VALIDATION.md", "requirements.txt", "requirements-test.txt", "pytest.ini"}
 TOP.add("VERSION-STATS-UPGRADE.md")
+TOP.add("R2-UPGRADE.md")
 TREES = {"studio_auth", "deploy", "examples", "tests", "tools"}
 SUFFIXES = {".py", ".sh", ".service", ".timer", ".conf", ".html", ".css", ".js"}
 
