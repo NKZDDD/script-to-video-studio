@@ -2572,7 +2572,17 @@ class Handler(BaseHTTPRequestHandler):
             raise LoginRequired("origin_rejected", "不接受其他网站发起的 Studio 请求", 403)
 
     def _login_error(self, exc):
-        return self._json({"error": str(exc), "code": exc.code, "login_required": True}, exc.status)
+        needs_login = True
+        if exc.status in (429, 503) or exc.code == "update_check_failed":
+            # A failed online check blocks this action, not an otherwise valid
+            # local session. The frontend must not cover local work with login.
+            try:
+                self._login().require(self.headers.get("Cookie", ""))
+            except LoginRequired:
+                pass
+            else:
+                needs_login = False
+        return self._json({"error": str(exc), "code": exc.code, "login_required": needs_login}, exc.status)
 
     def _send_file(self, full: str, ctype: str):
         """产物文件按 Range 分段回。浏览器拖视频进度条要从中间某个字节开始取，
@@ -2677,7 +2687,7 @@ class Handler(BaseHTTPRequestHandler):
             update_route = path in ("/api/updates/check", "/api/updates/download", "/api/updates/install", "/api/updates/stop")
             if not auth_route and not update_route:
                 self._login().require(cookie, force=path in (
-                    "/api/agent/start", "/api/agent/reroll", "/api/agent/assemble", "/api/agent/models/refresh", "/api/agent/config/refresh", "/api/providers/reload", "/api/agent/providers/reload", "/api/upload/refresh", "/api/agent/upload/selftest", "/api/upload/selftest"))
+                    "/api/agent/start", "/api/agent/reroll", "/api/agent/assemble", "/api/agent/config/refresh"))
             if self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json":
                 raise LoginRequired("json_required", "请使用 JSON 请求", 415)
             if n < 0 or ((auth_route or update_route) and n > 16384):
@@ -2725,9 +2735,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "内部分析接口已停用，请把修订要求交给 Agent"}, 410)
             from core import updates
             # Serialize starts with the final idle check before exit/install.
-            with updates.LIFECYCLE:
+            starts_job = path in ("/api/agent/start", "/api/agent/reroll", "/api/agent/assemble")
+            if starts_job:
+                with updates.LIFECYCLE:
+                    if updates.INSTALLING:
+                        raise ValueError("Studio 正在退出或安装更新，请稍后重新打开")
+                    result = agent_api.post(sys.modules[__name__], path, body)
+            else:
                 if updates.INSTALLING:
                     raise ValueError("Studio 正在退出或安装更新，请稍后重新打开")
+                # Ordinary posts neither hold nor wait on the job/install lock.
                 result = agent_api.post(sys.modules[__name__], path, body)
             return self._json(result)
         except LoginRequired as exc:

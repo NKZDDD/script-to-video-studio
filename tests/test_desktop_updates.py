@@ -317,3 +317,30 @@ def test_launch_update_error_is_actionable(tmp_path, monkeypatch):
     monkeypatch.setattr(desktop.subprocess, "Popen", fail)
     with pytest.raises(ValueError, match="尚未退出"):
         desktop.launch_update(tmp_path / "setup.exe")
+
+
+def test_nested_authorized_requests_reuse_version_check_but_explicit_check_does_not(monkeypatch):
+    response_for(monkeypatch, {'release':None, 'policy_protocol':1, 'client':{'allowed':True}})
+    original = updates.requests.get
+    calls = []
+    def get(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(updates.requests, 'get', get)
+    clock = [100.0]
+    monkeypatch.setattr(updates.time, 'monotonic', lambda: clock[0])
+    m = updates.UpdateManager()
+    m.require_allowed()
+    m.require_allowed()
+    assert len(calls) == 1
+    clock[0] += 61
+    m.require_allowed()
+    assert len(calls) == 2
+    m.check()
+    assert len(calls) == 3
+    response_for(monkeypatch, {'release':None, 'policy_protocol':1,
+                              'client':{'allowed':False, 'code':'update_required'}})
+    m.check()
+    with pytest.raises(Exception) as exc:
+        m.require_allowed()
+    assert exc.value.code == 'update_required'

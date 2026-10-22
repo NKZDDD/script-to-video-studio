@@ -87,12 +87,12 @@ def test_force_check_disabled_account_does_not_use_cached_success(manager):
     assert mgr.tokens is None and not mgr.local_session
 
 
-def test_network_failure_blocks_until_check_succeeds(manager):
+def test_network_failure_blocks_production_but_preserves_local_access(manager):
     mgr, stub = manager
     cookie = logged_in(mgr)
     stub.offline = True
     assert mgr.status(cookie, force=True)["can_retry"]
-    assert not mgr.status(cookie)["authenticated"]
+    assert mgr.status(cookie)["authenticated"]
     stub.offline = False
     mgr.retry_at = 0
     mgr.require(cookie, force=True)
@@ -104,7 +104,7 @@ def test_concurrent_requests_only_refresh_once(manager):
     stub.expired = True
     mgr.checked_until = 0
     with ThreadPoolExecutor(max_workers=12) as pool:
-        list(pool.map(lambda _: mgr.require(cookie), range(25)))
+        list(pool.map(lambda _: mgr.require(cookie, force=True), range(25)))
     assert sum(a == "refresh" for a, _ in stub.calls) == 1
 
 
@@ -217,3 +217,190 @@ def test_update_recovery_is_accessible_before_login_but_same_origin(http_server,
     with pytest.raises(HTTPError) as exc:
         request("/api/updates/install", {}, Origin="https://evil.example")
     assert exc.value.code == 403
+
+
+def test_local_access_never_renews_and_known_expiry_is_local(manager):
+    import time
+    mgr, stub = manager
+    cookie = logged_in(mgr)
+    before = len(stub.calls)
+    mgr.checked_until = 0
+    stub.offline = True
+    for _ in range(5):
+        mgr.require(cookie)
+        assert mgr.status(cookie)["authenticated"]
+    assert len(stub.calls) == before
+    mgr.user['expires_at'] = time.time() - 1
+    assert mgr.status(cookie)['code'] == 'account_expired'
+    assert len(stub.calls) == before
+    stub.offline = False
+    mgr.require(cookie, force=True)  # Renewal on the server can restore access.
+
+
+def test_slow_verify_does_not_block_dependency_or_plan_requests(http_server, monkeypatch):
+    request, mgr, stub, url = http_server
+    with request('/api/auth/login', {'username':'alice', 'password':'test-password'}) as response:
+        cookie = response.headers['Set-Cookie'].split(';')[0]
+    started, release = threading.Event(), threading.Event()
+    def slow(action, body, access=None):
+        if action == 'verify':
+            started.set()
+            assert release.wait(5)
+        return stub(action, body, access)
+    monkeypatch.setattr(mgr, '_post', slow)
+    with ThreadPoolExecutor(2) as pool:
+        future = pool.submit(mgr.require, cookie, True)
+        try:
+            assert started.wait(2)
+            for path in ('/api/agent/dependencies', '/api/agent/preview'):
+                req = Request(url+path, data=b'{}', headers={'Content-Type':'application/json', 'Cookie':cookie})
+                with urlopen(req, timeout=1) as r:
+                    assert json.load(r)['ok']
+            assert mgr.status(cookie)['authenticated']
+        finally:
+            release.set()
+        future.result(timeout=2)
+
+
+def test_usage_upload_does_not_lock_pages_or_verify(manager, monkeypatch):
+    from core import cloud_usage
+    mgr, stub = manager
+    cookie = logged_in(mgr)
+    mgr.user['id'] = 'user-a'
+    mgr.checked_until = 0
+    monkeypatch.setattr(cloud_usage, 'pending', lambda uid: [{'event_id':'event-a'}])
+    ack = []
+    monkeypatch.setattr(cloud_usage, 'acknowledge', lambda *args: ack.append(args))
+    started, release = threading.Event(), threading.Event()
+    def slow(action, body, access=None):
+        assert action == 'usage'
+        started.set()
+        assert release.wait(5)
+        return {'accepted':['event-a']}
+    monkeypatch.setattr(mgr, '_post', slow)
+    with ThreadPoolExecutor(2) as pool:
+        future = pool.submit(mgr.send_usage)
+        try:
+            assert started.wait(2)
+            pool.submit(mgr.require, cookie).result(timeout=1)
+        finally:
+            release.set()
+        future.result(timeout=2)
+    assert ack == [('user-a', [{'event_id':'event-a'}])]
+
+
+def test_logout_during_verify_cannot_restore_session(manager, monkeypatch):
+    mgr, stub = manager
+    cookie = logged_in(mgr)
+    started, release = threading.Event(), threading.Event()
+    def slow(action, body, access=None):
+        if action == 'verify':
+            started.set()
+            assert release.wait(5)
+        return stub(action, body, access)
+    monkeypatch.setattr(mgr, '_post', slow)
+    invalidated = threading.Event()
+    original = mgr._current
+    def current(generation):
+        if mgr.generation != generation:
+            invalidated.set()
+        return original(generation)
+    monkeypatch.setattr(mgr, '_current', current)
+    with ThreadPoolExecutor(3) as pool:
+        verification = pool.submit(mgr.require, cookie, True)
+        try:
+            assert started.wait(2)
+            logout = pool.submit(mgr.logout, cookie)
+            # Wait for local invalidation without waiting on the remote operation.
+            import time
+            deadline = time.monotonic() + 1
+            while mgr.local_session and time.monotonic() < deadline:
+                time.sleep(.005)
+            assert not mgr.status(cookie)['authenticated']
+        finally:
+            release.set()
+        logout.result(timeout=2)
+        with pytest.raises(L.LoginRequired):
+            verification.result(timeout=2)
+    assert invalidated.is_set()
+    assert not mgr.status(cookie)['authenticated']
+
+
+def test_local_routes_do_not_force_cloud_refresh(http_server):
+    request, mgr, stub, _ = http_server
+    request('/api/auth/login', {'username':'alice','password':'test-password'}).close()
+    mgr.checked_until = 0
+    before = len(stub.calls)
+    for path in ('/api/agent/dependencies','/api/agent/preview','/api/agent/settings',
+                 '/api/agent/models/refresh','/api/agent/providers/reload'):
+        request(path, {}).close()
+    assert len(stub.calls) == before
+    request('/api/agent/config/refresh', {}).close()
+    assert len(stub.calls) == before + 1
+
+
+def test_failed_production_check_does_not_lock_local_ui(http_server):
+    request, _, stub, _ = http_server
+    request('/api/auth/login', {'username':'alice','password':'test-password'}).close()
+    stub.offline = True
+    with pytest.raises(HTTPError) as exc:
+        request('/api/agent/start', {})
+    assert exc.value.code == 503
+    assert json.loads(exc.value.read())['login_required'] is False
+    with request('/api/agent/preview', {}) as r:
+        assert json.load(r)['ok']
+
+
+def test_slow_model_refresh_does_not_serialize_local_posts(http_server, monkeypatch):
+    from server import agent_api
+    request, mgr, stub, url = http_server
+    with request('/api/auth/login', {'username':'alice','password':'test-password'}) as r:
+        cookie = r.headers['Set-Cookie'].split(';')[0]
+    entered, release = threading.Event(), threading.Event()
+    def post(app, path, body):
+        if path == '/api/agent/models/refresh':
+            entered.set()
+            assert release.wait(5)
+        return {'ok':True}
+    monkeypatch.setattr(agent_api, 'post', post)
+    def call(path):
+        req = Request(url+path, data=b'{}', headers={'Content-Type':'application/json','Cookie':cookie})
+        with urlopen(req, timeout=2) as r:
+            return json.load(r)
+    with ThreadPoolExecutor(2) as pool:
+        pending = pool.submit(call, '/api/agent/models/refresh')
+        try:
+            assert entered.wait(1)
+            assert call('/api/agent/dependencies')['ok']
+            assert call('/api/agent/preview')['ok']
+        finally:
+            release.set()
+        assert pending.result(timeout=2)['ok']
+
+
+def test_version_network_failure_preserves_local_access_but_enforced_update_locks(http_server, monkeypatch):
+    request, mgr, _, _ = http_server
+    request('/api/auth/login', {'username':'alice','password':'test-password'}).close()
+    code = ['update_check_failed']
+    def failure(*a, **k):
+        raise L.LoginRequired(code[0], 'version check', 426)
+    monkeypatch.setattr(mgr, '_post', failure)
+    for reason, locks in [('update_check_failed',False), ('update_required',True)]:
+        code[0] = reason
+        mgr.retry_at = 0
+        with pytest.raises(HTTPError) as exc:
+            request('/api/agent/start', {})
+        assert exc.value.code == 426
+        assert json.loads(exc.value.read())['login_required'] is locks
+
+
+def test_local_posts_do_not_wait_for_job_creation_lock(http_server):
+    from core import updates
+    request, _, _, url = http_server
+    with request('/api/auth/login', {'username':'alice','password':'test-password'}) as r:
+        cookie = r.headers['Set-Cookie'].split(';')[0]
+    with updates.LIFECYCLE:
+        req = Request(url+'/api/agent/preview', data=b'{}',
+                      headers={'Content-Type':'application/json','Cookie':cookie})
+        with urlopen(req, timeout=1) as r:
+            assert json.load(r)['ok']

@@ -19,6 +19,11 @@
  function dismiss(){document.body.classList.remove('studio-updating');resolveReady();}
  function render(d){
    last=d;
+   // An unreachable policy endpoint blocks new production on the backend, but
+   // must not hide the local workspace of a previously authenticated session.
+   if(d.code==='update_check_failed'&&window.StudioLogin?.isAuthenticated()){
+     dismiss();return;
+   }
    const busy=['checking','downloading','installing'].includes(d.phase),r=d.release;
    const available=r&&['available','ready','downloading','installing','error'].includes(d.phase);
    const open=!d.allowed||(available&&skippedVersion!==r.version);

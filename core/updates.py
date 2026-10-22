@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import threading
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -75,6 +76,7 @@ class UpdateManager:
         self.gate_message = "正在确认应用版本，请稍候"
         self.check_lock = threading.Lock()
         self.verified_headers = {}
+        self.checked_at = None
         self.auto_download_key = None
         self.download_error = ""
 
@@ -141,6 +143,7 @@ class UpdateManager:
                     self.release, self.installer, self.received = release, None, 0
                 self.allowed = client["allowed"] and not identity_error
                 self.verified_headers = headers(info) if self.allowed else {}
+                self.checked_at = time.monotonic() if self.allowed else None
                 self.code = "client_damaged" if identity_error else str(client.get("code", "version_unconfirmed"))
                 self.gate_message = identity_error or str(client.get("message", "版本未确认"))
                 available = release and (version(release["version"]) > version(VERSION) or
@@ -163,7 +166,10 @@ class UpdateManager:
 
     def require_allowed(self):
         from .studio_login import LoginRequired
-        self.check()
+        with self.lock:
+            fresh = self.allowed and self.checked_at is not None and time.monotonic() - self.checked_at < 60
+        if not fresh:
+            self.check()
         with self.lock:
             if not self.allowed:
                 raise LoginRequired(self.code, self.gate_message, 426)

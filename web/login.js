@@ -55,7 +55,8 @@
    finally{account.disabled=false;$('#login-submit').disabled=false;}
  });
  window.StudioLogin={ready,isAuthenticated:()=>authenticated,lock};
- setInterval(()=>{if(authenticated)check(true);},60000);
+ // Status checks only read the local session; explicit retry still verifies online.
+ setInterval(()=>{if(authenticated)check();},60000);
  window.addEventListener('focus',()=>{if(authenticated)check();});
  window.StudioUpdates.ready.then(()=>check());
 })();
