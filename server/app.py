@@ -882,6 +882,8 @@ def api_get(path: str, q: dict) -> dict:
     cfg = load_config()
 
     if path == "/api/bootstrap":
+        from server import provider_view
+        managed_providers = cloud_config.client_managed()
         # 凭据一律不回前端：providers 整块剔掉，upload 里的密钥只回「配了没」
         pub = {k: v for k, v in cfg.items() if k != "providers"}
         up = dict(pub.get("upload") or {})
@@ -905,8 +907,8 @@ def api_get(path: str, q: dict) -> dict:
         env_p = _env_proxy()
         mode = (lm.get("proxy") or "").strip()
         saved_providers = cfg.get("providers") or {}
-        key_status = {pid: _provider_key_status(pid, saved_providers.get(pid, {}))
-                      for pid in set(PROVIDER_REGISTRY) | set(saved_providers)}
+        visible_ids = set(cloud_config.assigned_ids()) if managed_providers else set(PROVIDER_REGISTRY) | set(saved_providers)
+        key_status = {pid: _provider_key_status(pid, saved_providers.get(pid, {})) for pid in visible_ids}
         return {"config": pub,
                 # 实际生效的网络路径。前端算不出来 —— 环境变量和系统代理
                 # 只有服务端看得见。不回显的话代理就是隐形的。
@@ -925,7 +927,7 @@ def api_get(path: str, q: dict) -> dict:
                 # 各家保存过的**非密钥**设置。以前只回一个「配了没」的布尔值，
                 # 于是页面上 base_url 永远显示默认值 —— 改过自定义端点的人
                 # 再点一次保存就被默认值盖掉了，而且一声不吭。
-                "providers_public": {
+                "providers_public": {} if managed_providers else {
                     k: {f: v[f] for f in ("base_url", "poll_timeout",
                                           "poll_interval",
                                           # 用户实测出来的时长档位。不回显的话
@@ -935,11 +937,11 @@ def api_get(path: str, q: dict) -> dict:
                 # 账号表单的当前值。**密钥项只回「有没有」，不回值** ——
                 # 见 _mask_form。不回显的话表单每次打开都是空的，
                 # 人只能整批重填，而重填最容易漏一项然后又「凭据不全」。
-                "provider_accounts": {
+                "provider_accounts": {} if managed_providers else {
                     pid: _mask_form(pid, (v or {}).get("api_key", ""))
                     for pid, v in (cfg.get("providers") or {}).items()
                     if _account_form(pid)},
-                "capabilities": caps_of(cfg),
+                "capabilities": provider_view.capabilities(caps_of(cfg)),
                 # 两套体系的环节表都下发，前端按项目的 system 挑一套显示。
                 # 不在这里挑：切项目不用重新拉一遍 bootstrap。
                 "stages": S.STAGES,
@@ -1140,7 +1142,8 @@ def api_get(path: str, q: dict) -> dict:
         from core import providers as _pv
         st = _pv.status()
         st['providers'] = cloud_config.display_providers(st['providers'])
-        return st
+        from server import provider_view
+        return provider_view.status(st)
 
     if path == "/api/explorer":
         """资产库 + 按段看。把散在各处的产物拼成能看懂的两个视图。"""
@@ -1222,6 +1225,8 @@ def api_post(path: str, body: dict) -> dict:
     cfg = load_config()
 
     if path == "/api/config":
+        if 'providers' in body and cloud_config.client_managed():
+            raise ValueError('服务商连接配置由后台统一管理，客户端不能修改；请刷新后台配置')
         cur = load_config()
         # 密钥类字段「留空 = 不改」。前端拿到的是掩码后的值，
         # 直接 update 会把已保存的密钥覆盖成空。
@@ -1528,8 +1533,9 @@ def api_post(path: str, body: dict) -> dict:
             per[pid] = PROVIDER_QUOTA.get(pid, 4)
         if added:
             save_config(cur)
-        return {"ok": True, **st, "new_quota_for": added,
-                "capabilities": caps_of(cur)}
+        from server import provider_view
+        return {"ok": True, **provider_view.status(st), "new_quota_for": added,
+                "capabilities": provider_view.capabilities(caps_of(cur))}
 
     if path == "/api/models/refresh":
         """实拉一家（或全部）的模型清单，写进按凭据隔离的缓存。
@@ -1553,8 +1559,9 @@ def api_post(path: str, body: dict) -> dict:
                          "msg": r.get("msg", ""),
                          "updated_at": r.get("updated_at", "")})
         good = [r for r in rows if r["ok"]]
-        return {"ok": True, "rows": rows,
-                "capabilities": caps_of(cfg),
+        from server import provider_view
+        return {"ok": True, "rows": provider_view.diagnostics(rows),
+                "capabilities": provider_view.capabilities(caps_of(cfg)),
                 "msg": (f"{len(good)}/{len(rows)} 家拉到，"
                         f"共 {sum(r['count'] for r in good)} 个模型。"
                         f"没拉到的那几家看它自己那一行的原因 —— "
@@ -2545,6 +2552,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _json(self, data, code: int = 200, headers=None):
+        from server import provider_view
+        data = provider_view.diagnostics(data)
         self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8", headers)
 

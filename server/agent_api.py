@@ -102,6 +102,8 @@ def bootstrap(app, cfg):
     old = app.api_get("/api/bootstrap", {})
     from core import providers
     adapter_status = providers.status()
+    from core import cloud_config
+    adapter_status['managed'] = cloud_config.client_managed()
     caps = old["capabilities"]
     for cap in caps:
         cap.pop("llm", None)

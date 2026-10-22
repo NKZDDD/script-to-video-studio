@@ -67,12 +67,26 @@ def owner():
         return _owner
 
 
+def client_managed():
+    from . import cloud_adapters, providers
+    return cloud_adapters.required() or providers.status()['managed']
+
+
+def route_urls():
+    """Internal presentation redaction only; never expose these to the page."""
+    with _lock:
+        return [row.get('base_url', '') for cfg in _configs.values()
+                for row in [cfg, *cfg.get('keys', [])]]
+
+
 def provider(pid, local, field=None):
     from .providers import resolve_id, REGISTRY
     pid = resolve_id(pid)
     out = dict(local or {})
     with _lock:
         cloud = copy.deepcopy(_configs.get(pid))
+    if cloud is None and client_managed():
+        raise ValueError('该服务商未获后台授权，请刷新后台配置或联系管理员分配')
     if cloud is not None:
         candidates = cloud.get('keys', [cloud])
         eligible = [v for v in candidates if not field or v.get(field) or v.get('api_key')]
@@ -113,8 +127,9 @@ def display_providers(rows):
 
 def catalog_config(cfg):
     result = dict(cfg)
+    remote = client_managed()
     with _lock:
-        ids = set(_configs) | set(cfg.get('providers', {}))
+        ids = set(_configs) if remote else set(_configs) | set(cfg.get('providers', {}))
     result['providers'] = {pid: provider(pid, cfg.get('providers', {}).get(pid, {})) for pid in ids}
     return result
 

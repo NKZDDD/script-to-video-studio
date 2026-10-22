@@ -468,7 +468,7 @@ function outputList() {
 }
 function settings() {
  main.innerHTML=heading('工作台设置','生产必需配置，始终可见','所有已接入服务商继续可用。设置中只保留图片、视频与本机生产能力。')+
- `<div class="rv-toolbar">${[['providers','服务商与密钥'],['limits','并发与重试'],['llm','提示词改写 LLM'],['upload','参考图上传'],['features','功能包与路径'],['updates','软件更新']].map(([v,l])=>btn(l,'settings-tab',`data-tab="${v}"`,v===S.tab)).join('')}</div><div id="settings-content"></div>`;
+ `<div class="rv-toolbar">${[['providers',S.boot.adapter_status?.managed?'服务商':'服务商与密钥'],['limits','并发与重试'],['llm','提示词改写 LLM'],['upload','参考图上传'],['features','功能包与路径'],['updates','软件更新']].map(([v,l])=>btn(l,'settings-tab',`data-tab="${v}"`,v===S.tab)).join('')}</div><div id="settings-content"></div>`;
  if(S.tab==='providers')providerForm();else if(S.tab==='limits')limitForm();else if(S.tab==='llm')llmForm();else if(S.tab==='upload')uploadForm();else if(S.tab==='updates')updateForm();else featureForm();
 }
 async function updateForm(data) {
@@ -495,6 +495,10 @@ function llmForm() {
 function providerForm() {
  const cap=S.boot.capabilities.find(c=>c.id===S.provider)||S.boot.capabilities[0];if(!cap){$('#settings-content').innerHTML='<p>没有可用服务商，请管理员检查账号的 Key 分配和适配包。</p>'+btn('刷新后台配置','refresh-cloud-config');return;}
  S.provider=cap.id;const saved=S.boot.providers_public[cap.id]||{},status=S.boot.provider_keys_configured[cap.id]||{};
+ if(S.boot.adapter_status?.managed){
+  $('#settings-content').innerHTML=`<section class="rv-panel"><div class="rv-fields rv-provider-choice"><label class="rv-span">服务商<select id="provider-picker">${S.boot.capabilities.map(c=>option(c.id,c.name,cap.id)).join('')}</select></label></div><p>服务商由后台统一分配和管理。</p><p class="rv-caption">${status.source==='managed'?'当前账号已获授权。':'授权尚未同步，请刷新后台配置。'}可用模型会随后台配置更新。</p><div class="rv-actions">${btn('刷新后台配置','refresh-cloud-config','',true)}${btn('刷新模型','refresh-models')}</div>${['image','video'].filter(m=>cap[m]).map(m=>`<h4>${m==='image'?'图片模型':'视频模型'}</h4><p>${(cap[m].models||[]).length?esc(cap[m].models.join(' · ')):'暂无可用模型，请刷新或联系管理员分配。'}</p>`).join('')}</section>`;
+  return;
+ }
  let keys=cap.key_fields||[];if(cap.id==='chaomo')keys=[['image_1k_api_key','image_1k','TH 分组 Key（原图片 1K）','对应 -th 模型；支持的分辨率由模型和清晰度选项决定。'],['image_4k_api_key','image_4k','Native 原生 Key（原图片 4K）','对应 Native 模型；1K、2K、4K 均使用这把 Key。'],['video_api_key','video','视频 Key']];
  if(!keys.length)keys=[['api_key','api_key','API Key / 多账号凭据']];
  const keyField=(name,label,isSet,help='')=>field(`${esc(label)} · ${isSet?'已配置':'未配置'}`,`<div class="secret-field"><input type="password" name="${esc(name)}" autocomplete="new-password" placeholder="${isSet?'留空保持已存密钥':'填写密钥'}"><button type="button" class="rv-link" data-action="reveal">显示</button></div>`,esc(help));
