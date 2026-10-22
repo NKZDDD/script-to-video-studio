@@ -83,3 +83,14 @@ def test_invalid_source_limits_and_missing_adapter(env):
     post(c,'users/customer/providers',{'provider':'not_published','api_key':'test-only'})
     assert verify(c,h).json()['adapter_config']['missing']==['not_published']
     assert download(c,h,meta).status_code==409
+
+
+def test_large_import_and_normal_request_limits(env):
+    c, _, _ = env
+    login(c)
+    b = bundle()
+    b['modules']['example'] += '\n#' + 'x' * 550000 + '\n'
+    r = post(c, 'adapters/import', {'bundle': b})
+    assert r.status_code == 200, r.text
+    assert c.get('/admin/api/adapters').json()['active'] == ''
+    assert post(c, 'users/customer/settings', {'padding': 'x' * 17000}).status_code == 413
