@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "服务商适配包由后台统一发布，客户端按账号下载与更新；显示名称跟随后台 Key 库。请先升级认证服务至 1.8.0 并发布适配包，再分发本安装版。"}
+               "notes": "新增自动下载与重启更新：校验完成后一键重启，在原目录静默更新并自动打开；运行中的生产任务会阻止重启。强制更新时也显示下载失败原因，支持重试。旧客户端首次升级仍走原安装向导，此后使用新流程。继续使用后台发布的服务商适配包与账号配置。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))

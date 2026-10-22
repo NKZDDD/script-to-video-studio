@@ -62,6 +62,22 @@ def show_error(text):
         ctypes.windll.user32.MessageBoxW(None, str(text), "Respect Studio", 0x10)
 
 
+def launch_update(installer):
+    """Start the updater before closing; it waits for this process to exit."""
+    directory = Path(paths.PROGRAM_DIR).resolve()
+    if not getattr(sys, "frozen", False) or not (directory / "Respect-Studio.exe").is_file():
+        raise ValueError("请从已安装的 Studio 中重启更新")
+    # NSIS requires /D to be the last argument, without quotes even with spaces.
+    # Pass a command line directly to CreateProcess, never through a shell.
+    command = subprocess.list2cmdline([str(installer), "/S", f"/STUDIOUPDATE={os.getpid()}"])
+    command += " /D=" + str(directory)
+    env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1", STV_DATA_DIR=paths.data_dir())
+    try:
+        return subprocess.Popen(command, env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+    except OSError as exc:
+        raise ValueError("无法启动更新程序，Studio 尚未退出；请重试或手动运行已下载的安装包") from exc
+
+
 def run(server, url, jobs):
     import webview
     handle = None
@@ -78,7 +94,6 @@ def run(server, url, jobs):
             server.server_close()
             show_error("Studio 已在运行，请切换到已打开的窗口。")
             return 0
-    pending = []
     webview.settings["ALLOW_DOWNLOADS"] = True
     webview.settings["ALLOW_FILE_URLS"] = False
     window = webview.create_window("Respect Studio", url, width=1400, height=900,
@@ -93,7 +108,7 @@ def run(server, url, jobs):
         return True
 
     def request_install(installer):
-        pending.append(installer)
+        launch_update(installer)
         # Let the HTTP response reach the page before shutting down its host.
         threading.Timer(0.5, window.destroy).start()
 
@@ -114,9 +129,4 @@ def run(server, url, jobs):
         thread.join(timeout=5)
         if handle:
             kernel.CloseHandle(handle)
-    if pending:
-        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
-        # The installer reads the existing installation directory from HKCU.
-        subprocess.Popen([str(pending[0])], env=env,
-                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     return 0

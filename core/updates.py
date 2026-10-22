@@ -75,6 +75,8 @@ class UpdateManager:
         self.gate_message = "正在确认应用版本，请稍候"
         self.check_lock = threading.Lock()
         self.verified_headers = {}
+        self.auto_download_key = None
+        self.download_error = ""
 
     def status(self):
         with self.lock:
@@ -85,7 +87,15 @@ class UpdateManager:
 
     def check(self):
         with self.check_lock:
-            return self._check()
+            self._check()
+            with self.lock:
+                if (self.phase == "available" and getattr(self, "install_callback", None)
+                        and self._download_key() != self.auto_download_key):
+                    self.download()
+                return self.status()
+
+    def _download_key(self):
+        return tuple(self.release[k] for k in ("version", "url", "sha256", "bytes")) if self.release else None
 
     def _check(self):
         with self.lock:
@@ -124,6 +134,9 @@ class UpdateManager:
             release = validate_release(data["release"]) if data.get("release") else None
             with self.lock:
                 keep_ready = was_ready and self.release == release and self.installer
+                keep_error = self.release == release and self.download_error
+                if not downloading and self.release != release:
+                    self.download_error = ""
                 if not downloading and not keep_ready:
                     self.release, self.installer, self.received = release, None, 0
                 self.allowed = client["allowed"] and not identity_error
@@ -133,9 +146,12 @@ class UpdateManager:
                 available = release and (version(release["version"]) > version(VERSION) or
                                          (not self.allowed and version(release["version"]) == version(VERSION)))
                 if not downloading:
-                    self.phase = "ready" if keep_ready else ("available" if available else "current")
-                    self.message = ("安装包已校验，可安装" if keep_ready else
-                                    ("有新版本可下载" if available else "当前已是最新发布版本")) if self.allowed else self.gate_message
+                    self.phase = "ready" if keep_ready else ("error" if keep_error and available else
+                                                           ("available" if available else "current"))
+                    self.message = ("更新已准备好，重启即可完成" if keep_ready else
+                                    self.download_error if keep_error and available else
+                                    "有新版本可下载" if available else
+                                    "当前已是最新发布版本" if self.allowed else self.gate_message)
         except Exception as exc:
             with self.lock:
                 message = str(exc) if isinstance(exc, ValueError) else "检查更新失败；请确认登录服务已升级、网络正常后重试"
@@ -162,6 +178,8 @@ class UpdateManager:
                 raise ValueError("请先检查新版本")
             self.phase, self.message, self.received = "downloading", "正在下载安装包", 0
             self.installer = None
+            self.download_error = ""
+            self.auto_download_key = self._download_key()
             release = dict(self.release)
             threading.Thread(target=self._download, args=(release,), daemon=True).start()
         return self.status()
@@ -179,7 +197,7 @@ class UpdateManager:
             with requests.get(release["url"], timeout=(15, 60), stream=True,
                               allow_redirects=False, headers={"Accept-Encoding": "identity"}) as response:
                 if response.status_code != 200:
-                    raise ValueError("安装包下载失败，请确认后台下载地址可访问")
+                    raise ValueError(f"安装包下载失败（HTTP {response.status_code}），请确认后台下载地址可访问")
                 with partial.open("wb") as fp:
                     for chunk in response.iter_content(1024 * 1024):
                         total += len(chunk)
@@ -193,7 +211,7 @@ class UpdateManager:
                 raise ValueError("安装包校验不通过，请重新下载")
             os.replace(partial, target)
             with self.lock:
-                self.installer, self.phase, self.message = target, "ready", "下载并校验完成；任务结束后可安装"
+                self.installer, self.phase, self.message = target, "ready", "更新已准备好，重启即可完成"
         except Exception as exc:
             if target:
                 try:
@@ -203,6 +221,7 @@ class UpdateManager:
             with self.lock:
                 self.phase = "error"
                 self.message = str(exc) if isinstance(exc, ValueError) else "下载中断或写入失败，请重试"
+                self.download_error = self.message
 
     def install(self, jobs):
         global INSTALLING
@@ -225,7 +244,7 @@ class UpdateManager:
             except Exception:
                 INSTALLING = False
                 raise
-            self.phase, self.message = "installing", "正在退出 Studio 并打开安装器"
+            self.phase, self.message = "installing", "正在重启并应用更新，请稍候"
             return self.status()
 
 

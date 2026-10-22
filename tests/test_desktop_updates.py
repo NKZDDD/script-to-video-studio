@@ -235,3 +235,85 @@ def test_registered_test_build_can_run_without_being_recommended(monkeypatch, pu
     assert m.allowed and m.phase == "current"
     with pytest.raises(ValueError):
         m.download()
+
+
+def test_desktop_downloads_once_then_allows_explicit_retry(monkeypatch):
+    row = release()
+    response_for(monkeypatch, {"release": row, "policy_protocol": 1,
+                              "client": {"allowed": False, "message": "must update"}})
+    started = []
+    monkeypatch.setattr(updates.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: started.append(kw)))
+    m = updates.UpdateManager()
+    m.install_callback = lambda p: None
+    assert m.check()["phase"] == "downloading"
+    m.check()
+    assert len(started) == 1
+    m.phase, m.message, m.download_error = "error", "HTTP 404", "HTTP 404"
+    assert m.check()["message"] == "HTTP 404"
+    assert m.phase == "error" and len(started) == 1 and not m.allowed
+    m.download()
+    assert len(started) == 2 and m.download_error == ""
+    m.phase, m.message, m.download_error = "error", "HTTP 404", "HTTP 404"
+    row["url"] = "https://cdn.example/new-installer.exe"
+    response_for(monkeypatch, {"release": row, "policy_protocol": 1, "client": {"allowed": True}})
+    assert m.check()["phase"] == "downloading" and len(started) == 3
+
+
+def test_browser_checks_without_auto_download(monkeypatch):
+    response_for(monkeypatch, {"release": release(), "policy_protocol": 1, "client": {"allowed": True}})
+    m = updates.UpdateManager()
+    assert m.check()["phase"] == "available"
+    assert m.auto_download_key is None
+
+
+def test_launch_failure_keeps_ready_state_and_does_not_block_tasks(tmp_path, monkeypatch):
+    monkeypatch.setattr(updates, "INSTALLING", False)
+    m = updates.UpdateManager()
+    m.release, m.phase = release(), "ready"
+    m.installer = tmp_path / "installer.exe"
+    m.installer.write_bytes(b"MZtest-installer")
+    def fail(path):
+        raise ValueError("launch failed")
+    m.install_callback = fail
+    with pytest.raises(ValueError, match="launch failed"):
+        m.install(SimpleNamespace(active_count=lambda: 0))
+    assert not updates.INSTALLING and m.phase == "ready"
+
+
+def test_silent_handoff_preserves_directory_and_data(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    from core import desktop
+    folder = tmp_path / "Studio 中文 & spaces"
+    folder.mkdir()
+    (folder / "Respect-Studio.exe").touch()
+    data = tmp_path / "project data"
+    monkeypatch.setattr(desktop.paths, "PROGRAM_DIR", str(folder))
+    monkeypatch.setattr(desktop.paths, "data_dir", lambda: str(data))
+    monkeypatch.setattr(desktop.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    calls = []
+    monkeypatch.setattr(desktop.subprocess, "Popen", lambda *args, **kwargs: calls.append((args, kwargs)))
+    installer = tmp_path / "下载文件 setup.exe"
+    desktop.launch_update(installer)
+    args, kwargs = calls[0]
+    assert args[0] == subprocess.list2cmdline([str(installer), "/S", f"/STUDIOUPDATE={os.getpid()}"]) + " /D=" + str(folder.resolve())
+    assert kwargs["env"]["STV_DATA_DIR"] == str(data)
+    assert kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert kwargs["creationflags"] == 0x08000000 and not kwargs.get("shell")
+    monkeypatch.setattr(desktop.sys, "frozen", False)
+    with pytest.raises(ValueError, match="已安装"):
+        desktop.launch_update(installer)
+
+
+def test_launch_update_error_is_actionable(tmp_path, monkeypatch):
+    from core import desktop
+    (tmp_path / "Respect-Studio.exe").touch()
+    monkeypatch.setattr(desktop.paths, "PROGRAM_DIR", str(tmp_path))
+    monkeypatch.setattr(desktop.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(desktop.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    def fail(*args, **kwargs):
+        raise OSError("denied")
+    monkeypatch.setattr(desktop.subprocess, "Popen", fail)
+    with pytest.raises(ValueError, match="尚未退出"):
+        desktop.launch_update(tmp_path / "setup.exe")

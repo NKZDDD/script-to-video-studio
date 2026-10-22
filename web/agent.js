@@ -478,14 +478,14 @@ async function updateForm(data) {
   if(S.page!=='settings'||S.tab!=='updates')return;
   const r=d.release,busy=['checking','downloading','installing'].includes(d.phase);
   $('#settings-content').innerHTML=`<section class="rv-panel"><h3>Respect Studio · ${esc(d.current)}</h3>
-   <p>检查新版本，下载安装包后再安装。更新保留配置、外挂和项目文件。</p>
+   <p>发现新版本后自动下载并校验，准备好后点击“重启完成更新”。更新保留配置和项目文件。</p>
    <p role="status">${esc(d.message)}</p>${r?`<p>发布版本：<strong>${esc(r.version)}</strong> · ${(r.bytes/1048576).toFixed(1)} MB</p><p style="white-space:pre-wrap">${esc(r.notes)}</p>`:''}
-   ${d.phase==='downloading'?`<progress max="${Number(r?.bytes)||1}" value="${Number(d.received)||0}"></progress><p>${(d.received/1048576).toFixed(1)} MB 已下载</p>`:''}
+   ${['downloading','ready','installing'].includes(d.phase)?`<progress max="${Number(r?.bytes)||1}" value="${d.phase==='downloading'?(Number(d.received)||0):(Number(r?.bytes)||1)}"></progress><p>${d.phase==='downloading'?(d.received/1048576).toFixed(1)+' MB 已下载':'下载与校验已完成'}</p>`:''}
    <div class="rv-actions">${btn('检查更新','update-check',busy?'disabled':'')}
-   ${r&&['available','error'].includes(d.phase)?btn('下载新版','update-download','',true):''}
-   ${d.phase==='ready'?btn('退出并安装更新','update-install',d.desktop?'':'disabled',true):''}</div>
-   <p class="rv-caption">生产期间可以检查和下载；安装前请等待批次完成或停止批次。${d.desktop?'':'当前是浏览器模式，安装操作请从 Studio 独立窗口打开。'}</p></section>`;
-  if(busy)updateForm.timer=setTimeout(()=>updateForm(),1500);
+   ${r&&['available','error'].includes(d.phase)?btn(d.phase==='error'?'重试下载':'下载新版','update-download','',true):''}
+   ${d.phase==='ready'?btn('重启完成更新','update-install',d.desktop&&!d.active_jobs?'':'disabled',true):''}</div>
+   <p class="rv-caption">生产期间可以检查和下载；${d.active_jobs?'还有 '+d.active_jobs+' 个批次运行，':''}请等待批次结束后重启，程序会自动更新并重新打开。${d.desktop?'':'当前是浏览器模式，安装操作请从 Studio 独立窗口打开。'}</p></section>`;
+  if(busy||d.phase==='ready')updateForm.timer=setTimeout(()=>updateForm(),1500);
  }catch(e){notice(e.message,true);}
 }
 function llmForm() {
@@ -558,7 +558,7 @@ const actions={
  'settings-tab':e=>{S.tab=e.dataset.tab;settings();},
  'update-check':async()=>{notice('正在检查新版本');await updateForm(await post('updates/check'));},
  'update-download':async()=>updateForm(await post('updates/download')),
- 'update-install':async()=>{if(confirm('安装更新会退出 Studio。确定当前任务已结束并开始安装？'))await updateForm(await post('updates/install'));},
+ 'update-install':async()=>updateForm(await post('updates/install')),
  'reveal':e=>{const i=e.parentElement.querySelector('input');i.type=i.type==='password'?'text':'password';e.textContent=i.type==='password'?'显示':'隐藏';},
  'add-account':()=>{const cap=S.boot.capabilities.find(c=>c.id===S.provider),i=$$('[data-account]').length,fs=document.createElement('fieldset');fs.dataset.account=i;fs.innerHTML=`<legend>账号 ${i+1}</legend><div class="rv-fields">${cap.account_form.per.map(([k,l,secret,note])=>field(esc(l),input('account.'+i+'.'+k,'',secret?'password':'text'),esc(note))).join('')}</div>`;$('#accounts').append(fs);},
  'save-provider':saveProvider,

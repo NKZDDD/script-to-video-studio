@@ -137,8 +137,8 @@ def llm_factory(app, cfg):
 
 def get(app, path, q):
     if path == "/api/agent/updates":
-        from core.updates import MANAGER
-        return MANAGER.status()
+        from core.updates import MANAGER, active_jobs
+        return dict(MANAGER.status(), active_jobs=active_jobs(app.JOBS))
     cfg = app.load_config()
     if path == "/api/agent/bootstrap":
         return bootstrap(app, cfg)
