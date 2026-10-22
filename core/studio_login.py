@@ -60,7 +60,7 @@ class LoginManager:
 
     def _post(self, action, body, access=None):
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if action in ("login", "verify", "refresh", "storage/sign"):
+        if action in ("login", "verify", "refresh", "storage/sign", "adapters"):
             from . import updates
             # Re-use the verified identity for this request only, not persisted credentials.
             headers.update(updates.MANAGER.require_allowed())
@@ -100,7 +100,8 @@ class LoginManager:
             return False
 
     def _clear(self):
-        from . import cloud_config
+        from . import cloud_config, cloud_adapters
+        cloud_adapters.clear(self)
         cloud_config.clear(self)
         self.tokens = self.user = None
         self.local_session = ""
@@ -155,8 +156,14 @@ class LoginManager:
         if data.get("valid") is not True or not isinstance(data.get("user"), dict):
             self.checked_until = 0
             raise LoginRequired("invalid_auth_response", "登录服务未确认授权，请重试", 503)
-        from . import cloud_config, cloud_usage, cloud_storage
+        from . import cloud_config, cloud_usage, cloud_storage, cloud_adapters
         self.user = {k: data["user"].get(k) for k in ("id", "username", "expires_at")}
+        try:
+            cloud_adapters.install(self, self.user.get('id') or '', data.get('adapter_config'),
+                lambda checksum: self._post('adapters', {'device_id': self.device_id(), 'sha256': checksum}, self.tokens['access_token']))
+        except ValueError as exc:
+            self.checked_until = 0
+            raise LoginRequired('adapters_unavailable', str(exc), 503) from None
         try:
             cloud_config.install(self, self.user.get('id') or '', data.get('provider_config', {}))
             cloud_storage.install(self, self.user.get('id') or '', data.get('storage_config'))

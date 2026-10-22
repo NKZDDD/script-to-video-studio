@@ -4,7 +4,7 @@ let csrf='',page=1,rows=[],editing=null,total=0;
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const date=v=>v==null?'永久有效':new Date(v*1000).toLocaleString();
 function message(text,error=false){$('#message').textContent=text;$('#message').classList.toggle('error',error);$('#message').hidden=!text;}
-function locked(){csrf='';$('#login').hidden=false;$('#workspace').hidden=true;$('#identity').hidden=true;$('#editor').close();document.querySelector('#provisioning')?.close();document.querySelector('#r2-manager')?.close();}
+function locked(){csrf='';$('#login').hidden=false;$('#workspace').hidden=true;$('#identity').hidden=true;$('#editor').close();document.querySelector('#provisioning')?.close();document.querySelector('#r2-manager')?.close();document.querySelector('#adapter-manager')?.close();}
 async function api(path,body){
  const response=await fetch('/admin/api/'+path,body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});
  let data;try{data=await response.json();}catch{throw Error('服务没有返回有效结果，请检查连接后重试');}

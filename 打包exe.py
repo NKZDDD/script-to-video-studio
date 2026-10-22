@@ -196,7 +196,9 @@ def selfcheck(exe: str) -> bool:
     # 实遇 2026-09-08：本机有一个 `providers/yunhui.py`，自检报
     # 「服务商 17/18 缺 yunhui」并让人「别发出去」，而包是好的。
     # **假警报比漏报贵**：这一条会挡住每一次打包，然后人学会忽略它。
-    want_prov = sorted(p["id"] for p in P.status()["providers"] if p.get("builtin"))
+    want_prov = [] if report.get("managed_adapters") else sorted(p["id"] for p in P.status()["providers"] if p.get("builtin"))
+    if report.get("managed_adapters") and report["providers"]:
+        raise RuntimeError("Managed installer unexpectedly contains provider implementations")
     plugins = sorted(p["id"] for p in P.status()["providers"] if not p.get("builtin"))
     from core.packagecheck import resource_inventory
     expected_resources = resource_inventory()

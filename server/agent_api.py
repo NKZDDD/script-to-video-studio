@@ -44,6 +44,9 @@ def import_provider(app, body):
     要么新文件加载成功，要么目录回到导入前的样子：加载失败的文件留在目录里，
     每次扫描都会报错；覆盖掉的还是一家本来能用的服务商。
     """
+    from core import providers
+    if providers.status().get('managed'):
+        raise ValueError('服务商适配器由后台发布，请管理员导入适配包后刷新后台配置')
     name = str(body.get("filename") or "").strip()
     if (os.path.basename(name) != name or not name.lower().endswith(".py")
             or name.startswith(("_", "."))):
@@ -97,6 +100,8 @@ def import_jsonl(app, pj, raw: bytes) -> dict:
 
 def bootstrap(app, cfg):
     old = app.api_get("/api/bootstrap", {})
+    from core import providers
+    adapter_status = providers.status()
     caps = old["capabilities"]
     for cap in caps:
         cap.pop("llm", None)
@@ -104,6 +109,7 @@ def bootstrap(app, cfg):
         if "key_fields" in cap:
             cap["key_fields"] = [x for x in cap["key_fields"] if "llm" not in str(x)]
     return {"projects": projects(cfg), "projects_dir": cfg["projects_dir"], "capabilities": caps,
+            "adapter_status": {k: adapter_status[k] for k in ("managed", "adapter_version")},
             "providers_public": old["providers_public"], "provider_accounts": old["provider_accounts"],
             "provider_keys_configured": {k: {s: v for s, v in slots.items() if "llm" not in s}
                                          for k, slots in old["provider_keys_configured"].items()},

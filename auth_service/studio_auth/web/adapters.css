@@ -1,0 +1,3 @@
+#adapter-manager small,#adapter-manager details p{overflow-wrap:anywhere}
+#adapter-manager [role=tablist]{display:flex;flex-wrap:wrap;gap:8px;margin:22px 0 12px}
+#adapter-manager section[hidden]{display:none}

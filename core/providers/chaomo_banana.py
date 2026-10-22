@@ -5,7 +5,7 @@
 import os
 
 from core.apiutil import ApiError, extract_task_id
-from core.providers.chaomo import ChaomoProvider, _to_ratio
+from .chaomo import ChaomoProvider, _to_ratio
 
 _BANANA_MODELS = [
     "gemini-3-pro-image",        # Nano Banana Pro（1K/2K/4K，¥0.09/0.10）

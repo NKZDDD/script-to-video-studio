@@ -235,3 +235,12 @@ X-Studio-Build: <release.json 中的 build_sha256>
 返回 `summary` 去重账号计数与覆盖数、`distribution` 按版本/体系/状态的账号和设备记录数、`details` 当前页设备明细及 `total/page/page_size`。版本、账号搜索与 segment 只筛明细；观察期与体系同时筛汇总和明细。`enforcement_enabled` 为 false 时，低于最低版本计数表示恢复规则后涉及的账号。
 
 仅成功登录、verify、refresh 采集；未认证/被门槛提前阻断的请求和匿名更新检查不计入。只保留账号＋设备＋体系的最近版本，人数不可跨版本相加。无历史回填，不提供反破解保证。设备摘要以账号范围内的短标识返回，不返回凭证或原始设备 ID。
+# 服务商适配包（1.8.0）
+
+`POST /api/v1/auth/verify` 新增 `adapter_config`：未发布时为 `{"enabled":false}`；已发布时返回 `enabled/protocol/version/sha256/providers/missing`，其中哈希针对当前账号获授权的子包。
+
+`POST /api/v1/auth/adapters` 使用同一 Bearer、客户端版本请求头，JSON 为 `device_id` 与 `sha256`。响应 `{"bundle":{...}}`，最多 2 MB 代码包。每次复查账号、设备、会话、Key 授权和版本；授权或包变化返回 `409 adapters_changed`，重新 verify 后重试。
+
+管理员接口：`GET /admin/api/adapters` 查看登记版本与当前发布；`POST /admin/api/adapters/import` 接收 `{"bundle":{...}}`，只登记；`POST /admin/api/adapters/publish` 接收 `{"sha256":"..."}`，切换当前发布版本。写接口要求原有管理员会话、同源 Origin 与 CSRF Token。发布旧哈希即回退。
+
+包格式：`protocol:1`、`version`、`modules:{模块名:Python源码}`、`providers:[{id,name,module,class}]`。共享校验器位于 `studio_auth/adapter_format.py`。管理员发布的代码只在客户端执行，服务器不导入该源码。部署步骤见 [PROVIDER-ADAPTER-UPGRADE.md](PROVIDER-ADAPTER-UPGRADE.md)。

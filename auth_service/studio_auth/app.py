@@ -72,6 +72,8 @@ class Guard:
         if headers.get(b"content-encoding", b"identity").lower() != b"identity":
             return await respond(415, "encoding_unsupported", "不接受压缩请求体")
         limit = 2097152 if scope['path'] in ('/admin/api/keys/import/preview', '/admin/api/keys/import/commit') else 16384
+        if scope['path'] == '/admin/api/adapters/import':
+            limit = 2097152 + 64
         chunks, length = [], 0
         while True:
             message = await receive()
@@ -132,6 +134,8 @@ def create_app(settings=None, *, clock=None):
     app.include_router(version_stats_router)
     from .storage import router as storage_router
     app.include_router(storage_router)
+    from .adapters import router as adapters_router
+    app.include_router(adapters_router)
 
     @app.exception_handler(AuthError)
     async def auth_error(request, exc):
@@ -183,6 +187,8 @@ def create_app(settings=None, *, clock=None):
         result['provider_config'] = configuration(request.app.state.auth, result['user']['id'])
         from .storage import configuration as storage_configuration
         result['storage_config'] = storage_configuration(request.app.state.auth, result['user']['id'])
+        from .adapters import configuration as adapter_configuration
+        result['adapter_config'] = adapter_configuration(request.app.state.auth, result['user']['id'])
         return result
 
     @app.post("/api/v1/auth/refresh")

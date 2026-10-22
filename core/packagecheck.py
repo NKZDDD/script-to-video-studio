@@ -196,5 +196,6 @@ def run_package_check() -> dict:
         checks.append({"name": "发布资源校验和", "ok": False, "detail": str(exc)})
     from . import providers
     provider_ids = sorted(p["id"] for p in providers.status()["providers"] if p.get("builtin"))
-    return {"ok": all(x["ok"] for x in checks), "checks": checks,
+    from .cloud_adapters import required
+    return {"ok": all(x["ok"] for x in checks), "checks": checks, "managed_adapters": required(),
             "modules": modules, "resources": inventory, "providers": provider_ids}

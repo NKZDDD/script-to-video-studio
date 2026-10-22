@@ -5,6 +5,13 @@ import sqlite3
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS adapter_bundles (
+    sha256 TEXT PRIMARY KEY, version TEXT NOT NULL, providers TEXT NOT NULL,
+    payload TEXT NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS adapter_policy (
+    id INTEGER PRIMARY KEY CHECK(id=1), sha256 TEXT NOT NULL REFERENCES adapter_bundles(sha256)
+);
 CREATE TABLE IF NOT EXISTS client_version_policy (
     id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
 );

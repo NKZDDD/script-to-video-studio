@@ -31,6 +31,7 @@ def main() -> int:
     ap.add_argument("--desktop", action="store_true", help="在独立 Studio 窗口中打开")
     ap.add_argument("--package-selfcheck", action="store_true",
                     help=argparse.SUPPRESS)
+    ap.add_argument('--adapter-selfcheck', default='', help=argparse.SUPPRESS)
     ap.add_argument("--data", default="", metavar="目录",
                     help="数据目录（config.json 和默认 projects/ 放这儿）。"
                          "也可以用环境变量 STV_DATA_DIR。"
@@ -42,6 +43,15 @@ def main() -> int:
     desktop.setup_logs()
     if paths.FROZEN:
         desktop.hide_child_consoles()
+
+    if args.adapter_selfcheck:
+        from pathlib import Path
+        from core.cloud_adapters import load
+        classes = load(json.loads(Path(args.adapter_selfcheck).read_bytes()))
+        from core.providers import _check
+        errors = {pid: _check(cls) for pid, cls in classes.items() if _check(cls)}
+        print(json.dumps({'adapters': len(classes), 'errors': errors}, ensure_ascii=False))
+        return 2 if errors else 0
 
     if args.package_selfcheck:
         from core.packagecheck import run_package_check   # noqa: PLC0415

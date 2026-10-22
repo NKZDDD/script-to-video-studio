@@ -11,6 +11,7 @@ config.json
 # 实遇 2026-09-08：云绘从插件转内置时 `git add` 被拒才发现，
 # 而这行注释当时写的正是「内置服务商在 core/providers/，不受这条影响」。
 /providers/
+/adapter-cache/
 legacy/config.legacy.json
 config.local.*
 *.key

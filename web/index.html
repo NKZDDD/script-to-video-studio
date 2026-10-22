@@ -4208,6 +4208,11 @@ async function renderPlugins(fresh) {
     catch (e) { $('#plugBox').innerHTML = `<div class="alert err">${esc(String(e))}</div>`; return; }
   }
   const p = PLUG, ext = p.providers.filter(x => !x.builtin);
+  $('#plugReload').textContent = p.managed ? '刷新后台适配包' : '重新扫描';
+  if (p.managed) {
+    $('#plugBox').innerHTML = '<p>服务商由后台统一发布 · '+esc(p.adapter_version)+'</p><p>'+p.providers.map(x=>esc(x.name)).join('、')+'</p>';
+    return;
+  }
   const rows = p.providers.map(x =>
     `<tr><td><code>${esc(x.id)}</code></td><td>${esc(x.name)}</td>
        <td class="muted">${esc(x.supports.join(' / ')) || '—'}</td>

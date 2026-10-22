@@ -27,6 +27,8 @@ import os
 import pkgutil
 import sys
 import traceback
+import threading
+from functools import wraps
 
 from .. import paths
 from .base import ImageTask, Provider, VideoTask   # noqa: F401  对外导出
@@ -53,6 +55,32 @@ ALIASES: dict = {}           # 别名 → id
 SOURCES: dict = {}           # id → 它从哪儿来（"内置" / 插件文件路径）
 ERRORS: list = []            # 加载失败的文件 + 原因，给设置页显示
 WARNINGS: list = []          # 加载成功但声明有问题的，照样能用但要提醒
+_lock = threading.RLock()
+_remote = False
+_remote_version = ''
+
+
+def _locked(fn):
+    @wraps(fn)
+    def call(*args, **kwargs):
+        with _lock:
+            return fn(*args, **kwargs)
+    return call
+
+
+def activate_remote(classes, version):
+    global _remote, _remote_version
+    aliases = {alias: pid for pid, cls in classes.items() for alias in getattr(cls, 'aliases', ())}
+    with _lock:
+        REGISTRY.clear()
+        REGISTRY.update(classes)
+        ALIASES.clear()
+        ALIASES.update(aliases)
+        SOURCES.clear()
+        SOURCES.update({pid: '服务端 · '+version for pid in classes})
+        ERRORS.clear()
+        WARNINGS.clear()
+        _remote, _remote_version = True, version
 
 
 def _classes_in(module) -> list:
@@ -189,6 +217,8 @@ def _load_plugins() -> None:
 
 def reload_all() -> dict:
     """重新扫描内置 + 插件。设置页点「重新扫描」时调这个，不用重启。"""
+    if _remote:
+        return status()  # Managed adapters change only through authenticated refresh.
     REGISTRY.clear()
     ALIASES.clear()
     SOURCES.clear()
@@ -199,9 +229,12 @@ def reload_all() -> dict:
     return status()
 
 
+@_locked
 def status() -> dict:
     """给设置页看的加载报告。"""
     return {
+        "managed": _remote,
+        "adapter_version": _remote_version,
         "plugins_dir": paths.plugins_dir(),
         "plugins_dir_exists": os.path.isdir(paths.plugins_dir()),
         "providers": [{"id": pid, "name": getattr(cls, "name", pid),
@@ -209,21 +242,23 @@ def status() -> dict:
                        "source": SOURCES.get(pid, ""),
                        "builtin": SOURCES.get(pid) == "内置",
                        "aliases": [a for a, t in ALIASES.items() if t == pid]}
-                      for pid, cls in REGISTRY.items()],
+                      for pid, cls in list(REGISTRY.items())],
         "errors": list(ERRORS),
         "warnings": list(WARNINGS),
     }
 
 
+@_locked
 def resolve_id(provider_id: str) -> str:
     pid = (provider_id or "").strip()
     return pid if pid in REGISTRY else ALIASES.get(pid, pid)
 
 
+@_locked
 def list_capabilities() -> list:
     """所有服务商的能力声明（前端渲染用）。某一家的声明抛异常不该连累别家。"""
     out = []
-    for pid, cls in REGISTRY.items():
+    for pid, cls in list(REGISTRY.items()):
         try:
             cap = cls().capabilities()
             # 从类属性补上来，**不指望每家的 capabilities() 自己写一遍** ——
@@ -250,7 +285,8 @@ def list_capabilities() -> list:
 
 def build(provider_id: str, api_key: str, base_url: str = "",
           proxy: str = "", timeout: int = 900) -> Provider:
-    cls = REGISTRY.get(resolve_id(provider_id))
+    with _lock:
+        cls = REGISTRY.get(resolve_id(provider_id))
     if not cls:
         raise ValueError(f"未知服务商: {provider_id}"
                          f"（可用: {'、'.join(REGISTRY)}；"
@@ -258,5 +294,9 @@ def build(provider_id: str, api_key: str, base_url: str = "",
     return cls(api_key=api_key, base_url=base_url, proxy=proxy, timeout=timeout)
 
 
-_load_builtin()
-_load_plugins()
+from ..cloud_adapters import required as _managed_required
+if not _managed_required():
+    _load_builtin()
+    _load_plugins()
+else:
+    _remote = True

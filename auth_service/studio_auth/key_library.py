@@ -52,7 +52,12 @@ def keys(request: Request):
     current(request)
     with request.app.state.auth.store.connect() as db:
         rows = db.execute('SELECT * FROM key_library ORDER BY updated_at DESC,id').fetchall()
-    return {'keys': [public(r) for r in rows], 'providers': PROVIDER_NAMES}
+        from .adapters import _active
+        bundle = _active(db)
+    names = dict(PROVIDER_NAMES)
+    if bundle:
+        names.update({p['id']: p['name'] for p in bundle['providers']})
+    return {'keys': [public(r) for r in rows], 'providers': names}
 
 
 class KeyEdit(ProviderConfig):

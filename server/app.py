@@ -511,7 +511,7 @@ def _merge_group_keys(provider_id: str, incoming: dict, saved: dict) -> dict:
     if not any(n in incoming for n in names):
         return incoming                 # 这次没动这几个框，别碰 api_key
 
-    from core.providers.kunji import parse_keys as _pk
+    from core.key_groups import parse_keys as _pk
     # **这次一起提交了 `api_key` 那一栏时，以它为底。** 用户的用法是
     # 「把客服给的 `1k=…;4k=…` 整段粘进来，再单独改某一把」——
     # 拿已存的当底就会把刚粘进来的那段丢掉，而丢掉之后不报错，
@@ -550,7 +550,7 @@ def _provider_key_status(provider_id: str, provider_cfg: dict) -> dict:
     # 而重新粘的时候很容易只粘一把，把另外几把冲掉。
     fields = _key_fields(provider_id)
     if fields:
-        from core.providers.kunji import parse_keys as _pk
+        from core.key_groups import parse_keys as _pk
         have = _pk(str((provider_cfg or {}).get("api_key") or ""))
         for (name, gid, _l, _w) in fields:
             out[name] = bool(have.get(gid))
@@ -2668,7 +2668,7 @@ class Handler(BaseHTTPRequestHandler):
             update_route = path in ("/api/updates/check", "/api/updates/download", "/api/updates/install", "/api/updates/stop")
             if not auth_route and not update_route:
                 self._login().require(cookie, force=path in (
-                    "/api/agent/start", "/api/agent/reroll", "/api/agent/assemble", "/api/agent/models/refresh", "/api/agent/config/refresh", "/api/upload/refresh", "/api/agent/upload/selftest", "/api/upload/selftest"))
+                    "/api/agent/start", "/api/agent/reroll", "/api/agent/assemble", "/api/agent/models/refresh", "/api/agent/config/refresh", "/api/providers/reload", "/api/agent/providers/reload", "/api/upload/refresh", "/api/agent/upload/selftest", "/api/upload/selftest"))
             if self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json":
                 raise LoginRequired("json_required", "请使用 JSON 请求", 415)
             if n < 0 or ((auth_route or update_route) and n > 16384):
