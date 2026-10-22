@@ -2620,7 +2620,7 @@ const GEN_KINDS = [['asset','资产图','image','asset_tasks'],
 // 点「开始」就用错了服务商，而且不报错（那家也能出图，只是不是你排的那家）。
 function providerOptions(kind, cur) {
   return BOOT.capabilities.filter(c => c.supports.includes(kind))
-    .map(c => `<option value="${c.id}"${c.id === cur ? ' selected' : ''}>${c.name}</option>`)
+    .map(c => `<option value="${c.id}"${c.id === cur ? ' selected' : ''}>${esc(c.name)}</option>`)
     .join('');
 }
 // 「只跑这一集」——**这一页自己的范围**，不再跟「项目」页那个下拉。
@@ -2954,7 +2954,7 @@ async function tick() {
       <div class="top">
         <b>${j.kind}</b>
         <span class="pill ${mine?'s-run':''}">${j.project_name||'—'}</span>
-        <span class="muted">${j.provider||''} · 并发${j.concurrency} · ${j.elapsed}s</span>
+        <span class="muted">${esc(BOOT.capabilities.find(c => c.id === j.provider)?.name || j.provider || '')} · 并发${j.concurrency} · ${j.elapsed}s</span>
         <span class="sp" style="flex:1"></span>
         ${cnt}
         <button class="btn ghost sm" data-detail="${j.id}">明细</button>
@@ -3394,7 +3394,7 @@ function renderProviders() {
     // 调小了会在快出来的时候把它判成失败，钱照花、东西没拿到。
     const isVideo = !!c.video;
     return `<div class="card" style="background:var(--panel2);margin-bottom:10px">
-      <h2>${c.name} <span class="pill ${has?'s-ok':''}">${state}</span></h2>
+      <h2>${esc(c.name)} <span class="pill ${has?'s-ok':''}">${state}</span></h2>
       <div class="grid g2">
         <div><label>Base URL</label><input data-pv="${c.id}" data-f="base_url" value="${esc(saved.base_url || c.default_base_url)}"></div>
         ${keyBoxes}
@@ -4324,7 +4324,7 @@ function renderLimits() {
   const L = BOOT.config.limits || {global: 8, per_provider: {}};
   $('#limGlobal').value = L.global;
   $('#limProvBox').innerHTML = BOOT.capabilities.map(c =>
-    `<div><label>${c.name} 配额</label><input data-lim="${c.id}" type="number" min="1" max="32"
+    `<div><label>${esc(c.name)} 配额</label><input data-lim="${c.id}" type="number" min="1" max="32"
        value="${(L.per_provider||{})[c.id] ?? 4}"></div>`).join('');
 }
 $('#saveLimits').onclick = async () => {

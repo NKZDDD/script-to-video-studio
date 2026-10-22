@@ -123,10 +123,11 @@ def caps_of(cfg: Optional[dict] = None) -> list:
     """
     from core import model_catalog                      # noqa: PLC0415
     try:
-        return model_catalog.capabilities(cloud_config.catalog_config(cfg if cfg is not None else load_config()))
+        caps = model_catalog.capabilities(cloud_config.catalog_config(cfg if cfg is not None else load_config()))
     except Exception as exc:                            # noqa: BLE001
         print(f"[模型清单] 实拉/快照都没用上，退回代码里写死的那份：{exc}")
-        return list_capabilities()
+        caps = list_capabilities()
+    return cloud_config.display_providers(caps)
 
 
 def load_config() -> dict:
@@ -1137,7 +1138,9 @@ def api_get(path: str, q: dict) -> dict:
     if path == "/api/providers/status":
         """服务商加载报告：哪几家、从哪儿来、有没有加载失败的插件。"""
         from core import providers as _pv
-        return _pv.status()
+        st = _pv.status()
+        st['providers'] = cloud_config.display_providers(st['providers'])
+        return st
 
     if path == "/api/explorer":
         """资产库 + 按段看。把散在各处的产物拼成能看懂的两个视图。"""
@@ -1517,6 +1520,7 @@ def api_post(path: str, body: dict) -> dict:
         """
         from core import providers as _pv
         st = _pv.reload_all()
+        st['providers'] = cloud_config.display_providers(st['providers'])
         cur = load_config()
         per = cur.setdefault("limits", {}).setdefault("per_provider", {})
         added = [p for p in _pv.REGISTRY if p not in per]
@@ -1565,7 +1569,9 @@ def api_post(path: str, body: dict) -> dict:
         if not os.path.isfile(sample):
             with open(sample, "w", encoding="utf-8") as f:
                 f.write(PLUGIN_TEMPLATE)
-        return {"ok": True, "dir": d, "sample": sample, **_pv.status()}
+        st = _pv.status()
+        st['providers'] = cloud_config.display_providers(st['providers'])
+        return {"ok": True, "dir": d, "sample": sample, **st}
 
     if path == "/api/paths/projects":
         """改产物目录。换机器时最常改的就是这个（盘不一样、想放到大盘上）。"""

@@ -95,6 +95,22 @@ def managed(pid):
         return resolve_id(pid) in _configs
 
 
+def display_name(pid, default=''):
+    """Use assigned Key names for display only; never change the provider ID or route."""
+    from .providers import resolve_id
+    with _lock:
+        cloud = _configs.get(resolve_id(pid))
+        if cloud is None:
+            return default or pid
+        names = [row.get('key_name', '').strip() for row in cloud.get('keys', [cloud])]
+        return ' / '.join(dict.fromkeys(name for name in names if name)) or default or pid
+
+
+def display_providers(rows):
+    with _lock:
+        return [dict(row, name=display_name(row['id'], row.get('name', ''))) for row in rows]
+
+
 def catalog_config(cfg):
     result = dict(cfg)
     with _lock:
