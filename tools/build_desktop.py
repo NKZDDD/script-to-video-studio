@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "服务商页面改为后台统一分配的只读名称与模型列表，不再显示真实接口地址、Key 或个人备用配置；页面接口不再返回连接默认值和凭据表单，错误提示隐藏上游地址。按模型使用后台分配的不同 Key，支持刷新配置。包含自动下载与一键重启更新功能。"}
+               "notes": "修复联网校验等待时阻塞本地操作：登录、开始生产和手动刷新后台配置时在线校验，普通页面操作使用本地登录状态。用量上报与联网请求不再占用登录状态锁；临时网络故障保留已登录工作台，生产授权仍需通过校验。保留后台按模型分配 Key、托管服务商与一键重启更新功能。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))
