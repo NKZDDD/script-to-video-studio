@@ -183,6 +183,29 @@ def test_http_login_cookie_protected_posts_and_logout(http_server):
         assert not json.load(r)["authenticated"]
 
 
+def test_file_preview_range_and_media_share_login_without_online_check(http_server, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from urllib.parse import urlencode
+    from server import agent_api
+    request, _, stub, base = http_server
+    monkeypatch.setattr(agent_api, 'project', lambda *a: SimpleNamespace(root=str(tmp_path)))
+    (tmp_path/'preview.png').write_bytes(b'\x89PNG\r\n\x1a\nfixture')
+    path = '/file?' + urlencode({'root': str(tmp_path), 'rel': 'preview.png'})
+    request('/api/auth/login', {'username': 'alice', 'password': 'test-password'}).close()
+    before = len(stub.calls)
+    stub.offline = True
+    with request(path, **{'Range': 'bytes=0-0'}) as r:
+        assert r.status == 206 and r.read() == b'\x89'
+        assert r.headers['Content-Type'] == 'image/png'
+    with request(path) as r:
+        assert r.read() == (tmp_path/'preview.png').read_bytes()
+    # The separate external browser still has no credential; we do not make files public.
+    with pytest.raises(HTTPError) as exc:
+        urlopen(base+path)
+    assert exc.value.code == 401
+    assert len(stub.calls) == before
+
+
 def test_http_host_origin_and_plaintext_form_rejected(http_server):
     request, *_ = http_server
     for headers in ({"Origin": "https://evil.example"}, {"Host": "evil.example"}):

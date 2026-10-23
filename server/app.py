@@ -2659,7 +2659,7 @@ class Handler(BaseHTTPRequestHandler):
                     ctype += "; charset=utf-8"
                 return self._send_file(full, ctype)
             name = "agent.html" if path in ("/", "", "/index.html") else path.lstrip("/")
-            if name not in ("agent.html", "agent.css", "agent.js", "login.css", "login.js", "updates.js", "favicon.ico", "respect-logo.png"):
+            if name not in ("agent.html", "agent.css", "agent.js", "login.css", "login.js", "updates.js", "output-preview.js", "favicon.ico", "respect-logo.png"):
                 return self._json({"error": "404"}, 404)
             full = os.path.join(WEB_DIR, name)
             if os.path.isfile(full):

@@ -12,6 +12,7 @@
    revision++;
    authenticated=false;refresh.hidden=true;document.body.classList.add('studio-locked');
    const dialog=$('#dialog');if(dialog?.open)dialog.close();
+   const preview=$('#studio-file-preview');if(preview?.open)preview.close();
    message(text,true);$('#login-retry').hidden=!retry;
  };
  const unlock=data=>{

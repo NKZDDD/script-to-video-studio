@@ -485,6 +485,8 @@ def test_http_has_agent_entry_and_no_legacy_text_endpoints(tmp_path, monkeypatch
     url=f"http://127.0.0.1:{srv.server_port}"
     try:
         with urlopen(url) as r: assert b'agent.js' in r.read()
+        with urlopen(url+"/output-preview.js") as r:
+            assert b'studio-file-preview' in r.read()
         with urlopen(url+"/api/agent/bootstrap") as r:
             data=json.load(r)
             assert set(data["llm"]) == {"base_url", "model", "api_key_set", "ready", "rounds"} and data["projects"]==[]
