@@ -136,7 +136,7 @@ def test_full_key_catalog_separates_32_images_34_videos_and_other_models():
     fixture = json.loads((Path(__file__).parent/'fixtures/cangyuan-models-20261013.json').read_text())
     rows = [{'id': mid} for ids in fixture.values() for mid in ids]
     for provider, kind in [(CangyuanProvider(), 'image'), (CangyuanVideoProvider(), 'video')]:
-        cap = apply_catalog(provider.capabilities(), {'ok': True, 'rows': rows}, 'fixture')
+        cap = apply_catalog(provider.capabilities(), {'ok': True, 'rows': rows, 'strict': True}, 'fixture')
         assert set(cap[kind]['models']) == set(fixture[kind])
         assert not cap['model_catalog']['unknown']
 
@@ -155,3 +155,105 @@ def test_latest_image_flash_and_banana_four_k_have_their_own_limits():
         task.refs.append('https://example.test/over.jpg')
         with pytest.raises(ApiError):
             p.build_image_body(task)
+
+
+NEW_CONTRACTS = json.loads((Path(__file__).parent / 'fixtures/cangyuan-video-added-20261023.json')
+                           .read_text(encoding='utf-8'))['models']
+
+
+@pytest.mark.parametrize('model', NEW_CONTRACTS)
+def test_added_video_contract_reaches_submit_without_renaming(model, monkeypatch):
+    """Exercise real payload assembly and submit with all documented reference types."""
+    doc = NEW_CONTRACTS[model]
+    params = {p['name']: p for p in doc['params']}
+    refs = lambda name: [f'https://example.test/{name}/{n}'
+                         for n in range(params.get(name, {}).get('maxItems', 0))]
+    extra = {'video_refs': refs('reference_videos'), 'audio_refs': refs('reference_audios')}
+    if 'generate_audio' in params:
+        extra['generate_audio'] = True
+    if 'seed' in params:
+        extra['seed'] = 42
+    task = VideoTask('lake', model=model, duration=params['duration']['maximum'],
+                     ratio=params['aspect_ratio']['suggestions'][-1],
+                     resolution=params['resolution']['suggestions'][-1],
+                     refs=refs('reference_image_urls'), extra=extra)
+    calls = []
+    provider = CangyuanVideoProvider()
+    def request(method, path, **kw):
+        calls.append((method, path, kw))
+        return {'id': 'fixture-task'}
+    monkeypatch.setattr(provider.session, 'request', request)
+    monkeypatch.setattr(provider, '_retrieve', lambda *a, **kw: {'task_id': 'fixture-task'})
+    result = provider.generate_video(task, 'unused.mp4', log=lambda _: None)
+    assert result['model'] == model
+    method, path, kw = calls[0]
+    assert (method, path) == ('POST', '/v1/videos') and kw['retries'] == 1
+    body = kw['json_body']
+    assert body['model'] == model and body['duration'] == params['duration']['maximum']
+    assert body['resolution'] == task.resolution and body['aspect_ratio'] == task.ratio
+    assert set(body) <= set(params)
+    for field in ('reference_image_urls', 'reference_videos', 'reference_audios'):
+        assert body.get(field, []) == refs(field)
+    options = provider.capabilities()['video']['model_options'][model]
+    assert options['max_refs'] == params['reference_image_urls']['maxItems']
+    assert options['durations'] == list(range(params['duration']['minimum'], params['duration']['maximum'] + 1))
+    assert options['resolutions'] == params['resolution']['suggestions']
+    task.refs.append('https://example.test/over.jpg')
+    with pytest.raises(ApiError, match='最多'):
+        provider.build_video_body(task)
+    assert len(calls) == 1
+
+
+def test_added_seedance_frames_and_per_model_media_support():
+    p = CangyuanVideoProvider()
+    first, last = 'https://example.test/first.jpg', 'https://example.test/last.jpg'
+    task = VideoTask('lake', model='sd16-seedance-2.0', duration=15, resolution='4K',
+                     refs=[first], extra={'first_image_url': first})
+    with pytest.raises(ApiError, match='首尾帧'):
+        p.build_video_body(task)
+    task.extra['last_image_url'] = last
+    body = p.build_video_body(task)
+    assert body['resolution'] == '4k' and body['reference_image_urls'] == [first]
+    assert body['first_image_url'] == first and body['last_image_url'] == last
+    for model in ('sd17-seedance-2.0', 'sd17-seedance-2.0-2'):
+        task = VideoTask('lake', model=model, extra={'audio_refs': [first]})
+        assert p.build_video_body(task)['reference_audios'] == [first]
+        task.extra['video_refs'] = [first]
+        with pytest.raises(ApiError, match='reference_videos'):
+            p.build_video_body(task)
+    with pytest.raises(ApiError, match='reference_audios'):
+        p.build_video_body(VideoTask('lake', model='sd17-seedance-2.0-3', extra={'audio_refs': [first]}))
+    task = VideoTask('lake', model='wan6-wan3.0', extra={'first_image_url': first})
+    assert p.build_video_body(task)['first_image_url'] == first
+    task.refs = [last]
+    with pytest.raises(ApiError, match='混用'):
+        p.build_video_body(task)
+
+
+@pytest.mark.parametrize('model,duration', [('sd8-seedance-2.5-n', 15),
+                                          ('sd17-seedance-2.5-2', 5),
+                                          ('gv4-grok-imagine-video-1.5', 5)])
+def test_added_models_do_not_silently_change_duration(model, duration):
+    with pytest.raises(ApiError, match='秒'):
+        CangyuanVideoProvider().build_video_body(VideoTask('lake', model=model, duration=duration))
+
+
+def test_new_explicit_restrictions_and_suggestions_are_distinct():
+    p = CangyuanVideoProvider()
+    for model, resolution in [('kling-o3', '4K'), ('wan6-wan3.0', '1080P')]:
+        with pytest.raises(ApiError, match='不支持'):
+            p.build_video_body(VideoTask('lake', model=model, resolution=resolution))
+    with pytest.raises(ApiError, match='2500'):
+        p.build_video_body(VideoTask('x' * 2501, model='kling-o3'))
+    assert p.capabilities()['video']['model_options']['kling-o3']['max_prompt_chars'] == 2500
+    # Recommendations are not exhaustive enums; don't invent a ban on unlisted ratios.
+    assert p.build_video_body(VideoTask('lake', model='sd17-seedance-2.5-4', ratio='5:4'))['aspect_ratio'] == '5:4'
+
+
+def test_new_models_survive_old_non_strict_catalog_but_respect_account_bindings():
+    from core.model_catalog import apply_catalog
+    cap = CangyuanVideoProvider().capabilities()
+    old = {'ok': True, 'models': ['sd11-seedance-2.5']}
+    assert set(NEW_CONTRACTS) <= set(apply_catalog(cap, old, 'old')['video']['models'])
+    account = dict(old, strict=True, models=['sd17-seedance-2.5-4'])
+    assert apply_catalog(cap, account, 'account')['video']['models'] == account['models']
