@@ -244,11 +244,21 @@ async function openDelete(key) {
  S.del={root:S.root,key,down:true,up:false,siblings:false,items:[],choices:{},request:0,loading:false};
  await loadDelete();
 }
-async function openBatchDelete() {
- const keys=[...outputSelection()];if(!keys.length)return;
+async function openBatchDelete(keys) {
+ if(!keys.length)return;
  dialog('批量删除产物','<p>正在列出会被删除的文件…</p>');
  S.del={root:S.root,keys,down:false,up:false,siblings:false,items:[],choices:{},request:0,loading:false};
  await loadDelete();
+}
+async function openProductionDelete() {
+ const root=S.root;
+ await selectionQueue;
+ if(S.root!==root||S.page!=='production')return;
+ await loadProject(root);
+ if(S.root!==root||S.page!=='production')return;
+ const keys=S.data.tasks.filter(t=>t.selected).map(t=>t.key);
+ if(!keys.length)throw Error('请先在生产树勾选需要删除产物的任务');
+ await openBatchDelete(keys);
 }
 async function importRelease(file) {
  const d=await post('handoff/import',{filename:file.name,content_b64:await readFile(file)});
@@ -271,7 +281,7 @@ function production() {
  <div class="rv-panel"><div class="rv-row"><h3>本次服务商与并发</h3>${btn('填写 / 管理密钥','providers')}</div><div class="rv-service-head"><span>生产类型</span><span>服务商</span><span>模型</span><span>比例</span><span>清晰度 / 秒数</span><span>并发</span></div><div id="production-services"></div><p class="rv-caption">各行共享全局总上限与服务商上限；批内并发不能相加当作可用额度。设置变更只影响下次开始的批次。比例和视频的秒数都是直接传给服务商的参数，选「跟随任务」时用每条任务里写的值；下拉里是当前模型声明支持的档位。改了秒数，提示词仍是按原秒数写的。技术失败自动重试最多 ${esc(S.boot.retry)} 次，在 设置 → 并发与重试 里改。</p></div>
  <div id="jobs"></div>
  <div class="rv-toolbar"><select id="tree-mode" aria-label="树形分组">${[['family','按资源分类（父子）'],['type-episode','按资源类型 → 集'],['episode','按集 → 资源类型'],['disk','按磁盘目录']].map(([v,n])=>option(v,n,S.treeMode)).join('')}</select><label class="rv-search"><input id="asset-search" type="search" aria-label="搜索资源" placeholder="搜索人物、场景、任务 ID、文件名" value="${esc(S.filters.asset||'')}"></label><select id="asset-status" aria-label="资源状态">${choices(['全部状态','待生产','已完成','失败','选择有阻塞'],S.filters.assetStatus||'全部状态')}</select><select id="asset-type" aria-label="资源类型">${option('','全部类型',S.filters.assetType||'')}${Object.entries(cats).map(([k,v])=>option(k,v,S.filters.assetType)).join('')}</select></div>
- <div class="rv-row rv-selection"><span id="selection-count"></span><div class="rv-actions">${btn('选中当前结果','select-visible')}${btn('取消当前结果','clear-visible')}${btn('全项目全选','select-all')}${btn('补选依赖','dependencies')}${btn('批量放弃已选待取回','drop-submitted-batch')}</div></div><div id="dependency-alert"></div>
+ <div class="rv-row rv-selection"><span id="selection-count"></span><div class="rv-actions">${btn('选中当前结果','select-visible')}${btn('取消当前结果','clear-visible')}${btn('全项目全选','select-all')}${btn('补选依赖','dependencies')}${btn('批量删除已选产物…','production-delete')}${btn('批量放弃已选待取回','drop-submitted-batch')}</div></div><div id="dependency-alert"></div>
  <div class="rv-production-grid"><div class="rv-panel rv-tree-panel"><div id="resource-tree" role="region" aria-label="生产资源列表" tabindex="0"></div></div><aside class="rv-panel rv-detail" id="resource-detail" aria-label="资源详情" tabindex="0"></aside></div>`;
  renderServices();renderPublication();renderTree();renderDetail();renderJobs();renderPlan();
 }
@@ -611,7 +621,8 @@ const actions={
  'delete':e=>openDelete(e.dataset.key),
  'output-all':()=>{const keys=outputSelection();for(const key of S.outputVisible||[])keys.add(key);outputList();},
  'output-none':()=>{outputSelection().clear();outputList();},
- 'output-delete':openBatchDelete,
+ 'output-delete':()=>openBatchDelete([...outputSelection()]),
+ 'production-delete':openProductionDelete,
  'delete-all':()=>{if(S.del&&!S.del.loading){for(const x of S.del.items)S.del.choices[x.key]=x.exists&&!S.data?.running?.[x.key];renderDelete();}},
  'delete-none':()=>{if(S.del&&!S.del.loading){for(const x of S.del.items)S.del.choices[x.key]=false;renderDelete();}},
  'audio-remove':async(el)=>{await post('audio/remove',{key:el.dataset.key,file_ref:el.dataset.ref});invalidatePlan();await loadProject();notice('已移除音频引用，正在运行的批次不受影响。');},
