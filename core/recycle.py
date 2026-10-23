@@ -49,15 +49,21 @@ def _walk(start, edges) -> set:
 
 
 def plan(pj, key: str, up: bool = False, down: bool = True, siblings: bool = False) -> dict:
+    return plan_many(pj, [key], up=up, down=down, siblings=siblings)
+
+
+def plan_many(pj, keys: list, up: bool = False, down: bool = False, siblings: bool = False) -> dict:
+    if not isinstance(keys, list) or not keys or any(not isinstance(k, str) for k in keys):
+        raise ValueError("先选要删除的产物")
     tasks, parents, children, names = _graph(pj)
-    if key not in tasks:
+    if any(k not in tasks for k in keys):
         raise ValueError("任务不存在，请刷新")
-    why = {key: "本身"}
+    why = {key: "本身" for key in keys}
     if up:
-        for k in _walk([key], parents):
+        for k in _walk(keys, parents):
             why.setdefault(k, "上游")
     if siblings:
-        for p in parents[key]:
+        for p in {p for key in keys for p in parents[key]}:
             for k in children[p]:
                 why.setdefault(k, "兄弟")
     if down:

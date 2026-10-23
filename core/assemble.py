@@ -343,25 +343,28 @@ def _run(cmd, cancel, deadline) -> str:
 
 
 def reroll(pj, key: str) -> dict:
-    """重新抽卡：现在这条挪进备份，这一段回到待生产并勾选；提示词、参考图、输出路径都不变。"""
-    task = next((t for t in _videos(pj) if t["key"] == key), None)
+    """图片或视频先备份再重抽；提示词、参考图、输出路径保持不变。"""
+    task = next((t for t in A.task_rows(pj.tasks(), legacy=True) if t["key"] == key), None)
     if not task:
-        raise ValueError("只有分段视频可以重新抽卡，请刷新后再试")
+        raise ValueError("任务不存在，请刷新后再试")
     current = A.inside(pj.root, task["output"])
     if not R.valid_output(str(current)):
-        raise ValueError("这一段还没有有效视频，直接生产即可，不需要重新抽卡")
-    folder = A.inside(pj.root, BACKUP_DIR)
+        media = "视频" if task["kind"] == "video" else "图片"
+        raise ValueError(f"这一项还没有有效{media}，直接生产即可，不需要重新抽卡")
+    backup_dir = (BACKUP_DIR if task["kind"] == "video" else
+                  (current.parent.relative_to(Path(pj.root).resolve()) / "_抽卡备份").as_posix())
+    folder = A.inside(pj.root, backup_dir)
     folder.mkdir(parents=True, exist_ok=True)
-    backup = folder / f"{current.stem}_{time.strftime('%Y%m%d_%H%M%S')}{current.suffix}"
+    backup = folder / f"{current.stem}_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns()}{current.suffix}"
     os.replace(current, backup)
     submitted.clear(pj.root, task["output"])
     A.select(pj, {key: True})
-    return {"ok": True, "backup": f"{BACKUP_DIR}/{backup.name}"}
+    return {"ok": True, "backup": f"{backup_dir}/{backup.name}"}
 
 
 def undo_reroll(pj, key: str, backup_rel: str) -> None:
-    """重新抽卡没能开跑：把原视频放回原处，这一段不能因为没开跑就空着。"""
-    task = next((t for t in _videos(pj) if t["key"] == key), None)
+    """重新抽卡没能开跑：把原产物放回原处。"""
+    task = next((t for t in A.task_rows(pj.tasks(), legacy=True) if t["key"] == key), None)
     backup = A.inside(pj.root, backup_rel)
     if task and backup.is_file():
         current = A.inside(pj.root, task["output"])

@@ -300,7 +300,7 @@ def test_reroll_that_cannot_start_puts_the_video_back(pj, monkeypatch):
     monkeypatch.setattr(app, "caps_of", lambda cfg=None: [])
     monkeypatch.setattr(agent_api.R, "start", lambda *a, **kw: {"ok": False, "blocked": [{"key": "EP01-SEG01", "reason": "模型不在当前能力清单"}]})
     before = Path(pj.p("05_分段视频", "EP01-SEG01.mp4")).read_bytes()
-    with pytest.raises(ValueError, match="原视频已放回原处：模型不在当前能力清单"):
+    with pytest.raises(ValueError, match="原产物已放回原处：模型不在当前能力清单"):
         agent_api.post(app, "/api/agent/reroll", {"root": pj.root, "key": "EP01-SEG01"})
     assert Path(pj.p("05_分段视频", "EP01-SEG01.mp4")).read_bytes() == before
     assert not list(Path(pj.p("05_分段视频", "_抽卡备份")).glob("*.mp4"))

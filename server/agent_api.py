@@ -461,7 +461,7 @@ def post(app, path, body):
     if path == "/api/agent/reroll":
         key = str(body.get("key") or "")
         if key in R.busy(app.JOBS, pj.root):
-            raise ValueError("这一段正在生成，等它结束再重新抽卡")
+            raise ValueError("这一项正在生成，等它结束再重新抽卡")
         if pj.meta().get("archived"):
             raise ValueError("请先恢复归档项目")
         moved = assemble.reroll(pj, key)
@@ -474,7 +474,7 @@ def post(app, path, body):
         if not started.get("ok") or not started.get("job_id"):
             assemble.undo_reroll(pj, key, moved["backup"])
             reasons = "；".join(b["reason"] for b in started.get("blocked") or []) or started.get("message", "")
-            raise ValueError("没有开始重新生成，原视频已放回原处：" + reasons)
+            raise ValueError("没有开始重新生成，原产物已放回原处：" + reasons)
         return dict(moved, job_id=started["job_id"])
     if path == '/api/agent/audio/upload':
         try:
@@ -486,6 +486,9 @@ def post(app, path, body):
         return audio_refs.remove(pj, body.get('key'), body.get('file_ref'))
     if path in ('/api/agent/video-reference/add', '/api/agent/video-reference/remove'):
         return video_inputs.update(pj, body.get('key'), body.get('url'), remove=path.endswith('/remove'))
+    if path == "/api/agent/delete-plan":
+        return recycle.plan_many(pj, body.get("keys"), up=body.get("up") is True,
+                                 down=body.get("down") is True, siblings=body.get("siblings") is True)
     if path == "/api/agent/delete":
         keys = body.get("keys")
         if not isinstance(keys, list) or not keys or any(not isinstance(k, str) for k in keys):

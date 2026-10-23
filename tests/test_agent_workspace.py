@@ -384,6 +384,9 @@ def test_delete_moves_files_to_recycle_bin_with_the_chosen_chains(pj):
     assert rel(up=True, down=False) == {"asset1": "本身", "asset0": "上游"}
     assert rel(up=True) == {"asset1": "本身", "asset0": "上游", "asset2": "下游"}
     assert {x["key"] for x in recycle.plan(pj, "asset0")["items"]} == {"asset0", "asset1", "asset2"}
+    assert {x["key"] for x in recycle.plan_many(pj, ["asset0", "asset1"])["items"]} == {"asset0", "asset1"}
+    expanded = recycle.plan_many(pj, ["asset0", "asset1"], down=True)["items"]
+    assert {x["key"]: x["relation"] for x in expanded} == {"asset0": "本身", "asset1": "本身", "asset2": "下游"}
     with pytest.raises(ValueError, match="正在生成"):
         recycle.delete(pj, ["asset0"], running={"asset0": object()})
     d = recycle.delete(pj, ["asset0", "asset1"])
@@ -634,3 +637,32 @@ def test_broken_provider_file_restores_previous_one(plugin_home):
 def test_provider_import_rejects_bad_names(plugin_home, name):
     with pytest.raises(ValueError):
         _upload(name, PLUGIN)
+
+
+
+def test_image_reroll_enters_runtime_without_reusing_old_output(pj, monkeypatch):
+    publish(pj, plan_for(pj)); A.scan(pj)
+    for i in range(2):
+        image(pj.p("02_固定资产", f"asset{i}.png"))
+    original = Path(pj.p("02_固定资产", "asset0.png")).read_bytes()
+    child = Path(pj.p("02_固定资产", "asset1.png")).read_bytes()
+    calls = []
+    def make_worker(project, pc, kind, llm_factory=None):
+        def worker(task, log, cancel):
+            assert not A.inside(project.root, task["output"]).exists()
+            calls.append(task["key"])
+            image(str(A.inside(project.root, task["output"])))
+            return {"output": task["output"]}
+        return worker
+    monkeypatch.setattr(R.produce, "make_image_worker", make_worker)
+    monkeypatch.setattr(app, "load_config", lambda: {"projects_dir": str(Path(pj.root).parent), "providers": {}})
+    monkeypatch.setattr(app, "caps_of", lambda cfg=None: CAPS)
+    monkeypatch.setattr(app, "resolve_provider_cfg", resolve)
+    jobs = JobManager()
+    monkeypatch.setattr(app, "JOBS", jobs)
+    result = agent_api.post(app, "/api/agent/reroll", {"root": pj.root, "key": "asset0"})
+    job = jobs.get(result["job_id"]); wait_job(job)
+    assert job.status == "done" and calls == ["asset0"]
+    assert A.inside(pj.root, result["backup"]).read_bytes() == original
+    assert Path(pj.p("02_固定资产", "asset1.png")).read_bytes() == child
+    assert R.valid_output(pj.p("02_固定资产", "asset0.png"))
