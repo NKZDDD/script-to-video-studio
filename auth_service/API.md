@@ -171,7 +171,7 @@ else:
 - `POST /admin/api/keys/import/preview`：`{content:"config.json 文件文本"}`，返回不含密钥的 `rows` 和 `warnings`。每行含 `index`、`name`、`provider`、`field`、`base_url`、`models`、`duplicate`。不写入。
 - `POST /admin/api/keys/import/commit`：`{content:"同一文件文本",selected:[0,1]}`，重新解析校验、按索引选取，事务新建，返回 `added`、`skipped`、`key_ids`；不覆盖记录或分配账号。
 - 仅以上两个路径的请求体上限为 2 MiB（容纳 JSON 转义），`content` 最多 524288 字符；页面文件上限 512 KB。其他接口保持 16 KiB。一次最多 256 条。
-- 输入必须为含 `providers` 对象的 Studio 配置，重复 JSON 字段拒绝。只读取支持的凭据字段及 HTTPS 地址、显式模型绑定；错误响应不包含原始值。重复导入不启用已停用 Key。
+- 输入必须为含 `providers` 或 `llm` 对象的 Studio 配置，重复 JSON 字段拒绝。只读取支持的凭据字段及 HTTPS 地址、显式模型绑定；错误响应不包含原始值。重复导入不启用已停用 Key。1.10.0 起，`llm` 中明确填写的 `base_url`、`api_key`、`model` 转为下述改写专用条目。
 
 
 ## 客户端版本策略（1.6.0，兼容 1.5.0 发布请求）

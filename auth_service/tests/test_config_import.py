@@ -6,7 +6,7 @@ from test_provisioning import client_token, verify
 
 def payload(providers, **kw):
     return dict(content=json.dumps(dict(providers=providers, projects_dir='D:/not-imported',
-                                        llm={'api_key': 'do-not-import-llm'}, **kw)))
+                                        **kw)))
 
 
 def test_preview_commit_split_keys_no_secret_echo_and_no_assignment(env):

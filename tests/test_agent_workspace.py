@@ -492,7 +492,7 @@ def test_http_has_agent_entry_and_no_legacy_text_endpoints(tmp_path, monkeypatch
             assert b'studio-file-preview' in r.read()
         with urlopen(url+"/api/agent/bootstrap") as r:
             data=json.load(r)
-            assert set(data["llm"]) == {"base_url", "model", "api_key_set", "ready", "rounds"} and data["projects"]==[]
+            assert set(data["llm"]) == {"base_url", "model", "api_key_set", "ready", "rounds", "managed", "source", "key_name", "message"} and data["projects"]==[]
             assert not any("llm" in c.get("supports", []) for c in data["capabilities"])
         with pytest.raises(HTTPError) as e:
             urlopen(Request(url+"/api/stage/run",data=b'{}',headers={"Content-Type":"application/json"}))

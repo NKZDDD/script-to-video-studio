@@ -24,6 +24,8 @@ def assigned_bundle(auth, uid):
     if bundle is None:
         return None, []
     ids = {pid for pid, item in cfg.items() if item.get('keys')}
+    from .provider_names import LLM_PROVIDER
+    ids.discard(LLM_PROVIDER)  # Built-in OpenAI-compatible client, not a media adapter.
     selected = select(bundle, ids)
     missing = sorted(ids - {p['id'] for p in selected['providers']})
     return selected, missing

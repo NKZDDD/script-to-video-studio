@@ -7,7 +7,7 @@ from pydantic import Field, ValidationError
 
 from .admin import Body, current, record
 from .key_library import KeyEdit
-from .provider_names import PROVIDER_NAMES
+from .provider_names import PROVIDER_NAMES, LLM_PROVIDER, validate_llm_config
 from .provisioning import KEY_FIELDS
 from .service import AuthError
 
@@ -34,10 +34,11 @@ def parse(content):
         data = json.loads(content.lstrip('\ufeff'), object_pairs_hook=unique)
     except (ValueError, RecursionError):
         raise AuthError(422, 'invalid_config', '文件不是有效 JSON，或含重复字段；请检查文件格式') from None
-    if not isinstance(data, dict) or not isinstance(data.get('providers'), dict):
-        raise AuthError(422, 'invalid_config', '需要 Studio config.json：顶层应包含 providers 对象')
+    if (not isinstance(data, dict) or not any(k in data for k in ('providers', 'llm'))
+            or not isinstance(data.get('providers', {}), dict)):
+        raise AuthError(422, 'invalid_config', '需要 Studio config.json：顶层应包含 providers 或 llm 对象')
     candidates, warnings = [], []
-    for position, (provider, cfg) in enumerate(data['providers'].items(), 1):
+    for position, (provider, cfg) in enumerate(data.get('providers', {}).items(), 1):
         if not isinstance(cfg, dict):
             warnings.append(f'第 {position} 个服务商配置不是对象，已跳过')
             continue
@@ -53,17 +54,32 @@ def parse(content):
                                base_url=cfg.get('base_url', ''), models=cfg.get('models', []), **{field: cfg[field]})
                 if not getattr(item, field).strip() or any(not m.strip() or len(m) > 200 for m in item.models):
                     raise ValueError('empty credential or invalid model')
-            except (ValidationError, ValueError):
+                validate_llm_config(provider, item.model_dump())
+            except (ValidationError, ValueError, AuthError):
                 # Validation exceptions can contain the raw credential; never echo them.
                 warnings.append(f'第 {position} 个服务商的 {FIELD_NAMES[field]}、HTTPS 地址或模型列表格式不正确，已跳过；请修正后重导')
                 continue
             config = {'base_url': item.base_url, 'models': list(dict.fromkeys(m.strip() for m in item.models)),
                       field: getattr(item, field).strip()}
             candidates.append({'provider': item.provider, 'name': item.name, 'config': config, 'field': field})
+    lm = data.get('llm')
+    if lm:
+        try:
+            if not isinstance(lm, dict):
+                raise ValueError('invalid llm')
+            item = KeyEdit(provider=LLM_PROVIDER, name='提示词改写 LLM',
+                           base_url=lm.get('base_url', ''), api_key=lm.get('api_key', ''),
+                           models=[lm.get('model', '')])
+            config = {'base_url': item.base_url, 'api_key': item.api_key.strip(),
+                      'models': [m.strip() for m in item.models]}
+            validate_llm_config(LLM_PROVIDER, config)
+            candidates.append({'provider': LLM_PROVIDER, 'name': item.name, 'config': config, 'field': 'api_key'})
+        except (ValidationError, ValueError, AuthError):
+            warnings.append('提示词改写 LLM 未导入：请在 llm 中明确填写 HTTPS base_url、api_key 和一个 model')
     if len(candidates) > 256:
         raise AuthError(422, 'import_limit', '一次最多导入 256 条 Key，请拆分文件')
     if not candidates:
-        raise AuthError(422, 'no_keys', '没有可导入的 Key；支持 api_key、image_1k_api_key、image_4k_api_key、video_api_key')
+        raise AuthError(422, 'no_keys', '没有可导入的 Key；请检查 providers 凭据或 llm 的 HTTPS base_url、api_key、model')
     return candidates, warnings
 
 

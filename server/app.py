@@ -690,6 +690,7 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
     c = dict(cfg.get("llm") or {})
     # False 是 stream 的有效覆盖值，不能像空字符串一样过滤掉。
     c.update({k: v for k, v in (override or {}).items() if v not in (None, "")})
+    c = cloud_config.llm(c)
     if not c.get("api_key"):
         pid = _llm_provider_id(c)
         saved = ((cfg.get("providers") or {}).get(pid, {}) or {})
@@ -697,7 +698,7 @@ def build_llm(cfg: dict, override: dict = None) -> LLM:
         if not c.get("base_url"):
             c["base_url"] = saved.get("base_url", "")
     if not c.get("api_key"):
-        raise ValueError("LLM 未配置 api_key（在「分析引擎」页签保存）")
+        raise ValueError("LLM 未配置 api_key（在「提示词改写 LLM」页签保存）")
     notes: list = []
     mt = _max_tokens(c.get("max_tokens"), note=notes.append)
     llm = LLM(c["api_key"], c.get("base_url", "https://api.paisio.online"),
@@ -899,8 +900,16 @@ def api_get(path: str, q: dict) -> dict:
         # llm.api_key 之前是原文发给前端的 —— providers 整块剔了、upload 的
         # 密钥也抹了，就漏了这一个。页面只需要知道「配了没」。
         lm = dict(pub.get("llm") or {})
-        lm["api_key_set"] = bool((cfg.get("llm") or {}).get("api_key"))
-        lm.pop("api_key", None)
+        lm_managed = cloud_config.llm_managed()
+        try:
+            lm = cloud_config.llm(lm)
+            lm["api_key_set"] = bool(lm.get("api_key"))
+        except ValueError as exc:
+            lm = {"api_key_set": False, "message": str(exc)}
+        for secret in cloud_config.KEY_FIELDS:
+            lm.pop(secret, None)
+        lm["managed"] = lm_managed
+        lm["source"] = "managed" if lm_managed else "personal"
         pub["llm"] = lm
         pub.pop("subtitle", None)
         from core import system_v34 as V34
@@ -1226,6 +1235,8 @@ def api_post(path: str, body: dict) -> dict:
     cfg = load_config()
 
     if path == "/api/config":
+        if 'llm' in body and cloud_config.llm_managed():
+            raise ValueError('提示词改写 LLM 由后台统一管理，请在后台 Key 库修改后刷新后台配置')
         if 'providers' in body and cloud_config.client_managed():
             raise ValueError('服务商连接配置由后台统一管理，客户端不能修改；请刷新后台配置')
         cur = load_config()

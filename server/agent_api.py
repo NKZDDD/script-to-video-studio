@@ -123,7 +123,7 @@ def bootstrap(app, cfg):
             "features": cfg.get("agent_features", {}), "feature_labels": A.FEATURES,
             "limits": cfg["limits"], "defaults": A.DEFAULTS, "kinds": A.KINDS, "retry": R.retries(cfg),
             "semantics": A.SEMANTICS, "upload": old["config"].get("upload", {}),
-            "llm": dict({k: (old["config"].get("llm") or {}).get(k, "") for k in ("base_url", "model")},
+            "llm": dict({k: (old["config"].get("llm") or {}).get(k, "") for k in ("base_url", "model", "managed", "source", "key_name", "message")},
                         api_key_set=bool((old["config"].get("llm") or {}).get("api_key_set")),
                         ready=llm_ready(app, cfg), rounds=R.soften_rounds(cfg)),
             "paths": old["paths"]}

@@ -10,6 +10,37 @@ _owner = ''
 _configs = {}
 _catalogs = {}
 KEY_FIELDS = ('api_key', 'image_1k_api_key', 'image_4k_api_key', 'video_api_key', 'llm_api_key')
+LLM_PROVIDER = 'prompt_rewrite_llm'
+
+
+def llm_managed():
+    with _lock:
+        assigned = LLM_PROVIDER in _configs
+    return assigned or client_managed()
+
+
+def llm(local):
+    """Resolve the assigned rewrite route locally; never fetch while building an LLM."""
+    with _lock:
+        cloud = copy.deepcopy(_configs.get(LLM_PROVIDER))
+    if cloud is None and not client_managed():
+        return dict(local or {})
+    rows = cloud.get('keys', [cloud]) if cloud is not None else []
+    if not rows:
+        raise ValueError('后台尚未分配可用的提示词改写 LLM，请联系管理员在 Key 库分配后刷新后台配置')
+    row = rows[0]
+    from urllib.parse import urlsplit
+    url = urlsplit(row.get('base_url', ''))
+    models = row.get('models', [])
+    if (url.scheme != 'https' or not url.hostname or url.username or url.password
+            or url.query or url.fragment or len(models) != 1 or not models[0].strip()
+            or not row.get('api_key', '').strip()):
+        raise ValueError('后台提示词改写 LLM 配置不完整，需要 HTTPS 地址、API Key 和一个模型 ID')
+    # Keep runtime controls, but never mix a cloud secret with a personal endpoint/model.
+    out = {k: v for k, v in (local or {}).items() if k in ('timeout', 'max_tokens', 'stream')}
+    out.update(base_url=row['base_url'], api_key=row['api_key'], model=models[0], proxy='direct',
+               source='managed', key_name=row.get('key_name', ''))
+    return out
 
 
 def consistent(fn):
@@ -130,6 +161,7 @@ def catalog_config(cfg):
     remote = client_managed()
     with _lock:
         ids = set(_configs) if remote else set(_configs) | set(cfg.get('providers', {}))
+    ids.discard(LLM_PROVIDER)
     result['providers'] = {pid: provider(pid, cfg.get('providers', {}).get(pid, {})) for pid in ids}
     return result
 
@@ -208,7 +240,7 @@ def catalog(pid):
 
 def assigned_ids():
     with _lock:
-        return list(_configs)
+        return [pid for pid in _configs if pid != LLM_PROVIDER]
 
 
 def resolve(pid, resolved, model):

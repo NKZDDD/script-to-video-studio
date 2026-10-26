@@ -73,6 +73,9 @@ def assign(name: str, body: ProviderConfig, request: Request):
     actor, _ = current(request, csrf=True)
     auth = request.app.state.auth
     uid = user_id(auth, name)
+    from .provider_names import LLM_PROVIDER
+    if body.provider == LLM_PROVIDER:
+        raise AuthError(422, 'use_key_library', '提示词改写 LLM 请通过 Key 库配置并分配')
     # Compatibility endpoint for old admin clients. Never edit a shared library entry.
     with auth.store.connect(write=True) as db:
         rows = db.execute('SELECT k.* FROM user_keys a JOIN key_library k ON k.id=a.key_id '

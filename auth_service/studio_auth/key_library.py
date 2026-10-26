@@ -9,7 +9,7 @@ from pydantic import Field
 from .admin import Body, current, record
 from .provisioning import ProviderConfig, KEY_FIELDS, user_id
 from .service import AuthError
-from .provider_names import PROVIDER_NAMES
+from .provider_names import PROVIDER_NAMES, LLM_PROVIDER, validate_llm_config
 
 router = APIRouter()
 
@@ -57,6 +57,7 @@ def keys(request: Request):
     names = dict(PROVIDER_NAMES)
     if bundle:
         names.update({p['id']: p['name'] for p in bundle['providers']})
+    names[LLM_PROVIDER] = '提示词改写 LLM（OpenAI 兼容接口）'
     return {'keys': [public(r) for r in rows], 'providers': names}
 
 
@@ -91,6 +92,7 @@ def save_key(body: KeyEdit, request: Request):
                 cfg[field] = getattr(body, field).strip()
         if not any(cfg.get(k) for k in KEY_FIELDS):
             raise AuthError(422, 'key_required', '新建时请填写 Key')
+        validate_llm_config(body.provider, cfg)
         kid = body.id or str(uuid.uuid4())
         revision = old['revision'] if old and cfg == json.loads(old['config']) else str(uuid.uuid4())
         db.execute('INSERT INTO key_library VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
