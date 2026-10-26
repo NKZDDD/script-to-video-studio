@@ -425,22 +425,31 @@ def selections(pj: Project, rows: list) -> dict:
     path = pj.p("07_检查与记录", "selections.json")
     with LOCK:
         state = read_json(path, {}) or {}
+        changed = False
         for r in rows:
-            state.setdefault(r["key"], True)
-        if rows:
+            if r["key"] not in state:
+                state[r["key"]] = True
+                changed = True
+        if changed:
             write_json(path, state)
         return state
 
 
 def select(pj: Project, changes: dict):
-    valid = {t["key"] for t in task_rows(pj.tasks(), legacy=True)}
     with LOCK:
-        state = selections(pj, task_rows(pj.tasks(), legacy=True))
+        valid = {t["key"] for t in task_rows(pj.tasks(), legacy=True)}
         for k, v in changes.items():
             if k not in valid or not isinstance(v, bool):
                 raise ValueError("勾选项已不在当前计划中，请刷新")
-            state[k] = v
-        write_json(pj.p("07_检查与记录", "selections.json"), state)
+        path = pj.p("07_检查与记录", "selections.json")
+        saved = read_json(path, {}) or {}
+        state = dict(saved)
+        for key in valid:
+            state.setdefault(key, True)
+        state.update(changes)
+        if state != saved:
+            write_json(path, state)
+        return {key: state[key] for key in valid}
 
 
 def update_reference_contract(pj: Project) -> None:

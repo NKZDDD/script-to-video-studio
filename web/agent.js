@@ -67,6 +67,8 @@ async function loadProject(root=S.root,paint=true,background=false) {
  if(seq!==S.request || root!==S.root)return;
  if(background&&($('#dialog').open||document.activeElement?.matches('input,select,textarea')||!['production','handoff','outputs'].includes(S.page)))return;
  const previous=S.data;
+ const pending=selectionStates.get(root);
+ if(pending)applySelection(data,selectionValues(pending));
  S.data=data;
  if(previous?.root!==data.root||productionStamp(previous)!==productionStamp(data))invalidatePlan();
  if(paint)render();
@@ -366,7 +368,7 @@ function renderTree() {
  $$('[data-partial="true"]',main).forEach(e=>e.indeterminate=true);
 
  const selected=S.data.tasks.filter(t=>t.selected),missing=selected.filter(t=>t.missing_selection.length&&!t.done);
- $('#selection-count').textContent=`全项目选中 ${selected.length}/${S.data.tasks.length} 项 · 当前结果 ${S.visibleKeys.length} 项`;
+ $('#selection-count').textContent=`全项目选中 ${selected.length}/${S.data.tasks.length} 项 · 当前结果 ${S.visibleKeys.length} 项${selectionStates.has(S.root)?' · 正在保存勾选…':''}`;
  $('#plan-summary').textContent=`${selected.filter(t=>!t.done).length} 项待生产 · ${selected.filter(t=>t.done).length} 项可复用`;
  $('#dependency-alert').innerHTML=missing.length?`<div class="rv-notice is-error">${missing.length} 项缺少已勾选的上游，生产前会阻止提交。点“补选依赖”可以补齐。</div>`:'';
 }
@@ -391,12 +393,37 @@ function previewReference(e) {
  $('#dialog').classList.add('rv-image-dialog');
 }
 let selectionQueue=Promise.resolve();
+const selectionStates=new Map();
+function selectionValues(state) {return Object.assign({},state.confirmed,...state.edits.map(edit=>edit.changes));}
+function applySelection(data,changes) {
+ for(const task of data.tasks)if(Object.hasOwn(changes,task.key))task.selected=changes[task.key];
+ const available=new Set(data.tasks.filter(t=>t.done||t.selected).map(t=>t.key));
+ for(const task of data.tasks)task.missing_selection=task.done?[]:task.dependencies.filter(key=>!available.has(key));
+}
+function paintSelection() {
+ invalidatePlan();
+ if(S.page==='production'&&$('#resource-tree')){renderTree();renderDetail();}
+}
 async function setSelection(keys,value) {
  const root=S.root,changes=Object.fromEntries(keys.map(k=>[k,value]));
- invalidatePlan();
- selectionQueue=selectionQueue.catch(()=>{}).then(()=>api('selections',{root,changes}));
+ if(!keys.length)return;
+ let state=selectionStates.get(root);
+ if(!state){state={confirmed:Object.fromEntries(S.data.tasks.map(t=>[t.key,t.selected])),edits:[]};selectionStates.set(root,state);}
+ const edit={changes};state.edits.push(edit);
+ S.request++;applySelection(S.data,selectionValues(state));paintSelection();
+ selectionQueue=selectionQueue.catch(()=>{}).then(async()=>{
+  try {
+   const result=await api('selections',{root,changes});
+   state.confirmed=result.selections||{...state.confirmed,...changes};
+  } catch(e) {
+   throw Error('勾选保存失败，未保存的更改已恢复；请重试。'+e.message);
+  } finally {
+   state.edits.splice(state.edits.indexOf(edit),1);
+   if(!state.edits.length)selectionStates.delete(root);
+   if(S.root===root&&S.data?.root===root){S.request++;applySelection(S.data,selectionValues(state));paintSelection();}
+  }
+ });
  await selectionQueue;
- if(S.root===root)await loadProject();
 }
 async function editPrompt(key) {
  dialog('编辑任务提示词','<p>正在读取当前版本…</p>');
@@ -439,8 +466,9 @@ async function dropSubmittedBatch() {
  notice(`已放弃 ${d.count} 个任务${d.skipped.length?`，跳过 ${d.skipped.length} 个已完成或记录已清除的任务`:''}。请核对参数并重新查看生产计划，再开始生产。`);
 }
 async function preview() {
- const root=S.root,request=++S.planRequest;await selectionQueue;
- if(root!==S.root||request!==S.planRequest)return;
+ const root=S.root;await selectionQueue;
+ if(root!==S.root)return;
+ const request=++S.planRequest;
  const data=await api('preview',{root});if(root!==S.root||S.page!=='production'||request!==S.planRequest)return;S.plan=data;
  renderPlan();
  $('#production-plan')?.scrollIntoView({block:'nearest',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});
@@ -717,7 +745,7 @@ async function refreshCloudConfiguration(){
  cloudRefresh=(async()=>{notice('正在获取后台最新授权并拉取各把 Key 的模型…');const d=await api('config/refresh',{});await reloadBoot();if(S.root)await loadProject(S.root,false,true);render();notice([d.storage?.assigned?(d.storage.available?'后台 R2 已更新':'后台 R2 已停用或配置不完整'):'未分配后台 R2',...(d.rows||[]).map(r=>`${providerName(r.provider)}：${r.ok?'已更新 '+r.count+' 个模型':''}${r.partial||!r.ok?'；'+r.msg:''}`)].join('；'),d.rows?.some(r=>!r.ok||r.partial));})().finally(()=>{cloudRefresh=null;});return cloudRefresh;
 }
 window.addEventListener('studio-config-refresh',safe(refreshCloudConfiguration));
-async function tick(){try{if(!window.StudioLogin.isAuthenticated())return;await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job,S.jobRoot,true);if(S.root&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous!==undefined)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
+async function tick(){try{if(!window.StudioLogin.isAuthenticated())return;await refreshRuntime();if(S.job&&$('#dialog').open)await jobDetail(S.job,S.jobRoot,true);if(S.root&&!selectionStates.has(S.root)&&['production','handoff','outputs'].includes(S.page)&&!$('#dialog').open&&!document.activeElement?.matches('input,select,textarea')){const page=S.page,root=S.root;const previous=await loadProject(root,false,true);if(page===S.page&&root===S.root&&previous!==undefined)refreshProjectView(previous);}}catch(e){notice('更新失败：'+e.message,true);}finally{setTimeout(tick,4000);}}
 document.addEventListener('click',event=>{if(!$('#runtime').contains(event.target))$('#runtime').open=false;});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')$('#runtime').open=false;});
 stickyObserver.observe($('#sticky-header'));

@@ -32,8 +32,13 @@ def projects(cfg):
 
 
 def project(root, cfg):
-    key = os.path.normcase(os.path.abspath(root or ""))
-    if key not in {os.path.normcase(os.path.abspath(r["root"])) for r in projects(cfg)}:
+    resolved = os.path.abspath(root or "")
+    key = os.path.normcase(resolved)
+    bases = {os.path.normcase(os.path.abspath(base))
+             for base in [cfg["projects_dir"]] + list(cfg.get("agent_project_dirs") or [])}
+    # The list includes direct child directories. Checking one registered path
+    # must not read every sibling's metadata, failures and active plan over SMB.
+    if os.path.dirname(key) not in bases or not os.path.isdir(resolved):
         raise ValueError("项目未登记，请从项目列表打开")
     return Project(root)
 
@@ -222,6 +227,9 @@ def post(app, path, body):
             return MANAGER.install(app.JOBS)
         raise ValueError("未知更新操作")
     cfg = app.load_config()
+    if path == "/api/agent/selections":
+        pj = project(body.get("root"), cfg)
+        return {"ok": True, "selections": A.select(pj, body.get("changes") or {})}
     caps = app.caps_of(cfg)
     if path == '/api/agent/paths/browse':
         from core.workspace_paths import browse
@@ -358,9 +366,6 @@ def post(app, path, body):
         meta = pj.meta()
         meta["archived"] = bool(body.get("archived"))
         pj.save_meta(meta)
-        return {"ok": True}
-    if path == "/api/agent/selections":
-        A.select(pj, body.get("changes") or {})
         return {"ok": True}
     if path == "/api/agent/dependencies":
         data = A.view(pj)
