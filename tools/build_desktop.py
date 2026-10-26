@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "补齐生产页的批量删除入口：勾选生产树任务后点击“批量删除已选产物”，核对清单后移入回收站，任务保留。保留生产详情单项删除和产物页批量删除；正在生成的任务仍受保护。包含 2026.10.23.1 的 Studio 窗口内原图/媒体预览、图片重抽备份与启动失败恢复，以及联网等待不阻塞本地操作。服务商适配器及 Key 模型授权沿用已有后台配置；已发布沧元适配包 2026.10.23.1 时无需重复发布。"}
+               "notes": "提示词改写 LLM 接入后台 Key 库及账号分配，登录或刷新后台配置后使用下发的地址、模型和 Key；客户端显示实际配置来源，托管版不再回退旧本地 Key。新增按账号上报的登录、LLM、生产和本地操作诊断；生产页勾选/取消选择即时反馈，保存时不再扫描全部项目。保留原图预览、图片重抽及生产页批量删除。请先升级认证服务端到 1.10.0 并给账号分配提示词改写 LLM，再发布此版本；现有媒体适配包及授权继续使用。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))
