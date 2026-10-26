@@ -19,6 +19,8 @@ BUILD = re.compile(r"[a-f0-9]{64}")
 
 def observe(request, result, device_id):
     """Call only after successful account/session authentication and version gates."""
+    request.state._diag_user = result['user']['id']
+    request.state._diag_username = result['user']['username']
     auth = request.app.state.auth
     flavor = request.headers.get("x-studio-flavor", "")
     flavor = flavor if flavor in FLAVORS else "unknown"

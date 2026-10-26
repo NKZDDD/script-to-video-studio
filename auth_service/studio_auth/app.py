@@ -86,6 +86,8 @@ class Guard:
             if not message.get("more_body", False):
                 break
         delivered = False
+        from .diagnostics import identify
+        identify(scope, b''.join(chunks))
 
         async def bounded_receive():
             nonlocal delivered
@@ -115,11 +117,19 @@ def create_app(settings=None, *, clock=None):
     async def lifespan(app):
         kwargs = {"clock": clock} if clock is not None else {}
         app.state.auth = AuthService(settings, **kwargs)
-        yield
+        from .diagnostics import Recorder
+        app.state.diagnostics = Recorder(app.state.auth)
+        try:
+            yield
+        finally:
+            app.state.diagnostics.close()
 
     app = FastAPI(title="Respect Studio 登录服务", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(Guard, require_https=settings.require_https)
+    from .diagnostics import RequestLog, router as diagnostics_router
+    app.add_middleware(RequestLog)
+    app.include_router(diagnostics_router)
     from .admin import router
     app.include_router(router)
     from .provisioning import router as provisioning_router

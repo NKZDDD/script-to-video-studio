@@ -244,3 +244,13 @@ X-Studio-Build: <release.json 中的 build_sha256>
 管理员接口：`GET /admin/api/adapters` 查看登记版本与当前发布；`POST /admin/api/adapters/import` 接收 `{"bundle":{...}}`，只登记；`POST /admin/api/adapters/publish` 接收 `{"sha256":"..."}`，切换当前发布版本。写接口要求原有管理员会话、同源 Origin 与 CSRF Token。发布旧哈希即回退。
 
 包格式：`protocol:1`、`version`、`modules:{模块名:Python源码}`、`providers:[{id,name,module,class}]`。共享校验器位于 `studio_auth/adapter_format.py`。管理员发布的代码只在客户端执行，服务器不导入该源码。部署步骤见 [PROVIDER-ADAPTER-UPGRADE.md](PROVIDER-ADAPTER-UPGRADE.md)。
+
+## 请求诊断（1.9.0）
+
+`POST /api/v1/auth/diagnostics`：Bearer 会话＋`device_id`，`events` 每批 1～20 条；`dropped` 和 `recording_error` 为客户端本次运行的采集缺失情况。服务器重新校验账号、设备及会话，仅归入认证账号；不接受请求方指定 user_id。相同账号、event_id 幂等，保存后返回 `accepted` ID 列表。不触发版本检查或下发配置。
+
+每条事件包含 `event_id/at/kind/operation/outcome/duration_ms/status/category/request_id/host/version`。字段均有长度、类型和枚举限制；不接收自由文本异常、正文或完整 URL。字段协议见 `studio_auth/diagnostics.py:Event`。
+
+`GET /admin/api/users/{name}/diagnostics`：仅管理员，支持 `page`（50 条/页）、`hours`（1～720，默认24）、`source`（server/client）、`outcome`（success/error）、`kind`（auth/llm/provider/local）和 `request_id` 筛选；筛选空值表示全部。包含服务器收到时间以及诊断缺失计数。诊断记录是排错依据，不作为计费或授权凭证。
+
+认证请求可带 UUID 格式的 `X-Studio-Request-Id`，响应同名头用于对应两端记录；缺失或非法时由服务端生成。该编号不参与身份认证。

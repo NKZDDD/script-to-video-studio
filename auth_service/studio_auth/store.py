@@ -109,6 +109,8 @@ class Store:
                 raise RuntimeError("Database is newer than this program; refusing to start")
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
+            from .diagnostics import SCHEMA as DIAGNOSTIC_SCHEMA
+            db.executescript(DIAGNOSTIC_SCHEMA)
             db.execute("PRAGMA user_version=1")
         from .key_library import migrate
         with self.connect(write=True) as db:

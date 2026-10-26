@@ -236,3 +236,5 @@ class AuthService:
             db.execute("DELETE FROM audit WHERE at<?", (now-90*86400,))
             db.execute('DELETE FROM admin_sessions WHERE expires_at<=?', (now,))
             db.execute('DELETE FROM admin_audit WHERE at<?', (now-90*86400,))
+            from .diagnostics import prune
+            prune(db, now)

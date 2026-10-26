@@ -10,6 +10,7 @@ TOP = {"README.md", "API.md", "ADMIN-UPGRADE.md", "KEY-USAGE-UPGRADE.md", "KEY-L
 TOP.add("VERSION-STATS-UPGRADE.md")
 TOP.add("R2-UPGRADE.md")
 TOP.add("PROVIDER-ADAPTER-UPGRADE.md")
+TOP.add("REQUEST-LOGS-UPGRADE.md")
 TREES = {"studio_auth", "deploy", "examples", "tests", "tools"}
 SUFFIXES = {".py", ".sh", ".service", ".timer", ".conf", ".html", ".css", ".js"}
 

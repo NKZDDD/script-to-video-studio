@@ -811,6 +811,10 @@ def _resume_pending(pj, task, provider_cfg, prov, kind, log, cancel, interval, t
     return {"output": task["output"], "resumed": True}
 
 
+from .cloud_diagnostics import provider_call
+
+
+@provider_call
 @cloud_usage.tracked
 def _deliver(pj: Project, task: dict, out: str, prov, rec: Optional[dict], *, meta: dict,
              run: Callable, log: Callable, cancel: Callable, interval: int, timeout: int) -> dict:

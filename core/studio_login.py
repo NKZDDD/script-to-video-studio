@@ -12,7 +12,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from . import paths
+from . import paths, cloud_diagnostics
 from .store import read_json, write_json
 
 
@@ -50,6 +50,7 @@ class LoginManager:
         if self._device:
             return self._device
         path = Path(paths.data_dir()) / DEVICE_FILE
+        self._diagnostics_dir = str(path.parent)
         data = read_json(str(path), {}) or {}
         value = data.get("device_id", "") if isinstance(data, dict) else ""
         try:
@@ -70,8 +71,18 @@ class LoginManager:
             headers["Authorization"] = "Bearer " + access
         request = urllib.request.Request(AUTH_URL + "/api/v1/auth/" + action,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST")
+        request_id = str(uuid.uuid4())
+        request.add_header('X-Studio-Request-Id', request_id)
+        owner = cloud_diagnostics.identity(self)
+        if not owner and self.tokens:
+            owner = getattr(self, '_diagnostic_account', None)
+        if action == 'login' and getattr(self, '_diagnostics_dir', ''):
+            name = str(body.get('username', '')).strip().lower()
+            owner = ('name:'+name, name, self._diagnostics_dir)
+        started, error, status = time.monotonic(), None, 0
         try:
             with self.opener.open(request, timeout=15) as response:
+                status = getattr(response, 'status', 200)
                 raw = response.read(4194305)
                 if len(raw) > 4194304:
                     raise ValueError("oversized auth response")
@@ -80,6 +91,7 @@ class LoginManager:
                 raise ValueError("invalid auth response")
             return data
         except urllib.error.HTTPError as exc:
+            error, status = exc, exc.code
             try:
                 detail = json.loads(exc.read(16384)).get("error", {})
                 code = str(detail.get("code", "auth_service_error"))
@@ -89,8 +101,14 @@ class LoginManager:
             if code == "https_required":
                 message = "登录服务的 HTTPS 代理配置不完整，请联系管理员检查 X-Forwarded-Proto"
             raise LoginRequired(code, message, exc.code if exc.code in (401, 403, 426, 429) else 503) from None
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError, HTTPException):
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, HTTPException) as exc:
+            error = exc
             raise LoginRequired("auth_unavailable", "无法连接登录服务，请检查网络后重试；已有任务不会重新提交", 503) from None
+        finally:
+            # No telemetry about telemetry, and no added HTTP calls on this path.
+            if action in ('login', 'verify', 'refresh', 'logout', 'storage/sign', 'adapters'):
+                cloud_diagnostics.emit(owner, 'auth', action, started, error=error,
+                    status=status, request_id=request_id, target=AUTH_URL)
 
     def matches(self, header):
         try:
@@ -129,6 +147,9 @@ class LoginManager:
                 or not isinstance(data.get("user"), dict)):
             raise LoginRequired("invalid_auth_response", "登录服务没有返回有效凭证", 503)
         self.tokens = {k: data[k] for k in ("access_token", "refresh_token")}
+        user = data['user']
+        if user.get('id') and getattr(self, '_diagnostics_dir', ''):
+            self._diagnostic_account = (user['id'], user.get('username', ''), self._diagnostics_dir)
 
     def login(self, body):
         name, password = body.get("username"), body.get("password")
@@ -213,6 +234,7 @@ class LoginManager:
                 self.checked_until = time.monotonic() + 60
                 self.last_error, self.retry_at = None, 0
             if user.get('id'):
+                cloud_diagnostics.activate(self)
                 cloud_usage.start_sender(self)
 
     def storage_ticket(self, body, owner):

@@ -14,6 +14,7 @@ import time
 from typing import Any, Callable, Optional
 
 import requests
+from .cloud_diagnostics import llm_call
 
 
 def _env_proxy() -> str:
@@ -723,6 +724,7 @@ class LLM:
                     f"把「网络」改成强制直连再试")
         return None, True, "直连（系统与环境都没有代理）"
 
+    @llm_call
     def chat(self, system: str, user: str, retries: int = 3, log=None,
              cancel=None, on_usage=None, on_partial=None) -> str:
         """一次对话。默认走流式。

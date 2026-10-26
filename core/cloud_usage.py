@@ -162,6 +162,11 @@ def start_sender(manager):
                 active.send_usage()
             except Exception:
                 pass  # Keep durable records; the UI shows pending count. Never retry generation.
+            try:
+                from . import cloud_diagnostics
+                cloud_diagnostics.send(active)
+            except Exception:
+                pass  # Offline/old servers retain a bounded local outbox; never block UI.
             finally:
                 del active
     threading.Thread(target=run, name='studio-usage-upload', daemon=True).start()
