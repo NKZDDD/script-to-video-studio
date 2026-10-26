@@ -1,0 +1,257 @@
+"""Provider contract: keyed capabilities, exact request fields, no duplicate paid jobs."""
+import base64
+import copy
+import json
+from pathlib import Path
+
+import pytest
+import requests
+
+from core import model_catalog as MC, providers, submitted
+from core.apiutil import ApiError
+from core.providers.base import VideoTask
+from core.providers import zhongheng as Z
+
+
+@pytest.fixture
+def provider():
+    p = Z.ZhonghengProvider(api_key='fixture', proxy='direct')
+    p._specs = copy.deepcopy(Z.MODEL_SPECS)
+    return p
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(Z.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(Z.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+    return now
+
+
+def task(model='XXseedacn2.5', **overrides):
+    return VideoTask(**dict(dict(model=model, prompt='风景', duration=5, ratio='auto', resolution='720p'), **overrides))
+
+
+@pytest.mark.parametrize('model', Z.MODEL_SPECS)
+def test_all_authorized_video_models_create_query_save(model, provider, monkeypatch, clock):
+    calls, saved = [], []
+    spec = Z.MODEL_SPECS[model]
+    def request(method, path, **kw):
+        calls.append((method, path, kw))
+        if method == 'POST':
+            return dict(task_id='vid_fixture', status='processing', next_poll_seconds=7)
+        return dict(status='succeeded', download_url='https://result.test/video?download=1')
+    monkeypatch.setattr(provider.session, 'request', request)
+    monkeypatch.setattr(provider.session, 'save_item', lambda url, dest, **kw: saved.append(url))
+    t = task(model, duration=spec['duration_options'][0], resolution=spec['resolution_options'][0],
+             refs=['https://material.test/image.png'])
+    result = provider.generate_video(t, 'unused.mp4', poll_interval=5, log=lambda _: None)
+    assert [c[:2] for c in calls] == [('POST', '/v1/videos'), ('GET', '/v1/tasks/vid_fixture')]
+    assert calls[0][2]['json_body'] == dict(model=model, prompt='风景', duration=t.duration,
+                                          resolution=t.resolution, images=t.refs)
+    assert calls[0][2]['headers']['Idempotency-Key']
+    assert calls[0][2]['retries'] == 2 and calls[0][2]['submit'] is False
+    assert clock[0] == 7 and len(saved) == 1 and result['task_id'] == 'vid_fixture'
+
+
+def test_exact_discrete_durations_not_ranges_or_marketing_text(provider):
+    with pytest.raises(ApiError, match='不支持 15'):
+        provider.build_video_body(task('Aseedance2.0', duration=15), Z.MODEL_SPECS['Aseedance2.0'])
+    with pytest.raises(ApiError, match='不支持 28'):
+        provider.build_video_body(task('wan3/1080', duration=28), Z.MODEL_SPECS['wan3/1080'])
+    with pytest.raises(ApiError, match='不支持 10'):
+        provider.build_video_body(task('BBseadanco-480', duration=10), Z.MODEL_SPECS['BBseadanco-480'])
+
+
+def test_30_images_ten_audio_and_video_preserved(provider):
+    t = task(refs=[f'https://fixture.test/{i}.png' for i in range(30)],
+             extra={'video_refs': ['https://fixture.test/v.mp4'] * 10,
+                    'audio_refs': ['https://fixture.test/a.wav'] * 10})
+    body = provider.build_video_body(t, Z.MODEL_SPECS[t.model])
+    assert body['images'] == t.refs
+    assert len(body['reference_videos']) == len(body['reference_audios']) == 10
+    t.refs.append('https://fixture.test/31.png')
+    with pytest.raises(ApiError, match='未裁剪'):
+        provider.build_video_body(t, Z.MODEL_SPECS[t.model])
+
+
+@pytest.mark.parametrize('kwargs', [dict(ratio='9:16'), dict(duration=True), dict(duration=4.5),
+    dict(resolution='4K'), dict(extra={'quality': 'high'}), dict(extra={'generate_audio': False}),
+    dict(extra={'video_refs': 'https://fixture.test/v.mp4'}),
+    dict(extra={'start_frame': 'https://fixture.test/a.png'}),
+    dict(refs=['https://fixture.test/a.png'] * 31)])
+def test_invalid_input_no_upload_or_creation(provider, monkeypatch, kwargs):
+    calls = []
+    monkeypatch.setattr(provider.session, 'request', lambda *a, **kw: calls.append(a))
+    with pytest.raises(ApiError):
+        provider.generate_video(task(**kwargs), 'unused.mp4')
+    assert calls == []
+
+
+def test_zero_reference_support_not_treated_as_missing(provider):
+    with pytest.raises(ApiError, match='支持上限 0'):
+        provider.build_video_body(task('OOsd2.5', duration=15,
+            extra={'video_refs': ['https://fixture.test/v.mp4']}), Z.MODEL_SPECS['OOsd2.5'])
+
+
+def test_supported_ratio_audio_and_frames_are_explicit(provider):
+    spec = dict(Z.MODEL_SPECS['XXseedacn2.5'], aspect_ratio_options=['9:16'],
+                supports_generate_audio=True, reference_materials=['start_frame', 'end_frame'])
+    t = task(ratio='9:16', extra={'generate_audio': False, 'start_frame': 'https://fixture.test/a.png',
+                                 'end_frame': 'https://fixture.test/b.png'})
+    body = provider.build_video_body(t, spec)
+    assert body['ratio'] == '9:16' and body['generate_audio'] is False and 'end_frame' in body
+    t.refs = ['https://fixture.test/c.png']
+    with pytest.raises(ApiError):
+        provider.build_video_body(t, spec)
+
+
+def test_catalog_normalizes_types_options_without_exposing_chat_or_secrets(monkeypatch):
+    p = Z.ZhonghengProvider(api_key='fixture', base_url='https://fixture.test/v1/')
+    assert p.session.base_url == 'https://fixture.test'
+    fetched = []
+    spec = dict(Z.MODEL_SPECS['XXseedacn2.5'], duration_options=[8, 12],
+                aspect_ratio_options=['9:16'], resolution_options=['720p'])
+    def request(method, path, **kw):
+        fetched.append(path)
+        return {'data': [{'id': 'opaque-new-id', 'capabilities': spec},
+                         {'id': 'opaque-chat', 'capabilities': {'capability_type': 'chat'}}]}
+    monkeypatch.setattr(p.session, 'request', request)
+    monkeypatch.setattr(providers, 'build', lambda *a: p)
+    class Session:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **kw):
+            assert url == 'https://fixture.test/v1/models' and kw['allow_redirects'] is False
+            class Response:
+                status_code = 200
+                def json(self): return {'data': [{'id': 'opaque-new-id'}, {'id': 'opaque-chat'}]}
+            return Response()
+    monkeypatch.setattr(MC.requests, 'Session', Session)
+    result = MC.fetch('zhongheng', {'api_key': 'fixture'})
+    assert result['ok'] and result['strict'] and result['models'] == ['opaque-new-id']
+    cap = MC.apply_catalog(p.capabilities(), result, 'test')['video']
+    assert cap['models'] == ['opaque-new-id']
+    assert cap['model_options']['opaque-new-id']['durations'] == [8, 12]
+    assert cap['model_options']['opaque-new-id']['ratios'] == ['9:16']
+    assert p.list_models() == ['opaque-new-id'] and len(fetched) == 1
+    assert 'fixture' not in json.dumps(result)
+
+
+def test_no_network_in_capabilities_and_automatic_ratio_choice(provider, monkeypatch):
+    monkeypatch.setattr(provider.session, 'request', lambda *a, **k: pytest.fail('network on local UI'))
+    cap = provider.capabilities()['video']
+    assert len(cap['models']) == 26
+    assert all(options['ratios'] == ['auto'] for options in cap['model_options'].values())
+
+
+def test_upload_local_data_uri_and_direct_url(provider, tmp_path, monkeypatch):
+    calls = []
+    def request(method, path, **kw):
+        calls.append((method, path, kw))
+        return {'success': True, 'data': [{'url': 'https://material.test/upload.png'}]}
+    monkeypatch.setattr(provider.session, 'request', request)
+    f = tmp_path/'ref.png'; f.write_bytes(b'image-bytes')
+    for ref in [str(f), 'data:image/png;base64,' + base64.b64encode(b'image-bytes').decode()]:
+        assert provider._upload(ref) == 'https://material.test/upload.png'
+    assert provider._upload('https://fixture.test/a.png') == 'https://fixture.test/a.png'
+    assert len(calls) == 2
+    assert all(c[1] == '/v1/media' and c[2]['submit'] is False for c in calls)
+    assert calls[0][2]['files'][0][0] == 'file'
+    assert calls[0][2]['files'][0][1][1] == b'image-bytes'
+    with pytest.raises(ApiError): provider._upload('http://fixture.test/a.png')
+    with pytest.raises(ApiError): provider._upload('data:image/png;base64,@@bad')
+    f.write_bytes(b'')
+    with pytest.raises(ApiError): provider._upload(str(f))
+
+
+def test_upload_error_never_creates_a_task(provider, monkeypatch):
+    calls = []
+    def request(method, path, **kw):
+        calls.append(path)
+        return {'success': False, 'message': 'upload failed'}
+    monkeypatch.setattr(provider.session, 'request', request)
+    with pytest.raises(ApiError):
+        provider.generate_video(task(refs=['data:image/png;base64,aW1hZ2U=']), 'unused.mp4')
+    assert calls == ['/v1/media']
+
+
+def test_query_and_download_failures_keep_id_and_resume_uses_only_get(provider, tmp_path, monkeypatch, clock):
+    calls = []
+    def request(method, path, **kw):
+        calls.append((method, path))
+        if method == 'POST': return {'task_id': 'vid_existing', 'status': 'processing'}
+        return {'status': 'succeeded', 'video_url': 'https://result.test/v.mp4'}
+    monkeypatch.setattr(provider.session, 'request', request)
+    monkeypatch.setattr(provider.session, 'save_item', lambda *a, **kw: (_ for _ in ()).throw(ApiError('download failed')))
+    with submitted.tracking(str(tmp_path), 'out.mp4', provider=provider.id):
+        with pytest.raises(ApiError): provider.generate_video(task(), str(tmp_path/'out.mp4'))
+    record = submitted.load(str(tmp_path), 'out.mp4')
+    assert record['task_id'] == 'vid_existing'
+    monkeypatch.setattr(provider.session, 'save_item', lambda *a, **kw: None)
+    assert provider.resume(record, str(tmp_path/'out.mp4'))['resumed']
+    assert [c[0] for c in calls] == ['POST', 'GET', 'GET']
+
+
+@pytest.mark.parametrize('error', [ApiError('offline'), ApiError('busy', status=503)])
+def test_ambiguous_submission_stops_new_generation(provider, monkeypatch, error):
+    monkeypatch.setattr(provider.session, 'request', lambda *a, **kw: (_ for _ in ()).throw(error))
+    with pytest.raises(ApiError) as e: provider.generate_video(task(), 'unused.mp4')
+    assert e.value.err_code == 'submit_uncertain' and e.value.kind == 'task_fatal'
+
+
+def test_http_retries_preserve_body_and_idempotency_key(provider, monkeypatch, clock):
+    calls = []
+    def http(method, url, **kw):
+        calls.append((method, url, kw))
+        if len(calls) == 1: raise requests.ReadTimeout('timeout')
+        class Response:
+            status_code = 200
+            content = b'json'
+            def json(self): return {'task_id': 'vid_once', 'status': 'succeeded', 'video_url': 'https://result.test/v.mp4'}
+        return Response()
+    monkeypatch.setattr(requests, 'request', http)
+    monkeypatch.setattr(provider.session, 'save_item', lambda *a, **kw: None)
+    assert provider.generate_video(task(), 'unused.mp4')['task_id'] == 'vid_once'
+    assert len(calls) == 2
+    assert calls[0][2]['json'] == calls[1][2]['json']
+    assert calls[0][2]['headers']['Idempotency-Key'] == calls[1][2]['headers']['Idempotency-Key']
+
+
+def test_poll_backoff_deadline_failure_detail_and_no_echo_download(provider, monkeypatch, clock):
+    calls = []
+    def request(method, path, **kw):
+        calls.append((method, path, clock[0]))
+        if len(calls) == 1: raise ApiError('temporary', status=429)
+        return {'status': 'processing', 'video_url': 'https://fixture.test/reference.mp4', 'next_poll_seconds': 12}
+    monkeypatch.setattr(provider.session, 'request', request)
+    monkeypatch.setattr(provider.session, 'save_item', lambda *a, **kw: pytest.fail('not finished'))
+    with pytest.raises(ApiError, match='查询超时'):
+        provider.resume({'task_id': 'vid_kept'}, 'unused.mp4', poll_interval=5, poll_timeout=18)
+    assert all(c[0] == 'GET' for c in calls) and clock[0] == 18
+    monkeypatch.setattr(provider.session, 'request', lambda *a, **kw: dict(status='failed',
+        error='upstream_error', error_code='invalid_prompt', error_detail='提示词未通过内容审核'))
+    with pytest.raises(ApiError, match='提示词未通过内容审核') as e:
+        provider.resume({'task_id': 'vid_failed'}, 'unused.mp4')
+    assert e.value.provider_task_failed and e.value.err_code == 'invalid_prompt'
+
+
+def test_cancel_after_submission_remembers_id(provider, tmp_path, monkeypatch):
+    posted = [False]
+    def request(*a, **kw):
+        posted[0] = True
+        return {'task_id': 'vid_cancel', 'status': 'processing'}
+    monkeypatch.setattr(provider.session, 'request', request)
+    with submitted.tracking(str(tmp_path), 'out.mp4', provider=provider.id):
+        with pytest.raises(ApiError, match='已取消'):
+            provider.generate_video(task(), 'unused.mp4', cancel=lambda: posted[0])
+    assert submitted.load(str(tmp_path), 'out.mp4')['task_id'] == 'vid_cancel'
+
+
+def test_each_key_reads_its_own_authorized_catalog(monkeypatch):
+    def request(session, *a, **kw):
+        return {'data': [{'id': session.api_key, 'capabilities': Z.MODEL_SPECS['XXseedacn2.5']}]}
+    from core.apiutil import HttpSession
+    monkeypatch.setattr(HttpSession, 'request', request)
+    assert Z.ZhonghengProvider('a').list_models() == ['a']
+    assert Z.ZhonghengProvider('b').list_models() == ['b']
