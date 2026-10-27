@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "新增 Liam-2 独立单图交接：同版 C 分别生成 A/B，无需整板和区域提取。JSONL 与 Agent READY 发布均支持，新交接图在生产和产物页单列；校验同版 C、边界配对、视频角色及间接依赖，执行保存 C 快照和摘要。兼容原 ABC 整板、independent_c 与 scene_c 材料。已有项目刷新后可导出新契约；供应商继续使用后台适配包（包括 2026.10.26.6），无需升级认证服务端。"}
+               "notes": "修正生产页资产分类：场景、道具等不再因 LOC_/PROP_ 等编号前缀误归人物身份；独立交接图在资源树和服务商设置中排到分段视频之前。同步修订生产契约，明确 c_then_a_b 独立 C/A/B 与旧整板、独立 C 模式的适用范围，补全字段、引用、目录及完整示例。已有任务、引用、配置与产物保留；服务商继续使用后台适配包（包括 2026.10.26.6），无需升级认证服务端。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))
