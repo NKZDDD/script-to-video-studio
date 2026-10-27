@@ -22,7 +22,7 @@ from .store import LOCK, Project, read_json, read_text, write_json, write_text
 
 SCHEMA = "studio.production-plan/v1"
 KINDS = {"asset": "资产图", "scstate": "场景状态图", "board": "交接板整板",
-         "region": "交接板区域图", "video": "分段视频", "handoff": "独立交接图 C/A/B"}
+         "region": "交接板区域图", "handoff": "独立交接图 C/A/B", "video": "分段视频"}
 LEGACY_KINDS = dict(KINDS, storyboard="旧项目故事板")
 SEMANTICS = {"CHAR": "人物身份", "LOOK": "造型与服装", "COST": "独立服装", "CT": "人物状态",
              "GRP": "群体", "CRE": "生物", "LOC": "场景", "PROP": "道具",
@@ -503,6 +503,28 @@ def update_reference_contract(pj: Project) -> None:
                 temp.unlink(missing_ok=True)
 
 
+def _inferred_semantic(task: dict) -> str:
+    """Display metadata for material/legacy tasks without declared resources."""
+    kind = task["kind"]
+    fixed = {"scstate": "SCSTATE", "board": "ABC", "region": "REGION",
+             "handoff": "HANDOFF", "video": "VIDEO"}
+    if kind in fixed:
+        return fixed[kind]
+    folders = {"人物身份资产": "CHAR", "人物造型资产": "LOOK", "服饰资产": "COST",
+               "连续状态资产": "CT", "群体资产": "GRP", "生物资产": "CRE",
+               "场景资产": "LOC", "道具资产": "PROP", "载具资产": "VEH", "特效资产": "VFX"}
+    parts = str(task.get("output", "")).replace("\\", "/").split("/")
+    if kind == "asset" and len(parts) > 2 and parts[0] == "02_固定资产" and parts[1] in folders:
+        return folders[parts[1]]
+    # Older tasks may lack a category directory. Match the ID family at the
+    # beginning as well as after a project prefix, including PROP001-style IDs.
+    key = str(task.get("key", "")).upper()
+    for family, semantic in {**{k: k for k in SEMANTICS}, "PH": "CHAR", "LK": "LOOK"}.items():
+        if re.search(rf"(^|_){family}(?=_|\d|$)", key):
+            return semantic
+    return "CHAR" if kind == "asset" else "SCSTATE"
+
+
 def view(pj: Project) -> dict:
     from . import audio_refs, video_inputs
     update_reference_contract(pj)
@@ -523,9 +545,7 @@ def view(pj: Project) -> dict:
     for t in rows:
         t["missing_selection"] = [k for k in t["dependencies"] if k not in done and not chosen.get(k)] if not t["done"] else []
     resources = plan.get("resources") or [
-        {"id": t["key"], "name": t.get("name") or t["key"], "semantic":
-         next((k for k in SEMANTICS if "_" + k + "_" in t["key"]),
-              {"asset": "CHAR", "video": "VIDEO", "board": "ABC", "region": "REGION"}.get(t["kind"], "SCSTATE")) if t["kind"] != "handoff" else "HANDOFF",
+        {"id": t["key"], "name": t.get("name") or t["key"], "semantic": _inferred_semantic(t),
          "parent_id": None, "episodes": [t["episode"]] if t.get("episode") else [], "task_key": t["key"]} for t in rows]
     return {"root": pj.root, "meta": pj.meta(), "publication": publication, "tasks": rows,
             "resources": resources, "production": read_json(pj.p("07_检查与记录", "production-settings.json"), {}),

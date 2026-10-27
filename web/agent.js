@@ -340,6 +340,7 @@ function matchedResources() {
 }
 function renderTree() {
  const rs=matchedResources(),tasks=new Map(S.data.tasks.map(t=>[t.key,t])),all=new Map(S.data.resources.map(r=>[r.id,r]));
+ const rank=Object.keys(S.boot.semantics),cmpType=(a,b)=>(rank.indexOf(a)+1||99)-(rank.indexOf(b)+1||99);
  S.visibleKeys=rs.map(r=>r.task_key).filter(Boolean);S.groupKeys={};let gi=0;
  const leaf = r => {const t=tasks.get(r.task_key);return `<div class="rv-leaf ${S.detail===r.id?'active':''}">${t?`<input type="checkbox" data-key="${esc(t.key)}" aria-label="选择 ${esc(r.name)}" ${t.selected?'checked':''}>`:'<span>♪</span>'}<button class="rv-leaf-name" data-action="detail" data-id="${esc(r.id)}"><strong>${esc(r.name)}</strong><small>${esc(r.id)}</small></button>${(st=>`<span class="rv-badge ${st.cls}">${esc(st.label)}</span>`)(taskState(t))}</div>`;};
  const folder = (name,key,children,resources) => {const id='g'+gi++;const keys=[...new Set(resources.map(r=>r.task_key).filter(Boolean))];S.groupKeys[id]=keys;const selected=keys.filter(k=>tasks.get(k)?.selected).length,done=keys.filter(k=>tasks.get(k)?.done).length,state=JSON.stringify([S.root,S.treeMode,S.filters.asset||'',key]),open=S.folders.get(state)??!!S.filters.asset;return `<details class="rv-folder" data-folder="${esc(key)}" ${open?'open':''} data-folder-state="${esc(state)}"><summary data-folder-toggle><input type="checkbox" data-group="${id}" aria-label="选择 ${esc(name)} 当前结果" ${keys.length&&selected===keys.length?'checked':''} ${!keys.length?'disabled':''} data-partial="${selected>0&&selected<keys.length}"><strong>${esc(name)}</strong><small title="已完成几条 · 勾选了几条（都是这一组共几条里的）">已完成 ${done}/${keys.length} · 选中 ${selected}/${keys.length}</small></summary><div class="rv-folderbody">${children}</div></details>`;};
@@ -350,13 +351,13 @@ function renderTree() {
  function descendants(r) {return [r,...(children.get(r.id)||[]).flatMap(descendants)].filter(x=>rs.includes(x));}
  function node(r) {const cs=(children.get(r.id)||[]).filter(x=>visible.has(x.id));return cs.length?folder(r.name,'entity:'+r.id,(rs.includes(r)?leaf(r):'')+cs.map(node).join(''),descendants(r)):leaf(r);}
  const roots=(children.get(null)||[]).filter(r=>visible.has(r.id));const groups=new Map();roots.forEach(r=>{const type=r.semantic;if(!groups.has(type))groups.set(type,[]);groups.get(type).push(r);});
- html=[...groups].map(([k,v])=>folder(S.boot.semantics[k]||k,'family:'+k,v.map(node).join(''),v.flatMap(descendants))).join('');
+ html=[...groups].sort(([a],[b])=>cmpType(a,b)).map(([k,v])=>folder(S.boot.semantics[k]||k,'family:'+k,v.map(node).join(''),v.flatMap(descendants))).join('');
  } else if(S.treeMode==='disk') {
  const groups=new Map();rs.forEach(r=>{const t=tasks.get(r.task_key),l=(t?.output||'声音元数据').split('/').slice(0,-1).join('/')||'声音元数据';if(!groups.has(l))groups.set(l,[]);groups.get(l).push(r);});
  html=[...groups].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>folder(k,'disk:'+k,v.map(leaf).join(''),v)).join('');
  } else {
- const eps=r=>r.episodes.length?r.episodes:['全剧共享'],rank=Object.keys(S.boot.semantics),byEp=S.treeMode==='episode';
- const cmpType=(a,b)=>(rank.indexOf(a)+1||99)-(rank.indexOf(b)+1||99),cmpEp=(a,b)=>a==='全剧共享'?-1:b==='全剧共享'?1:a.localeCompare(b,'zh',{numeric:true});
+ const eps=r=>r.episodes.length?r.episodes:['全剧共享'],byEp=S.treeMode==='episode';
+ const cmpEp=(a,b)=>a==='全剧共享'?-1:b==='全剧共享'?1:a.localeCompare(b,'zh',{numeric:true});
  const outerOf=byEp?eps:r=>[r.semantic],innerOf=byEp?r=>[r.semantic]:eps,typeName=k=>S.boot.semantics[k]||k;
  const groups=new Map();
  rs.forEach(r=>outerOf(r).forEach(o=>{if(!groups.has(o))groups.set(o,new Map());const g=groups.get(o);innerOf(r).forEach(i=>{if(!g.has(i))g.set(i,[]);g.get(i).push(r);});}));
