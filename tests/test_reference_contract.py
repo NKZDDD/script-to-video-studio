@@ -5,7 +5,7 @@ import zipfile
 import pytest
 
 from core import agent_handoff as H, agent_projects as A, matspec, produce
-from core.reference_contract import MARKER, RULES
+from core.reference_contract import MARKER, RULES, SCOPE, SCOPE_MARKER
 from core.independent_c import RULES as HANDOFF_RULES
 from core.single_handoff import RULES as SINGLE_HANDOFF_RULES
 from core.store import Project
@@ -48,7 +48,11 @@ def test_old_contract_append_preserves_project_and_published_materials(pj):
     A.view(pj)
     A.view(pj)
     request = A.revision_request(pj, ["asset0"], "调整映射行标点")
-    assert contract.read_bytes() == original + ("\n\n" + RULES + "\n\n" + HANDOFF_RULES + "\n\n" + SINGLE_HANDOFF_RULES).encode("utf-8")
+    updated = contract.read_bytes()
+    assert updated.startswith(SCOPE.encode("utf-8"))
+    assert updated.count(SCOPE_MARKER.encode()) == 1
+    assert original in updated
+    assert updated.endswith(("\n\n" + RULES + "\n\n" + HANDOFF_RULES + "\n\n" + SINGLE_HANDOFF_RULES).encode("utf-8"))
     assert {p: p.read_bytes() for p in protected} == before
     assert RULES in request["text"] and pj.root in request["text"]
     assert "asset0" in request["text"]

@@ -2,6 +2,33 @@
 
 MARKER = "<!-- studio-reference-punctuation-v1 -->"
 
+# A documentation revision, independent of the installed EXE and project locks.
+REVISION = "2026.10.27.2"
+SCOPE_MARKER = "<!-- studio-contract-scope-2026-10-27-2 -->"
+SCOPE = f"""{SCOPE_MARKER}
+## 契约版本与模式适用范围
+
+契约说明版本：{REVISION}。独立单图交接要求 Studio 2026.10.27.1 或更高版本；说明版本不作为客户端升级门槛，也不增加 JSONL manifest 必填字段。
+
+先按项目已确认的交接模式读取对应规则。新建 Liam-2 / Liam-3 项目采用已确认的 c_then_a_b 时使用下表第一行；旧项目不因更新契约自动切换工艺。没有交接需求时不强制建立交接图。
+
+下表的旧整板流程用于对应旧电影级项目；通用十二环节原有故事板流程继续保留，实际目录以本契约的「输出目录与分类」为准。
+
+| 模式 | 图片标记与依赖 | 视频引用 | 输出分类 |
+|---|---|---|---|
+| c_then_a_b：同版 C → 独立 A/B | C/A/B 都填 handoff_mode=c_then_a_b、view=C/A/B；A/B 同 boundary、同 c_key，分别直接引用同版 C；不填 region/board/parent | OUT_A→A、IN_B→B、IN_C→C，不填 board | HANDOFF，04_交接图/C、A、B；C 不是 SCSTATE |
+| independent_c：独立 C → AB 双联板 → 区域 A/B | 仅 C 填 handoff_mode=independent_c（兼容 scene_c）；AB 整板引用 C，区域 A/B 通过 region/board 引用整板 | OUT_A/IN_B 引区域 A/B，IN_C 引对应独立 C | C 在 03b_场景状态图；整板和区域在 04_交接板 |
+| 原 ABC 整板 → 区域 A/B/C | 不填新 handoff_mode；区域通过 region/board 引用同版整板 | OUT_A/IN_B/IN_C 引对应区域 | 04_交接板及其区域图目录 |
+
+同一 c_then_a_b 交接边界的 A/B/C 是同一时刻现场的不同取景；一段视频的入站 B/C 与出站 A 可以属于不同边界、不同时间。三个 role 表示用途，各自最多一张，不能解释成三个必然不同的时刻。
+
+输出格式、字段、目录和 Image N 映射按本次契约及对应 Schema；旧技能中的整板、区域提取、容器尺寸条款仅用于相应旧模式。若技能快照或旧正文与上表冲突，按实际模式适用本节与对应模式章节，不混用字段，不改写项目锁、历史任务或成品。
+
+参考图行统一为 Image N = 实际ID 身份描述，ID 后用空格，保持真实编号、身份、用途和上传顺序。JSONL 的 key 与发布包的资源 asset_id 按各自格式填写。
+
+Agent 的导演设计、人物资产、七段式视频提示词、内部设计台账及材料审核继续执行。Studio 不要求交付中间文件，不代表 Agent 可以省略内部工作。内部审核器若只识别旧格式，应对齐适配并报告未验证项，不能伪造外部字段、把旁白改成对白或绕过审核。内部通过与 Studio 实际导入通过分别记录。
+"""
+
 RULES = """## 参考图身份映射与标点
 <!-- studio-reference-punctuation-v1 -->
 

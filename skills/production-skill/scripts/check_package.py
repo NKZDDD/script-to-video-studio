@@ -85,7 +85,7 @@ check("⑤ 主入口保留项目锁路由", "项目锁" in skill and "model-adap
 # ---------- ⑥ Image N 参考图模板 ----------
 engine = read(os.path.join("references", "seedance-render-engine.md"))
 check("⑥ Image N 显式参考图模板已固化",
-      bool(re.search(r"Image N = 资源\s*key，这张图是用途", ma))
+      "Image N = 实际ID 身份描述；用途说明" in ma
       and "Image 1 = PRJ__ABC_EP01_SEG01_TO_SEG02_B_R01" in ma
       and "model-adapters.md" in engine)
 prompt_examples = [body for body in re.findall(r"```text\s*\n(.*?)```", ma, re.S)

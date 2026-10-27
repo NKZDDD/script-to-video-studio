@@ -47,8 +47,10 @@ def template(pj: Project, lock: dict, revision: str) -> str:
 1. `剧本.txt`：完整原文。
 2. `生产材料契约.md`：要交回的 `生产材料.jsonl` 的字段和形状。
 3. `01_剧本与分段/`：项目里已经有的分析产物（没有就跳过）。
-4. `00_项目说明/skill/production-skill/`：完整生产技能。按它做分析，不要另找规则。
+4. `00_项目说明/skill/production-skill/`：项目创建时固定的完整生产技能快照，负责设计与审核；输出字段和模式适用范围以本次契约为准。保留内部设计依据，不套用不适用于当前模式的旧整板字段。
 5. `00_项目说明/project-lock.json`：用户锁定的画幅、时长、风格。不能改。
+
+契约说明版本：{A.CONTRACT_REVISION}。先读契约开头的模式适用范围；旧项目不自动迁移，不改项目锁或技能快照散列。内部审核脚本不支持新字段时需对齐适配并记录真实结果，不能跳过审核或宣称已通过 Studio 导入。
 
 两条交回方式，用户都能导入：
 
@@ -79,8 +81,10 @@ def export_package(pj: Project, limits=None) -> dict:
     files = {"AGENT_TASK.md": template(pj, lock, revision).encode("utf-8"),
              "剧本.txt": script.encode("utf-8"),
              "生产材料契约.md": matspec.render(limits, pj.meta().get("title", ""), system).encode("utf-8"),
-             "00_项目说明/production-contract.md": A.contract(pj, lock, remote=True).encode("utf-8")}
-    for rel in ("00_项目说明/project-lock.json", "00_项目说明/production.schema.json",
+             "00_项目说明/production-contract.md": A.contract(pj, lock, remote=True).encode("utf-8"),
+             "00_项目说明/production.schema.json": json.dumps(A.schema_document(), ensure_ascii=False, indent=2).encode("utf-8"),
+             "production-material.schema.json": matspec.json_schema().encode("utf-8")}
+    for rel in ("00_项目说明/project-lock.json",
                 "01_剧本与分段/原始素材.txt"):
         files[rel] = (root / rel).read_bytes()
     analysis = root / "01_剧本与分段"
@@ -95,6 +99,8 @@ def export_package(pj: Project, limits=None) -> dict:
     files["交接包说明.json"] = json.dumps({
         "project_id": lock["project_id"], "title": pj.meta().get("title", ""),
         "next_revision": revision, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "contract_revision": A.CONTRACT_REVISION,
+        "skill_snapshot": "保留项目锁定快照；输出格式按本次生产契约，内部审核需适配当前格式",
         "contains": "剧本、生产材料契约、已有分析和完整技能；不含图片和视频",
         "script": "剧本.txt", "material_contract": "生产材料契约.md"},
         ensure_ascii=False, indent=2).encode("utf-8")

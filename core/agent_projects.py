@@ -16,7 +16,8 @@ import time
 import uuid
 
 from . import paths, probe, submitted, independent_c, single_handoff
-from .reference_contract import MARKER as REFERENCE_MARKER, RULES as REFERENCE_RULES
+from .reference_contract import (MARKER as REFERENCE_MARKER, RULES as REFERENCE_RULES,
+                                 SCOPE as CONTRACT_SCOPE, SCOPE_MARKER, REVISION as CONTRACT_REVISION)
 from .store import LOCK, Project, read_json, read_text, write_json, write_text
 
 SCHEMA = "studio.production-plan/v1"
@@ -149,12 +150,14 @@ def contract(pj: Project, lock: dict, remote: bool = False) -> str:
              else "请直接在此本机项目下产出，不要产出到临时对话目录再要求用户导入。")
     return f"""# {'交接包' if remote else '本机'}生产契约
 
+{CONTRACT_SCOPE}
+
 项目：{lock['project_id']}
 唯一项目根目录：{root}
 协议：{SCHEMA}；选项散列：{lock['options_hash']}；技能包散列：{lock['skill_hash']}。
 
 先读 project-lock.json、production.schema.json 和 skill/production-skill/SKILL.md；按需路由完整 references/，保留 scripts/。
-生产步骤：锁定配置 → 剧本分段 → 身份/造型/状态等固定资产 → 空间状态与按需交接板 → 七段式视频提示词 → 分层审计。
+生产步骤：锁定配置 → 剧本分段 → 身份/造型/状态等固定资产 → 空间状态与按所选模式制作交接图 → 七段式视频提示词 → 分层审计。
 原始素材：01_剧本与分段/原始素材.txt；缺原文时请求补齐，禁止凭空创建剧本。
 Studio 不执行文本分析。{where}
 
@@ -196,6 +199,8 @@ Studio 拥有 00_项目说明、07_检查与记录、selections.json、active-pl
 
 def template(pj: Project, lock: dict) -> str:
     return f"""# Agent 生产任务
+
+{CONTRACT_SCOPE}
 
 请在本机目录 `{pj.root}` 完成项目「{pj.meta()['title']}」。
 先阅读 `{pj.p('00_项目说明', 'production-contract.md')}`，随后读取同目录 project-lock.json 和完整 skill/production-skill/ 技能包。
@@ -464,31 +469,38 @@ def select(pj: Project, changes: dict):
 
 
 def update_reference_contract(pj: Project) -> None:
-    """Append writer guidance without rebuilding an older project's locked contract."""
+    """Scope current guidance while preserving locked skills and historical material."""
     if pj.meta().get("workflow") != "agent":
         return
     path = inside(pj.root, "00_项目说明/production-contract.md")
     with LOCK:
         if not path.is_file():
             return
-        original = path.read_bytes()
         # This file is Studio-owned and not part of the immutable task/skill hash.
         # Keep existing projects' writer schema in sync with the appended contract.
         schema_path = pj.p("00_项目说明", "production.schema.json")
         current_schema = read_json(schema_path, {}) or {}
         if current_schema.get("title") == SCHEMA and "handoff_tasks" not in current_schema.get("properties", {}):
             write_json(schema_path, schema_document())
-        additions = [rules for marker, rules in ((REFERENCE_MARKER, REFERENCE_RULES),
-                     (independent_c.MARKER, independent_c.RULES),
-                     (single_handoff.MARKER, single_handoff.RULES)) if marker.encode("utf-8") not in original]
-        if not additions:
-            return
-        temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-        try:
-            temp.write_bytes(original + "".join("\n\n" + rules for rules in additions).encode("utf-8"))
-            os.replace(temp, path)
-        finally:
-            temp.unlink(missing_ok=True)
+        guidance = ((REFERENCE_MARKER, REFERENCE_RULES), (independent_c.MARKER, independent_c.RULES),
+                    (single_handoff.MARKER, single_handoff.RULES))
+        for doc, rules in ((path, guidance), (inside(pj.root, "00_项目说明/AGENT_TASK.md"), ())):
+            if not doc.is_file():
+                continue
+            original = doc.read_bytes()
+            prefix = b"" if SCOPE_MARKER.encode("utf-8") in original else (
+                CONTRACT_SCOPE + "\n\n## 原项目内容（保留）\n\n"
+                "下文项目编号、路径和锁定选项继续有效；涉及新旧输出格式时按上面的模式适用范围读取。\n\n").encode("utf-8")
+            additions = [text for marker, text in rules if marker.encode("utf-8") not in original]
+            updated = prefix + original + "".join("\n\n" + text for text in additions).encode("utf-8")
+            if updated == original:
+                continue
+            temp = doc.with_name(doc.name + "." + uuid.uuid4().hex + ".tmp")
+            try:
+                temp.write_bytes(updated)
+                os.replace(temp, doc)
+            finally:
+                temp.unlink(missing_ok=True)
 
 
 def view(pj: Project) -> dict:
@@ -529,6 +541,6 @@ def revision_request(pj: Project, keys: list, note: str) -> dict:
     text = f"# Agent 定向修订\n\n项目根：`{pj.root}`\n当前发布：{current['publication'].get('revision', 'legacy')}\n\n原因：{note}\n\n"
     text += "仅修订下列任务及受影响下游，按原契约发布新版本；不要覆盖旧发布或成品。\n\n"
     text += "\n".join(f"- {t['key']}：{t['prompt_ref']}" for t in tasks)
-    text += "\n\n先读原项目已有契约，不要用其他项目的契约替换项目编号、根目录或锁定配置。\n\n" + REFERENCE_RULES + "\n\n" + independent_c.RULES + "\n\n" + single_handoff.RULES
+    text += "\n\n先读原项目已有契约，不要用其他项目的契约替换项目编号、根目录或锁定配置。\n\n" + CONTRACT_SCOPE + "\n\n" + REFERENCE_RULES + "\n\n" + independent_c.RULES + "\n\n" + single_handoff.RULES
     write_text(str(inside(pj.root, rel)), text)
     return {"rel": rel, "text": text}

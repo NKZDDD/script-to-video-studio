@@ -538,7 +538,7 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
                 elif roles.count(r) > 1:
                     out.append({"level": "error", "code": "HANDOFF_ROLE_DUP",
                                 "msg": f"{who} 有 {roles.count(r)} 个 `{r}` —— "
-                                       f"三个 role 是三个不同时刻，各自最多一个。"
+                                       f"三个 role 表示不同引用用途，各自最多一个；同一单图交接边界的 A/B/C 是同一时刻。"
                                        f"给两张的话程序分不出该信哪张，"
                                        f"而它不会挑，会两张都发"})
             if hs and not roles:

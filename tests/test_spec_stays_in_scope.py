@@ -68,7 +68,7 @@ class SpecScopeTests(unittest.TestCase):
         self.assertEqual([f for f, need, _ in matspec.REF_FIELDS if need],
                          ["image_n", "key"], "程序真读的只有这两个")
         for sid, text in self.texts.items():
-            self.assertIn("别为它们花时间", text, sid)
+            self.assertIn("不作为 Studio 强制交付字段", text, sid)
 
     def test_those_fields_really_do_not_reach_the_task(self):
         """★ 上面那条断言的前提，用真数据验一次。
@@ -112,17 +112,17 @@ class SpecScopeTests(unittest.TestCase):
     def test_the_sample_is_still_compliant(self):
         """★ 边界收紧了，示例仍然要 0 条问题导入。
 
-        改文案时最容易顺手把示例改坏 —— 而示例是 codex 唯一的形状权威。
+        新旧模式示例分别导入，不能把独立的示例文件合并成一个项目。
         """
-        import json
+        import re
         from core import matimport as M
         for sid, text in self.texts.items():
-            lines = [ln.strip() for ln in text.split("\n")
-                     if ln.strip().startswith('{"kind"')]
-            self.assertGreaterEqual(len(lines), 4, sid)
-            units = M.parse("\n".join(lines))
-            bad = [i for i in M.audit(units) if i["level"] == "error"]
-            self.assertEqual(bad, [], f"{sid}: 示例自己不合格 {bad}")
+            examples = re.findall(r'```jsonl\n(.*?)\n```', text, re.S)
+            self.assertEqual(len(examples), 2, sid)
+            for example in examples:
+                units = M.parse(example)
+                bad = [i for i in M.audit(units) if i["level"] == "error"]
+                self.assertEqual(bad, [], f"{sid}: 示例自己不合格 {bad}")
 
 
 if __name__ == "__main__":

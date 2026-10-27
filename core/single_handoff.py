@@ -16,6 +16,7 @@ RULES = """<!-- studio-single-handoff-v1 -->
 - 这是 Studio 外部契约扩展；Liam 的内部 audit_abc 不直接作为生产任务导入。内部 scene_c / handoff_view 及 view、boundary、c_key 按上述字段映射；不能只更改提示词或伪装 region/board 来通过验收。
 - tasks.json 增加可选 handoff_tasks 数组，资源 semantic=HANDOFF，输出在 04_交接图/C、A、B 下；旧五个数组保留。C 不是 SCSTATE，不为每个 C 强制增建状态图。
 - C/A/B 均为独立单幅图，不填 region/board/parent。一处 boundary 具有 A、B 各一张且 c_key 相同。可先仅发布 C；包含 A/B 时须同时登记配对任务。C 可供多个有依据的边界复用。
+- 同一交接边界的 A/B/C 表达同一时刻现场的不同取景；一段视频引用的入站 B/C 与出站 A 可以属于不同边界，不能把三个 role 一概解释成不同的时刻。
 - A/B 分别直接引用唯一同版 C，可以追加必要身份/道具资产；不直接或间接引用 A/B、旧整板/区域或另一张竞争 C。C 不能依赖下游 A/B 或旧整板/区域。先联合确定 A/B 提示词，执行时 C 完成后 A/B 可并行，不按 A 的生成结果改 B。
 - 视频 handoff_refs：OUT_A 引 A，IN_B 引 B，IN_C 引 C，不填 board。IN_B/IN_C 同时存在时必须指向同版 C；OUT_A 可以属于另一出站边界。各 role 最多一张，不重复塞入 reference_images。实际上传顺序仍按 image_n 连续编号。
 - C/A/B 使用项目视频比例，像素按所选模型支持范围设置，不沿用旧双联/三联容器尺寸。各镜真实机位、人物状态、物体承托和同刻关系由已审材料定义；程序校验依赖和来源，不冒充图像或三维几何审核。

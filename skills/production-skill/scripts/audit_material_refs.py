@@ -2,6 +2,7 @@
 
 --profile v3 (default): retain V3.0-specific basic guards.
 --profile internal: normalized internal records for other delivery contracts.
+--profile studio: Studio JSONL, including handoff_refs; no V3 storyboard requirement.
 Internal records are an audit adapter, not an external delivery schema.
 
 --files: {image_key: absolute_local_image_path}
@@ -29,7 +30,7 @@ def _audit_refs(rows, files=None):
     edges = 0
     for row in tasks:
         k = row['key']
-        rr = row.get('storyboard_refs', []) + row.get('reference_images', [])
+        rr = row.get('handoff_refs', []) + row.get('storyboard_refs', []) + row.get('reference_images', [])
         pairs = [(r.get('image_n'), r.get('key', r.get('asset_id'))) for r in rr]
         graph[k] = [r for _, r in pairs]
         edges += len(pairs)
@@ -91,11 +92,11 @@ def _audit_refs(rows, files=None):
 
 
 def audit(rows, files=None, uploads=None, *, require_parent_first=False, profile='v3'):
-    """Apply selected basic guards; retain graph/upload validation in both modes."""
+    """Apply selected basic guards; retain graph/upload validation in all profiles."""
     errors, notes = [], []
     layers = {'material': 'not_checked', 'files': 'not_checked', 'submission': 'not_checked',
               'execution_order': 'not_checked'}
-    if profile not in ('v3', 'internal'):
+    if profile not in ('v3', 'internal', 'studio'):
         errors.append(f'Unknown audit profile: {profile!r}')
     elif not isinstance(rows, list) or not rows:
         errors.append('Empty material: no tasks to audit')
@@ -123,7 +124,7 @@ def audit(rows, files=None, uploads=None, *, require_parent_first=False, profile
                     errors.append(f'task {index}: invalid EPxx-SEGxx key')
                 if not isinstance(row.get('storyboard_refs'), list) or not row['storyboard_refs']:
                     errors.append(f'task {index}: V3.0 requires non-empty storyboard_refs')
-            for field in ('storyboard_refs', 'reference_images'):
+            for field in ('handoff_refs', 'storyboard_refs', 'reference_images'):
                 refs = row.get(field, [])
                 if not isinstance(refs, list):
                     errors.append(f'task {index}: {field} must be an array')
@@ -141,6 +142,8 @@ def audit(rows, files=None, uploads=None, *, require_parent_first=False, profile
                       'video': sum(r.get('kind') == 'video' for r in tasks)}
             for field, actual in counts.items():
                 declared = manifests[0].get(field)
+                if profile == 'studio' and field not in manifests[0]:
+                    continue
                 if type(declared) is not int or declared != actual:
                     errors.append(f'manifest {field}: declared {declared!r}, actual {actual}')
     notes.append(f'Profile {profile}: partial audit only, not full external schema/import validation. Episode/segment totals, shape routing, necessary visual coverage, identity descriptions, timing and visual correctness require separate checks.')
@@ -186,7 +189,7 @@ def audit(rows, files=None, uploads=None, *, require_parent_first=False, profile
                 errors.append(f'{key}: unknown submission task or non-array records')
                 continue
             expected = [(r['image_n'], r.get('key', r.get('asset_id')))
-                        for r in by_key[key].get('storyboard_refs', []) + by_key[key].get('reference_images', [])]
+                        for r in by_key[key].get('handoff_refs', []) + by_key[key].get('storyboard_refs', []) + by_key[key].get('reference_images', [])]
             actual = []
             for record in records:
                 if not isinstance(record, dict):
@@ -210,8 +213,8 @@ def audit(rows, files=None, uploads=None, *, require_parent_first=False, profile
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('material', type=Path)
-    parser.add_argument('--profile', choices=('v3', 'internal'), default='v3',
-                        help='v3: V3.0 basic guards; internal: normalized records for other contracts')
+    parser.add_argument('--profile', choices=('v3', 'internal', 'studio'), default='v3',
+                        help='v3: V3.0 guards; internal: normalized records; studio: Studio JSONL handoff refs')
     parser.add_argument('--files', type=Path, help='JSON mapping of image key to actual absolute file path')
     parser.add_argument('--uploads', type=Path, help='JSON ordered image records extracted from actual assembled requests')
     parser.add_argument('--require-parent-first', action='store_true',

@@ -668,7 +668,7 @@ class PerSystemContractTests(unittest.TestCase):
     def test_the_general_system_has_no_scene_state(self):
         from core import matspec as S
         v61 = S.render({"image": 6}, "剧", "v61")
-        self.assertNotIn("03b_场景状态图", v61)
+        self.assertNotIn("03b_场景状态图", v61.split("## 输出目录与分类", 1)[1].split("## ", 1)[0])
         self.assertNotIn("场景状态提示词", v61)
         self.assertIn("没有场景状态图", v61)
 
@@ -925,7 +925,7 @@ class CombinedPackageTests(unittest.TestCase):
             got[sid] = r
             self.assertEqual(r["system"], sid)
         self.assertIn("03b_场景状态图", got["v34"]["text"])
-        self.assertNotIn("03b_场景状态图", got["v61"]["text"])
+        self.assertNotIn("03b_场景状态图", got["v61"]["text"].split("## 输出目录与分类", 1)[1].split("## ", 1)[0])
         self.assertNotEqual(got["v34"]["saved"], got["v61"]["saved"])
 
     def test_without_a_project_the_page_choice_decides(self):
@@ -937,7 +937,7 @@ class CombinedPackageTests(unittest.TestCase):
         from server import app as A
         r = A.api_post("/api/material/spec", {"system": "v61"})
         self.assertEqual(r["system"], "v61")
-        self.assertNotIn("03b_场景状态图", r["text"])
+        self.assertNotIn("03b_场景状态图", r["text"].split("## 输出目录与分类", 1)[1].split("## ", 1)[0])
 
     def test_the_page_sends_its_choice(self):
         """★ 后端支持了不算完 —— 页面不发这个值，支持了也用不上。"""

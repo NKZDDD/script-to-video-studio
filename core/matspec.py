@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from .reference_contract import RULES as REFERENCE_RULES
+from .reference_contract import RULES as REFERENCE_RULES, SCOPE as CONTRACT_SCOPE, REVISION as CONTRACT_REVISION
 from . import independent_c, single_handoff
 
 # ====================================================================
@@ -69,14 +69,15 @@ MATERIAL_FIELDS = {
         ("reference_images", False, "有序参考图，见下面「参考图怎么写」"),
         ("view", False, 'c_then_a_b 的单图身份：C / A / B，不是 region；详见独立单图交接扩展。'),
         ("c_key", False, '独立 A/B 直接引用的同版 C key；须与 reference_images 一致。'),
-        ("handoff_mode", False, '独立 C 专用：写 `"independent_c"`，不填 region/board/parent，'
-         '落入场景状态图。原 ABC 流程不填。AB 整板真实引用它，视频以 IN_C 引用它；详见独立 C 扩展。'),
+        ("handoff_mode", False, '按模式填写：新单图 C/A/B 都写 `"c_then_a_b"`，并写 view；'
+         '旧独立 C → AB 模式仅 C 写 `"independent_c"`。两种模式的独立图都不填 region/board/parent；'
+         '新单图落入交接图目录，旧独立 C 落入场景状态图目录。原 ABC 整板及区域图不填此字段。'),
         ("handoff_type", False, '兼容旧材料：未填 handoff_mode 时，`"scene_c"` / `"independent_c"` 按独立 C 识别。'
          '新材料优先使用 handoff_mode；其他值不会被当成独立 C。'),
-        # ---- 下面三个只有 ABC 交接板用（电影级 v7.0）----
+        # region/board are legacy board fields; boundary also pairs new A/B.
         ("region", False,
          "**只有交接板的区域图写它**：`A` / `B` / `C`。写了就落 "
-         "`04_交接板/区域图/`，不写就按 key 的家族前缀算。" + chr(10) +
+         "`04_交接板/区域图/`；新单图模式不写它，改由 handoff_mode/view 路由。" + chr(10) +
          "  程序**按这个字段认区域图，不按 key 前缀** —— 整板和它的三张"
          "区域图同属 ABC 家族、key 也长得像，靠前缀分不开，而分错的后果是"
          "区域图落进整板目录，「视频该引哪张」从目录上就看不出来了。"),
@@ -86,10 +87,10 @@ MATERIAL_FIELDS = {
          "有且只能有它一条。多投一张会重定空间或外观的图，派生就飘了，"
          "而飘了不报错：图看着像那么回事，空间已经不对。"),
         ("boundary", False,
-         "**整板专用**：这块板架在哪个交接边界上，比如 "
-         "`EP01_SEG01_TO_SEG02`。程序只是记下来给人看，不参与判定。"),
+         "交接边界 ID，比如 `EP01_SEG01_TO_SEG02`。新 c_then_a_b 模式的 A/B 必填，"
+         "程序以它配对 A/B 并核对同版 c_key；C 可被多个有依据的边界共用。旧整板模式用作边界说明。"),
         ("name", False, "人看的名字，比如「林溪身份根」。写 `goal` 也认"),
-        ("family", False, "家族标记。程序不读它（落点看 `key` 的前缀），"
+        ("family", False, "家族标记。程序不读它（先按模式和区域标记路由，其余看 `key` 的前缀），"
                           "写着方便你自己核对"),
     ],
     "video": [
@@ -106,16 +107,17 @@ MATERIAL_FIELDS = {
                            "不看 key 的前缀"),
         ("prompt", True, "完整可投喂的提示词正文"),
         ("handoff_refs", False,
-         "本段引用的**交接板区域图**，按 `image_n` 顺序上传，"
+         "本段引用的**交接图**（新模式独立 A/B/C，旧模式区域图或独立 C），按 `image_n` 顺序上传，"
          "就是模型看到的 Image 1..N 的前几张。每项加一个 `role`：" + chr(10) +
-         "  · `IN_B` —— 入板的 B 区独立图，定本段**首镜**" + chr(10) +
-         "  · `IN_C` —— 原 ABC 的 C 区图，或独立 C 模式的上游空间图，定本段**开场空间**" + chr(10) +
-         "  · `OUT_A` —— 出板的 A 区独立图，定本段**结尾**" + chr(10) +
+         "  · `IN_B` —— 入站独立 B（新模式）或 B 区域图（旧模式），定本段**首镜**" + chr(10) +
+         "  · `IN_C` —— 入站独立 C，或旧 ABC 的 C 区域图，定本段**开场空间**" + chr(10) +
+         "  · `OUT_A` —— 出站独立 A（新模式）或 A 区域图（旧模式），定本段**结尾**" + chr(10) +
          "  **不是必填，可以一个都没有。** 交接板只给需要承接的边界做："
          "首段没有入板、末段没有出板、天然转场两边都不做 —— "
          "那些情况这里就是空的，**不算缺项**。" + chr(10) +
-         "  **引的是区域图，或显式声明的独立 C（仅 IN_C）。** 整板只留在上游，不喂给视频。" + chr(10) +
-         "  三个 role 各自最多一个：它们是三个不同时刻，语义不能互换，"
+         "  **c_then_a_b 按 OUT_A→A、IN_B→B、IN_C→C 引用独立图，不填 board；**"
+         "旧模式引用对应区域图或独立 C。整板只留在上游，不喂给视频。" + chr(10) +
+         "  三个 role 各自最多一个：同一新模式边界 A/B/C 是同一时刻；入站与出站可属不同边界，语义不能互换，"
          "同一个 role 给两张的话程序分不出该信哪张。" + chr(10) +
          "  老材料写 `storyboard_refs` 也照旧认（同义），"
          "但新材料用 `handoff_refs`。"),
@@ -136,19 +138,16 @@ MATERIAL_FIELDS = {
 }
 
 # 参考图元素的字段（`reference_images` / `handoff_refs` 里每一项）。
-# **程序真读的只有两个。** 剩下五个（who / controls / not_controls /
-# scope / role）一个都不进任务 —— `role` 甚至被写成空串丢掉。
-# 它们是我们自己那套方法论的字段，留在必填表里等于要求 codex 按我们的框架
-# 做一遍记账，而产出的东西哪儿都不去。契约只管「程序要吃什么」。
+# image_n/key resolve the reference; handoff_refs additionally use role/board.
 REF_FIELDS = [
     ("image_n", True, "**实际上传顺序**，从 1 连续排。跳号或重号会被拦"),
     ("key", True, "指向本材料里另一条的 `key`。写 `asset_id` 也认（同义）"),
     # `role` 从「程序不读」升级成「handoff_refs 里必读」：
-    # IN_B / IN_C / OUT_A 是三个不同时刻，语义不能互换。
+    # IN_B / IN_C / OUT_A 表示引用用途，不是三个必然不同的时刻。
     # 在 `reference_images` 里它仍然不读。
     ("role", False, "**只有 `handoff_refs` 里读它**：`IN_B` / `IN_C` / `OUT_A`。"
                     "放在 `reference_images` 里不读"),
-    ("board", False, "handoff_refs 可标明整板 key；独立 C 的 IN_C 可省略，若填写须与 IN_B 的 AB 整板及其独立 C 来源一致。"),
+    ("board", False, "旧整板模式可标明整板 key；旧独立 C 的 IN_C 可省略，若填写须与入站 AB 的 C 来源一致。新 c_then_a_b 不填。"),
 ]
 
 # 写着不报错，但**程序一个都不读**，也不影响出图出片。想自己核对就写，
@@ -164,7 +163,7 @@ TASK_FIELDS = {
         ("prompt_ref", "程序落的提示词 txt 路径 —— 你只要给 `prompt` 正文"),
         ("reference_images[].asset_id", "从材料参考图的 `key` 转来"),
         ("reference_images[].file_ref", "程序算出的那张图的落点"),
-        ("output", "程序按 `key` 的家族 + 你给的 `filename` 算出来的路径"),
+        ("output", "新 c_then_a_b 先按 view 路由到 04_交接图/C、A、B；旧区域图/独立 C 按其标记路由，其他图片按 key 家族与 filename 算路径"),
         ("params.size", "从材料的 `size` / `ratio` 或申报头来"),
     ],
     "video": [
@@ -192,6 +191,7 @@ _BOARD_LINE = "04_交接板/  提示词 → 03_提示词/交接板提示词/"
 _REGION_LINE = "04_交接板/区域图/  提示词 → 03_提示词/交接板提示词/"
 _VIDEO_LINE = "05_分段视频/  提示词 → 03_提示词/视频提示词/"
 _SCSTATE_LINE = "03b_场景状态图/  提示词 → 03_提示词/场景状态提示词/"
+_HANDOFF_LINE = "04_交接图/C、A、B/  提示词 → 03_提示词/交接图提示词/"
 
 # 家族前缀 → 落哪个子目录。**和 matimport.out_path 是同一张表**，
 # 所以契约说的落点就是实际落点。
@@ -226,19 +226,21 @@ SYSTEMS = {
         "dirs": {"资产（人物/造型/连续状态/服饰/场景/道具/载具/生物/群体/特效）":
                  _ASSET_LINE,
                  "场景状态图": _SCSTATE_LINE,
-                 "交接板整板": _BOARD_LINE,
-                 "交接板区域图（A/B/C）": _REGION_LINE,
+                 "独立交接图（c_then_a_b，HANDOFF）": _HANDOFF_LINE,
+                 "旧模式交接板整板": _BOARD_LINE,
+                 "旧模式交接板区域图（A/B/C）": _REGION_LINE,
                  "分段视频": _VIDEO_LINE},
         "families": _FAMILIES_V34,
         "note": "这套体系有场景状态图（同一个场景在不同剧情时刻的状态）。"
-                "**没有故事板** —— 段间承接由 ABC 交接板负责，"
-                "视频引的是交接板派生的区域图，不引故事板。",
+                "当前独立单图交接按 c_then_a_b 编译；原 ABC 整板及独立 C → AB 模式继续兼容。"
+                "视频引用哪类交接图取决于明确选择的模式，不强制新增故事板。",
     },
     "v61": {
         "label": "通用十二环节",
         "stage_count": 12,
         "midfiles": "`s1_global.json`、`s2_segments.json`、`s8_compile.json` 之类",
         "dirs": {"资产（人物/场景/道具/连续状态/群体/生物）": _ASSET_LINE,
+                 "独立交接图（c_then_a_b，HANDOFF）": _HANDOFF_LINE,
                  "故事板": _SB_LINE,
                  "分段视频": _VIDEO_LINE},
         "families": _FAMILIES_V61,
@@ -303,10 +305,12 @@ AUDIT = [
     ("board 要指到真整板", "区域图的 `board` 必须是本材料里一条**不带 region** "
                            "的 ABC。指到别的东西 → 出图时报「参考图不存在」，"
                            "而那张图压根没人做"),
-    ("视频不引整板", "`handoff_refs` 引区域图；IN_C 也可引 handoff_mode=independent_c 的独立 C。"
+    ("视频不引整板", "新 c_then_a_b 按 OUT_A→A、IN_B→B、IN_C→C 引独立图；"
+                       "旧模式引区域图，IN_C 也可引 handoff_mode=independent_c 的独立 C。"
                        "引到整板 → 一张三区图整个喂给视频模型，"
                        "画面会去学那张板的分格排版，**片子出得来、构图是错的**"),
-    ("三个 role 各自最多一个", "`IN_B` / `IN_C` / `OUT_A` 是三个不同时刻，"
+    ("三个 role 各自最多一个", "`IN_B` / `IN_C` / `OUT_A` 是三种用途。"
+                               "同一新模式边界的 A/B/C 是同一时刻，视频入站与出站可以跨边界；"
                                "语义不能互换。同一个 role 给两张，程序分不出"
                                "该信哪张 —— 而它不会挑，会两张都发"),
     ("交接板引用会报出来", "每段引了哪几个 role → **提醒**（不拦）。"
@@ -383,7 +387,7 @@ def json_schema() -> str:
         # 一条 image 也满足 manifest 分支**（它只要求 kind，额外字段又不禁），
         # 于是 oneOf 匹配到两个，校验器判不合法。const 才能把分支分开。
         rows = MATERIAL_FIELDS[kind]
-        props = {f: _prop(f) for f, _n, _w in rows}
+        props = {f: dict(_prop(f), description=why) for f, _n, why in rows}
         props["kind"] = {"const": kind}
         return {
             "type": "object",
@@ -392,6 +396,7 @@ def json_schema() -> str:
         }
     sch = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$comment": "Studio 契约说明版本 " + CONTRACT_REVISION + "；引用图关系仍须由导入器检查。",
         "title": "生产材料的一行",
         "oneOf": [one("manifest"), one("image"), one("video")],
         "$defs": {"ref": {
@@ -409,12 +414,11 @@ def jsonl_schema(system: str = "v34") -> str:
 
     以前只有一份，两套体系共用 —— 而 v7.0 把电影级的故事板整条换成了
     ABC 交接板，通用十二环节没这回事。共用一份的话，总有一套拿到的示例
-    在教它产一批本体系用不上的东西，**而示例是形状的唯一权威**：
-    codex 照它产，比照任何一段文字说明都准。
+    在教它产一批本体系用不上的东西。本函数保留旧模式字段示例；
+    当前独立单图示例由 single_jsonl_schema 提供，不能混用。
 
-    这份样例是**一份完全合格的最小材料** —— 抄下来原样导入会 0 条问题。
-    所以它同时是文档和自检：引用链闭合、编号连续、申报和实物对得上，
-    三样都在这四行里演示了。示例自己不合格的话，照它产出来的也不会合格。
+    这份旧样例演示可导入的字段形状：引用链闭合、编号连续、申报与任务数一致。
+    提示词仍为占位内容，不能直接用于生产。完整新模式示例由 single_jsonl_schema 提供。
 
     第四样：**画幅每张各写各的**。人物立绘 3:4、空间母图和整板 16:9、
     A/B 区图 9:16（成片画幅）、C 区图 16:9（要看清整个空间）—— 全写同一个
@@ -431,7 +435,7 @@ def jsonl_schema(system: str = "v34") -> str:
         # 两段 —— 因为这份示例要演示**同一块板的两端**：
         # SEG01 用它的 A 区定结尾，SEG02 用它的 B/C 区定开头和空间。
         "episodes": 1, "segs_per_episode": {"EP01": 2},
-        "params": {"episode_seconds": 60, "seg_duration": 15,
+        "params": {"episode_seconds": 30, "seg_duration": 15,
                    "ratio": "9:16", "image_size": "9:16",
                    "pacing": "中速", "subtitle": True},
     }
@@ -547,7 +551,7 @@ def jsonl_schema(system: str = "v34") -> str:
               # 而那正是「视频只有一个参考图」的来处 —— 样例本身在教它。
               for g in ("A", "B")]
         man61 = dict(man, total=4, image=3, video=1,
-                     segs_per_episode={"EP01": 1})
+                     segs_per_episode={"EP01": 1}, params=dict(man["params"], episode_seconds=15))
         vid61 = {
             "kind": "video", "key": "EP01-SEG01",
             "episode": "EP01", "seg": "SEG01",
@@ -566,6 +570,50 @@ def jsonl_schema(system: str = "v34") -> str:
                                   vid_prev, vid))
 
 
+def single_jsonl_schema() -> str:
+    """Runnable material example for the current mode, with no prompt placeholders."""
+    c = "PRJ_DEMO__ABC_SPACE_R01"
+    boundary = "EP01_SEG01_TO_SEG02"
+    a, b = (f"PRJ_DEMO__ABC_{boundary}_R01_{view}" for view in ("A", "B"))
+    rows = [{"kind": "manifest", "total": 5, "image": 3, "video": 2,
+             "episodes": 1, "segs_per_episode": {"EP01": 2},
+             "params": {"episode_seconds": 30, "image_size": "16:9", "ratio": "16:9", "seg_duration": 15}}]
+    for key, view, prompt in (
+        (c, "C", "真人电影质感，生成无人庭院的独立现场 C，东侧石门、西侧树木、中央石桌。"
+         "日光柔和，平视展示完整空间布局；一张单幅图，不分格，不添加文字。"),
+        (a, "A", f"Image 1 = {c} 同一时刻的无人庭院现场，东侧石门、西侧树木、中央石桌。\n"
+         "生成单幅 A：石门近景，摄影机位于树旁朝东拍摄；保持同一时刻现场及原物体位置，石桌位于画外。"
+         "真人电影质感，不分格，不添加文字。"),
+        (b, "B", f"Image 1 = {c} 同一时刻的无人庭院现场，东侧石门、西侧树木、中央石桌。\n"
+         "生成单幅 B：石桌中景，摄影机位于石门旁朝西拍摄；保持同一时刻现场及原物体位置，树木在石桌后方。"
+         "真人电影质感，不分格，不添加文字。"),
+    ):
+        row = {"kind": "image", "key": key, "filename": key + ".png", "handoff_mode": "c_then_a_b",
+               "view": view, "size": "16:9", "prompt": prompt, "reference_images": []}
+        if view != "C":
+            row.update(boundary=boundary, c_key=c, reference_images=[{"image_n": 1, "key": c}])
+        rows.append(row)
+    for seg, refs, mapping, motion, continuity in (
+        ("SEG01", [{"image_n": 1, "key": a, "role": "OUT_A"}],
+         f"Image 1 = {a} 庭院石门近景，前段结尾构图，保持石门朝向与现场位置。",
+         "[镜头1] 从庭院树旁朝石门平稳前进，光影随真实移动自然变化，最后抵达参考图的机位与构图。",
+         "结尾抵达交接 A 的现场状态，下一段从同一时刻的 B 取景接续，物体不换位。"),
+        ("SEG02", [{"image_n": 1, "key": b, "role": "IN_B"}, {"image_n": 2, "key": c, "role": "IN_C"}],
+         f"Image 1 = {b} 庭院石桌中景，本段首镜构图，石门旁朝西的机位。\n"
+         f"Image 2 = {c} 同一庭院的独立现场 C，保持开场石门、树木和石桌的位置关系。",
+         "[镜头1] 从参考 B 的构图开始，镜头向石桌缓缓推进，树木始终位于石桌后方，微风带动树叶。",
+         "开场继承前段交接时刻的现场，随后自然推进；不把 C 额外拍成一个镜头。"),
+    ):
+        prompt = ("【画幅风格】\n真人电影质感，柔和日光，自然色彩。\n【参考图】\n" + mapping +
+                  "\n【站位声明】\n无人庭院，石门在东、树木在西、石桌居中，保持共同现场。\n【时间轴分镜】\n" + motion +
+                  "\n【接续状态】\n" + continuity + "\n【音效】\n仅自然风声与树叶摩擦声，无语言人声。"
+                  "\n【强制禁止项】\n不增人物、字幕、旁白或配乐，不改变现场物体数量与位置，不出现分格画面。")
+        rows.append({"kind": "video", "key": "EP01-" + seg, "filename": "EP01-" + seg + ".mp4",
+                     "episode": "EP01", "seg": seg, "duration": 15, "ratio": "16:9", "prompt": prompt,
+                     "handoff_refs": refs, "reference_images": []})
+    return "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+
+
 # 材料交到哪。**约定一个确定的名字**，别让人每次去翻文件对话框 ——
 # 而且这个名字要和扫描口认的后缀对得上（`/api/material/scan`）。
 MAT_DIR = "00_生产材料"
@@ -581,6 +629,8 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("# 生产材料契约"
       + (f"｜{project_name}" if project_name else "")
       + f"｜{sysm['label']}")
+    a("")
+    a(CONTRACT_SCOPE)
     a("")
     a(f"**这一份是给「{sysm['label']}」用的。** 两套体系的活不一样多，"
       "别拿另一套的契约去产 —— " + sysm["note"])
@@ -627,9 +677,20 @@ def render(limits: Optional[dict] = None, project_name: str = "",
       "每一处猜错都是静默的（比如张数数成两倍，然后「超上限」全员误报）。"
       "JSONL 没有这些歧义，错在哪一行、哪个字段都能指出来。")
     a("")
-    a("下面这几行是**一份完全合格的最小材料** —— 原样导入 0 条问题，"
-      "有测试盯着这件事（示例自己不合格的话，照它产出来的也不会合格）。"
-      "拿它当形状的唯一权威：")
+    a("### 当前 c_then_a_b 模式示例")
+    a("")
+    a("下面是用于导入验证的完整小场景：3 张独立交接图、2 段各 15 秒的视频，合计 30 秒。"
+      "示例说明文件结构、角色与引用关系；正式项目须按已确认的剧本、导演设计和项目锁编译，"
+      "不能用示例内容或时长替换实际设计。导入通过不代表媒体已生成或实图验收通过。")
+    a("```jsonl")
+    a(single_jsonl_schema())
+    a("```")
+    a("")
+    a("### 旧模式字段示例（仅兼容参考）")
+    a("")
+    a("以下 " + ("ABC 整板与区域图" if system == "v34" else "通用故事板") +
+      " 示例只演示旧模式字段形状，含提示词占位内容，不是当前 c_then_a_b 的生产模板；"
+      "只有明确沿用该旧模式时参考它，并补齐本项目完整提示词。")
     a("")
     a("```jsonl")
     a(jsonl_schema(system))
@@ -683,10 +744,10 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     for f, need, why in REF_FIELDS:
         a(f"- `{f}`{'（必填）' if need else ''} —— {why}")
     a("")
-    a("**程序只读这两个。** 以前这张表里还有 "
+    a("程序读取 image_n 与 key/asset_id，并读取 handoff_refs 的 role 及适用旧模式的 board。"
+      "以下字段不参与上述结构判定："
       + "、".join(f"`{f}`" for f in REF_FIELDS_IGNORED)
-      + " —— 它们一个都不进任务（`role` 甚至被写成空串丢掉）。"
-        "写着不报错，想自己核对就写，但**别为它们花时间**。")
+      + "。这些信息可按 Agent 内部设计与审核需要保存，不作为 Studio 强制交付字段。")
     a("")
     a("表外的字段同理：不读，也不报错。")
     a("")
@@ -714,14 +775,14 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("## 参考图怎么写")
     a("")
     a("`image_n` **就是实际上传顺序**：第 1 个元素就是 Image 1。"
-      "视频的交接板区域图排在前面（`handoff_refs`），"
+      "视频的交接图排在前面（`handoff_refs`），"
       "补图接着排（`reference_images`）。")
     a("")
     a("提示词正文里**每张要有一句「这是谁」** —— 出图前那道检查查的就是它："
       "多人场景里只写编号、不写是谁，模型必然张冠李戴。")
     a("")
     a("```")
-    a("Image 1 = <key>　这张图是谁 / 是什么")
+    a("Image 1 = 实际ID 身份描述及用途")
     a("```")
     a("")
     a("**硬要求只有这一行。** 下面这几项写了更稳（多图时模型不容易平均融合），"
@@ -745,11 +806,11 @@ def render(limits: Optional[dict] = None, project_name: str = "",
       "两个数组拼起来就是模型看到的 Image 1..N，`image_n` 从 1 连续排。"
       "程序按这个顺序上传，不重排、不去重、不补号。")
     a("")
-    a("**几张、选哪几张，是你的判断。** 程序只查三件机械的事："
-      "非空、编号连续、引的 key 在本材料里存在。"
+    a("**几张、选哪几张，是你的判断。** 程序检查引用数量、连续编号、引用目标存在，"
+      "以及所选模式下的 role、同版 C 来源、边界配对与依赖关系。"
       "参考图上限是**这一次能装多少**（服务商的容量），不是目标也不是下限。")
     a("")
-    a("## 落点（和程序自己跑 LLM 时完全一致）")
+    a("## 输出目录与分类")
     a("")
     for what, where in sysm["dirs"].items():
         a(f"- **{what}** → `{where}`")
@@ -758,7 +819,10 @@ def render(limits: Optional[dict] = None, project_name: str = "",
       "契约要求视频的 key 是 `EP01-SEG01`（拼接按这个前缀挑本集分段），"
       "那个形状里本来就没有家族前缀。")
     a("")
-    a("图片按 key 里的家族前缀算落点。你只要给 `filename`。"
+    a("图片先按结构化模式路由：c_then_a_b + view → 04_交接图/C、A、B，分类为 HANDOFF；"
+      "此模式的 C 不放进 SCSTATE。"
+      + ("旧独立 C → 03b_场景状态图，旧 region → 04_交接板/区域图。" if system != "v61" else "")
+      + "其他图片再按 key 里的家族前缀算落点。JSONL 只要给 `filename`。"
       "**这套体系认这些前缀**（不在表里的会落到人物身份资产，"
       "所以别用表外的前缀）：")
     a("")
@@ -781,9 +845,9 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("## 不需要的东西")
     a("")
     a(f"程序原来那 {sysm.get('stage_count', '')} 个环节的中间产物"
-      f"（{sysm.get('midfiles', '')}）**一份都不用给**。"
-      f"它们是「程序一步步问模型」时的中间结果；"
-      f"你一次想完整部剧，那些中间形态不存在。")
+      f"（{sysm.get('midfiles', '')}）不是本次 JSONL 导入的必交文件。"
+      "Agent 仍须保存并审核必要的设计、依据和内部台账；内部记录与外部交付格式分开，"
+      "不能把不需要交给 Studio 理解为不需要完成内部工作。")
     a("")
     a("## 程序查不了的，靠你保证")
     a("")
