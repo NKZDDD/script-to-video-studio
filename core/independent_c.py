@@ -1,5 +1,7 @@
 """Explicit independent-C handoff extension shared by both material readers."""
 
+from . import single_handoff
+
 MODE = "independent_c"
 MARKER = "<!-- studio-independent-c-v2 -->"
 RULES = """<!-- studio-independent-c-v2 -->
@@ -41,8 +43,8 @@ def audit(nodes):
     def fail(n, code, text):
         out.append({"level": "error", "code": code, "msg": f"{n['key']}：{text}"})
     for n in nodes:
-        if mode(n) not in ("", MODE):
-            fail(n, "HANDOFF_MODE_UNKNOWN", "handoff_mode 只支持 independent_c；原 ABC 流程不填此字段")
+        if mode(n) not in ("", MODE, single_handoff.MODE):
+            fail(n, "HANDOFF_MODE_UNKNOWN", "handoff_mode 只支持 independent_c / c_then_a_b；原 ABC 流程不填此字段")
         if is_independent(n):
             if n["kind"] != "scstate" or n.get("region") or n.get("board"):
                 fail(n, "INDEPENDENT_C_SHAPE", "独立 C 必须是场景状态图片任务，不填 region/board/parent")
@@ -81,6 +83,8 @@ def audit(nodes):
             fail(n, "INDEPENDENT_C_SOURCE", "IN_B 来自 AB 双联板时，IN_C 必须引用该板实际使用的独立 C，不能混用其他板的区域 C")
         for h in hs:
             dep = by_key.get(h["key"], {})
+            if single_handoff.is_single(dep):
+                continue  # Validated by the single-image contract, including incoming source matching.
             if not is_independent(dep):
                 if (any(is_independent(by_key.get(r["key"], {})) for r in hs)
                         or dep.get("board") in ab):

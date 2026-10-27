@@ -15,18 +15,18 @@ import shutil
 import time
 import uuid
 
-from . import paths, probe, submitted, independent_c
+from . import paths, probe, submitted, independent_c, single_handoff
 from .reference_contract import MARKER as REFERENCE_MARKER, RULES as REFERENCE_RULES
 from .store import LOCK, Project, read_json, read_text, write_json, write_text
 
 SCHEMA = "studio.production-plan/v1"
 KINDS = {"asset": "资产图", "scstate": "场景状态图", "board": "交接板整板",
-         "region": "交接板区域图", "video": "分段视频"}
+         "region": "交接板区域图", "video": "分段视频", "handoff": "独立交接图 C/A/B"}
 LEGACY_KINDS = dict(KINDS, storyboard="旧项目故事板")
 SEMANTICS = {"CHAR": "人物身份", "LOOK": "造型与服装", "COST": "独立服装", "CT": "人物状态",
              "GRP": "群体", "CRE": "生物", "LOC": "场景", "PROP": "道具",
              "VEH": "载具", "VFX": "特效", "SCSTATE": "场景状态",
-             "ABC": "交接板", "REGION": "区域图", "VIDEO": "分段视频", "AUD": "声音身份"}
+             "HANDOFF": "独立交接图", "ABC": "交接板", "REGION": "区域图", "VIDEO": "分段视频", "AUD": "声音身份"}
 FEATURES = {"advanced": "高级参数", "batch": "批量创建", "post": "成片合成",
             "logs": "详细日志", "legacy_import": "旧材料导入"}
 DEFAULTS = {"source_type": "剧本", "episode_strategy": "按原文", "episode_count": 1,
@@ -38,7 +38,7 @@ DEFAULTS = {"source_type": "剧本", "episode_strategy": "按原文", "episode_c
             "emotion_curve": False, "report": False, "image_provider": "",
             "image_model": "", "video_provider": "", "video_model": ""}
 DIRECTORIES = ["00_项目说明", "01_剧本与分段", "02_固定资产", "03_提示词/releases",
-               "03b_场景状态图", "04_交接板/区域图", "05_分段视频", "06_成片", "07_检查与记录"]
+               "03b_场景状态图", "04_交接板/区域图", "04_交接图/C", "04_交接图/A", "04_交接图/B", "05_分段视频", "06_成片", "07_检查与记录"]
 
 
 def digest(data) -> str:
@@ -79,11 +79,13 @@ def schema_document() -> dict:
                            "reference_images": {"type": "array", "items": ref},
                            "handoff_refs": {"type": "array", "items": ref},
                            "episode": {"type": "string"}, "board": {"type": "string"},
-                           "handoff_mode": {"enum": [independent_c.MODE]},
+                           "handoff_mode": {"enum": [independent_c.MODE, single_handoff.MODE]},
+                           "view": {"enum": ["C", "A", "B"]},
+                           "c_key": {"type": "string"}, "boundary": {"type": "string"},
                            "handoff_type": {"type": "string", "description": "兼容 scene_c / independent_c 独立 C 标记；优先使用 handoff_mode"},
                            "region": {"enum": ["A", "B", "C"]}}}
     schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": SCHEMA,
-            "type": "object", "required": ["schema", "project_id", "revision", "resources"] + [k + "_tasks" for k in KINDS],
+            "type": "object", "required": ["schema", "project_id", "revision", "resources"] + [k + "_tasks" for k in KINDS if k != "handoff"],
             "additionalProperties": False,
             "properties": {"schema": {"const": SCHEMA}, "project_id": {"type": "string"},
                            "revision": {"type": "string", "pattern": "^r[0-9]{4,}$"},
@@ -95,6 +97,8 @@ def schema_document() -> dict:
                                    "task_key": {"type": ["string", "null"]}}}},
                            **{k + "_tasks": {"type": "array", "items": task} for k in KINDS}}}
     schema["properties"]["video_tasks"]["items"] = dict(task, required=task["required"] + ["episode", "handoff_refs"])
+    schema["properties"]["scstate_tasks"]["items"] = dict(task, properties=dict(task["properties"], handoff_mode={"enum": [independent_c.MODE]}))
+    schema["properties"]["handoff_tasks"]["items"] = dict(task, required=task["required"] + ["handoff_mode", "view"], properties=dict(task["properties"], handoff_mode={"const": single_handoff.MODE}))
     return schema
 
 
@@ -156,10 +160,10 @@ Studio 不执行文本分析。{where}
 
 ## 发布
 每次用新目录 03_提示词/releases/r0001（后续递增 r0002…），写 tasks.json、images/*.txt、videos/*.txt。
-tasks.json 使用 schema、project_id、revision、resources 和 asset_tasks/scstate_tasks/board_tasks/region_tasks/video_tasks 五个数组。
+tasks.json 使用 schema、project_id、revision、resources 和 asset_tasks/scstate_tasks/board_tasks/region_tasks/video_tasks 五个数组。新增独立单图交接使用可选 handoff_tasks 数组。
 task 必填 key/output/prompt_ref/params/reference_images；视频须有 handoff_refs（无交接板时写 []）。
 所有路径相对项目根，使用 /，不能带 ..、绝对路径或外部 URL。prompt_ref 指向本次发布中的 UTF-8 文本。
-输出分类：02_固定资产、03b_场景状态图、04_交接板、04_交接板/区域图、05_分段视频。
+输出分类：02_固定资产、03b_场景状态图、04_交接图/C|A|B、04_交接板、04_交接板/区域图、05_分段视频。
 resources 每个对象：id、name、semantic、parent_id（无则 null）、episodes（全剧共享则 []）、task_key。
 semantic 可选 {', '.join(SEMANTICS)}；一个 task 对应一个资源，AUD 为声音身份元数据，task_key=null。
 人物以身份为父节点挂 LOOK/CT；共用资源只保留一个 ID，episodes 记录使用集，不为每集复制。
@@ -185,6 +189,8 @@ Studio 拥有 00_项目说明、07_检查与记录、selections.json、active-pl
 {REFERENCE_RULES}
 
 {independent_c.RULES}
+
+{single_handoff.RULES}
 """
 
 
@@ -266,6 +272,7 @@ def validate_release(pj: Project, revision: str) -> tuple:
         raise ValueError("tasks.json 的协议/项目/版本不一致")
     if any(k not in set(["schema", "project_id", "revision", "resources"] + [k + "_tasks" for k in KINDS]) for k in plan):
         raise ValueError("tasks.json 含契约之外字段；新项目不支持旧故事板数组")
+    plan.setdefault("handoff_tasks", [])  # Additive extension: old releases remain valid.
     for k in KINDS:
         if not isinstance(plan.get(k + "_tasks"), list):
             raise ValueError(f"缺少 {k}_tasks 数组")
@@ -273,12 +280,14 @@ def validate_release(pj: Project, revision: str) -> tuple:
             raise ValueError(f"{k}_tasks 中每个任务必须是对象")
     rows = task_rows(plan)
     keys, outputs = {}, {}
-    prefixes = dict(zip(KINDS, ["02_固定资产/", "03b_场景状态图/", "04_交接板/", "04_交接板/区域图/", "05_分段视频/"]))
+    prefixes = {"asset": "02_固定资产/", "scstate": "03b_场景状态图/", "board": "04_交接板/", "region": "04_交接板/区域图/", "video": "05_分段视频/", "handoff": single_handoff.DIRECTORY + "/"}
     for t in rows:
         key = t.get("key")
         if not isinstance(key, str) or not key or key in keys:
             raise ValueError(f"任务 key 缺失或重复：{key}")
         keys[key] = t
+        if t["kind"] == "handoff" and not single_handoff.is_single(t):
+            raise ValueError(f"handoff_tasks 必须声明 c_then_a_b：{key}")
         output = t.get("output", "")
         target = inside(pj.root, output)
         normalized = output.casefold()
@@ -352,11 +361,13 @@ def validate_release(pj: Project, revision: str) -> tuple:
                 raise ValueError(f"区域图必须且仅引用指定整板：{t['key']}")
         if t["kind"] == "video":
             ins = set()
-            if any(keys[rids[r["asset_id"]]["task_key"]]["kind"] in ("region", "board") or independent_c.is_independent(keys[rids[r["asset_id"]]["task_key"]]) for r in t["reference_images"]):
+            if any(keys[rids[r["asset_id"]]["task_key"]]["kind"] in ("region", "board", "handoff") or independent_c.is_independent(keys[rids[r["asset_id"]]["task_key"]]) for r in t["reference_images"]):
                 raise ValueError(f"区域图及独立 C 必须通过 handoff_refs 指定边界用途，整板不得直接用于视频：{t['key']}")
             for r in t["handoff_refs"]:
                 dep = keys[rids[r["asset_id"]]["task_key"]]
                 role = r.get("role")
+                if single_handoff.is_single(dep):
+                    continue  # Shared audit verifies view, role, C version and incoming pairing.
                 if independent_c.is_independent(dep) and role == "IN_C":
                     continue  # Shared extension validation checks the AB -> C source below.
                 if dep["kind"] != "region" or role not in ("IN_B", "IN_C", "OUT_A") or dep.get("region") != role[-1] or r.get("board") != dep.get("board"):
@@ -367,7 +378,7 @@ def validate_release(pj: Project, revision: str) -> tuple:
                 raise ValueError(f"视频不能混用入站整板或直接引用整板：{t['key']}")
     nodes = [dict(t, board=t.get("board") or t.get("parent"), refs=graph[t["key"]], handoff=[
         dict(r, key=rids[r["asset_id"]]["task_key"]) for r in t.get("handoff_refs", [])]) for t in rows]
-    issues = independent_c.audit(nodes)
+    issues = independent_c.audit(nodes) + single_handoff.audit(nodes, (lock.get("options") or {}).get("ratio", ""))
     if issues:
         raise ValueError(issues[0]["code"] + "：" + issues[0]["msg"])
     no_cycles(graph, "生产依赖")
@@ -461,8 +472,15 @@ def update_reference_contract(pj: Project) -> None:
         if not path.is_file():
             return
         original = path.read_bytes()
+        # This file is Studio-owned and not part of the immutable task/skill hash.
+        # Keep existing projects' writer schema in sync with the appended contract.
+        schema_path = pj.p("00_项目说明", "production.schema.json")
+        current_schema = read_json(schema_path, {}) or {}
+        if current_schema.get("title") == SCHEMA and "handoff_tasks" not in current_schema.get("properties", {}):
+            write_json(schema_path, schema_document())
         additions = [rules for marker, rules in ((REFERENCE_MARKER, REFERENCE_RULES),
-                     (independent_c.MARKER, independent_c.RULES)) if marker.encode("utf-8") not in original]
+                     (independent_c.MARKER, independent_c.RULES),
+                     (single_handoff.MARKER, single_handoff.RULES)) if marker.encode("utf-8") not in original]
         if not additions:
             return
         temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
@@ -495,7 +513,7 @@ def view(pj: Project) -> dict:
     resources = plan.get("resources") or [
         {"id": t["key"], "name": t.get("name") or t["key"], "semantic":
          next((k for k in SEMANTICS if "_" + k + "_" in t["key"]),
-              {"asset": "CHAR", "video": "VIDEO", "board": "ABC", "region": "REGION"}.get(t["kind"], "SCSTATE")),
+              {"asset": "CHAR", "video": "VIDEO", "board": "ABC", "region": "REGION"}.get(t["kind"], "SCSTATE")) if t["kind"] != "handoff" else "HANDOFF",
          "parent_id": None, "episodes": [t["episode"]] if t.get("episode") else [], "task_key": t["key"]} for t in rows]
     return {"root": pj.root, "meta": pj.meta(), "publication": publication, "tasks": rows,
             "resources": resources, "production": read_json(pj.p("07_检查与记录", "production-settings.json"), {}),
@@ -511,6 +529,6 @@ def revision_request(pj: Project, keys: list, note: str) -> dict:
     text = f"# Agent 定向修订\n\n项目根：`{pj.root}`\n当前发布：{current['publication'].get('revision', 'legacy')}\n\n原因：{note}\n\n"
     text += "仅修订下列任务及受影响下游，按原契约发布新版本；不要覆盖旧发布或成品。\n\n"
     text += "\n".join(f"- {t['key']}：{t['prompt_ref']}" for t in tasks)
-    text += "\n\n先读原项目已有契约，不要用其他项目的契约替换项目编号、根目录或锁定配置。\n\n" + REFERENCE_RULES + "\n\n" + independent_c.RULES
+    text += "\n\n先读原项目已有契约，不要用其他项目的契约替换项目编号、根目录或锁定配置。\n\n" + REFERENCE_RULES + "\n\n" + independent_c.RULES + "\n\n" + single_handoff.RULES
     write_text(str(inside(pj.root, rel)), text)
     return {"rel": rel, "text": text}

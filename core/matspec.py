@@ -24,7 +24,7 @@ import json
 from typing import Optional
 
 from .reference_contract import RULES as REFERENCE_RULES
-from . import independent_c
+from . import independent_c, single_handoff
 
 # ====================================================================
 # 这里有**两套字段**，而且名字不一样。混着写就是 codex 实测撞上的那个歧义：
@@ -67,6 +67,8 @@ MATERIAL_FIELDS = {
          "  · 交接板 A/B 区图的形状和用它出片的那一段 `ratio` 不一致时，视频那一步"
          "要裁或者加黑边，而那一步不会说话 —— 导入时会提醒一句，不拦。"),
         ("reference_images", False, "有序参考图，见下面「参考图怎么写」"),
+        ("view", False, 'c_then_a_b 的单图身份：C / A / B，不是 region；详见独立单图交接扩展。'),
+        ("c_key", False, '独立 A/B 直接引用的同版 C key；须与 reference_images 一致。'),
         ("handoff_mode", False, '独立 C 专用：写 `"independent_c"`，不填 region/board/parent，'
          '落入场景状态图。原 ABC 流程不填。AB 整板真实引用它，视频以 IN_C 引用它；详见独立 C 扩展。'),
         ("handoff_type", False, '兼容旧材料：未填 handoff_mode 时，`"scene_c"` / `"independent_c"` 按独立 C 识别。'
@@ -356,7 +358,9 @@ _TYPES = {
     "handoff_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
     "storyboard_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
     "region": {"type": "string", "enum": ["A", "B", "C"]},
-    "handoff_mode": {"type": "string", "enum": [independent_c.MODE]},
+    "view": {"type": "string", "enum": ["C", "A", "B"]},
+    "c_key": {"type": "string"},
+    "handoff_mode": {"type": "string", "enum": [independent_c.MODE, single_handoff.MODE]},
     "handoff_type": {"type": "string"},
     "board": {"type": "string"}, "boundary": {"type": "string"},
 }
@@ -633,6 +637,7 @@ def render(limits: Optional[dict] = None, project_name: str = "",
     a("")
     if system != "v61":
         a(independent_c.RULES)
+    a(single_handoff.RULES)
     a("## 第一行：申报头（必须有）")
     a("")
     a("材料第一行是一条 `{\"kind\": \"manifest\", ...}`，"

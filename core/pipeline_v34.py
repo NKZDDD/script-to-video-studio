@@ -96,6 +96,8 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
 
     if include_produce:
         for sid in V.PRODUCE_ORDER:
+            if sid == "p3h" and not pj.tasks().get("handoff_tasks"):
+                continue
             s = V.by_id()[sid]
             steps.append({"kind": "produce", "stage": sid,
                           "task_key": s["task_key"],
@@ -152,7 +154,7 @@ def _worker_kind(stage_id: str) -> str:
     # **共用 worker 不等于共用批次**：批次标识一律走 `_batch_kind()`
     # （一步一个，理由见那边）。
     return {"p1": "asset", "p2": "storyboard", "p3": "storyboard",
-            "p3x": "storyboard", "p4": "storyboard", "p5": "video"}[stage_id]
+            "p3x": "storyboard", "p3h": "storyboard", "p4": "storyboard", "p5": "video"}[stage_id]
 
 
 def _batch_kind(stage_id: str) -> str:

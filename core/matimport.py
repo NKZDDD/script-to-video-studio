@@ -38,7 +38,7 @@ import json
 import os
 import re
 from typing import Optional
-from . import independent_c
+from . import independent_c, single_handoff
 
 # ---------------------------------------------------------------- 分割
 
@@ -375,6 +375,8 @@ def _from_json(no: int, r: dict) -> dict:
         "region": str(r.get("region") or "").strip().upper(),
         "board": str(r.get("board") or r.get("parent") or "").strip(),
         "handoff_mode": independent_c.mode(r),
+        "view": str(r.get("view") or "").strip().upper(),
+        "c_key": str(r.get("c_key") or "").strip(),
     }
 
 
@@ -470,7 +472,7 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
     #      「这一段该不该有交接板」不查 —— 那是按剧情定的（首段没入板、
     #      末段没出板、天然转场两边都没有），程序不懂内容。
     boards = {u["stem"] for u in units
-              if u["kind"] == "image" and not u.get("region") and not independent_c.is_independent(u)
+              if u["kind"] == "image" and not u.get("region") and not independent_c.is_independent(u) and not single_handoff.is_single(u)
               and "ABC" in str(u["stem"]).upper()}
     regions = {u["stem"]: u for u in units if u.get("region")}
 
@@ -547,10 +549,11 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
 
     nodes = []
     for u in units:
-        kind = ("video" if u["kind"] == "video" else "scstate" if independent_c.is_independent(u)
+        kind = ("video" if u["kind"] == "video" else "handoff" if single_handoff.is_single(u) else "scstate" if independent_c.is_independent(u)
                 else "region" if u.get("region") else "board" if u["stem"] in boards else "asset")
         nodes.append(dict(u, key=u["stem"], kind=kind, refs=[k for _, k in u["refs"]]))
     out.extend(independent_c.audit(nodes))
+    out.extend(single_handoff.audit(nodes, str((decl.get("params") or {}).get("ratio") or "")))
 
     # 段号连续：缺一段 = 成片短一截，而拼接不会说话
     byep: dict = {}
@@ -619,7 +622,7 @@ def audit(units: list, limits: Optional[dict] = None) -> list:
         in_c = {h["key"] for h in (u.get("handoff") or [])
                 if h.get("role") == "IN_C"}
         for aid in (u.get("spine") or []):
-            if aid in in_c:
+            if aid in in_c and not any(x["stem"] == aid and single_handoff.is_single(x) for x in units):
                 continue
             sr = shape.get(aid)
             if sr and sr != vr:
@@ -868,6 +871,8 @@ def out_path(u: dict) -> str:
     up = stem.upper()
     if u.get("kind") == "video":
         return f"05_分段视频/{u['filename']}"
+    if single_handoff.is_single(u):
+        return f"{single_handoff.DIRECTORY}/{u.get('view', '')}/{u['filename']}"
     if independent_c.is_independent(u):
         return f"03b_场景状态图/{u['filename']}"
     # **区域派生图按 `region` 字段认，不按 key 前缀。**
@@ -900,6 +905,8 @@ def prompt_path(u: dict, out_rel: str) -> str:
     """
     if out_rel.startswith("05_分段视频"):
         return f"03_提示词/视频提示词/{u['stem']}_PROMPT.txt"
+    if out_rel.startswith(single_handoff.DIRECTORY + "/"):
+        return f"03_提示词/交接图提示词/{u['stem']}_PROMPT.txt"
     if out_rel.startswith("04_故事板"):
         return f"03_提示词/故事板提示词/{u['stem']}_PROMPT.txt"
     if out_rel.startswith("03b_场景状态图"):
@@ -935,6 +942,7 @@ def build(units: list, size: str = "", ratio: str = "",
     units = units_of(units)        # 申报头不是任务，混进去就是一条永远做不完的活
     where = {u["stem"]: out_path(u) for u in units if u["stem"]}
     assets, scstates, boards, regions, videos, texts = [], [], [], [], [], {}
+    handoffs = []
     storyboards = []                       # v6.x 的故事板，v7.0 材料里恒为空
     skipped = []
     for u in units:
@@ -960,6 +968,8 @@ def build(units: list, size: str = "", ratio: str = "",
              "from_material": True}
         if u.get("handoff_mode"):
             t["handoff_mode"] = u["handoff_mode"]
+        if single_handoff.is_single(u):
+            t.update({k: u[k] for k in ("view", "boundary", "c_key") if u.get(k)})
         if u["kind"] == "video":
             t["params"] = {"duration": u["seconds"] or duration,
                            "ratio": u["ratio"] or ratio or "9:16"}
@@ -1018,7 +1028,7 @@ def build(units: list, size: str = "", ratio: str = "",
             t["reference_images"] = [r for r in refs if id(r) not in spine_keys]
             videos.append(t)
         else:
-            t["params"] = {"size": u["ratio"] or size or "9:16"}
+            t["params"] = {"size": u["ratio"] or (ratio if single_handoff.is_single(u) else size) or "9:16"}
             # **按落点分三路，不是「不是故事板就算资产」。**
             #
             # 原来只判了一个 `04_故事板`，其余全进 asset_tasks —— 于是
@@ -1032,7 +1042,9 @@ def build(units: list, size: str = "", ratio: str = "",
             #   · relay 的批次也错：p1（资产）里混着场景状态，而 p2 永远是空的
             # **先判区域图再判整板** —— 区域图的落点是整板目录的子目录，
             # 顺序反了的话 `startswith("04_交接板")` 会把区域图也吞进整板那一批。
-            if rel.startswith(REGION_DIR):
+            if single_handoff.is_single(u):
+                handoffs.append(t)
+            elif rel.startswith(REGION_DIR):
                 t["region"] = str(u.get("region") or "").strip().upper()
                 t["board"] = str(u.get("board") or u.get("parent") or "").strip()
                 regions.append(t)
@@ -1056,7 +1068,7 @@ def build(units: list, size: str = "", ratio: str = "",
             # 但写一个两套都不认的值，第一个来读它的人就会挑错。
             "tasks": {"system": system or "material",
                       "from_material": True, "asset_tasks": assets,
-                      "scstate_tasks": scstates,
+                      "scstate_tasks": scstates, "handoff_tasks": handoffs,
                       "board_tasks": boards, "region_tasks": regions,
                       # v7.0 不再产故事板。这个键仍然写出来（空的）——
                       # 读它的地方不少（explorer、relay、老项目的对账），

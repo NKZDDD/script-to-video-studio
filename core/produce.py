@@ -845,6 +845,8 @@ def _deliver(pj: Project, task: dict, out: str, prov, rec: Optional[dict], *, me
                                "原任务 ID 已保留，不会重新提交；需要重新生成时请先手动放弃任务。",
                                kind=TASK_FATAL, err_code="submitted_pending") from exc
             raise
+    if meta.get("handoff_source"):
+        got = dict(got, handoff_source=meta["handoff_source"])
     submitted.clear(pj.root, task["output"])
     return got
 
@@ -928,6 +930,8 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
                 raise RuntimeError(bad_map)
             if map_warn:
                 log(f"⚠️ {map_warn}")
+        from .single_handoff import freeze_source
+        srcs, source_meta = freeze_source(pj, task, srcs)
         resolution = (task.get("params") or {}).get("resolution", "")
         ident = submitted.identity(prompt=prompt, refs=[s for _, s in srcs], size=want,
                                    resolution=resolution, provider=provider_cfg["provider"], model=model)
@@ -937,7 +941,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
         meta = _deliver(
             pj, task, out, prov, rec, log=log, cancel=cancel, interval=interval, timeout=timeout,
             meta={"provider": provider_cfg["provider"], "model": model, "identity": ident,
-                  '_usage': provider_cfg.get('_usage', {}), '_usage_kind': 'image'},
+                  '_usage': provider_cfg.get('_usage', {}), '_usage_kind': 'image', **source_meta},
             run=lambda: generate(
                 lambda p: submitted.new_attempt() or prov.generate_image(
                     ImageTask(prompt=p, refs=refs, size=want, model=model,

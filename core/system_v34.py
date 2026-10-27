@@ -100,6 +100,9 @@ STAGES = [
     #
     # **数量是 0～N−1 张，不是每段一张。** 只有需要承接的边界才做，
     # 天然转场免做且**不算缺项**。
+    {"id": "p3h", "no": 12, "name": "独立交接图 C/A/B", "kind": "image",
+     "scope": "episode", "out": "", "task_key": "handoff_tasks",
+     "note": "同版 C 完成后 A/B 独立生成；无整板或区域提取"},
     {"id": "p3", "no": 12, "name": "交接板整板生产", "kind": "image",
      "scope": "episode", "out": "", "task_key": "board_tasks",
      "note": "一个边界一张，A/B/C 三区一次生成；整板只留在上游，不喂给视频"},
@@ -254,7 +257,7 @@ SERIES_STAGES = {s["id"] for s in STAGES
                  if s["kind"] == "llm" and s["scope"] == "series"}
 
 # 出图出片各步消费 tasks.json 里的哪个键，以及排在谁后面。
-PRODUCE_ORDER = ["p1", "p2", "p3", "p3x", "p4", "p5"]
+PRODUCE_ORDER = ["p1", "p2", "p3h", "p3", "p3x", "p4", "p5"]
 
 
 # 每个环节的模板里都能用的占位符，不用声明依赖。

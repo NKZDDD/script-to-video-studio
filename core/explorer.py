@@ -393,6 +393,7 @@ _TASK_KINDS = [("asset_tasks", "asset", "资产图", "环节5b"),
 # 出了图、花了钱，页面上看不见。
 _TASK_KINDS_V34 = [("asset_tasks", "asset", "资产图", "第5环节"),
                    ("scstate_tasks", "storyboard", "场景状态图", "第11环节"),
+                   ("handoff_tasks", "storyboard", "独立交接图 C/A/B", "交接"),
                    # v7.0：故事板整条换成 ABC 交接板，**两步**：
                    # 整板（一个边界一张、三区一次生成）→ 以它为唯一参考派生
                    # A/B/C 三张区域图。视频用的是区域图，整板只留在上游。
@@ -407,7 +408,7 @@ _TASK_KINDS_V34 = [("asset_tasks", "asset", "资产图", "第5环节"),
 def _task_kinds(pj: Project, task_data: Optional[dict] = None) -> list:
     t = pj.tasks() if task_data is None else task_data
     # 材料项目可能保留旧的 meta.system；生产表按实际任务列，明细也必须如此。
-    extended = (any(t.get(k) for k in ("scstate_tasks", "board_tasks", "region_tasks"))
+    extended = (any(t.get(k) for k in ("scstate_tasks", "board_tasks", "region_tasks", "handoff_tasks"))
                 or any(uses_handoff(v) for v in (t.get("video_tasks") or [])))
     return _TASK_KINDS_V34 if system_of(pj) == "v34" or extended else _TASK_KINDS
 

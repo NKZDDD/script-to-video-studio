@@ -60,7 +60,7 @@ class ProduceOnlyPlanTests(unittest.TestCase):
         乱了的话下游拿不到上游的参考图，而 relay 会把它们全判成「在等」。"""
         got = [s["stage"] for s in PV.plan(_proj("v34"), include_llm=False,
                                            include_deliver=False)]
-        self.assertEqual(got, list(PV.V.PRODUCE_ORDER))
+        self.assertEqual(got, [s for s in PV.V.PRODUCE_ORDER if s != "p3h"])  # Empty optional handoff group stays hidden.
 
 
 class SweepInGenerateTests(unittest.TestCase):

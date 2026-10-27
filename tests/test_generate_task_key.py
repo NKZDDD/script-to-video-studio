@@ -46,6 +46,7 @@ class GenerateTaskKeyTests(unittest.TestCase):
         self.assertEqual(table, {
             "asset_tasks": ("asset", "p1"),
             "scstate_tasks": ("storyboard", "p2"),
+            "handoff_tasks": ("storyboard", "p3h"),
             "board_tasks": ("storyboard", "p3"),
             "region_tasks": ("storyboard", "p4"),
             "video_tasks": ("video", "p5"),

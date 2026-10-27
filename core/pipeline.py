@@ -102,8 +102,11 @@ def plan(pj, *, include_produce: bool = True, include_deliver: bool = True,
     prod = [e for e in (produce_episodes or eps) if not eps or e in eps] or eps
     ptag = f"（只 {'、'.join(prod)}）" if prod and prod != _eps.ids(pj) else ""
     if include_produce:
-        for sid, key, kind in PRODUCE:
-            st = next(s for s in S.STAGES if s["id"] == sid)
+        production = list(PRODUCE)
+        if pj.tasks().get("handoff_tasks"):
+            production.insert(-1, ("s9h", "handoff_tasks", "storyboard"))
+        for sid, key, kind in production:
+            st = next((s for s in S.STAGES if s["id"] == sid), {"no": 9, "name": "独立交接图 C/A/B"})
             steps.append({"kind": "produce", "stage": sid, "task_key": key,
                           "produce": kind,
                           # relay 的 kind 用**步**的 id，不用 worker 类型。

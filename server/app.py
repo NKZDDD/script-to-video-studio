@@ -986,6 +986,7 @@ def api_get(path: str, q: dict) -> dict:
         # v34 才有这一层（通用十二环节没有），没有就是 0 条，不占地方。
         for kind, key in (("asset_tasks", "asset"),
                           ("scstate_tasks", "scstate"),
+                          ("handoff_tasks", "handoff"),
                           ("board_tasks", "board"),
                           ("region_tasks", "region"),
                           # v6.x 的故事板。v7.0 项目里是空的，那一行不摆。
@@ -2227,6 +2228,7 @@ def api_post(path: str, body: dict) -> dict:
         # **只有批次号分得开** —— 共用批次号出过事（2026-08-20），见 _batch_kind。
         BATCH = {"asset_tasks": ("asset", "p1"),
                  "scstate_tasks": ("storyboard", "p2"),
+                 "handoff_tasks": ("storyboard", "p3h"),
                  "board_tasks": ("storyboard", "p3"),
                  "region_tasks": ("storyboard", "p4"),
                  "video_tasks": ("video", "p5"),
@@ -2266,7 +2268,7 @@ def api_post(path: str, body: dict) -> dict:
             # 按集筛空最常见 —— 材料导入模式下尤其：那一集本来就没有这一类活。
             if ep_sel and kind != "asset":
                 whole = len(tasks.get(task_key, []))
-                name = {"asset_tasks": "资产图", "scstate_tasks": "场景状态图",
+                name = {"handoff_tasks": "独立交接图 C/A/B", "asset_tasks": "资产图", "scstate_tasks": "场景状态图",
                         "storyboard_tasks": "故事板",
                         "video_tasks": "分段视频"}.get(task_key, task_key)
                 return {"ok": False,
@@ -2333,6 +2335,7 @@ def api_post(path: str, body: dict) -> dict:
                 # 是两者之和」，空的那个不影响。
                 for _bk, _tk in (("p1", "asset_tasks"),
                                  ("p2", "scstate_tasks"),
+                                 ("p3h", "handoff_tasks"),
                                  ("p3", "board_tasks"),
                                  ("p3", "storyboard_tasks"),
                                  ("p4", "region_tasks"),
