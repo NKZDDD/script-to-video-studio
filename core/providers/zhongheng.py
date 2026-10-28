@@ -18,6 +18,10 @@ from core.apiutil import ApiError, RETRYABLE, TASK_FATAL, classify, submit_uncer
 from core.providers.base import Provider
 
 
+# Unified video API documents these ratios even when per-model metadata is empty.
+RATIOS = ('9:16', '16:9', '1:1')
+
+
 # Public capability snapshot; generated below from the provider catalog, no credentials.
 MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                     'duration_options': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
@@ -596,9 +600,9 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
 
 
 def model_options(spec):
-    """Empty optional lists mean omit that parameter, not arbitrary values."""
+    """Use unified video ratios when the model omits its ratio choices."""
     return dict(durations=list(spec.get('duration_options') or []),
-                ratios=list(spec.get('aspect_ratio_options') or ['auto']),
+                ratios=list(spec.get('aspect_ratio_options') or RATIOS),
                 resolutions=list(spec.get('resolution_options') or []),
                 default_duration=spec.get('defaults', {}).get('duration', 5),
                 default_resolution=spec.get('defaults', {}).get('resolution', ''),
@@ -668,13 +672,13 @@ class ZhonghengProvider(Provider):
         return dict(id=self.id, name=self.name, default_base_url=self.default_base_url,
                     supports=list(self.supports), video=dict(
                         models=list(options), default_model=next(iter(options), ''),
-                        default_duration=5, ratios=['auto'], resolutions=[], durations=[],
+                        default_duration=5, ratios=list(RATIOS), resolutions=[], durations=[],
                         max_refs=None, max_video_refs=None, max_audio_refs=None,
                         supports_audio_refs=True, reference_video_urls_supported=True,
                         ref_mode='bytes', ref_max_bytes=25 * 1024 * 1024,
                         model_options=options,
                         notes='按最新模型能力传 ratio 与 resolution，由服务商转换尺寸，不在客户端计算像素。'
-                              '未声明比例选项时请选择“自动比例”，省略 ratio；固定画幅须待服务商开放选项。'
+                              '模型未列出比例选项时，使用通用文档的 9:16、16:9、1:1，按所选比例发送 ratio。'
                               '参考图可直接上传，无需对象存储。'))
 
     def _read_specs(self):
@@ -735,24 +739,25 @@ class ZhonghengProvider(Provider):
             raise ApiError(f'{model} 不支持 {task.duration} 秒，请刷新模型后选择已声明的时长；未提交生成', kind=TASK_FATAL)
         body = dict(model=model, prompt=task.prompt, duration=int(task.duration))
         # /api-docs: platform converts ratio/resolution; never send size/width/height.
-        # Only apply defaults within declared choices. Empty lists do not authorize
-        # arbitrary values, even if an older saved setting or default has one.
+        # Ratio has documented common choices; resolution/quality remain model-specific.
         defaults = spec.get('defaults') or {}
         for field, value, options, default in [('ratio', task.ratio, 'aspect_ratio_options', 'aspect_ratio'),
                 ('resolution', task.resolution, 'resolution_options', 'resolution'),
                 ('quality', task.extra.get('quality'), 'quality_options', None)]:
-            choices = spec.get(options) or []
+            choices = spec.get(options) or (RATIOS if field == 'ratio' else [])
             value = str(value or '').strip()
             if field == 'ratio' and value.lower() == 'auto':
                 value = ''
             if not value and choices and default:
                 value = str(defaults.get(default) or '').strip()
+            if not value and field == 'ratio':
+                raise ApiError(f'{model} 需要明确的画面比例，请在生产页选择 '
+                               f'{"、".join(choices)} 后重试；未提交生成', kind=TASK_FATAL)
             if not value:
                 continue
             match = next((str(v) for v in choices if str(v).lower() == value.lower()), None)
             if match is None:
-                hint = '；请在生产页将比例选为“自动比例”' if field == 'ratio' and not choices else ''
-                raise ApiError(f'{model} 未声明支持 {field}={value}{hint}，未提交生成', kind=TASK_FATAL)
+                raise ApiError(f'{model} 未声明支持 {field}={value}，未提交生成', kind=TASK_FATAL)
             body[field] = match
         extra = task.extra
         groups = [('images', task.refs, 'max_image_refs', 'image'),
@@ -846,7 +851,7 @@ class ZhonghengProvider(Provider):
                 _cancel(cancel)
                 body[field] = self._upload(body[field])
         _cancel(cancel)
-        log(f'纵横科技 {task.model}：{task.duration} 秒，比例 {body.get("ratio", "自动（省略）")}，'
+        log(f'纵横科技 {task.model}：{task.duration} 秒，比例 {body["ratio"]}，'
             f'清晰度 {body.get("resolution", "自动（省略）")}')
         # This gateway documents idempotency. HTTP retries keep precisely the same
         # body/key; exhausted uncertain submissions must not become a fresh order.

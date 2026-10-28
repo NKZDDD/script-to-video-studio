@@ -29,7 +29,7 @@ def clock(monkeypatch):
 
 
 def task(model='XXseedacn2.5', **overrides):
-    return VideoTask(**dict(dict(model=model, prompt='风景', duration=5, ratio='auto', resolution='720p'), **overrides))
+    return VideoTask(**dict(dict(model=model, prompt='风景', duration=5, ratio='9:16', resolution='720p'), **overrides))
 
 
 @pytest.mark.parametrize('model', Z.MODEL_SPECS)
@@ -48,7 +48,7 @@ def test_all_authorized_video_models_create_query_save(model, provider, monkeypa
     result = provider.generate_video(t, 'unused.mp4', poll_interval=5, log=lambda _: None)
     assert [c[:2] for c in calls] == [('POST', '/v1/videos'), ('GET', '/v1/tasks/vid_fixture')]
     assert calls[0][2]['json_body'] == dict(model=model, prompt='风景', duration=t.duration,
-                                          resolution=t.resolution, images=t.refs)
+                                          ratio=t.ratio, resolution=t.resolution, images=t.refs)
     assert calls[0][2]['headers']['Idempotency-Key']
     assert calls[0][2]['retries'] == 2 and calls[0][2]['submit'] is False
     assert clock[0] == 7 and len(saved) == 1 and result['task_id'] == 'vid_fixture'
@@ -75,7 +75,7 @@ def test_30_images_ten_audio_and_video_preserved(provider):
         provider.build_video_body(t, Z.MODEL_SPECS[t.model])
 
 
-@pytest.mark.parametrize('kwargs', [dict(ratio='9:16'), dict(duration=True), dict(duration=4.5),
+@pytest.mark.parametrize('kwargs', [dict(ratio='2:3'), dict(duration=True), dict(duration=4.5),
     dict(resolution='4K'), dict(extra={'quality': 'high'}), dict(extra={'generate_audio': False}),
     dict(extra={'video_refs': 'https://fixture.test/v.mp4'}),
     dict(extra={'start_frame': 'https://fixture.test/a.png'}),
@@ -138,11 +138,12 @@ def test_catalog_normalizes_types_options_without_exposing_chat_or_secrets(monke
     assert 'fixture' not in json.dumps(result)
 
 
-def test_no_network_in_capabilities_and_automatic_ratio_choice(provider, monkeypatch):
+def test_no_network_in_capabilities_and_documented_ratio_choices(provider, monkeypatch):
     monkeypatch.setattr(provider.session, 'request', lambda *a, **k: pytest.fail('network on local UI'))
     cap = provider.capabilities()['video']
     assert len(cap['models']) == 28
-    assert all(options['ratios'] == ['auto'] for options in cap['model_options'].values())
+    assert cap['ratios'] == ['9:16', '16:9', '1:1']
+    assert all(options['ratios'] == ['9:16', '16:9', '1:1'] for options in cap['model_options'].values())
 
 
 @pytest.mark.parametrize('resolution', ['480p', '720p', '768p', '1080p', '2k', '4K'])
@@ -167,14 +168,43 @@ def test_declared_defaults_apply_when_parameters_are_automatic(provider, ratio):
     assert 'size' not in body
 
 
-def test_empty_options_omit_optional_parameters_instead_of_guessing(provider):
+@pytest.mark.parametrize('ratio', ['9:16', '16:9', '1:1'])
+@pytest.mark.parametrize('ratio_choices', [[], None])
+def test_empty_ratio_options_use_unified_documentation_in_ui_catalog_and_request(provider, ratio, ratio_choices):
+    spec = dict(Z.MODEL_SPECS['XXseedacn2.5'], resolution_options=[],
+                defaults={'aspect_ratio': '9:16', 'resolution': '4K'})
+    if ratio_choices is None:
+        spec.pop('aspect_ratio_options')
+    else:
+        spec['aspect_ratio_options'] = ratio_choices
+    body = provider.build_video_body(task(ratio=ratio, resolution=''), spec)
+    # Ratio is sent unchanged; empty resolution metadata does not invent 4K or pixel sizes.
+    assert body == dict(model='XXseedacn2.5', prompt='风景', duration=5, ratio=ratio)
+    assert Z.model_options(spec)['ratios'] == ['9:16', '16:9', '1:1']
+    assert Z.catalog_row('XXseedacn2.5', spec)['capability_schema']['aspect_ratios'] == ['9:16', '16:9', '1:1']
+
+
+def test_declared_ratio_choices_override_unified_fallback(provider):
+    spec = dict(Z.MODEL_SPECS['XXseedacn2.5'], aspect_ratio_options=['16:9'])
+    assert Z.model_options(spec)['ratios'] == ['16:9']
+    with pytest.raises(ApiError, match='ratio=9:16'):
+        provider.build_video_body(task(ratio='9:16'), spec)
+
+
+@pytest.mark.parametrize('ratio', ['', 'auto', 'AUTO'])
+def test_legacy_automatic_ratio_without_model_default_requires_selection(provider, monkeypatch, ratio):
+    calls = []
+    monkeypatch.setattr(provider.session, 'request', lambda *a, **kw: calls.append(a))
+    with pytest.raises(ApiError, match='请在生产页选择 9:16、16:9、1:1'):
+        provider.generate_video(task(ratio=ratio), 'unused.mp4')
+    assert calls == []
+
+
+def test_documented_ratio_default_does_not_enable_undeclared_resolution(provider):
     spec = dict(Z.MODEL_SPECS['XXseedacn2.5'], aspect_ratio_options=[], resolution_options=[],
                 defaults={'aspect_ratio': '9:16', 'resolution': '4K'})
     body = provider.build_video_body(task(ratio='auto', resolution=''), spec)
-    assert body == dict(model='XXseedacn2.5', prompt='风景', duration=5)
-    # An old saved fixed ratio must not be silently discarded or converted to size.
-    with pytest.raises(ApiError, match='自动比例'):
-        provider.build_video_body(task(ratio='9:16', resolution=''), spec)
+    assert body == dict(model='XXseedacn2.5', prompt='风景', duration=5, ratio='9:16')
 
 
 def test_20261028_model_snapshot_keeps_new_models_and_revised_limits(provider):
