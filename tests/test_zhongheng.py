@@ -55,12 +55,12 @@ def test_all_authorized_video_models_create_query_save(model, provider, monkeypa
 
 
 def test_exact_discrete_durations_not_ranges_or_marketing_text(provider):
-    with pytest.raises(ApiError, match='不支持 15'):
-        provider.build_video_body(task('Aseedance2.0', duration=15), Z.MODEL_SPECS['Aseedance2.0'])
+    assert provider.build_video_body(task('Aseedance2.0', duration=15), Z.MODEL_SPECS['Aseedance2.0'])['duration'] == 15
+    with pytest.raises(ApiError, match='不支持 16'):
+        provider.build_video_body(task('Aseedance2.0', duration=16), Z.MODEL_SPECS['Aseedance2.0'])
     with pytest.raises(ApiError, match='不支持 28'):
         provider.build_video_body(task('wan3/1080', duration=28), Z.MODEL_SPECS['wan3/1080'])
-    with pytest.raises(ApiError, match='不支持 10'):
-        provider.build_video_body(task('BBseadanco-480', duration=10), Z.MODEL_SPECS['BBseadanco-480'])
+    assert provider.build_video_body(task('BBseadanco-480', duration=10, resolution='480p'), Z.MODEL_SPECS['BBseadanco-480'])['duration'] == 10
 
 
 def test_30_images_ten_audio_and_video_preserved(provider):
@@ -141,8 +141,64 @@ def test_catalog_normalizes_types_options_without_exposing_chat_or_secrets(monke
 def test_no_network_in_capabilities_and_automatic_ratio_choice(provider, monkeypatch):
     monkeypatch.setattr(provider.session, 'request', lambda *a, **k: pytest.fail('network on local UI'))
     cap = provider.capabilities()['video']
-    assert len(cap['models']) == 26
+    assert len(cap['models']) == 28
     assert all(options['ratios'] == ['auto'] for options in cap['model_options'].values())
+
+
+@pytest.mark.parametrize('resolution', ['480p', '720p', '768p', '1080p', '2k', '4K'])
+@pytest.mark.parametrize('ratio', ['9:16', '16:9', '1:1'])
+def test_declared_parameters_are_sent_without_client_pixel_calculation(provider, resolution, ratio):
+    # 4K is a future declared capability fixture, not a claim about today's catalog.
+    spec = dict(Z.MODEL_SPECS['XXseedacn2.5'], resolution_options=[resolution],
+                aspect_ratio_options=['9:16', '16:9', '1:1'])
+    t = task(ratio=ratio, resolution=resolution.lower(),
+             extra={'size': '720*1280', 'width': 720, 'height': 1280, 'aspect_ratio': '16:9'})
+    body = provider.build_video_body(t, spec)
+    assert body == dict(model=t.model, prompt=t.prompt, duration=5, ratio=ratio, resolution=resolution)
+
+
+@pytest.mark.parametrize('ratio', ['', 'auto', 'AUTO'])
+def test_declared_defaults_apply_when_parameters_are_automatic(provider, ratio):
+    spec = dict(Z.MODEL_SPECS['XXseedacn2.5'], aspect_ratio_options=['16:9', '9:16'],
+                resolution_options=['720p', '2k'],
+                defaults={'duration': 5, 'aspect_ratio': '9:16', 'resolution': '2k'})
+    body = provider.build_video_body(task(ratio=ratio, resolution=''), spec)
+    assert body['ratio'] == '9:16' and body['resolution'] == '2k'
+    assert 'size' not in body
+
+
+def test_empty_options_omit_optional_parameters_instead_of_guessing(provider):
+    spec = dict(Z.MODEL_SPECS['XXseedacn2.5'], aspect_ratio_options=[], resolution_options=[],
+                defaults={'aspect_ratio': '9:16', 'resolution': '4K'})
+    body = provider.build_video_body(task(ratio='auto', resolution=''), spec)
+    assert body == dict(model='XXseedacn2.5', prompt='风景', duration=5)
+    # An old saved fixed ratio must not be silently discarded or converted to size.
+    with pytest.raises(ApiError, match='自动比例'):
+        provider.build_video_body(task(ratio='9:16', resolution=''), spec)
+
+
+def test_20261028_model_snapshot_keeps_new_models_and_revised_limits(provider):
+    assert Z.MODEL_SPECS['Xseadanco2.0']['max_image_refs'] == 9
+    assert Z.MODEL_SPECS['OOsd2.5-30秒']['duration_options'] == [30]
+    spec = Z.MODEL_SPECS['Fseadanco2.0mini']
+    assert spec['resolution_options'] == ['720p']
+    with pytest.raises(ApiError, match='支持上限 0'):
+        provider.build_video_body(task('Fseadanco2.0mini', extra={'video_refs': ['https://fixture.test/v.mp4']}), spec)
+    assert Z.MODEL_SPECS['BBseadanco-1080']['max_audio_refs'] == 5
+
+
+def test_real_request_path_uses_model_declared_fields(provider, monkeypatch):
+    provider._specs['XXseedacn2.5'].update(aspect_ratio_options=['9:16'], resolution_options=['2k'])
+    calls = []
+    def request(method, path, **kw):
+        calls.append((method, path, kw))
+        return dict(task_id='vid_documented', status='succeeded', video_url='https://result.test/v.mp4')
+    monkeypatch.setattr(provider.session, 'request', request)
+    monkeypatch.setattr(provider.session, 'save_item', lambda *a, **k: None)
+    provider.generate_video(task(ratio='9:16', resolution='2K'), 'unused.mp4', log=lambda _: None)
+    assert len(calls) == 1 and calls[0][:2] == ('POST', '/v1/videos')
+    assert calls[0][2]['json_body'] == dict(model='XXseedacn2.5', prompt='风景', duration=5,
+                                          ratio='9:16', resolution='2k')
 
 
 def test_upload_local_data_uri_and_direct_url(provider, tmp_path, monkeypatch):

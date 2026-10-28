@@ -1,4 +1,4 @@
-"""纵横科技视频协议，依据 /api-docs 与 2026-10-26 按 Key 读取的能力。
+"""纵横科技视频协议，依据 /api-docs 与 2026-10-28 按 Key 读取的能力。
 
 仅接入已授权的视频能力；对话使用 Studio 现有的 OpenAI LLM 配置。
 本文件使用绝对公共导入，也可由服务端适配包独立加载。
@@ -99,7 +99,7 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                'reference_materials': ['image', 'video', 'audio'],
                'defaults': {'duration': 5, 'resolution': '1080p', 'aspect_ratio': ''}},
  'Aseedance2.0': {'capability_type': 'video',
-                  'duration_options': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+                  'duration_options': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
                   'resolution_options': ['720p'],
                   'aspect_ratio_options': [],
                   'quality_options': [],
@@ -159,14 +159,14 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                       'reference_materials': ['image', 'video', 'audio'],
                       'defaults': {'duration': 5, 'resolution': '720p', 'aspect_ratio': ''}},
  'Fseadanco2.0mini': {'capability_type': 'video',
-                      'duration_options': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-                      'resolution_options': ['720p', '480p'],
+                      'duration_options': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                      'resolution_options': ['720p'],
                       'aspect_ratio_options': [],
                       'quality_options': [],
                       'max_image_refs': 9,
                       'max_audio_refs': 3,
-                      'max_video_refs': 3,
-                      'reference_materials': ['image', 'video', 'audio'],
+                      'max_video_refs': 0,
+                      'reference_materials': ['image', 'audio'],
                       'defaults': {'duration': 5, 'resolution': '720p', 'aspect_ratio': ''}},
  'TTseadanco2.5-1080': {'capability_type': 'video',
                         'duration_options': [5,
@@ -318,12 +318,13 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                                           26,
                                           27,
                                           28,
-                                          29],
+                                          29,
+                                          30],
                      'resolution_options': ['1080p'],
                      'aspect_ratio_options': [],
                      'quality_options': [],
                      'max_image_refs': 30,
-                     'max_audio_refs': 10,
+                     'max_audio_refs': 5,
                      'max_video_refs': 0,
                      'reference_materials': ['image', 'audio'],
                      'defaults': {'duration': 5, 'resolution': '1080p', 'aspect_ratio': ''}},
@@ -350,6 +351,7 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                                          24,
                                          25,
                                          26,
+                                         27,
                                          28,
                                          29,
                                          30],
@@ -357,9 +359,9 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                     'aspect_ratio_options': [],
                     'quality_options': [],
                     'max_image_refs': 30,
-                    'max_audio_refs': 10,
+                    'max_audio_refs': 5,
                     'max_video_refs': 0,
-                    'reference_materials': ['image', 'audio'],
+                    'reference_materials': ['image', 'video'],
                     'defaults': {'duration': 5, 'resolution': '720p', 'aspect_ratio': ''}},
  'BBseadanco-480': {'capability_type': 'video',
                     'duration_options': [5,
@@ -367,6 +369,7 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                                          7,
                                          8,
                                          9,
+                                         10,
                                          11,
                                          12,
                                          13,
@@ -375,6 +378,7 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                                          16,
                                          17,
                                          18,
+                                         19,
                                          20,
                                          21,
                                          22,
@@ -390,9 +394,9 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                     'aspect_ratio_options': [],
                     'quality_options': [],
                     'max_image_refs': 30,
-                    'max_audio_refs': 10,
+                    'max_audio_refs': 5,
                     'max_video_refs': 0,
-                    'reference_materials': ['image', 'audio'],
+                    'reference_materials': ['image', 'video'],
                     'defaults': {'duration': 5, 'resolution': '480p', 'aspect_ratio': ''}},
  'wan3-480/720': {'capability_type': 'video',
                   'duration_options': [5, 10, 15, 30],
@@ -568,7 +572,27 @@ MODEL_SPECS = {'XXseadanco2.0M': {'capability_type': 'video',
                     'max_audio_refs': 10,
                     'max_video_refs': 10,
                     'reference_materials': ['image', 'video', 'audio'],
-                    'defaults': {'duration': 5, 'resolution': '720p', 'aspect_ratio': ''}}}
+                    'defaults': {'duration': 5, 'resolution': '720p', 'aspect_ratio': ''}},
+ 'Xseadanco2.0': {'capability_type': 'video',
+                  'duration_options': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                  'resolution_options': ['720p'],
+                  'aspect_ratio_options': [],
+                  'quality_options': [],
+                  'max_image_refs': 9,
+                  'max_audio_refs': 3,
+                  'max_video_refs': 3,
+                  'reference_materials': ['image', 'video', 'audio'],
+                  'defaults': {'duration': 5, 'resolution': '720p', 'aspect_ratio': ''}},
+ 'OOsd2.5-30秒': {'capability_type': 'video',
+                 'duration_options': [30],
+                 'resolution_options': ['720p'],
+                 'aspect_ratio_options': [],
+                 'quality_options': [],
+                 'max_image_refs': 9,
+                 'max_audio_refs': 0,
+                 'max_video_refs': 0,
+                 'reference_materials': ['image'],
+                 'defaults': {'duration': 30, 'resolution': '720p', 'aspect_ratio': ''}}}
 
 
 def model_options(spec):
@@ -649,9 +673,9 @@ class ZhonghengProvider(Provider):
                         supports_audio_refs=True, reference_video_urls_supported=True,
                         ref_mode='bytes', ref_max_bytes=25 * 1024 * 1024,
                         model_options=options,
-                        notes='模型按 Key 授权刷新，秒数、清晰度和参考数量以模型能力为准。'
-                              '当前目录未声明比例时请选择“自动比例”，不发送 ratio；'
-                              '有固定画幅要求时先向服务商确认。参考图可直接上传，无需对象存储。'))
+                        notes='按最新模型能力传 ratio 与 resolution，由服务商转换尺寸，不在客户端计算像素。'
+                              '未声明比例选项时请选择“自动比例”，省略 ratio；固定画幅须待服务商开放选项。'
+                              '参考图可直接上传，无需对象存储。'))
 
     def _read_specs(self):
         if self._specs is None:
@@ -710,15 +734,21 @@ class ZhonghengProvider(Provider):
         if isinstance(task.duration, bool) or task.duration not in spec.get('duration_options', []):
             raise ApiError(f'{model} 不支持 {task.duration} 秒，请刷新模型后选择已声明的时长；未提交生成', kind=TASK_FATAL)
         body = dict(model=model, prompt=task.prompt, duration=int(task.duration))
-        for field, value, options in [('ratio', task.ratio, 'aspect_ratio_options'),
-                                      ('resolution', task.resolution, 'resolution_options'),
-                                      ('quality', task.extra.get('quality'), 'quality_options')]:
+        # /api-docs: platform converts ratio/resolution; never send size/width/height.
+        # Only apply defaults within declared choices. Empty lists do not authorize
+        # arbitrary values, even if an older saved setting or default has one.
+        defaults = spec.get('defaults') or {}
+        for field, value, options, default in [('ratio', task.ratio, 'aspect_ratio_options', 'aspect_ratio'),
+                ('resolution', task.resolution, 'resolution_options', 'resolution'),
+                ('quality', task.extra.get('quality'), 'quality_options', None)]:
+            choices = spec.get(options) or []
             value = str(value or '').strip()
-            if field == 'ratio' and value == 'auto':
-                continue
+            if field == 'ratio' and value.lower() == 'auto':
+                value = ''
+            if not value and choices and default:
+                value = str(defaults.get(default) or '').strip()
             if not value:
                 continue
-            choices = spec.get(options) or []
             match = next((str(v) for v in choices if str(v).lower() == value.lower()), None)
             if match is None:
                 hint = '；请在生产页将比例选为“自动比例”' if field == 'ratio' and not choices else ''
@@ -816,7 +846,8 @@ class ZhonghengProvider(Provider):
                 _cancel(cancel)
                 body[field] = self._upload(body[field])
         _cancel(cancel)
-        log(f'纵横科技 {task.model}：{task.duration} 秒，比例 {body.get("ratio", "自动（不发送 ratio）")}')
+        log(f'纵横科技 {task.model}：{task.duration} 秒，比例 {body.get("ratio", "自动（省略）")}，'
+            f'清晰度 {body.get("resolution", "自动（省略）")}')
         # This gateway documents idempotency. HTTP retries keep precisely the same
         # body/key; exhausted uncertain submissions must not become a fresh order.
         idem = uuid.uuid4().hex
