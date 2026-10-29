@@ -39,7 +39,7 @@ DEFAULTS = {"source_type": "剧本", "episode_strategy": "按原文", "episode_c
             "emotion_curve": False, "report": False, "image_provider": "",
             "image_model": "", "video_provider": "", "video_model": ""}
 DIRECTORIES = ["00_项目说明", "01_剧本与分段", "02_固定资产", "03_提示词/releases",
-               "03b_场景状态图", "04_交接板/区域图", "04_交接图/C", "04_交接图/A", "04_交接图/B", "05_分段视频", "06_成片", "07_检查与记录"]
+               "03b_场景状态图", "04_交接板/区域图", "04_交接图", "05_分段视频", "06_成片", "07_检查与记录"]
 
 
 def digest(data) -> str:
@@ -166,7 +166,7 @@ Studio 不执行文本分析。{where}
 tasks.json 使用 schema、project_id、revision、resources 和 asset_tasks/scstate_tasks/board_tasks/region_tasks/video_tasks 五个数组。新增独立单图交接使用可选 handoff_tasks 数组。
 task 必填 key/output/prompt_ref/params/reference_images；视频须有 handoff_refs（无交接板时写 []）。
 所有路径相对项目根，使用 /，不能带 ..、绝对路径或外部 URL。prompt_ref 指向本次发布中的 UTF-8 文本。
-输出分类：02_固定资产、03b_场景状态图、04_交接图/C|A|B、04_交接板、04_交接板/区域图、05_分段视频。
+输出分类：02_固定资产、03b_场景状态图、04_交接图（C/A/B 平铺）、04_交接板、04_交接板/区域图、05_分段视频。
 resources 每个对象：id、name、semantic、parent_id（无则 null）、episodes（全剧共享则 []）、task_key。
 semantic 可选 {', '.join(SEMANTICS)}；一个 task 对应一个资源，AUD 为声音身份元数据，task_key=null。
 人物以身份为父节点挂 LOOK/CT；共用资源只保留一个 ID，episodes 记录使用集，不为每集复制。

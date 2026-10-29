@@ -173,7 +173,9 @@ def test_video_worker_uses_single_b_c_in_order(setup):
     for t in built['tasks']['handoff_tasks']: put(pj, t['output'])
     task = built['tasks']['video_tasks'][1]; run(pj, task)
     assert [Path(f) for f in provider.sent[0].refs] == [Path(pj.p(*r['file_ref'].split('/'))) for r in task['handoff_refs']]
-    assert [Path(f).parent.name for f in provider.sent[0].refs] == ['B', 'C']
+    assert [Path(f).parent.name for f in provider.sent[0].refs] == ['04_交接图', '04_交接图']
+    assert [Path(f).name for f in provider.sent[0].refs] == [
+        Path(r['file_ref']).name for r in task['handoff_refs']]
 
 
 def test_actual_c_is_snapshotted_and_reroll_warns_without_blocking(setup):

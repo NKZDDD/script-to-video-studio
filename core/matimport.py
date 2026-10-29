@@ -872,7 +872,9 @@ def out_path(u: dict) -> str:
     if u.get("kind") == "video":
         return f"05_分段视频/{u['filename']}"
     if single_handoff.is_single(u):
-        return f"{single_handoff.DIRECTORY}/{u.get('view', '')}/{u['filename']}"
+        # C/A/B 平铺在同一个目录：同一交接边界的三张图放一起才看得出成组，
+        # 靠文件名区分；view 只做资源树分类，不再分文件夹。
+        return f"{single_handoff.DIRECTORY}/{u['filename']}"
     if independent_c.is_independent(u):
         return f"03b_场景状态图/{u['filename']}"
     # **区域派生图按 `region` 字段认，不按 key 前缀。**

@@ -16,7 +16,7 @@ SCOPE = f"""{SCOPE_MARKER}
 
 | 模式 | 图片标记与依赖 | 视频引用 | 输出分类 |
 |---|---|---|---|
-| c_then_a_b：同版 C → 独立 A/B | C/A/B 都填 handoff_mode=c_then_a_b、view=C/A/B；A/B 同 boundary、同 c_key，分别直接引用同版 C；不填 region/board/parent | OUT_A→A、IN_B→B、IN_C→C，不填 board | HANDOFF，04_交接图/C、A、B；C 不是 SCSTATE |
+| c_then_a_b：同版 C → 独立 A/B | C/A/B 都填 handoff_mode=c_then_a_b、view=C/A/B；A/B 同 boundary、同 c_key，分别直接引用同版 C；不填 region/board/parent | OUT_A→A、IN_B→B、IN_C→C，不填 board | HANDOFF，C/A/B 平铺在 04_交接图/；C 不是 SCSTATE |
 | independent_c：独立 C → AB 双联板 → 区域 A/B | 仅 C 填 handoff_mode=independent_c（兼容 scene_c）；AB 整板引用 C，区域 A/B 通过 region/board 引用整板 | OUT_A/IN_B 引区域 A/B，IN_C 引对应独立 C | C 在 03b_场景状态图；整板和区域在 04_交接板 |
 | 原 ABC 整板 → 区域 A/B/C | 不填新 handoff_mode；区域通过 region/board 引用同版整板 | OUT_A/IN_B/IN_C 引对应区域 | 04_交接板及其区域图目录 |
 

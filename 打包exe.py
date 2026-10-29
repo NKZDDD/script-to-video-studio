@@ -402,7 +402,7 @@ def main() -> int:
         # 保留控制台：启动时打的四行路径、跑批时的进度和报错都在那儿。
         # 关掉控制台等于把出错原因藏起来。
         "--console",
-        "--name", NAME,
+        "--name", name,
         # 生成的临时 spec 放 build/，不要覆盖仓库里可供人工打包的 spec。
         "--specpath", os.path.join(HERE, "build"),
         # 运行时读的资源，必须打进去

@@ -277,18 +277,24 @@ async function importRelease(file) {
 }
 function production() {
  const d=S.data;const cats={...S.boot.kinds};if(d.tasks.some(t=>t.kind==='storyboard'))cats.storyboard='旧项目故事板';
+ // 独立 C/A/B 里 C 就承担了整板的角色，整板/区域图这两类没有任务时不再占位。
+ for(const k of ['board','region'])if(!d.tasks.some(t=>t.kind===k))delete cats[k];
  main.innerHTML=`<section class="rv-production-dock" aria-label="生产操作与计划"><div class="rv-panel rv-production-actions"><div><strong id="plan-summary"></strong><small id="production-version"></small></div><div class="rv-actions">${btn('查看生产计划','preview')}${btn('开始生产','start','disabled',true)}</div><small>勾选后先查看生产计划，确认后开始；筛选不清除隐藏勾选。</small></div></section><div id="production-plan" tabindex="0" aria-label="生产计划详情"></div>`+
  heading(d.meta.title,'选择这次要生产什么','资产和分集任务在同一棵树中管理，有效成品自动复用。',btn('批量放图…','bulk-place')+btn('Agent 契约','handoff')+btn('刷新','refresh'))+
  `<div id="publication-errors"></div>
  <div class="rv-panel"><div class="rv-row"><h3>本次服务商与并发</h3>${btn('填写 / 管理密钥','providers')}</div><div class="rv-service-head"><span>生产类型</span><span>服务商</span><span>模型</span><span>比例</span><span>清晰度 / 秒数</span><span>并发</span></div><div id="production-services"></div><p class="rv-caption">各行共享全局总上限与服务商上限；批内并发不能相加当作可用额度。设置变更只影响下次开始的批次。比例和视频的秒数都是直接传给服务商的参数，选「跟随任务」时用每条任务里写的值；下拉里是当前模型声明支持的档位。改了秒数，提示词仍是按原秒数写的。技术失败自动重试最多 ${esc(S.boot.retry)} 次，在 设置 → 并发与重试 里改。</p></div>
  <div id="jobs"></div>
- <div class="rv-toolbar"><select id="tree-mode" aria-label="树形分组">${[['family','按资源分类（父子）'],['type-episode','按资源类型 → 集'],['episode','按集 → 资源类型'],['disk','按磁盘目录']].map(([v,n])=>option(v,n,S.treeMode)).join('')}</select><label class="rv-search"><input id="asset-search" type="search" aria-label="搜索资源" placeholder="搜索人物、场景、任务 ID、文件名" value="${esc(S.filters.asset||'')}"></label><select id="asset-status" aria-label="资源状态">${choices(['全部状态','待生产','已完成','失败','选择有阻塞'],S.filters.assetStatus||'全部状态')}</select><select id="asset-type" aria-label="资源类型">${option('','全部类型',S.filters.assetType||'')}${Object.entries(cats).map(([k,v])=>option(k,v,S.filters.assetType)).join('')}</select></div>
+ <div class="rv-toolbar"><select id="tree-mode" aria-label="树形分组">${[['family','按资源分类（父子）'],['type-episode','按资源类型 → 集'],['episode','按集 → 资源类型'],['disk','按磁盘目录']].map(([v,n])=>option(v,n,S.treeMode)).join('')}</select><label class="rv-search"><input id="asset-search" type="search" aria-label="搜索资源" placeholder="搜索人物、场景、任务 ID、文件名" value="${esc(S.filters.asset||'')}"></label><select id="asset-status" aria-label="资源状态">${choices(['全部状态','待生产','已完成','失败','已提交待取回','选择有阻塞'],S.filters.assetStatus||'全部状态')}</select><select id="asset-type" aria-label="资源类型">${option('','全部类型',S.filters.assetType||'')}${Object.entries(cats).map(([k,v])=>option(k,v,S.filters.assetType)).join('')}</select></div>
  <div class="rv-row rv-selection"><span id="selection-count"></span><div class="rv-actions">${btn('选中当前结果','select-visible')}${btn('取消当前结果','clear-visible')}${btn('全项目全选','select-all')}${btn('补选依赖','dependencies')}${btn('批量删除已选产物…','production-delete')}${btn('批量放弃已选待取回','drop-submitted-batch')}</div></div><div id="dependency-alert"></div>
  <div class="rv-production-grid"><div class="rv-panel rv-tree-panel"><div id="resource-tree" role="region" aria-label="生产资源列表" tabindex="0"></div></div><aside class="rv-panel rv-detail" id="resource-detail" aria-label="资源详情" tabindex="0"></aside></div>`;
  renderServices();renderPublication();renderTree();renderDetail();renderJobs();renderPlan();
 }
 function renderServices() {
  const cats={...S.boot.kinds};if(S.data.tasks.some(t=>t.kind==='storyboard'))cats.storyboard='旧项目故事板';
+ // 独立 C/A/B 模式下 C 就是整板，整板/区域图这两类没有任务时不摆这一行，
+ // 免得每次都要在一堆用不上的生产类型里找。老项目有对应任务的照常显示，
+ // 不能把它的服务商设置藏掉。
+ for(const k of ['board','region'])if(!S.data.tasks.some(t=>t.kind===k))delete cats[k];
  updateHTML($('#production-services'),Object.entries(cats).map(([k,n])=>serviceRow(k,n)+`<div class="rv-actions">${btn('首选＋备用排序','provider-chain',`data-kind="${k}"`)}<small>${esc((S.data.production[k]?.fallbacks||[]).map((r,i)=>`备用 ${i+1}：${providerName(r.provider)} / ${r.model}`).join(' → ')||'尚未配置备用')}</small></div>`).join(''));
 }
 function renderPublication() {
@@ -335,7 +341,7 @@ function matchedResources() {
  return S.data.resources.filter(r=>{const t=tasks.get(r.task_key),q=(S.filters.asset||'').toLowerCase();
  if(!`${r.name} ${r.id} ${t?.key||''} ${t?.output||''}`.toLowerCase().includes(q))return false;
  if(S.filters.assetType&&t?.kind!==S.filters.assetType)return false;
- return !S.filters.assetStatus||S.filters.assetStatus==='全部状态'||(S.filters.assetStatus==='已完成'&&t?.done)||(S.filters.assetStatus==='待生产'&&t&&!t.done)||(S.filters.assetStatus==='失败'&&bad.has(t?.key))||(S.filters.assetStatus==='选择有阻塞'&&t?.missing_selection.length);
+ return !S.filters.assetStatus||S.filters.assetStatus==='全部状态'||(S.filters.assetStatus==='已完成'&&t?.done)||(S.filters.assetStatus==='待生产'&&t&&!t.done)||(S.filters.assetStatus==='失败'&&bad.has(t?.key))||(S.filters.assetStatus==='已提交待取回'&&t&&!t.done&&t.submitted)||(S.filters.assetStatus==='选择有阻塞'&&t?.missing_selection.length);
  });
 }
 function renderTree() {

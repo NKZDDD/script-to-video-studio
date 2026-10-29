@@ -14,7 +14,7 @@ RULES = """<!-- studio-single-handoff-v1 -->
 
 - JSONL 仍为 kind=image，C/A/B 三张图各写 handoff_mode="c_then_a_b"、view="C"/"A"/"B"。A/B 另写 boundary（同一交接边界 ID）、c_key（同版 C 的任务 key），并在 reference_images 真实引用该 C。C 的 key/filename 必须包含实际版本，换版使用新 key/filename。
 - 这是 Studio 外部契约扩展；Liam 的内部 audit_abc 不直接作为生产任务导入。内部 scene_c / handoff_view 及 view、boundary、c_key 按上述字段映射；不能只更改提示词或伪装 region/board 来通过验收。
-- tasks.json 增加可选 handoff_tasks 数组，资源 semantic=HANDOFF，输出在 04_交接图/C、A、B 下；旧五个数组保留。C 不是 SCSTATE，不为每个 C 强制增建状态图。
+- tasks.json 增加可选 handoff_tasks 数组，资源 semantic=HANDOFF，C/A/B 三张图平铺在 04_交接图/ 同一目录、靠文件名区分，资源树里各自独立可选；旧五个数组保留。C 不是 SCSTATE，不为每个 C 强制增建状态图。
 - C/A/B 均为独立单幅图，不填 region/board/parent。一处 boundary 具有 A、B 各一张且 c_key 相同。可先仅发布 C；包含 A/B 时须同时登记配对任务。C 可供多个有依据的边界复用。
 - 同一交接边界的 A/B/C 表达同一时刻现场的不同取景；一段视频引用的入站 B/C 与出站 A 可以属于不同边界，不能把三个 role 一概解释成不同的时刻。
 - A/B 分别直接引用唯一同版 C，可以追加必要身份/道具资产；不直接或间接引用 A/B、旧整板/区域或另一张竞争 C。C 不能依赖下游 A/B 或旧整板/区域。先联合确定 A/B 提示词，执行时 C 完成后 A/B 可并行，不按 A 的生成结果改 B。

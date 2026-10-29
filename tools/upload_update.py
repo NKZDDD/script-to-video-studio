@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
 
 import requests
 
@@ -15,6 +16,29 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from core import paths, uploader
 from core.updates import validate_release
+
+
+class _Progress:
+    """Tee the upload stream so boto3's read loop reports live progress."""
+
+    def __init__(self, fp, total: int):
+        self.fp = fp
+        self.total = max(1, total)
+        self.done = 0
+        self.started = time.monotonic()
+        self.shown = 0.0
+
+    def read(self, size=-1):
+        chunk = self.fp.read(size)
+        self.done += len(chunk)
+        now = time.monotonic()
+        if now - self.shown >= 0.5 or self.done >= self.total:
+            self.shown = now
+            speed = self.done / max(1e-6, now - self.started) / 1048576
+            print(f"\r  {100.0 * self.done / self.total:5.1f}%  "
+                  f"{self.done / 1048576:6.1f}/{self.total / 1048576:.1f} MB  "
+                  f"{speed:5.1f} MB/s", end="", flush=True)
+        return chunk
 
 
 def verify_public(release):
@@ -67,14 +91,16 @@ def upload_release(manifest, cfg, *, public_base_url=None):
             raise ValueError("R2 已有同版本的不同文件；请提高版本号，不覆盖旧安装包")
         print("R2 已有相同安装包，验证公网下载。", flush=True)
     else:
-        print("正在上传安装包到 R2…", flush=True)
+        print(f"正在上传安装包到 R2…（{release['bytes'] / 1048576:.1f} MB）", flush=True)
         with candidate.open("rb") as fp:
-            client.put_object(Bucket=cfg["bucket"], Key=key, Body=fp,
+            client.put_object(Bucket=cfg["bucket"], Key=key,
+                Body=_Progress(fp, release["bytes"]),
                 IfNoneMatch="*", ContentLength=release["bytes"],
                 ContentType="application/octet-stream",
                 ContentDisposition=f'attachment; filename="{name}"',
                 CacheControl="public, max-age=31536000, immutable",
                 Metadata={"sha256": release["sha256"]})
+        print("\n上传完成。", flush=True)
     print("正在从公开地址下载并核对完整 SHA256…", flush=True)
     verify_public(release)
     # Never export config.json or storage credentials. The manifest contains public release fields only.

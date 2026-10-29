@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "修正生产页资产分类：场景、道具等不再因 LOC_/PROP_ 等编号前缀误归人物身份；独立交接图在资源树和服务商设置中排到分段视频之前。同步修订生产契约，明确 c_then_a_b 独立 C/A/B 与旧整板、独立 C 模式的适用范围，补全字段、引用、目录及完整示例。已有任务、引用、配置与产物保留；服务商继续使用后台适配包（包括 2026.10.26.6），无需升级认证服务端。"}
+               "notes": "独立单图交接的 C/A/B 三张图改为平铺在 04_交接图/ 同一目录（不再分 C、A、B 子目录），C 在资源树里仍独立可选并承担整板角色；项目没有整板/区域图任务时，生产页的服务商行与类型筛选不再显示这两类；资源状态筛新增「已提交待取回」。C 图重抽或换服务商导致同名文件内容变化时按最新版出图，只在任务日志提示旧版 A/B/视频可能不一致，抽卡不再被拦住。纵横视频按服务商最新文档提交 ratio/resolution。已有任务、引用、配置与产物保留（老项目仍按 tasks.json 里的旧路径读取）；服务商继续使用后台适配包，无需升级认证服务端。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))

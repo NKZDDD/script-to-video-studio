@@ -163,7 +163,7 @@ TASK_FIELDS = {
         ("prompt_ref", "程序落的提示词 txt 路径 —— 你只要给 `prompt` 正文"),
         ("reference_images[].asset_id", "从材料参考图的 `key` 转来"),
         ("reference_images[].file_ref", "程序算出的那张图的落点"),
-        ("output", "新 c_then_a_b 先按 view 路由到 04_交接图/C、A、B；旧区域图/独立 C 按其标记路由，其他图片按 key 家族与 filename 算路径"),
+        ("output", "新 c_then_a_b 按 view 分类为 HANDOFF，C/A/B 平铺在 04_交接图/；旧区域图/独立 C 按其标记路由，其他图片按 key 家族与 filename 算路径"),
         ("params.size", "从材料的 `size` / `ratio` 或申报头来"),
     ],
     "video": [
@@ -191,7 +191,7 @@ _BOARD_LINE = "04_交接板/  提示词 → 03_提示词/交接板提示词/"
 _REGION_LINE = "04_交接板/区域图/  提示词 → 03_提示词/交接板提示词/"
 _VIDEO_LINE = "05_分段视频/  提示词 → 03_提示词/视频提示词/"
 _SCSTATE_LINE = "03b_场景状态图/  提示词 → 03_提示词/场景状态提示词/"
-_HANDOFF_LINE = "04_交接图/C、A、B/  提示词 → 03_提示词/交接图提示词/"
+_HANDOFF_LINE = "04_交接图/（C、A、B 平铺）/  提示词 → 03_提示词/交接图提示词/"
 
 # 家族前缀 → 落哪个子目录。**和 matimport.out_path 是同一张表**，
 # 所以契约说的落点就是实际落点。
@@ -819,7 +819,8 @@ def render(limits: Optional[dict] = None, project_name: str = "",
       "契约要求视频的 key 是 `EP01-SEG01`（拼接按这个前缀挑本集分段），"
       "那个形状里本来就没有家族前缀。")
     a("")
-    a("图片先按结构化模式路由：c_then_a_b + view → 04_交接图/C、A、B，分类为 HANDOFF；"
+    a("图片先按结构化模式路由：c_then_a_b + view → 04_交接图/ 同一目录平铺（C/A/B 靠文件名区分，"
+      "资源树里各自独立可选），分类为 HANDOFF；"
       "此模式的 C 不放进 SCSTATE。"
       + ("旧独立 C → 03b_场景状态图，旧 region → 04_交接板/区域图。" if system != "v61" else "")
       + "其他图片再按 key 里的家族前缀算落点。JSONL 只要给 `filename`。"

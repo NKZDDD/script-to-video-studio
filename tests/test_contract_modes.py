@@ -31,7 +31,8 @@ def test_current_example_has_valid_mappings_routes_and_declared_duration(system)
     assert [t['view'] for t in tasks['handoff_tasks']] == ['C', 'A', 'B']
     assert tasks['scstate_tasks'] == tasks['board_tasks'] == tasks['region_tasks'] == []
     for task in tasks['handoff_tasks']:
-        assert task['output'].startswith('04_交接图/' + task['view'] + '/')
+        assert task['output'].startswith('04_交接图/')
+        assert task['output'].count('/') == 1  # C/A/B 平铺，不再按 view 分子目录
     for row in rows[1:]:
         refs = [dict(ref, asset_id=ref['key'])
                 for ref in row.get('handoff_refs', []) + row['reference_images']]
