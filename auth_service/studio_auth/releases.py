@@ -2,19 +2,32 @@
 import json
 import re
 from urllib.parse import urlparse
+from typing import Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .admin import WEB, current, record
 from .service import AuthError
-from .store import client_version_check_enabled
+from .store import client_version_check_enabled, application_for_flavor
 
 router = APIRouter()
 
 
-class Release(BaseModel):
+class ApplicationIdentity(BaseModel):
+    application: Literal['studio', 'batch'] | None = None
+
+    @model_validator(mode='after')
+    def matching_application(self):
+        expected = application_for_flavor(self.flavor)
+        if self.application is not None and self.application != expected:
+            raise ValueError('应用与客户端体系不匹配，请选择正确的应用')
+        self.application = expected
+        return self
+
+
+class Release(ApplicationIdentity):
     model_config = ConfigDict(extra="forbid", strict=True)
     version: str = Field(pattern=r"^\d{1,5}(\.\d{1,5}){3}$")
     flavor: str = Field(pattern=r"^(all|v34|v61|batch)$")
@@ -44,9 +57,10 @@ class Release(BaseModel):
 class Enforcement(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     enabled: bool
+    application: Literal['studio', 'batch'] = 'studio'
 
 
-class BuildRegistration(BaseModel):
+class BuildRegistration(ApplicationIdentity):
     model_config = ConfigDict(extra="forbid", strict=True)
     version: str = Field(pattern=r"^\d{1,5}(\.\d{1,5}){3}$")
     flavor: str = Field(pattern=r"^(all|v34|v61|batch)$")
@@ -74,22 +88,24 @@ def stylesheet():
 
 
 @router.get("/admin/api/releases")
-def list_releases(request: Request):
+def list_releases(request: Request, application: Literal['studio', 'batch'] | None = None):
     current(request)
     with request.app.state.auth.store.connect() as db:
         rows = db.execute("SELECT payload FROM client_releases ORDER BY flavor").fetchall()
         builds = db.execute("SELECT flavor,version FROM client_builds").fetchall()
-        enabled = client_version_check_enabled(db)
-    return {"releases": [json.loads(row["payload"]) for row in rows],
-            "builds": [dict(row) for row in builds], "enforcement_enabled": enabled}
+        enabled = client_version_check_enabled(db, application or 'studio')
+    releases = [json.loads(row['payload']) for row in rows]
+    return {"releases": [r for r in releases if not application or application_for_flavor(r['flavor']) == application],
+            "builds": [dict(r) for r in builds if not application or application_for_flavor(r['flavor']) == application],
+            "application": application, "enforcement_enabled": enabled}
 
 
 @router.post("/admin/api/releases/enforcement")
 def enforcement(body: Enforcement, request: Request):
     actor, _ = current(request, csrf=True)
     auth = request.app.state.auth
-    auth.store.set_client_version_check(body.enabled, actor, auth.now())
-    return {"ok": True, "enforcement_enabled": body.enabled}
+    auth.store.set_client_version_check(body.enabled, actor, auth.now(), body.application)
+    return {"ok": True, "application": body.application, "enforcement_enabled": body.enabled}
 
 
 @router.post("/admin/api/releases/builds")
@@ -138,33 +154,38 @@ def publish(body: Release, request: Request):
 
 
 @router.get("/api/v1/updates/latest")
-def latest(request: Request, flavor: str = "all"):
+def latest(request: Request, flavor: str = "all", application: Literal['studio', 'batch'] | None = None):
     if flavor not in ("all", "v34", "v61", "batch"):
         raise AuthError(400, "invalid_flavor", "未知客户端体系")
+    if application and application != application_for_flavor(flavor):
+        raise AuthError(400, 'application_mismatch', '应用与客户端体系不匹配')
     with request.app.state.auth.store.connect() as db:
-        enabled = client_version_check_enabled(db)
+        enabled = client_version_check_enabled(db, application_for_flavor(flavor))
         row = db.execute("SELECT payload FROM client_releases WHERE flavor=?", (flavor,)).fetchone()
     # Old installers reject R2 URLs before checking allowed. Hide the recommendation
     # during migration as well as bypassing version checks, without deleting it.
     release = json.loads(row["payload"]) if row and enabled else None
-    return {"release": release, "policy_protocol": 1, "enforcement_enabled": enabled,
+    return {"release": release, "application": application_for_flavor(flavor), "policy_protocol": 1, "enforcement_enabled": enabled,
             "client": client_status(request, flavor, enforced=enabled)}
 
 
 def client_status(request, flavor=None, *, enforced=None):
     """Only our service can enforce this rule; caller-reported hashes are spoofable."""
     flavor = flavor or request.headers.get("x-studio-flavor", "")
+    application = application_for_flavor(flavor)
+    if request.headers.get('x-respect-application', application) != application:
+        return {'allowed': False, 'code': 'application_mismatch', 'message': '应用标识与客户端体系不匹配'}
     v, digest = request.headers.get("x-studio-version", ""), request.headers.get("x-studio-build", "")
     with request.app.state.auth.store.connect() as db:
         if enforced is None:
-            enforced = client_version_check_enabled(db)
+            enforced = client_version_check_enabled(db, application)
         if not enforced:
             return {"allowed": True, "code": "version_check_paused",
                     "message": "版本校验已临时暂停，仍需通过账号登录和授权检查"}
         rows = db.execute("SELECT flavor,payload FROM client_releases").fetchall()
         releases = {r["flavor"]: json.loads(r["payload"]) for r in rows}
         current_release = releases.get(flavor)
-        any_enforced = any(r.get("enforce_build") for r in releases.values())
+        any_enforced = any(r.get("enforce_build") for f, r in releases.items() if application_for_flavor(f) == application)
         if flavor not in ("all", "v34", "v61", "batch") or request.headers.get("x-studio-flavor") != flavor:
             return {"allowed": not any_enforced and not v, "code": "client_unregistered",
                     "message": "客户端缺少版本登记，请安装最新 Studio"}

@@ -1,4 +1,6 @@
-# Respect Studio 登录校验服务端 1.10.1
+# Respect Studio 登录校验服务端 1.10.2
+
+1.10.2 增加双应用选择和独立版本校验开关，批量客户端支持独立安装更新；账号和 Key 库继续共用，见 [双应用升级说明](APPLICATION-UPDATE-UPGRADE.md)。
 
 1.10.1 增加“对外批量版”独立版本类别，复用原账号、Key 分配和用量对账接口。Studio 的更新策略保持独立，不增加计费功能，见[批量客户端接入说明](BATCH-CLIENT-UPGRADE.md)。
 

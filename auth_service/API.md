@@ -1,5 +1,7 @@
 # Studio 登录服务 API v1
 
+服务端 1.10.2：版本发布和构建登记增加可选 `application: studio|batch`，必须与 `flavor` 匹配；旧清单省略时自动推导。版本列表及统计支持 `?application=studio|batch` 筛选。`POST /admin/api/releases/enforcement` 接收 `{application,enabled}`，省略 application 默认为 studio；暂停只影响该应用。公开更新查询支持 application 参数，并返回 application。新批量客户端发送 `X-Respect-Application: batch`，旧 Studio 请求头继续兼容。
+
 服务端 1.10.1 起，版本登记、发布、校验与统计的 `flavor` 额外接受 `batch`（对外批量版）；其版本策略与 `all/v34/v61` 独立。登录、账号 Key 配置、用量上报协议不变。
 
 域名示例：`https://auth.example.com`。所有 POST 使用 `Content-Type: application/json`。所有时间字段为 Unix 秒；请求体上限 16 KiB。不要把密码或 Token 放在 URL 查询参数里。
@@ -210,7 +212,7 @@ X-Studio-Build: <release.json 中的 build_sha256>
 
 ## 1.6.2 单独登记测试构建
 
-管理员 `POST /admin/api/releases/builds` 接收且仅接收 `{"flavor":"all","version":"2026.10.20.3","build_sha256":"64位小写十六进制校验码"}`，需管理员会话、同源和 CSRF 校验。返回 `{"ok":true}`，写入 `register_client_build` 审计。校验码必须取自实际打包清单，不能只填写一个任意版本号。
+管理员 `POST /admin/api/releases/builds` 接收 `{"flavor":"all","version":"2026.10.20.3","build_sha256":"64位小写十六进制校验码"}`，需管理员会话、同源和 CSRF 校验。返回 `{"ok":true}`，写入 `register_client_build` 审计。校验码必须取自实际打包清单，不能只填写一个任意版本号。
 
 只写 `client_builds`，不修改推荐版本、下载地址、最低版本或暂停状态，不向公开接口提供测试包下载信息。重复登记同一版本和校验码成功；同体系同版本的校验码不能替换，正式发布也遵守此限制。管理员列表 `builds` 包含全部已登记构建，包括历史正式版和测试版；列表本身不代表更新推荐。
 
@@ -232,7 +234,7 @@ X-Studio-Build: <release.json 中的 build_sha256>
 ## 版本统计（服务端 1.6.4）
 
 `GET /admin/api/releases/statistics` 仅管理员会话可访问，响应禁止缓存。
-参数：`days=7|30|90|0`（默认 30，0 为全部）、`flavor=*|all|v34|v61|unknown`、`segment=all|old|required|attention`、`version`、`search`（账号）、`page`（从 1 开始，每页 50 条）。`version=unknown` 筛选未上报有效版本。
+参数：`days=7|30|90|0`（默认 30，0 为全部）、`flavor=*|all|v34|v61|batch|unknown`、`segment=all|old|required|attention`、`version`、`search`（账号）、`page`（从 1 开始，每页 50 条）。`version=unknown` 筛选未上报有效版本。
 
 返回 `summary` 去重账号计数与覆盖数、`distribution` 按版本/体系/状态的账号和设备记录数、`details` 当前页设备明细及 `total/page/page_size`。版本、账号搜索与 segment 只筛明细；观察期与体系同时筛汇总和明细。`enforcement_enabled` 为 false 时，低于最低版本计数表示恢复规则后涉及的账号。
 

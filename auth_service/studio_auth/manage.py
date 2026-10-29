@@ -56,8 +56,9 @@ def main():
     backup = cmds.add_parser("backup", help="生成一致性备份，拒绝覆盖已有文件")
     backup.add_argument("target")
     cmds.add_parser("prune", help="清理过期会话、限流计数和 90 天以前的审计记录")
-    version_check = cmds.add_parser("client-version-check", help="暂停/恢复所有客户端体系的版本校验，保留登录和账号授权")
+    version_check = cmds.add_parser("client-version-check", help="按应用暂停/恢复版本校验，保留登录和账号授权")
     version_check.add_argument("action", choices=["status", "pause", "resume"])
+    version_check.add_argument('--application', choices=['studio', 'batch'], default='studio')
     args = parser.parse_args()
     if args.db:
         os.environ["STUDIO_AUTH_DB"] = args.db
@@ -69,9 +70,10 @@ def main():
     if command == "client-version-check":
         from .store import client_version_check_enabled
         if args.action != "status":
-            service.store.set_client_version_check(args.action == "resume", "local-cli", service.now())
+            service.store.set_client_version_check(args.action == "resume", "local-cli", service.now(), args.application)
         with service.store.connect() as db:
-            enabled = client_version_check_enabled(db)
+            enabled = client_version_check_enabled(db, args.application)
+        print('应用：', args.application)
         print("数据库：", service.store.path)
         print("版本校验：" + ("已开启" if enabled else "已暂停；账号登录、有效期和 Key 授权照常检查"))
     elif command in ('add-admin', 'password-admin'):

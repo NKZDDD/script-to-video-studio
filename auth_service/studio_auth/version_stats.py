@@ -8,7 +8,7 @@ from fastapi import APIRouter, Query, Request
 
 from .admin import current
 from .service import digest
-from .store import client_version_check_enabled
+from .store import client_version_check_enabled, application_for_flavor
 
 
 router = APIRouter()
@@ -74,6 +74,7 @@ def classify(row, releases, builds):
 
 @router.get("/admin/api/releases/statistics")
 def statistics(request: Request, days: Literal["7", "30", "90", "0"] = "30",
+               application: Literal['studio', 'batch'] | None = None,
                flavor: Literal["*", "all", "v34", "v61", "batch", "unknown"] = "*",
                segment: Literal["all", "old", "required", "attention"] = "all",
                version: str = Query(default="", max_length=24),
@@ -93,7 +94,9 @@ def statistics(request: Request, days: Literal["7", "30", "90", "0"] = "30",
                           "ORDER BY o.last_seen_at DESC,o.user_id,o.device_hash,o.flavor").fetchall()
         releases = {r["flavor"]: json.loads(r["payload"]) for r in db.execute("SELECT * FROM client_releases")}
         builds = {(r["flavor"], r["version"]): r["build_sha256"] for r in db.execute("SELECT * FROM client_builds")}
-        enabled = client_version_check_enabled(db)
+        enabled = client_version_check_enabled(db, application or application_for_flavor(flavor))
+    if application:
+        rows = [r for r in rows if application_for_flavor(r['flavor']) == application]
     observed = {r["user_id"] for r in rows if r["user_id"] in eligible}
     candidates = [r for r in rows if r["user_id"] in eligible and (flavor == "*" or r["flavor"] == flavor)]
     active = [r for r in candidates if r["last_seen_at"] >= cutoff]

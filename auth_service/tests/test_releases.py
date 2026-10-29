@@ -204,7 +204,7 @@ def test_pause_persists_across_restart_and_publication_then_resume_restores_cata
     assert c.get("/api/v1/updates/latest", headers=headers("2026.10.20.2","c")).json()["client"]["allowed"]
     with auth.store.connect() as db:
         assert [r["target"] for r in db.execute(
-            "SELECT target FROM admin_audit WHERE action='client_version_check' ORDER BY id")] == ["paused","enabled"]
+            "SELECT target FROM admin_audit WHERE action='client_version_check' ORDER BY id")] == ["studio:paused","studio:enabled"]
 
 
 def test_existing_database_migrates_with_enforcement_enabled(env):

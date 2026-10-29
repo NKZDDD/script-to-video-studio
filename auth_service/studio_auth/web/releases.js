@@ -6,7 +6,12 @@
  const dialog=document.createElement('dialog');
  dialog.id='release-manager';
  dialog.setAttribute('aria-labelledby','release-title');
- const flavors={all:'全体系',v34:'电影级十七章',v61:'通用十二环节',batch:'对外批量版'};
+ const applications={studio:'Respect Studio',batch:'对外批量版'};
+ let application='studio';
+ const allFlavors={all:'全体系',v34:'电影级十七章',v61:'通用十二环节',batch:'对外批量版'};
+ let flavors={all:allFlavors.all,v34:allFlavors.v34,v61:allFlavors.v61};
+ const defaultFlavor=()=>application==='batch'?'batch':'all';
+ const checkImport=r=>{if(!Object.hasOwn(flavors,r.flavor)||(r.application&&r.application!==application))throw new Error('此清单属于其他应用，请先切换应用再导入');};
  const flavorOptions=Object.entries(flavors).map(([value,name])=>`<option value="${value}">${name}</option>`).join('');
  const importField=(label,filename)=>`<label class="release-import">
    <span class="release-import-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M12 17v-5m-3 3 3-3 3 3"/></svg></span>
@@ -16,6 +21,7 @@
    <div><p class="release-eyebrow">RESPECT STUDIO</p><h2 id="release-title">客户端版本</h2></div>
    <div class="release-header-actions"><span class="release-state" data-state-badge></span><button type="button" class="release-close" data-close aria-label="关闭版本管理">×</button></div>
  </div>
+ <div class="release-application"><label>管理应用 <select data-application><option value="studio">Respect Studio</option><option value="batch">对外批量版</option></select></label><span>版本、安装包和校验按应用独立；账号与 Key 池共用。</span></div>
  <nav class="release-tabs" role="tablist" aria-label="版本管理模块">
    <button type="button" role="tab" id="release-tab-overview" aria-controls="release-overview" aria-selected="true" data-view="overview">版本概览</button>
    <button type="button" role="tab" id="release-tab-statistics" aria-controls="release-statistics" aria-selected="false" tabindex="-1" data-view="statistics">版本统计</button>
@@ -28,7 +34,7 @@
      <div class="release-section-heading"><h3>发布状态，一目了然</h3><p>查看当前策略，或切换到需要的功能。</p></div>
      <div class="release-group">
        <div class="release-policy-row"><div><h4>版本校验</h4><p data-enforcement-status role="status"></p></div><button type="button" data-enforcement-toggle>读取状态…</button></div>
-       <div class="release-group-note">所有体系共用。暂停期间保留发布记录并隐藏更新推荐；账号登录与 Key 授权始终开启。</div>
+       <div class="release-group-note">仅影响当前选择的应用。暂停期间保留发布记录并隐藏本应用的更新推荐；另一应用、账号登录与 Key 授权不受影响。</div>
      </div>
      <p class="release-feedback" data-policy-status role="status"></p>
      <div class="release-section-label"><h4>当前发布</h4><span>按体系管理</span></div>
@@ -139,7 +145,7 @@
  const emptyList=(list,text)=>list.append(element('li',text,'release-empty'));
  const loadStatistics=async(focusDetails=false)=>{
    const ticket=++statsRequest;
-   const query=new URLSearchParams({days:stats('days').value,flavor:stats('flavor').value,segment:stats('segment').value,search:stats('search').value.trim(),version:statsVersion,page:String(statsPage)});
+   const query=new URLSearchParams({application,days:stats('days').value,flavor:stats('flavor').value,segment:stats('segment').value,search:stats('search').value.trim(),version:statsVersion,page:String(statsPage)});
    stats('content').hidden=true;feedback(stats('message'),'正在读取统计…');
    try{
      const data=await api('releases/statistics?'+query);
@@ -187,7 +193,7 @@
  stats('clear').onclick=()=>{statsVersion='';statsPage=1;loadStatistics(true);};
  stats('refresh').onclick=()=>loadStatistics();
  stats('prev').onclick=()=>{statsPage--;loadStatistics(true);};stats('next').onclick=()=>{statsPage++;loadStatistics(true);};
- stats('publish').onclick=()=>{const flavor=flavors[stats('flavor').value]?stats('flavor').value:'all';fill(catalog.releases.find(r=>r.flavor===flavor)||{flavor});feedback(status,'请根据统计确认版本策略，保存后才会生效。');showView('publish');};
+ stats('publish').onclick=()=>{const flavor=flavors[stats('flavor').value]?stats('flavor').value:defaultFlavor();fill(catalog.releases.find(r=>r.flavor===flavor)||{flavor});feedback(status,'请根据统计确认版本策略，保存后才会生效。');showView('publish');};
  const toggle=dialog.querySelector('[data-enforcement-toggle]');
  const showEnforcement=()=>{
    const enabled=catalog.enforcement_enabled!==false;
@@ -219,7 +225,7 @@
  };
  const fill=r=>{
    for(const key of ['flavor','version','url','sha256','build_sha256','bytes','notes'])
-     form.elements[key].value=r?.[key]??(key==='flavor'?'all':'');
+     form.elements[key].value=r?.[key]??(key==='flavor'?defaultFlavor():'');
    form.elements.manifest.value='';
    dialog.querySelector('[data-filename=publish]').textContent=r?.url?'已保存的发布信息 · 可导入新清单':'选择 release.json 或 release.r2.json';
    minimumOptions(r?.minimum_version||(r?.mandatory?r.version:previous()?.minimum_version)||'0.0.0.0');
@@ -242,7 +248,10 @@
    if(!builds.length){const empty=document.createElement('li');empty.className='release-empty';empty.textContent='暂无构建，可先在「测试登记」中导入版本信息。';list.append(empty);}
  };
  const refresh=async()=>{
-   catalog=await api('releases');catalog.builds||=[];showEnforcement();showBuilds();
+   const requestedApp=application;
+   const next=await api('releases?application='+requestedApp);
+   if(application!==requestedApp)return;
+   catalog=next;catalog.builds||=[];showEnforcement();showBuilds();
    const overview=dialog.querySelector('[data-release-overview]');overview.replaceChildren();
    for(const [flavor,name] of Object.entries(flavors)){
      const row=catalog.releases.find(r=>r.flavor===flavor);
@@ -257,45 +266,64 @@
      card.append(manage);overview.append(card);
    }
  };
+
+ dialog.querySelector('[data-application]').onchange=()=>safe(async()=>{
+   application=dialog.querySelector('[data-application]').value;
+   flavors=application==='batch'?{batch:allFlavors.batch}:{all:allFlavors.all,v34:allFlavors.v34,v61:allFlavors.v61};
+   statsRequest++;statsPage=1;statsVersion='';
+   for(const select of [form.elements.flavor,testForm.elements.flavor,stats('flavor'),dialog.querySelector('[data-build-filter]')]){
+     select.replaceChildren();
+     if(select===stats('flavor')||select.hasAttribute('data-build-filter'))select.add(new Option('本应用所有体系','*'));
+     for(const [value,label] of Object.entries(flavors))select.add(new Option(label,value));
+   }
+   testForm.reset();fill({flavor:defaultFlavor()});
+   feedback(testStatus,'');feedback(status,'');feedback(policyStatus,'');
+   dialog.querySelector('[data-filename=test]').textContent='选择 release.json 或 release.r2.json';
+   stats('content').hidden=true;
+   await refresh();fill(catalog.releases.find(r=>r.flavor===defaultFlavor())||{flavor:defaultFlavor()});
+   showView('overview');
+ });
  dialog.querySelector('[data-build-filter]').onchange=showBuilds;
  toggle.onclick=async()=>{
    toggle.disabled=true;
    try {
      const enabled=catalog.enforcement_enabled===false;
-     await api('releases/enforcement',{enabled});await refresh();
+     await api('releases/enforcement',{enabled,application});await refresh();
      feedback(policyStatus,enabled?'已恢复原版本规则，客户端下次校验时生效。':'已暂停校验。发布新版后仍需手动恢复。');
    } catch(error){feedback(policyStatus,error.message,true);}
    finally{toggle.disabled=false;}
  };
  dialog.querySelector('[data-close]').onclick=()=>dialog.close();
  button.onclick=()=>safe(async()=>{
-   await refresh();fill(catalog.releases.find(r=>r.flavor==='all'));
+   await refresh();fill(catalog.releases.find(r=>r.flavor===defaultFlavor())||{flavor:defaultFlavor()});
    feedback(status,'');feedback(policyStatus,'');showView('overview');dialog.showModal();
  });
  testForm.elements.manifest.onchange=async e=>{
    try {
      const r=JSON.parse(await e.target.files[0].text());
-     if(!['all','v34','v61','batch'].includes(r.flavor)||!/^\d{1,5}(\.\d{1,5}){3}$/.test(r.version)||!/^[a-f0-9]{64}$/.test(r.build_sha256))throw new Error();
+     checkImport(r);
+     if(!Object.hasOwn(flavors,r.flavor)||!/^\d{1,5}(\.\d{1,5}){3}$/.test(r.version)||!/^[a-f0-9]{64}$/.test(r.build_sha256))throw new Error();
      for(const key of ['flavor','version','build_sha256'])testForm.elements[key].value=r[key];
      dialog.querySelector('[data-filename=test]').textContent=e.target.files[0].name;
      feedback(testStatus,'已读取测试包信息，确认后点击“登记测试版本”。');
-   }catch{testForm.reset();dialog.querySelector('[data-filename=test]').textContent='选择 release.json 或 release.r2.json';feedback(testStatus,'文件无效，请导入含构建校验码的打包清单。',true);}
+   }catch(error){testForm.reset();dialog.querySelector('[data-filename=test]').textContent='选择 release.json 或 release.r2.json';feedback(testStatus,error.message||'文件无效，请导入含构建校验码的打包清单。',true);}
  };
  testForm.onsubmit=async e=>{
    e.preventDefault();const submit=testForm.querySelector('[type=submit]');submit.disabled=true;
    try {
      const data={};for(const key of ['flavor','version','build_sha256'])data[key]=testForm.elements[key].value.trim();
+     data.application=application;
      await api('releases/builds',data);await refresh();minimumOptions(form.elements.minimum_version.value);
      feedback(testStatus,`${data.version} 已登记，未推送更新。`+(catalog.enforcement_enabled===false?' 版本校验仍暂停。':''));
    }catch(error){feedback(testStatus,error.message,true);}finally{submit.disabled=false;}
  };
  form.elements.flavor.onchange=()=>safe(async()=>{const f=form.elements.flavor.value;await refresh();fill(catalog.releases.find(r=>r.flavor===f)||{flavor:f});feedback(status,'');});
  form.elements.version.onchange=()=>minimumOptions(form.elements.minimum_version.value);
- form.elements.manifest.onchange=async e=>{try{const file=e.target.files[0],r=JSON.parse(await file.text());fill(r);dialog.querySelector('[data-filename=publish]').textContent=file.name;feedback(status,'已读取版本信息，请确认推荐版本和最低可用版本。');}catch{feedback(status,'版本信息文件无效。',true);}};
+ form.elements.manifest.onchange=async e=>{try{const file=e.target.files[0],r=JSON.parse(await file.text());checkImport(r);fill(r);dialog.querySelector('[data-filename=publish]').textContent=file.name;feedback(status,'已读取版本信息，请确认推荐版本和最低可用版本。');}catch(error){feedback(status,error.message||'版本信息文件无效。',true);}};
  form.addEventListener('invalid',e=>{const details=e.target.closest('details');if(details)details.open=true;},true);
  form.onsubmit=async e=>{e.preventDefault();const submit=form.querySelector('[type=submit]');submit.disabled=true;try{
    const data={};for(const key of ['flavor','version','url','sha256','build_sha256','notes','minimum_version'])data[key]=form.elements[key].value.trim();
-   data.bytes=Number(form.elements.bytes.value);
+   data.application=application;data.bytes=Number(form.elements.bytes.value);
    await api('releases',data);await refresh();fill(catalog.releases.find(r=>r.flavor===data.flavor));
    feedback(status,catalog.enforcement_enabled===false?
      '已保存。版本校验仍暂停，分发完成后请在概览中恢复。':

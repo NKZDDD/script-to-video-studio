@@ -16,6 +16,12 @@ CREATE TABLE IF NOT EXISTS client_version_policy (
     id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
 );
 INSERT OR IGNORE INTO client_version_policy VALUES(1,1);
+CREATE TABLE IF NOT EXISTS application_version_policy (
+    application TEXT PRIMARY KEY CHECK(application IN ('studio','batch')),
+    enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
+);
+INSERT OR IGNORE INTO application_version_policy SELECT 'studio',enabled FROM client_version_policy WHERE id=1;
+INSERT OR IGNORE INTO application_version_policy SELECT 'batch',enabled FROM client_version_policy WHERE id=1;
 CREATE TABLE IF NOT EXISTS client_releases (
     flavor TEXT PRIMARY KEY, payload TEXT NOT NULL
 );
@@ -148,15 +154,21 @@ class Store:
             finally:
                 dest.close()
 
-    def set_client_version_check(self, enabled, actor, now):
+    def set_client_version_check(self, enabled, actor, now, application='studio'):
+        if application not in ('studio', 'batch'):
+            raise ValueError('未知应用')
         with self.connect(write=True) as db:
-            db.execute("UPDATE client_version_policy SET enabled=? WHERE id=1", (int(enabled),))
+            db.execute("UPDATE application_version_policy SET enabled=? WHERE application=?", (int(enabled), application))
             db.execute("INSERT INTO admin_audit(at,administrator,action,target) VALUES(?,?,?,?)",
-                       (now, actor, "client_version_check", "enabled" if enabled else "paused"))
+                       (now, actor, "client_version_check", application + ':' + ("enabled" if enabled else "paused")))
 
 
-def client_version_check_enabled(db):
-    row = db.execute("SELECT enabled FROM client_version_policy WHERE id=1").fetchone()
+def application_for_flavor(flavor):
+    return 'batch' if flavor == 'batch' else 'studio'
+
+
+def client_version_check_enabled(db, application='studio'):
+    row = db.execute("SELECT enabled FROM application_version_policy WHERE application=?", (application,)).fetchone()
     return row is None or bool(row["enabled"])
 
 

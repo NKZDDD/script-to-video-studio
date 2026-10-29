@@ -173,3 +173,5 @@
   #release-manager .release-device-meta { text-align: left; }
 }
 @media(prefers-reduced-motion:reduce) { #release-manager button { transition: none; } }
+
+.release-application{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:16px 28px;background:#f5f5f7}.release-application label{font-weight:600}.release-application select{margin-left:10px;padding:9px 14px;border:1px solid #d2d7df;border-radius:10px;background:white}.release-application span{font-size:13px;color:#667085}
