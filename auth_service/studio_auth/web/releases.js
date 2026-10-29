@@ -6,7 +6,7 @@
  const dialog=document.createElement('dialog');
  dialog.id='release-manager';
  dialog.setAttribute('aria-labelledby','release-title');
- const flavors={all:'全体系',v34:'电影级十七章',v61:'通用十二环节'};
+ const flavors={all:'全体系',v34:'电影级十七章',v61:'通用十二环节',batch:'对外批量版'};
  const flavorOptions=Object.entries(flavors).map(([value,name])=>`<option value="${value}">${name}</option>`).join('');
  const importField=(label,filename)=>`<label class="release-import">
    <span class="release-import-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M12 17v-5m-3 3 3-3 3 3"/></svg></span>
@@ -275,7 +275,7 @@
  testForm.elements.manifest.onchange=async e=>{
    try {
      const r=JSON.parse(await e.target.files[0].text());
-     if(!['all','v34','v61'].includes(r.flavor)||!/^\d{1,5}(\.\d{1,5}){3}$/.test(r.version)||!/^[a-f0-9]{64}$/.test(r.build_sha256))throw new Error();
+     if(!['all','v34','v61','batch'].includes(r.flavor)||!/^\d{1,5}(\.\d{1,5}){3}$/.test(r.version)||!/^[a-f0-9]{64}$/.test(r.build_sha256))throw new Error();
      for(const key of ['flavor','version','build_sha256'])testForm.elements[key].value=r[key];
      dialog.querySelector('[data-filename=test]').textContent=e.target.files[0].name;
      feedback(testStatus,'已读取测试包信息，确认后点击“登记测试版本”。');

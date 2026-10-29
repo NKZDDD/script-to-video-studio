@@ -12,6 +12,7 @@ TOP.add("R2-UPGRADE.md")
 TOP.add("PROVIDER-ADAPTER-UPGRADE.md")
 TOP.add("REQUEST-LOGS-UPGRADE.md")
 TOP.add("LLM-CONFIG-UPGRADE.md")
+TOP.add("BATCH-CLIENT-UPGRADE.md")
 TREES = {"studio_auth", "deploy", "examples", "tests", "tools"}
 SUFFIXES = {".py", ".sh", ".service", ".timer", ".conf", ".html", ".css", ".js"}
 

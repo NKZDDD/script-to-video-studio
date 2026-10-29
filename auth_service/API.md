@@ -1,5 +1,7 @@
 # Studio 登录服务 API v1
 
+服务端 1.10.1 起，版本登记、发布、校验与统计的 `flavor` 额外接受 `batch`（对外批量版）；其版本策略与 `all/v34/v61` 独立。登录、账号 Key 配置、用量上报协议不变。
+
 域名示例：`https://auth.example.com`。所有 POST 使用 `Content-Type: application/json`。所有时间字段为 Unix 秒；请求体上限 16 KiB。不要把密码或 Token 放在 URL 查询参数里。
 
 由 Studio Python 后端请求；本服务不开放跨域浏览器调用。下面的密码和凭证均为占位示例，不是可用账号。

@@ -12,7 +12,7 @@ from .store import client_version_check_enabled
 
 
 router = APIRouter()
-FLAVORS = ("all", "v34", "v61")
+FLAVORS = ("all", "v34", "v61", "batch")
 VERSION = re.compile(r"[0-9]{1,5}(?:\.[0-9]{1,5}){3}")
 BUILD = re.compile(r"[a-f0-9]{64}")
 
@@ -74,7 +74,7 @@ def classify(row, releases, builds):
 
 @router.get("/admin/api/releases/statistics")
 def statistics(request: Request, days: Literal["7", "30", "90", "0"] = "30",
-               flavor: Literal["*", "all", "v34", "v61", "unknown"] = "*",
+               flavor: Literal["*", "all", "v34", "v61", "batch", "unknown"] = "*",
                segment: Literal["all", "old", "required", "attention"] = "all",
                version: str = Query(default="", max_length=24),
                search: str = Query(default="", max_length=64),

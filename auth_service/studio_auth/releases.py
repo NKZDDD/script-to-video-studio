@@ -17,7 +17,7 @@ router = APIRouter()
 class Release(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     version: str = Field(pattern=r"^\d{1,5}(\.\d{1,5}){3}$")
-    flavor: str = Field(pattern=r"^(all|v34|v61)$")
+    flavor: str = Field(pattern=r"^(all|v34|v61|batch)$")
     url: str = Field(max_length=2048)
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     bytes: int = Field(gt=0, le=2 * 1024**3)
@@ -49,7 +49,7 @@ class Enforcement(BaseModel):
 class BuildRegistration(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     version: str = Field(pattern=r"^\d{1,5}(\.\d{1,5}){3}$")
-    flavor: str = Field(pattern=r"^(all|v34|v61)$")
+    flavor: str = Field(pattern=r"^(all|v34|v61|batch)$")
     build_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -139,7 +139,7 @@ def publish(body: Release, request: Request):
 
 @router.get("/api/v1/updates/latest")
 def latest(request: Request, flavor: str = "all"):
-    if flavor not in ("all", "v34", "v61"):
+    if flavor not in ("all", "v34", "v61", "batch"):
         raise AuthError(400, "invalid_flavor", "未知客户端体系")
     with request.app.state.auth.store.connect() as db:
         enabled = client_version_check_enabled(db)
@@ -165,7 +165,7 @@ def client_status(request, flavor=None, *, enforced=None):
         releases = {r["flavor"]: json.loads(r["payload"]) for r in rows}
         current_release = releases.get(flavor)
         any_enforced = any(r.get("enforce_build") for r in releases.values())
-        if flavor not in ("all", "v34", "v61") or request.headers.get("x-studio-flavor") != flavor:
+        if flavor not in ("all", "v34", "v61", "batch") or request.headers.get("x-studio-flavor") != flavor:
             return {"allowed": not any_enforced and not v, "code": "client_unregistered",
                     "message": "客户端缺少版本登记，请安装最新 Studio"}
         if not v and (not current_release or not current_release.get("enforce_build")):
