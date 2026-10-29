@@ -100,13 +100,16 @@ def audit(nodes, ratio=""):
     return out
 
 
-def freeze_source(pj, task, srcs):
-    """Snapshot actual C bytes before upload, with a persistent version/hash guard.
+def freeze_source(pj, task, srcs, log=None):
+    """Snapshot actual C bytes before upload, and warn when C was re-rolled.
 
-    Hashing/network reads happen outside the shared state lock. The returned local
-    snapshot is what the adapter uploads, so changes to the original cannot mix
-    two versions between hash collection and request submission.
-    """
+Hashing/network reads happen outside the shared state lock. The returned local
+snapshot is what the adapter uploads, so changes to the original cannot mix
+two versions between hash collection and request submission.
+
+同 key 的 C 允许换内容（重抽/换服务商/同名覆盖）：始终按最新版出图，只把新
+摘要记进证据并留一条警告。抽卡不能被锁死，混版的后果交给用户按提示重产。
+"""
     if not is_single(task) or task.get("view") not in ("A", "B"):
         return srcs, {}
     import hashlib
@@ -143,9 +146,15 @@ def freeze_source(pj, task, srcs):
     evidence = {"c_key": task["c_key"], "file_ref": source, "sha256": sha, "snapshot": relative}
     with _SOURCE_LOCK:
         previous = read_json(record, {}) or {}
-        if previous and previous != evidence:
-            raise ValueError("同 key 的 C 文件已改变，不能混用不同版本；请为 C 换新 key/文件名并重新发布相关 A/B 和视频")
-        if not previous:
+        if not isinstance(previous, dict):
+            previous = {}
+        if previous and previous.get("sha256") != sha:
+            if log:
+                log(f"⚠️ {task['key']}：C {task['c_key']} 的内容已换版（"
+                    f"{str(previous.get('sha256') or '')[:12]} → {sha[:12]}"
+                    "），本次按最新版出图；此前用旧版 C 出的 A/B 和视频可能与它不一致，需要时请一并重产。")
+        # Track the current snapshot while retaining older content-addressed files.
+        if previous != evidence:
             write_json(record, evidence)
     actual = list(srcs)
     actual[index] = (ref, relative)

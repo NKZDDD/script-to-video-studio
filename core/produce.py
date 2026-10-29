@@ -931,7 +931,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
             if map_warn:
                 log(f"⚠️ {map_warn}")
         from .single_handoff import freeze_source
-        srcs, source_meta = freeze_source(pj, task, srcs)
+        srcs, source_meta = freeze_source(pj, task, srcs, log)
         resolution = (task.get("params") or {}).get("resolution", "")
         ident = submitted.identity(prompt=prompt, refs=[s for _, s in srcs], size=want,
                                    resolution=resolution, provider=provider_cfg["provider"], model=model)

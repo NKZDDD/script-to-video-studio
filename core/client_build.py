@@ -8,7 +8,7 @@ import re
 
 from . import build_info, paths
 
-VERSION = "2026.10.27.2"
+VERSION = "2026.10.28.2"
 MANIFEST = "studio-build.json"
 
 

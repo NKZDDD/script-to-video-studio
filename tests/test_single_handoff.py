@@ -176,7 +176,7 @@ def test_video_worker_uses_single_b_c_in_order(setup):
     assert [Path(f).parent.name for f in provider.sent[0].refs] == ['B', 'C']
 
 
-def test_actual_c_is_snapshotted_and_changed_version_is_blocked(setup):
+def test_actual_c_is_snapshotted_and_reroll_warns_without_blocking(setup):
     pj, _ = setup
     c, a, b = M.build(parsed(rows()))['tasks']['handoff_tasks']
     put(pj, c['output'])
@@ -186,8 +186,39 @@ def test_actual_c_is_snapshotted_and_changed_version_is_blocked(setup):
     assert meta['handoff_source']['sha256'] == A.digest(Path(pj.p(c['output'])).read_bytes())
     assert S.freeze_source(pj, b, srcs) == (actual, meta)
     put(pj, c['output'], b'new-version')
-    with pytest.raises(ValueError, match='同 key'): S.freeze_source(pj, b, srcs)
+    logs = []
+    fresh, fresh_meta = S.freeze_source(pj, b, srcs, logs.append)
+    assert fresh[0][1] != actual[0][1]
+    assert Path(pj.p(fresh[0][1])).read_bytes() == b'new-version'
+    assert fresh_meta['handoff_source']['sha256'] == A.digest(b'new-version')
+    assert len(logs) == 1 and '本次按最新版出图' in logs[0] and '旧版 C' in logs[0]
+    assert S.freeze_source(pj, a, srcs, logs.append) == (fresh, fresh_meta)
+    assert len(logs) == 1  # unchanged bytes do not warn again for the other view
+    record = next(Path(pj.p('07_检查与记录/handoff-sources')).glob('*.json'))
+    assert json.loads(record.read_text(encoding='utf-8')) == fresh_meta['handoff_source']
     assert Path(pj.p(actual[0][1])).read_bytes() != b'new-version'
+
+
+@pytest.mark.parametrize('count', [0, 2])
+def test_unlock_still_requires_one_c_source(setup, count):
+    pj, _ = setup
+    c, a, _ = M.build(parsed(rows()))['tasks']['handoff_tasks']
+    put(pj, c['output'])
+    srcs = [(r, r['file_ref']) for r in a['reference_images']] * count
+    with pytest.raises(ValueError, match='缺少唯一'):
+        S.freeze_source(pj, a, srcs)
+
+
+def test_old_malformed_source_record_does_not_lock_rerolls(setup):
+    pj, _ = setup
+    c, a, _ = M.build(parsed(rows()))['tasks']['handoff_tasks']
+    put(pj, c['output'])
+    srcs = [(r, r['file_ref']) for r in a['reference_images']]
+    actual, meta = S.freeze_source(pj, a, srcs)
+    record = next(Path(pj.p('07_检查与记录/handoff-sources')).glob('*.json'))
+    write_json(str(record), ['old-invalid-record'])
+    assert S.freeze_source(pj, a, srcs) == (actual, meta)
+    assert json.loads(record.read_text(encoding='utf-8')) == meta['handoff_source']
 
 
 def test_image_worker_uses_snapshot_and_records_source_for_resource_alias(setup, monkeypatch):
@@ -212,6 +243,68 @@ def test_image_worker_uses_snapshot_and_records_source_for_resource_alias(setup,
     record = next(r for r in pj.registry('storyboard') if r['id'] == a['key'])
     assert record['handoff_source']['c_key'] == c['key']
     assert record['handoff_source']['sha256'] == A.digest(Path(pj.p(c['output'])).read_bytes())
+
+
+@pytest.mark.parametrize('system', ['v34', 'v61'])
+def test_rerolled_c_reaches_image_provider_and_keeps_previous_output_evidence(setup, monkeypatch, system):
+    from core import produce
+    pj, provider = setup
+    built = M.build(parsed(rows()), system=system)
+    pj.save_meta({'system': system}); pj.save_tasks(built['tasks'])
+    c, a, b = built['tasks']['handoff_tasks']
+    for rel, text in built['prompts'].items(): write_text(pj.p(rel), text)
+    put(pj, c['output'])
+    original = Path(pj.p(c['output'])).read_bytes()
+    sent = []
+    def generate(task, dest, **kw):
+        sent.append(Path(task.refs[0]).read_bytes())
+        image(dest)
+        return {'task_id': 'test-reroll-' + str(len(sent))}
+    monkeypatch.setattr(provider, 'generate_image', generate)
+    cfg = {'provider':'mock', 'api_key':'x', 'model':'m', 'agent_mode':True, 'soften_rounds':0}
+    worker = produce.make_image_worker(pj, cfg, 'storyboard')
+    worker(a, lambda _: None, lambda: False)
+    image(pj.p(c['output']))
+    latest = Path(pj.p(c['output'])).read_bytes()
+    logs = []
+    worker(b, logs.append, lambda: False)
+    records = {r['id']: r for r in pj.registry('storyboard')}
+    assert sent == [original, latest]
+    assert records[a['key']]['handoff_source']['sha256'] == A.digest(original)
+    assert records[b['key']]['handoff_source']['sha256'] == A.digest(latest)
+    assert any('本次按最新版出图' in line for line in logs)
+    assert Path(pj.p(records[a['key']]['handoff_source']['snapshot'])).read_bytes() == original
+
+
+def test_pending_a_resumes_old_job_and_keeps_old_c_evidence_after_reroll(setup, monkeypatch):
+    from core import produce, submitted
+    from core.apiutil import ApiError
+    pj, provider = setup
+    built = M.build(parsed(rows()), system='v34'); pj.save_tasks(built['tasks'])
+    c, a, _ = built['tasks']['handoff_tasks']
+    for rel, text in built['prompts'].items(): write_text(pj.p(rel), text)
+    put(pj, c['output'])
+    original = Path(pj.p(c['output'])).read_bytes()
+    calls = []
+    def generate(task, dest, **kw):
+        calls.append(('create', Path(task.refs[0]).read_bytes()))
+        submitted.remember('pending-a', custom='fixture')
+        raise ApiError('模拟查询超时')
+    def resume(record, dest, **kw):
+        calls.append(('resume', record['task_id']))
+        image(dest)
+        return {'task_id': record['task_id'], 'resumed': True}
+    monkeypatch.setattr(provider, 'generate_image', generate)
+    monkeypatch.setattr(provider, 'resume', resume)
+    worker = produce.make_image_worker(pj, {'provider':'mock', 'api_key':'x', 'model':'m', 'agent_mode':True, 'soften_rounds':0}, 'storyboard')
+    with pytest.raises(ApiError, match='原任务 ID 已保留'):
+        worker(a, lambda _: None, lambda: False)
+    image(pj.p(c['output']))
+    result = worker(a, lambda _: None, lambda: False)
+    assert result['resumed'] is True
+    assert calls == [('create', original), ('resume', 'pending-a')]
+    record = next(r for r in pj.registry('storyboard') if r['id'] == a['key'])
+    assert record['handoff_source']['sha256'] == A.digest(original)
 
 
 def test_existing_project_schema_updated_with_contract(pj):
