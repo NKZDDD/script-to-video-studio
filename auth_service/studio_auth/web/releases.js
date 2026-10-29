@@ -21,7 +21,7 @@
    <div><p class="release-eyebrow">RESPECT STUDIO</p><h2 id="release-title">客户端版本</h2></div>
    <div class="release-header-actions"><span class="release-state" data-state-badge></span><button type="button" class="release-close" data-close aria-label="关闭版本管理">×</button></div>
  </div>
- <div class="release-application"><label>管理应用 <select data-application><option value="studio">Respect Studio</option><option value="batch">对外批量版</option></select></label><span>版本、安装包和校验按应用独立；账号与 Key 池共用。</span></div>
+ <div class="release-application"><label>管理应用<select data-application aria-describedby="release-application-help"><option value="studio">Respect Studio</option><option value="batch">对外批量版</option></select></label><p id="release-application-help">切换要管理更新的应用。同一账号可登录两个应用，Key 池共用。</p></div>
  <nav class="release-tabs" role="tablist" aria-label="版本管理模块">
    <button type="button" role="tab" id="release-tab-overview" aria-controls="release-overview" aria-selected="true" data-view="overview">版本概览</button>
    <button type="button" role="tab" id="release-tab-statistics" aria-controls="release-statistics" aria-selected="false" tabindex="-1" data-view="statistics">版本统计</button>

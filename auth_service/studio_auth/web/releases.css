@@ -174,4 +174,16 @@
 }
 @media(prefers-reduced-motion:reduce) { #release-manager button { transition: none; } }
 
-.release-application{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:16px 28px;background:#f5f5f7}.release-application label{font-weight:600}.release-application select{margin-left:10px;padding:9px 14px;border:1px solid #d2d7df;border-radius:10px;background:white}.release-application span{font-size:13px;color:#667085}
+#release-manager .release-application {
+  display: grid; grid-template-columns: 240px minmax(0, 1fr); align-items: end;
+  gap: 16px 20px; padding: 16px 28px 20px; flex: 0 0 auto;
+}
+#release-manager .release-application label {
+  display: grid; gap: 8px; margin: 0; min-width: 0; font-size: 13px; font-weight: 600;
+}
+#release-manager .release-application select { margin: 0; background: #fff; }
+#release-manager .release-application p { color: var(--release-muted); font-size: 12px; padding-bottom: 10px; }
+@media(max-width:700px) {
+  #release-manager .release-application { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 12px 18px 18px; }
+  #release-manager .release-application p { padding-bottom: 0; }
+}

@@ -5,3 +5,23 @@
 .key-checkbox{width:auto}.key-order{display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid #dce4f0;border-radius:8px;margin:8px 0}.key-order span{flex:1}.key-order small{display:block;color:#6a7b91;margin-top:5px}#key-edit{border-top:1px solid #dce4f0;padding-top:10px}
 
 #request-diagnostics{width:min(1400px,96vw)}#request-diagnostics .toolbar{flex-wrap:wrap;padding:0;align-items:end}#request-diagnostics .toolbar label{min-width:120px;flex:1}#request-diagnostics td{overflow-wrap:anywhere;max-width:300px}#diagnostics-message{color:#b23528}
+
+/* Date controls must fit their grid cell, including under browser zoom. */
+#provisioning #usage-filter {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px; align-items: end; margin: 24px 0; padding: 0;
+}
+#provisioning #usage-filter label { display: grid; gap: 8px; min-width: 0; margin: 0; }
+#provisioning #usage-filter input, #provisioning #usage-filter select {
+  width: 100%; min-width: 0; max-width: none; min-height: 44px;
+}
+#provisioning .usage-filter-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+#provisioning .usage-filter-actions button { min-height: 44px; }
+@media(max-width:760px) {
+  #provisioning #usage-filter { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #provisioning .usage-filter-actions { grid-column: 1 / -1; }
+}
+@media(max-width:520px) {
+  #provisioning #usage-filter { grid-template-columns: minmax(0, 1fr); }
+  #provisioning .usage-filter-actions button { flex: 1; }
+}
