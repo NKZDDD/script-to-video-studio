@@ -16,7 +16,7 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
-RUNTIME_MODULES = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore",
+RUNTIME_MODULES = ["pypdf", "pymupdf", "fitz", "cryptography", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore",
                    "psutil", "webview",
                    "core.agent_projects", "core.agent_runtime", "core.agent_handoff",
                    "core.assemble", "core.bulk_place", "core.recycle", "core.submitted",

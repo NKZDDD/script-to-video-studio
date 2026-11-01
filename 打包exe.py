@@ -88,6 +88,9 @@ REQUIRED = {
            "请求体大几倍，更容易撞网关体积上限（踩过）",
     "pypdf": "读 PDF 剧本 —— 缺了传 PDF 直接失败，"
              "而报错写的是「pip install pypdf」，exe 用户照不了",
+    "fitz": "PDF 解析兜底（PyMuPDF）—— pypdf 提取为空时靠它，"
+            "缺了扫描件 / 部分排版直接读不出字",
+    "cryptography": "登录凭据与授权校验的加密原语 —— 缺了相关接口会失败",
     "imageio_ffmpeg": "拼接成片的兜底 ffmpeg —— 目标机器装了系统 ffmpeg "
                       "也行，但不能赌它装了",
     "psutil": "当前线程、CPU / 内存与并发建议，Agent 工作台必备",
@@ -98,8 +101,10 @@ REQUIRED = {
 OPTIONAL = {
 }
 
-# 这些包 PyInstaller 有时扫不出来（运行时才 import 的），显式点名
-HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg", "psutil"]
+# 这些包 PyInstaller 有时扫不出来（运行时才 import 的），显式点名。
+# fitz 是 PyMuPDF 的兼容入口（core/docparse.py 用的就是它），pymupdf._extra
+# 是 pymupdf 在 import 时无条件加载的扩展，漏了会整个 import 失败。
+HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "fitz", "pymupdf._extra", "imageio_ffmpeg", "psutil"]
 
 # --hidden-import 只带入口模块，不保证子模块、证书、Pillow 插件或 ffmpeg.exe。
 # 这些发布库必须用 --collect-all 做完整收集。
@@ -108,7 +113,7 @@ HIDDEN = ["boto3", "botocore", "PIL", "pypdf", "imageio_ffmpeg", "psutil"]
 # 表现是打包脚本自检全绿、依赖全 ✓，走到拼命令那一行才 NameError。
 COLLECT_ALL = ["webview", "requests", "certifi", "urllib3", "charset_normalizer",
                "boto3", "botocore", "s3transfer", "PIL",
-               "pypdf", "imageio_ffmpeg"]
+               "pypdf", "pymupdf", "cryptography", "imageio_ffmpeg"]
 
 EXCLUDE = ["PyQt5", "qfluentwidgets", "qframelesswindow", "PyQt5.QtWebEngine", "PySide2", "PySide6", "PyQt6",
            "videocaptioner", "core.subtitle", "core.captions", "core.agent_post", "audioop", "pydub",
@@ -118,7 +123,7 @@ EXCLUDE = ["PyQt5", "qfluentwidgets", "qframelesswindow", "PyQt5.QtWebEngine", "
 #
 # 「打包机器上装了」和「进了包」是两件事：PyInstaller 扫不到的运行时
 # import 会被漏掉，而漏掉不报错。所以必须让 exe 自己回答。
-MUST_IMPORT = ["pypdf", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore", "psutil", "webview"]
+MUST_IMPORT = ["pypdf", "pymupdf", "fitz", "cryptography", "PIL.Image", "imageio_ffmpeg", "boto3", "botocore", "psutil", "webview"]
 
 
 def check_page() -> bool:
