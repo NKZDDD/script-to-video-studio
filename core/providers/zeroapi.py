@@ -56,11 +56,12 @@ def _ratio_of(want: str) -> str:
 
 
 def _snap(val: int, allowed: list, log: Callable, model: str, field: str) -> int:
-    if val in allowed:
-        return val
-    near = min(allowed, key=lambda a: abs(a - val))
-    log(f"零视 {model} 的 {field} 只能是 {allowed}，已把 {val} 纠正为 {near}")
-    return near
+    """按分镜要求的秒数原样发出，本地不吸附到档位。
+
+    档位列表只用于页面提示：新模型上线后旧列表就过期，吸附会把
+    「30 秒」静默改成 15/20 秒，而任务照样按原时长计费。
+    """
+    return max(1, int(val))
 
 
 class ZeroApiProvider(Provider):
@@ -91,7 +92,7 @@ class ZeroApiProvider(Provider):
                 "models": I2V_MODELS + SORA_MODELS + SD2_MODELS,
                 "default_model": "seedance_2_fast_480p",
                 "ratios": RATIOS,
-                "durations": I2V_DURATIONS,
+                "durations": list(range(1, 31)),
                 "default_duration": 10,
                 "resolutions": [""],
                 "max_refs": 9,

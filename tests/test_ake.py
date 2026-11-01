@@ -21,8 +21,8 @@ class AkeTests(unittest.TestCase):
         self.assertEqual(AkeProvider.ref_mode, "url")
 
     def test_model_limits(self):
-        self.assertEqual(_duration("wan3.0-video", 40), 30)
-        self.assertEqual(_duration("grok-imagine-video-1.5", 2), 4)
+        self.assertEqual(_duration("wan3.0-video", 40), 40)
+        self.assertEqual(_duration("grok-imagine-video-1.5", 2), 2)
         self.assertEqual(_duration("wan-3.0", 60), 60)
         self.assertEqual(_limits("wan3.0-video"), (10, 5, 5))
         self.assertEqual(_limits("wan3.0-image"), (10, 0, 5))
