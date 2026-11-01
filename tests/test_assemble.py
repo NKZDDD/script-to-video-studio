@@ -71,6 +71,28 @@ def test_project_segments_of_different_picture_are_refused(pj):
     assert not list(Path(pj.p("06_成片")).glob("*.mp4"))
 
 
+def test_fit_mismatch_scales_different_segments_to_the_base_size(pj):
+    """勾选「允许统一缩放规格」后，规格不同的本集分段也缩放到基准尺寸，剪映那条路。"""
+    clip(pj.p("05_分段视频", "EP01-SEG02.mp4"), size="640x360")
+    d = assemble.build(pj, "EP01", ["05_分段视频/EP01-SEG01.mp4", "05_分段视频/EP01-SEG02.mp4"],
+                       fit_mismatch=True)
+    assert "统一规格拼接" in d["mode"] and "320x240" in d["mode"]
+    info = probe.media_info(pj.p(*d["rel"].split("/")))
+    assert (info["width"], info["height"]) == (320, 240)
+    assert info["duration"] == pytest.approx(2, abs=0.3)
+
+
+def test_specs_flags_mismatched_segments_but_ignores_inserted_video(pj):
+    """合成前预检：只报本集分段规格不一致，外部视频会自动适配不算冲突。"""
+    clip(pj.p("05_分段视频", "EP01-SEG02.mp4"), size="640x360")
+    same = assemble.specs(pj, "EP01", ["05_分段视频/EP01-SEG01.mp4"])
+    assert same["episodes"] == []
+    bad = assemble.specs(pj, "EP01", ["05_分段视频/EP01-SEG01.mp4", "05_分段视频/EP01-SEG02.mp4"])["episodes"]
+    assert bad == [{"episode": "EP01", "base": "320x240", "total": 2, "mismatch": 1}]
+    clip(pj.p("06_成片", "插入素材", "片头.mp4"), size="640x360", audio=False)
+    assert assemble.specs(pj, "EP01", ["06_成片/插入素材/片头.mp4", "05_分段视频/EP01-SEG01.mp4"])["episodes"] == []
+
+
 def test_chosen_segments_in_chosen_order_are_joined(pj):
     items = ["05_分段视频/EP01-SEG02.mp4", "05_分段视频/EP01-SEG01.mp4"]
     d = assemble.build(pj, "EP01", items)
@@ -242,13 +264,13 @@ def test_stopping_interrupts_the_episode_being_encoded(pj, monkeypatch):
     from core.executor import JobManager
     real = assemble._join
 
-    def slow(ff, paths, partial, ref=0, keep=(), cancel=None):
+    def slow(ff, paths, partial, ref=0, keep=(), cancel=None, **kw):
         until = time.monotonic() + 20
         while time.monotonic() < until:
             if cancel and cancel():
                 return "已停止", ""
             time.sleep(0.05)
-        return real(ff, paths, partial, ref, keep, cancel)
+        return real(ff, paths, partial, ref, keep, cancel, **kw)
     monkeypatch.setattr(assemble, "_join", slow)
     _add_ep02(pj)
     jobs = JobManager()
@@ -275,6 +297,9 @@ def test_routes_through_the_http_layer(pj, monkeypatch):
     monkeypatch.setattr(app, "caps_of", lambda cfg=None: [])
     root = pj.root
     assert len(agent_api.get(app, "/api/agent/assemble-plan", {"root": [root], "episode": ["EP01"]})["rows"]) == 3
+    sp = agent_api.post(app, "/api/agent/assemble/specs", {"root": root, "episodes": ["EP01"],
+                                                           "items": ["05_分段视频/EP01-SEG01.mp4"]})
+    assert sp["episodes"] == []
     raw = base64.b64encode(Path(pj.p("05_分段视频", "EP01-SEG02.mp4")).read_bytes()).decode()
     up = agent_api.post(app, "/api/agent/assemble/upload", {"root": root, "filename": "x.mp4", "content_b64": raw})
     d = agent_api.post(app, "/api/agent/assemble", {"root": root, "episode": "EP01",

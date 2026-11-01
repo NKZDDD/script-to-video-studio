@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "独立单图交接的 C/A/B 三张图改为平铺在 04_交接图/ 同一目录（不再分 C、A、B 子目录），C 在资源树里仍独立可选并承担整板角色；项目没有整板/区域图任务时，生产页的服务商行与类型筛选不再显示这两类；资源状态筛新增「已提交待取回」。C 图重抽或换服务商导致同名文件内容变化时按最新版出图，只在任务日志提示旧版 A/B/视频可能不一致，抽卡不再被拦住。纵横视频按服务商最新文档提交 ratio/resolution。已有任务、引用、配置与产物保留（老项目仍按 tasks.json 里的旧路径读取）；服务商继续使用后台适配包，无需升级认证服务端。"}
+               "notes": "合成成片支持「统一缩放规格」：本集分段之间的分辨率或编码不一致时，点合成会先提示，确认后自动统一缩放到该集基准规格（相当于剪辑软件把整条时间线放到同一画布），规格一致时仍是原画质拼接、画面不重编码；外部插入视频照旧单独适配。已有任务、引用、配置与产物保留；服务商继续使用后台适配包，无需升级认证服务端。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))

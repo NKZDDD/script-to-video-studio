@@ -70,6 +70,34 @@ def plan(pj, episodes) -> dict:
             "rows": rows, "extras": _extras(pj)}
 
 
+def specs(pj, episodes, items) -> dict:
+    """合成前先看每一集要拼的分段画面规格是否一致，供页面提示改用统一缩放。
+
+    只比对本项目的分段：外部视频（插入素材、抽卡备份）规格不同会自动适配，不算冲突。
+    返回不一致的集：[{episode, base, total, mismatch}]，全一致时为空。
+    """
+    chosen = _chosen(pj, episodes)
+    groups = _split(pj, chosen, list(items or []))
+    outputs = {t["output"] for t in _videos(pj)}
+    found = []
+    for ep in chosen:
+        infos = {}
+        for rel in groups[ep]:
+            if rel in outputs:
+                info = probe.media_info(str(A.inside(pj.root, rel)))
+                if info:
+                    infos[rel] = info
+        ref = next((rel for rel in groups[ep] if rel in infos), None)
+        if ref is None:
+            continue
+        base = infos[ref]
+        diff = [rel for rel, info in infos.items() if _picture(info) != _picture(base)]
+        if diff:
+            found.append({"episode": ep, "base": f"{base['width']}x{base['height']}",
+                          "total": len(infos), "mismatch": len(diff)})
+    return {"episodes": found}
+
+
 def save_insert(pj, filename: str, raw: bytes) -> dict:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", os.path.basename(filename or "")).strip(" .")
     if Path(name).suffix.lower() not in VIDEO_EXT:
@@ -142,10 +170,10 @@ def _prepare(pj, episodes, items) -> tuple:
     return chosen, groups, outputs, ff
 
 
-def build(pj, episodes, items=None) -> dict:
+def build(pj, episodes, items=None, fit_mismatch=False) -> dict:
     """每一集各出一个成片，当场合成完再返回。先把所有集的清单核对完，再逐集合成 —— 不会合出一半才报错。"""
     chosen, groups, outputs, ff = _prepare(pj, episodes, items)
-    masters = [_build_one(pj, ff, ep, groups[ep], outputs) for ep in chosen]
+    masters = [_build_one(pj, ff, ep, groups[ep], outputs, fit_mismatch=fit_mismatch) for ep in chosen]
     first = masters[0]
     return {"ok": True, "masters": masters, "episodes": chosen,
             "rel": first["rel"], "mode": first["mode"], "count": sum(m["count"] for m in masters)}
@@ -160,7 +188,7 @@ def _assembling(jobs, root: str) -> set:
     return out
 
 
-def start(pj, episodes, items, jobs) -> dict:
+def start(pj, episodes, items, jobs, fit_mismatch=False) -> dict:
     """后台合成：清单当场核对，编码在后台逐集跑，页面可以接着做别的事。
 
     几十集一次合要一两个小时，放在请求里同步跑的话页面一直被挡着。
@@ -184,7 +212,9 @@ def start(pj, episodes, items, jobs) -> dict:
                     continue
                 job.set_item(ep, state="running", msg=f"正在合成 {len(groups[ep])} 段")
                 try:
-                    m = _build_one(pj, ff, ep, groups[ep], outputs, cancel=lambda: job.cancelled)
+                    m = _build_one(pj, ff, ep, groups[ep], outputs,
+                                   cancel=lambda: job.cancelled,
+                                   fit_mismatch=fit_mismatch)
                     job.set_item(ep, state="ok", output=m["rel"], msg=f"{m['mode']}，共 {m['count']} 段")
                 except Exception as exc:                    # noqa: BLE001
                     job.set_item(ep, state="cancelled" if job.cancelled else "failed", msg=str(exc)[:500])
@@ -198,7 +228,8 @@ def start(pj, episodes, items, jobs) -> dict:
     return {"ok": True, "job_id": job.id, "episodes": chosen, "count": sum(len(g) for g in groups.values())}
 
 
-def _build_one(pj, ff, episode: str, items: list, outputs: set, cancel=None) -> dict:
+def _build_one(pj, ff, episode: str, items: list, outputs: set, cancel=None,
+               fit_mismatch: bool = False) -> dict:
     paths = [str(A.inside(pj.root, rel)) for rel in items]
     safe_ep = "".join(c for c in episode if c.isalnum() or c in "-_") or "EP01"
     rel = "06_成片/" + safe_ep + time.strftime("_MASTER_%Y%m%d_%H%M%S_") + str(time.time_ns())[-6:] + ".mp4"
@@ -212,7 +243,8 @@ def _build_one(pj, ff, episode: str, items: list, outputs: set, cancel=None) -> 
         # 采样率也各家不一，直接首尾相接会把后面所有段的声音往后推，而且 ffmpeg 不报错。
         ref = next((i for i, r in enumerate(items) if r in outputs), 0)
         keep = {i for i, r in enumerate(items) if r in outputs}
-        error, mode = _join(ff, paths, partial, ref, keep, cancel=cancel)
+        error, mode = _join(ff, paths, partial, ref, keep, cancel=cancel,
+                            fit_mismatch=fit_mismatch)
         if error or not R.valid_output(str(partial)):
             raise ValueError(f"{episode} 成片合成失败：" + (error or "输出文件未通过校验"))
         os.replace(partial, output)
@@ -232,15 +264,18 @@ def _picture_text(info) -> str:
     return f"{w}x{h} {codec or '未知编码'} {pix or '未知像素格式'}"
 
 
-def _join(ff, paths, partial, ref=0, keep=(), cancel=None):
+def _join(ff, paths, partial, ref=0, keep=(), cancel=None, fit_mismatch=False):
     """画面原样拼接，返回 (错误, 方式)。错误为空表示成功。
 
     每一段先做成临时文件：视频轨 `-c copy`，声音裁 / 补到这一段画面的长度。
     再把临时文件无损接起来，最后只把声音收成一条 AAC —— 垫在每段末尾的 AAC 帧
     会把下一段的声音往后推，所以不能逐段压 AAC 再拷贝。
 
-    `keep` 是本项目分段的下标。它们规格和基准段不同就停下，不重编码。
+    `keep` 是本项目分段的下标。默认它们规格和基准段不同就停下，不重编码；
     外部视频规格不同时，只重编码那一段去适配基准段。
+
+    `fit_mismatch=True` 时改走剪辑软件那条路：规格不同的本集分段也逐段重编码
+    适配到统一目标（基准宽高 + h264/yuv420p），代价是被适配的那几段掉一次画质。
     """
     infos = [probe.media_info(p) for p in paths]
     if any(i is None for i in infos):
@@ -248,6 +283,12 @@ def _join(ff, paths, partial, ref=0, keep=(), cancel=None):
         return "读不到这些视频的流信息：" + "、".join(Path(p).name for p in bad), ""
     base = infos[ref]
     keep = set(keep or ())
+    # 统一目标是「基准宽高 + h264/yuv420p」：基准段自己是 hevc/10bit 时，
+    # 只转其它段会让两者继续对不上，所以目标编码固定，基准段也一起转。
+    target = _picture(base)
+    if fit_mismatch:
+        target = ("h264", base["width"] + base["width"] % 2,
+                  base["height"] + base["height"] % 2, "yuv420p")
     fitted = 0
     parts = []
     deadline = time.monotonic() + 3600
@@ -255,13 +296,15 @@ def _join(ff, paths, partial, ref=0, keep=(), cancel=None):
         if cancel and cancel():
             return "已停止", ""
         dest = partial.parent / f"part_{i}.mkv"
-        if _picture(info) == _picture(base):
+        if _picture(info) == target:
             error = _copy_part(ff, path, info, dest, cancel, deadline)
-        elif i in keep:
+        elif i in keep and not fit_mismatch:
             return (f"{Path(path).name} 的画面是 {_picture_text(info)}，本集用来对齐的分段是 {_picture_text(base)}。"
-                    "原画质拼接不会重编码分段视频，请换成同一分辨率和编码后再合成", "")
+                    "原画质拼接不会重编码分段视频，请换成同一分辨率和编码后再合成"
+                    "（合成对话框里可以勾选「允许统一缩放规格」，改为逐段重编码适配）", "")
         else:
-            error = _fit_part(ff, path, info, base, dest, cancel, deadline)
+            error = _fit_part(ff, path, info, base, dest, cancel, deadline,
+                              target if fit_mismatch else None)
             if not error:
                 fitted += 1
         if error:
@@ -276,7 +319,11 @@ def _join(ff, paths, partial, ref=0, keep=(), cancel=None):
     if error:
         return error, ""
     if fitted:
-        mode = (f"原画质拼接（{len(paths) - fitted} 段画面原样，{fitted} 段规格不同已单独适配，声音对齐画面）")
+        if fit_mismatch:
+            mode = (f"统一规格拼接（{len(paths) - fitted} 段画面原样，{fitted} 段重编码适配到 "
+                    f"{target[1]}x{target[2]}，声音对齐画面）")
+        else:
+            mode = (f"原画质拼接（{len(paths) - fitted} 段画面原样，{fitted} 段规格不同已单独适配，声音对齐画面）")
     else:
         mode = "原画质拼接（画面不重编码，声音对齐画面）"
     return "", mode
@@ -302,13 +349,20 @@ def _copy_part(ff, path, info, dest, cancel, deadline) -> str:
     return _run(cmd, cancel, deadline)
 
 
-def _fit_part(ff, path, info, base, dest, cancel, deadline) -> str:
-    """外部视频和分段规格不同：只重编码这一段，缩放到分段的宽高。"""
+def _fit_part(ff, path, info, base, dest, cancel, deadline, target=None) -> str:
+    """外部视频和分段规格不同：只重编码这一段，缩放到分段的宽高。
+
+    `target` 给了就按它（h264/宽/高/像素格式）统一输出，用于「允许统一缩放规格」：
+    这时连本集分段也可以被转换，且不再要求基准段本身必须是 h264/yuv420p。
+    """
     name = Path(path).name
-    w, h = base["width"], base["height"]
-    if base.get("codec") != "h264" or base.get("pix_fmt") != "yuv420p" or w % 2 or h % 2:
-        return (f"{name} 的画面是 {_picture_text(info)}，和本集分段 {_picture_text(base)} 不同。"
-                "原画质拼接不能改分段的画面，这一段也无法适配进去，请去掉或先导出成相同规格")
+    if target:
+        _codec, w, h, _pix = target
+    else:
+        w, h = base["width"], base["height"]
+        if base.get("codec") != "h264" or base.get("pix_fmt") != "yuv420p" or w % 2 or h % 2:
+            return (f"{name} 的画面是 {_picture_text(info)}，和本集分段 {_picture_text(base)} 不同。"
+                    "原画质拼接不能改分段的画面，这一段也无法适配进去，请去掉或先导出成相同规格")
     fps = base["fps"] if 1 <= base["fps"] <= 60 else 30
     span = f"{_span(path, info):.3f}"
     video = (f"[0:v:0]setpts=PTS-STARTPTS,scale={w}:{h}:force_original_aspect_ratio=decrease,"

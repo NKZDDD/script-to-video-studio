@@ -445,6 +445,18 @@ def post(app, path, body):
         if not cfg.get("agent_features", {}).get("legacy_import") or pj.meta().get("workflow") == "agent":
             raise ValueError("材料导入只对开启该功能包的旧项目提供；Agent 项目自动接收发布")
         return app.api_post("/api/material/import", body)
+    if path == "/api/agent/assemble/specs":
+        if not cfg.get("agent_features", {}).get("post"):
+            raise ValueError("请先开启成片合成功能包")
+        items = body.get("items")
+        if items is not None and (not isinstance(items, list) or any(not isinstance(x, str) for x in items)):
+            raise ValueError("拼接清单格式不对，请刷新后重试")
+        episodes = body.get("episodes")
+        if episodes is None:
+            episodes = [str(body.get("episode") or "")]
+        if not isinstance(episodes, list) or any(not isinstance(x, str) for x in episodes):
+            raise ValueError("选集格式不对，请刷新后重试")
+        return assemble.specs(pj, episodes, items)
     if path == "/api/agent/assemble":
         if not cfg.get("agent_features", {}).get("post"):
             raise ValueError("请先开启成片合成功能包")
@@ -456,7 +468,8 @@ def post(app, path, body):
             episodes = [str(body.get("episode") or "")]
         if not isinstance(episodes, list) or any(not isinstance(x, str) for x in episodes):
             raise ValueError("选集格式不对，请刷新后重试")
-        return assemble.start(pj, episodes, items, app.JOBS)
+        return assemble.start(pj, episodes, items, app.JOBS,
+                              fit_mismatch=bool(body.get("fit_mismatch")))
     if path == "/api/agent/assemble/upload":
         try:
             raw = base64.b64decode(body.get("content_b64") or "", validate=True)
