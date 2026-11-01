@@ -55,7 +55,8 @@ class PaisioSeedance25Tests(unittest.TestCase):
             PaisioProvider._video_body(task, task.model)
         self.assertEqual(raised.exception.kind, TASK_FATAL)
         message = str(raised.exception)
-        self.assertIn("4-30秒", message)
+        # 秒数不再本地拦：这里只剩比例 / 参考素材 / 公网 URL 三类问题。
+        self.assertIn("比例只支持", message)
         self.assertIn("视频素材最多10条", message)
         self.assertIn("音频素材最多10条", message)
         self.assertIn("公网", message)

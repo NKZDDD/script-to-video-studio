@@ -236,7 +236,7 @@ class HaomanjuProvider(Provider):
                 f"本该有 {len(refs)} 张参考图 —— 少了出来的就不是同一个人，所以不出这条。"
                 f"去「设置 → 参考图上传」配对象存储。",
                 status=0, kind="task_fatal")
-        sec = max(5, min(15, int(task.duration or 10)))
+        sec = max(1, int(task.duration or 10))
         body = {
             "model": model,
             "prompt": task.prompt,

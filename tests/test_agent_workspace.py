@@ -253,7 +253,11 @@ def test_video_seconds_chosen_on_the_video_row_is_what_the_provider_gets(pj):
     assert video["params"]["duration"] == 30
     saved["video"]["duration"] = 20
     write_json(pj.p("07_检查与记录", "production-settings.json"), saved)
-    assert "视频那一行选的是 20 秒" in _video_reason(pj, {}, CAPS)
+    # 20 秒不再被能力声明顶回去：任务参数保留用户选的秒数。
+    plan = R.preview(pj, {}, CAPS, resolve)
+    video = next(t for t in plan["_tasks"] if t["key"] == "video")
+    assert video["params"]["duration"] == 20
+    assert not [b for b in plan["blocked"] if b["key"] == "video"]
     with pytest.raises(ValueError):
         R.validate_settings({"video": dict(saved["video"], duration=0)}, CAPS)
 
@@ -572,15 +576,15 @@ def _video_reason(pj, cfg, caps):
     return next(b["reason"] for b in R.preview(pj, cfg, caps, resolve)["blocked"] if b["key"] == "video")
 
 
-def test_duration_block_says_which_model_where_from_and_what_to_do(pj):
+def test_duration_is_not_blocked_by_narrow_model_capabilities(pj):
     plan = board_plan(pj);plan["video_tasks"][0]["params"]["duration"] = 30
     publish(pj, plan);A.scan(pj)
     caps = copy.deepcopy(CAPS);caps[0]["video"]["durations"] = list(range(4, 13))
-    reason = _video_reason(pj, {}, caps)
-    assert "要 30 秒" in reason and "「图片服务商 / test-video」" in reason
-    assert "4–12 秒" in reason and "服务商的模型能力声明" in reason and "重新切段" in reason
-    reason = _video_reason(pj, {"providers": {"chaomo": {"durations": "test-video=5,10"}}}, caps)
-    assert "5、10 秒" in reason and "手填" in reason
+    # 本地能力声明的秒数档位不再拦用户：30 秒原样进任务参数，超范围交给服务商。
+    plan = R.preview(pj, {}, caps, resolve)
+    video = next(t for t in plan["_tasks"] if t["key"] == "video")
+    assert video["params"]["duration"] == 30
+    assert not [b for b in plan["blocked"] if b["key"] == "video"]
 
 
 PLUGIN = '''from core.providers.base import Provider

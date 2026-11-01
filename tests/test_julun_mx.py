@@ -31,7 +31,9 @@ def test_model_survives_old_catalog_with_fixed_duration(mod):
     cap = apply_catalog(mod.JulunProvider().capabilities(), {'rows':[{'id':'sd2.5'}]}, 'old snapshot')
     opts = cap['video']['model_options'][mod.MX_MODEL]
     assert mod.MX_MODEL in cap['video']['models']
-    assert opts['durations'] == [30]
+    # 出片秒数统一放开成 1–60：本地不再把候选钉在固定 30 秒上。
+    assert 'durations' not in opts
+    assert cap['video']['durations'] == list(range(1, 61))
     assert set(opts['ratios']) == {'21:9','16:9','4:3','1:1','3:4','9:16'}
     assert (opts['max_refs'],opts['max_video_refs'],opts['max_audio_refs']) == (30,10,10)
 
@@ -44,12 +46,18 @@ def test_request_matches_document_and_keeps_all_references(mod, seconds):
     path, body = mod.JulunProvider().build_video_body(task(duration=seconds, ratio='', refs=refs,
         extra={'video_refs':vids,'audio_refs':auds,'store':False,'face_split':True}))
     assert path == '/v1/videos/generations'
-    assert body == {'model':mod.MX_MODEL,'prompt':'参考人物进入房间','duration':30,'aspect_ratio':'16:9',
+    assert body == {'model':mod.MX_MODEL,'prompt':'参考人物进入房间','duration':seconds,'aspect_ratio':'16:9',
                     'image_refs':refs,'video_refs':vids,'audio_refs':auds,'store':False,'face_split':True}
 
 
-@pytest.mark.parametrize('seconds',[0,31,1.5,True,None])
-def test_invalid_duration_does_not_silently_submit(mod, seconds):
+@pytest.mark.parametrize('seconds',[0,31,1.5])
+def test_numeric_duration_is_sent_without_clamping(mod, seconds):
+    _, body = mod.JulunProvider().build_video_body(task(duration=seconds))
+    assert body['duration'] == max(1, int(seconds))
+
+
+@pytest.mark.parametrize('seconds',[True,None])
+def test_non_numeric_duration_rejected(mod, seconds):
     with pytest.raises(ApiError,match='整数秒'):
         mod.JulunProvider().build_video_body(task(duration=seconds))
 

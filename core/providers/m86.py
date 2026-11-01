@@ -157,10 +157,7 @@ class M86Provider(Provider):
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
         model = task.model or "seed-2.0"
         ratio = _to_ratio(task.ratio, VIDEO_RATIOS, "9:16")
-        sec = int(task.duration or 15)
-        if not 1 <= sec <= 15:
-            log(f"M86 {model} 时长按 1–15 秒处理，已把 {sec} 收敛到 15")
-            sec = 15
+        sec = max(1, int(task.duration or 15))
         refs = list(task.refs or [])[:9]
 
         fields = {"model": model, "prompt": task.prompt, "seconds": str(sec), "ratio": ratio}

@@ -154,8 +154,8 @@ class ZhiProvider(Provider):
             "prompt": task.prompt or "",
             "aspect_ratio": task.ratio or "9:16",
             "resolution": (task.resolution or "").strip().lower() or "720p",
-            # 按提交值计费 —— 夹在 1-300，别让一次手滑烧穿积分
-            "duration_seconds": max(1, min(300, int(task.duration or 10))),
+            # 按用户选的秒数原样提交，本地不夹到 300 秒（那是旧的上限猜测）
+            "duration_seconds": max(1, int(task.duration or 10)),
         }
         if refs:
             body["reference_image_urls"] = refs

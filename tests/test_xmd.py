@@ -223,7 +223,7 @@ def test_remote_ref_also_goes_through_size_check_and_never_gets_auth(provider, m
 
 
 @pytest.mark.parametrize("changes", [
-    {"prompt": ""}, {"prompt": "字" * 3001}, {"duration": 15}, {"model": "wrong-model"},
+    {"prompt": ""}, {"prompt": "字" * 3001}, {"model": "wrong-model"},
     {"ratio": "2:3"}, {"refs": ["r"] * 11}, {"extra": {"gallery_ids": [True]}},
     {"refs": ["r"] * 10, "extra": {"gallery_ids": [21]}},
     {"extra": {"shield": "true"}}, {"extra": {"video_refs": ["v.mp4"]}},
@@ -239,6 +239,16 @@ def test_invalid_task_fails_before_upload_or_paid_submission(provider, monkeypat
     assert caught.value.kind == TASK_FATAL
     request.assert_not_called()
     upload.assert_not_called()
+
+
+def test_chosen_duration_is_submitted_without_local_rejection(provider, monkeypatch):
+    # XMD 不再只收 30 秒：用户选 15 就发 15，超范围交给服务商裁决。
+    request = Mock(side_effect=[{"code": 0, "job_id": "vj_1"},
+                                {"code": 0, "status": "success", "video_url": "https://cdn/v.mp4"}])
+    monkeypatch.setattr(provider, "_request", request)
+    monkeypatch.setattr(provider.session, "save_item", Mock())
+    provider.generate_video(VideoTask("cat", duration=15), "out.mp4")
+    assert request.call_args_list[0].kwargs["obj"]["duration"] == 15
 
 
 def test_complete_flow_uses_job_id_status_success_and_immediate_download(provider, monkeypatch):

@@ -87,55 +87,69 @@ def fetch(pid, pc):
         keys += [str(v).strip() for v in prov.keys.values() if str(v).strip()]
     keys = list(dict.fromkeys(keys)) or [prov.session.api_key]
     rows, failures = {}, []
+    readable = getattr(prov, 'catalog_rows', None)
     for key in keys:
         prov.session.api_key = key
-        try:
-            with requests.Session() as session:
-                session.trust_env = False
-                response = session.get(prov.session.base_url + endpoint,
-                    headers=prov.session._headers(), proxies=prov.session._proxies(),
-                    timeout=(8, 20), allow_redirects=False)
-            if response.status_code != 200:
-                failures.append(f'HTTP {response.status_code}'); continue
-            data = response.json()
+        if callable(readable):
+            # 有的家的 /v1/models 回的是内部 id（LensForge 是 UUID），当模型名
+            # 显示会变成一串乱码。这类服务商自己提供可读的目录行。
+            try:
+                data = readable()
+            except Exception:                    # noqa: BLE001
+                failures.append('模型清单读取失败')
+                continue
+        else:
+            try:
+                with requests.Session() as session:
+                    session.trust_env = False
+                    response = session.get(prov.session.base_url + endpoint,
+                        headers=prov.session._headers(), proxies=prov.session._proxies(),
+                        timeout=(8, 20), allow_redirects=False)
+                if response.status_code != 200:
+                    failures.append(f'HTTP {response.status_code}')
+                    continue
+                data = response.json()
+            except requests.RequestException:
+                failures.append('网络连接失败或超时')
+                continue
+            except (ValueError, AttributeError):
+                failures.append('接口返回的不是模型 JSON')
+                continue
             data = data if isinstance(data, list) else data.get('data')
             if pid == 'hongniao' and isinstance(data, dict):
                 data = data.get('models')
-            if not isinstance(data, list):
-                failures.append('接口未返回模型数组'); continue
-            for row in data:
-                if not isinstance(row, dict):
-                    continue
-                mid = row.get('model_group') if pid == 'gate' else row.get('id')
-                if mid is None or not str(mid).strip():
-                    continue
-                mid = str(mid).strip()
-                # 只保留模型字段，不把响应中的账号、调试信息打包或传给页面。
-                item = {'id': mid}
-                if pid == 'hongniao':
-                    from .cloud_adapters import module
-                    item['capability_schema'] = module(pid).catalog_schema(row)
-                # `capability_schema` 是无限画布那家给的**逐模型约束**
-                # （duration.min/max、aspect_ratio(s)、resolutions、
-                # max_reference_images 这些）—— 比任何文档都准，而字段名和
-                # 上面那几个都不一样。不收的话它整份被丢掉，等于白拉一趟。
-                # 后面这一串是**超模那套**的字段名（2026-09-14 实拉）：
-                # 它把逐模型的比例、参考图上限、一次出几张、quality 档位
-                # 全摆在顶层，名字和别家都不一样。不收的话整份被丢掉 ——
-                # 和无限画布的 capability_schema 是同一个毛病。
-                for field in ('type', 'model_type', 'category', 'output_modalities',
-                              'display_name', 'durations_seconds', 'ratios',
-                              'max_images', 'resolution', 'capability_schema',
-                              'resolution_mode', 'supported_aspect_ratios',
-                              'supported_image_sizes', 'max_reference_images',
-                              'n_max', 'supported_quality_values'):
-                    if field in row:
-                        item[field] = row[field]
-                rows[mid] = item
-        except requests.RequestException:
-            failures.append('网络连接失败或超时')
-        except (ValueError, AttributeError):
-            failures.append('接口返回的不是模型 JSON')
+        if not isinstance(data, list):
+            failures.append('接口未返回模型数组')
+            continue
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            mid = row.get('model_group') if pid == 'gate' else row.get('id')
+            if mid is None or not str(mid).strip():
+                continue
+            mid = str(mid).strip()
+            # 只保留模型字段，不把响应中的账号、调试信息打包或传给页面。
+            item = {'id': mid}
+            if pid == 'hongniao':
+                from .cloud_adapters import module
+                item['capability_schema'] = module(pid).catalog_schema(row)
+            # `capability_schema` 是无限画布那家给的**逐模型约束**
+            # （duration.min/max、aspect_ratio(s)、resolutions、
+            # max_reference_images 这些）—— 比任何文档都准，而字段名和
+            # 上面那几个都不一样。不收的话它整份被丢掉，等于白拉一趟。
+            # 后面这一串是**超模那套**的字段名（2026-09-14 实拉）：
+            # 它把逐模型的比例、参考图上限、一次出几张、quality 档位
+            # 全摆在顶层，名字和别家都不一样。不收的话整份被丢掉 ——
+            # 和无限画布的 capability_schema 是同一个毛病。
+            for field in ('type', 'model_type', 'category', 'output_modalities',
+                          'display_name', 'durations_seconds', 'ratios',
+                          'max_images', 'resolution', 'capability_schema',
+                          'resolution_mode', 'supported_aspect_ratios',
+                          'supported_image_sizes', 'max_reference_images',
+                          'n_max', 'supported_quality_values'):
+                if field in row:
+                    item[field] = row[field]
+            rows[mid] = item
     if not rows:
         return {'ok': False, 'msg': '；'.join(dict.fromkeys(failures)) or '模型清单为空'}
     strict = False
@@ -188,18 +202,9 @@ def _from_schema(schema):
     if not isinstance(schema, dict):
         return {}
     out = {}
-    dur = schema.get('duration')
-    if isinstance(dur, dict):
-        if isinstance(dur.get('values'), list) and dur['values']:
-            out['durations'] = [int(x) for x in dur['values']]
-        elif isinstance(dur.get('min'), int) and isinstance(dur.get('max'), int):
-            out['durations'] = list(range(dur['min'], dur['max'] + 1))
-    # 2026-09-17 实拉：同一家还有第三种写法 —— `durations` 直接是个数组
-    # （无限画布的 `seedance2.5` 回的是 `"durations": [30]`）。
-    # 只认前两种的话，它**唯一合法的那个时长整份丢掉**：页面上不给候选、
-    # 校验也不拦，人填 15 秒发出去被平台拒，而拒绝来得比出图还晚。
-    if 'durations' not in out and isinstance(schema.get('durations'), list)             and schema['durations']:
-        out['durations'] = [int(x) for x in schema['durations']]
+    # 出片时长不从这里进 model_options：本地不再按上游档位限制候选，
+    # 统一由 providers.list_capabilities 放开成 1–60（秒数交给服务商裁决）。
+    # 比例、参考图上限这些照旧逐模型合并。
     for key in ('aspect_ratios', 'aspect_ratio'):        # 单复数都认
         v = schema.get(key)
         if isinstance(v, list) and v:
@@ -310,6 +315,9 @@ def apply_catalog(cap, result, source):
                 options['max_refs'] = row['max_images']
             options.update(_from_schema(row.get('capability_schema')))
             options.update(_from_toplevel(row))
+            # 实拉目录会把各模型的 durations 带回来，合并进去就又把候选夹窄了。
+            # 统一删掉，出片秒数保持 1–60，真超范围让服务商拒绝。
+            options.pop('durations', None)
             if isinstance(options.get('max_refs'), int) and not block.get('refs_unlimited'):
                 options['refs_unlimited'] = False
             pattern = block.get('unlimited_ref_model_pattern')
@@ -321,6 +329,15 @@ def apply_catalog(cap, result, source):
                 options.pop('max_refs', None)
             if options:
                 block.setdefault('model_options', {}).setdefault(row['id'], {}).update(options)
+    # 元数据里也保证出片候选是 1–60：apply_catalog 的入参通常来自
+    # list_capabilities（已放开），但不让其他来源把它改窄。
+    video = cap.get('video')
+    if isinstance(video, dict):
+        video['durations'] = list(providers.ALL_DURATIONS)
+        # 服务商自带 capabilities 里也可能写了模型级 durations，一并删掉。
+        for options in (video.get('model_options') or {}).values():
+            if isinstance(options, dict):
+                options.pop('durations', None)
     cap['model_catalog'] = {'source': source, 'updated_at': result.get('updated_at', ''),
         'total': len(rows), 'unknown': unknown, 'other': other,
         # 哪几类没动 —— 页面要能说清「这一类的清单不是实拉的」，

@@ -49,7 +49,12 @@ _BUILTIN_ORDER = ["paisio", "lingganya", "zeroapi", "m86", "aicopy", "kunji",
                   # **加了文件就必须加这里** —— 冻结环境（exe）里扫不到目录时会
                   # 退回按这张表挨个 import，不在表里就整家被漏掉（见 _load 的说明）。
                   "yunhui", "xmd", "hongniao", "hzyfai", "cangyuan", "cangyuan_video", "chaomo_banana", "zhongheng",
-                  "valeclouds", "threefatai"]
+                  "valeclouds", "threefatai", "lensforge"]
+
+# 出片时长的统一候选：**本地不再猜上游档位**。
+# 各家的秒数限制会随上新/下线变化，本地按模型档位去夹只会把 30 秒静默改成
+# 15/20 秒还照原价计费。真超范围交给服务商拒绝，任务明细里能看到真实原因。
+ALL_DURATIONS = list(range(1, 61))
 
 REGISTRY: dict = {}          # id → 类
 ALIASES: dict = {}           # 别名 → id
@@ -277,6 +282,15 @@ def list_capabilities() -> list:
                 if k in af:
                     af[k] = [list(x) for x in af[k]]
             cap.setdefault("account_form", af)
+            # 出片秒数统一放开成 1–60：不再按各家/各模型声明的档位限制候选。
+            # 模型级 durations 一并删掉，前端没有它就会回落到 video.durations
+            # （见 web/agent.js:durationsOf）。秒数由服务商裁决，本地不猜。
+            video = cap.get("video")
+            if isinstance(video, dict):
+                video["durations"] = list(ALL_DURATIONS)
+                for options in (video.get("model_options") or {}).values():
+                    if isinstance(options, dict):
+                        options.pop("durations", None)
             out.append(cap)
         except Exception as exc:                     # noqa: BLE001
             out.append({"id": pid, "name": getattr(cls, "name", pid),

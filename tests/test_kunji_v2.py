@@ -121,14 +121,14 @@ class VeoTests(unittest.TestCase):
         self.assertEqual(len(seen["body"]["image_urls"]), 2)
         self.assertNotIn("image_url", seen["body"])
 
-    def test_multi_ref_is_locked_to_eight_seconds_and_16_9(self):
-        """★ 文档：多参考图传 4/6 秒或 9:16 会**生成失败**。失败不扣费，但白等一轮。"""
+    def test_multi_ref_only_locks_16_9_now(self):
+        """★ 文档：多参考图传 9:16 会**生成失败**。秒数不再本地强制 8 秒。"""
         p = KunjiProvider(api_key="sk-x")
         seen = _stub(p, {"id": "t1", "status": "completed", "url": "https://x/v.mp4"})
         p.generate_video(VideoTask(prompt="一致", refs=[f"https://c/{i}.jpg" for i in range(3)],
                                    duration=4, ratio="9:16",
                                    model="veo-3.1-generate-preview-ref"), "o.mp4")
-        self.assertEqual(seen["body"]["duration"], 8)
+        self.assertEqual(seen["body"]["duration"], 4)
         self.assertEqual(seen["body"]["aspect_ratio"], "16:9")
 
     def test_multi_ref_requires_the_ref_model(self):
@@ -140,12 +140,13 @@ class VeoTests(unittest.TestCase):
                              "o.mp4")
         self.assertEqual(raised.exception.kind, TASK_FATAL)
 
-    def test_duration_snaps_to_allowed(self):
+    def test_duration_is_sent_as_chosen(self):
         p = KunjiProvider(api_key="sk-x")
         seen = _stub(p, {"id": "t1", "status": "completed", "url": "https://x/v.mp4"})
         p.generate_video(VideoTask(prompt="x", duration=5,
                                    model="veo-3.1-fast-generate-preview"), "o.mp4")
-        self.assertIn(seen["body"]["duration"], VIDEO_DURATIONS)
+        # 5 不在旧的 4/6/8 档位里，现在也原样发出，不再就近吸附。
+        self.assertEqual(seen["body"]["duration"], 5)
 
     def test_provider_now_declares_video(self):
         """以前这家只声明 image —— 视频能力在页面上根本看不到。"""

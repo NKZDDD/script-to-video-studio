@@ -735,9 +735,11 @@ class ZhonghengProvider(Provider):
         model = task.model
         if not model or not (task.prompt or '').strip():
             raise ApiError('请选择纵横科技模型并填写提示词', kind=TASK_FATAL)
-        if isinstance(task.duration, bool) or task.duration not in spec.get('duration_options', []):
-            raise ApiError(f'{model} 不支持 {task.duration} 秒，请刷新模型后选择已声明的时长；未提交生成', kind=TASK_FATAL)
-        body = dict(model=model, prompt=task.prompt, duration=int(task.duration))
+        try:
+            duration = max(1, int(task.duration))
+        except (TypeError, ValueError):
+            raise ApiError(f'{model} 的视频时长须为正整数秒，未提交生成', kind=TASK_FATAL) from None
+        body = dict(model=model, prompt=task.prompt, duration=duration)
         # /api-docs: platform converts ratio/resolution; never send size/width/height.
         # Ratio has documented common choices; resolution/quality remain model-specific.
         defaults = spec.get('defaults') or {}

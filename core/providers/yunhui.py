@@ -173,12 +173,10 @@ class YunhuiProvider(Provider):
         images = list(task.refs or [])
         videos = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
         audios = list(task.extra.get("audio_refs") or task.extra.get("audios") or [])
-        sec = int(task.duration or 15)
+        sec = max(1, int(task.duration or 15))
         ratio = task.ratio or "9:16"
 
         problems = []
-        if not SEC_MIN <= sec <= SEC_MAX:
-            problems.append(f"时长文档写 {SEC_MIN}–{SEC_MAX} 秒，收到 {sec} 秒")
         for got, cap, what in ((images, MAX_IMAGES, "图片"),
                                (videos, MAX_VIDEOS, "视频"),
                                (audios, MAX_AUDIOS, "音频")):

@@ -373,7 +373,9 @@ class PaisioProvider(Provider):
         refs = list(task.refs or [])
         videos = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
         audios = list(task.extra.get("audio_refs") or task.extra.get("audios") or [])
-        duration = int(task.duration or 15)
+        # 出片秒数原样发出：DURATION_RULES 只是页面提示用的旧表，
+        # 不做本地拦截/夹取（选 30 秒不能被静默改成 15 秒还照原价计费）。
+        duration = max(1, int(task.duration or 15))
         ratio = task.ratio or "9:16"
 
         problems = []
@@ -398,13 +400,6 @@ class PaisioProvider(Provider):
                     f"这一条要是回 400 说提示词过长，那就是它；去 "
                     f"core/providers/paisio.py 把 PROMPT_SOFT_MAX 那段改成 "
                     f"problems.append 就是硬校验。")
-        allowed = DURATION_RULES.get(model)
-        if allowed and duration not in allowed:
-            problems.append(f"{model}的时长只能是{min(allowed)}-{max(allowed)}秒，收到{duration}秒"
-                            if len(allowed) == max(allowed) - min(allowed) + 1
-                            else f"{model}的时长只能是{'、'.join(map(str, allowed))}秒，收到{duration}秒")
-        elif not allowed and not 4 <= duration <= 30:
-            problems.append(f"时长按4-30秒处理，收到{duration}秒")
         if ratio not in SEEDANCE25_RATIOS:
             problems.append(f"比例只支持{'、'.join(SEEDANCE25_RATIOS)}，收到{ratio}")
         cap_i, cap_v, cap_a = REF_LIMITS.get(model, REF_LIMITS_DEFAULT)

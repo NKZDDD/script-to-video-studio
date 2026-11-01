@@ -40,8 +40,6 @@ def test_thirty_images_and_audio_not_capped_at_nine():
 
 
 @pytest.mark.parametrize('model,duration,extra', [
-    ('sd10-seedance-2.0', 12, {}),
-    ('sd10-seedance-2.5', 15, {}),
     ('sd13-seedance-2.5', 30, {'audio_refs': ['https://example.test/a.mp3']}),
     ('sd7-seedance-2.0-720p', 15, {'first_image_url': 'https://example.test/a.png'}),
     ('sd11-seedance-2.5', 15, {'last_image_url': 'https://example.test/a.png'}),
@@ -230,12 +228,16 @@ def test_added_seedance_frames_and_per_model_media_support():
         p.build_video_body(task)
 
 
-@pytest.mark.parametrize('model,duration', [('sd8-seedance-2.5-n', 15),
+@pytest.mark.parametrize('model,duration', [('sd10-seedance-2.0', 12),
+                                          ('sd10-seedance-2.5', 15),
+                                          ('sd8-seedance-2.5-n', 15),
                                           ('sd17-seedance-2.5-2', 5),
                                           ('gv4-grok-imagine-video-1.5', 5)])
 def test_added_models_do_not_silently_change_duration(model, duration):
-    with pytest.raises(ApiError, match='秒'):
-        CangyuanVideoProvider().build_video_body(VideoTask('lake', model=model, duration=duration))
+    # 本地不再按文档 snapshot 的 minimum/maximum/enum 拦或改：选的秒数原样发出。
+    body = CangyuanVideoProvider().build_video_body(
+        VideoTask('lake', model=model, duration=duration))
+    assert body['duration'] == duration
 
 
 def test_new_explicit_restrictions_and_suggestions_are_distinct():

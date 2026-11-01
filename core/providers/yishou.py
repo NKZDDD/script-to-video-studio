@@ -135,7 +135,7 @@ class YishouProvider(Provider):
         body: dict = {
             "model": model,
             "prompt": task.prompt or "",
-            "seconds": int(task.duration or 15),      # 文档：统一用 seconds，别用 duration_seconds
+            "seconds": max(1, int(task.duration or 15)),  # 文档：统一用 seconds，别用 duration_seconds
             "aspect_ratio": task.ratio or "9:16",     # 必填
         }
         if refs:

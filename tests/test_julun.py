@@ -216,33 +216,34 @@ class FormatDispatchTests(unittest.TestCase):
 
 
 class DurationTests(unittest.TestCase):
-    def test_sd25_updated_range_and_legacy_fixed_30(self):
-        """2026-09-28 sd2.5 开放整数时长；旧 Dubai 的固定规则仍保留。"""
+    """**本地不再按模型档位夹取/吸附秒数。** 用户选多少就发多少，
+    真超出上游范围由服务商拒绝（任务明细能看到真实原因）。"""
+
+    def test_sd25_and_legacy_dubai_both_send_seconds_as_chosen(self):
         said = []
         self.assertEqual(fit_duration("sd2.5", 10, log=said.append), 10)
-        self.assertEqual(fit_duration("dubai_sd25_170", 15, log=said.append), 30)
+        self.assertEqual(fit_duration("dubai_sd25_170", 15, log=said.append), 15)
         self.assertEqual(fit_duration("sd2.5", 30), 30)
-        self.assertEqual(len(said), 1)      # 只纠正旧 Dubai
+        # 不再纠正任何模型，所以也不会有纠正日志
+        self.assertEqual(said, [])
 
-    def test_discrete_choices_snap_to_nearest(self):
-        self.assertEqual(fit_duration("sd-2-c8", 4), 10)
+    def test_discrete_models_no_longer_snap(self):
+        self.assertEqual(fit_duration("sd-2-c8", 4), 4)
         self.assertEqual(fit_duration("sd-2-c8", 15), 15)
-        with self.assertRaises(ApiError):
-            fit_duration("minimax-h3 2k", 8)
-        self.assertEqual(fit_duration("Quality V4 · 480p/720p (可@图/视频/音频)", 12), 10)
+        self.assertEqual(fit_duration("minimax-h3 2k", 8), 8)
+        self.assertEqual(fit_duration("Quality V4 · 480p/720p (可@图/视频/音频)", 12), 12)
 
-    def test_wan30th_allows_up_to_30(self):
+    def test_wan30th_passes_through(self):
         self.assertEqual(fit_duration("wan3.0th", 30), 30)
-        self.assertEqual(fit_duration("wan3.0th", 31), 30)
+        self.assertEqual(fit_duration("wan3.0th", 31), 31)
 
-    def test_range_models_clamp_and_say_so(self):
+    def test_range_models_no_longer_clamp(self):
         said = []
-        self.assertEqual(fit_duration("SD2.0 Fast", 99, log=said.append), 15)
-        self.assertEqual(fit_duration("SD2.0 Fast", 1, log=said.append), 4)
-        self.assertEqual(len(said), 2)
+        self.assertEqual(fit_duration("SD2.0 Fast", 99, log=said.append), 99)
+        self.assertEqual(fit_duration("SD2.0 Fast", 1, log=said.append), 1)
+        self.assertEqual(said, [])
 
-    def test_submitted_body_carries_the_corrected_duration(self):
-        """纠正必须落到真正发出去的 body 里，不能只在日志里说说。"""
+    def test_submitted_body_carries_the_chosen_duration(self):
         p = JulunProvider()
         _, body = p.build_video_body(_vt(model="sd2.5", refs=URLS, duration=10))
         self.assertEqual(body["seconds"], 10)

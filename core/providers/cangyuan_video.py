@@ -853,12 +853,9 @@ class CangyuanVideoProvider(Provider):
         max_prompt = params.get('prompt', {}).get('maxLength')
         if max_prompt and len(task.prompt) > max_prompt:
             raise ApiError(f'{model} 提示词最多 {max_prompt} 字符，请缩短后重试；没有截断或提交', kind='task_fatal')
-        duration = task.duration
-        rule = params['duration']
-        if (isinstance(duration, bool) or not isinstance(duration, int) or duration <= 0
-                or duration < rule.get('minimum', 1) or duration > rule.get('maximum', float('inf'))
-                or ('enum' in rule and duration not in rule['enum'])):
-            raise ApiError(f'{model} 不支持 {duration} 秒，请按模型候选选择；没有自动改秒数', kind='task_fatal')
+        # 出片秒数原样发出：本地按模型 minimum/maximum/enum 拦会把用户选的
+        # 30 秒顶回去（还可能是上游早已放宽的旧规则）。真超范围让服务商拒绝。
+        duration = max(1, int(task.duration or 1))
         body = {'model': model, 'prompt': task.prompt, 'duration': duration}
         if task.ratio:
             body['aspect_ratio'] = task.ratio

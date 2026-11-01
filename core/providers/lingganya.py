@@ -81,8 +81,6 @@ def self_check(body: dict) -> list:
         tips.append(f"model={model} 不在这家的模型表里。视频可用的是："
                     f"{'、'.join(list(VIDEO_SPECS)[:8])} 等")
     elif spec:
-        if str(body.get("seconds")) not in [str(s) for s in spec["seconds"]]:
-            tips.append(f"时长 {body.get('seconds')} 不是 {model} 的合法档位，只能 {spec['seconds']}")
         imgs = body.get("images") or []
         if len(imgs) > spec["max_images"]:
             tips.append(f"参考图 {len(imgs)} 张超上限：{model} 最多 {spec['max_images']} 张")
@@ -105,9 +103,10 @@ def self_check(body: dict) -> list:
 
 
 def fit_video(body: dict, log=print) -> dict:
-    """按模型规格纠正请求体：seconds 吸附到合法档位、参考图裁到上限、缺图报错。
+    """补齐请求体：参考图裁到上限、缺图报错。
 
-    宁可自动纠正 + 明确记一行日志，也不要把明知不合法的参数发出去换一个 400。
+    **出片秒数不再吸附档位** —— 用户选 30 秒就发 30 秒，本地档位表会过期，
+    真超范围交给服务端拒绝。参考图的约束照旧处理。
     自定义模型名（不在表里）原样放过，交给服务端判断。
     """
     model = str(body.get("model") or "")
@@ -115,15 +114,10 @@ def fit_video(body: dict, log=print) -> dict:
     if not spec:
         return body
 
-    allowed = spec["seconds"]
     try:
-        sec = int(str(body.get("seconds")))
+        sec = max(1, int(str(body.get("seconds"))))
     except Exception:                                   # noqa: BLE001
-        sec = allowed[-1]
-    if sec not in allowed:
-        near = min(allowed, key=lambda a: abs(a - sec))
-        log(f"灵感鸭 {model} 的时长只能是 {allowed} 秒，已把 {sec} 纠正为 {near}")
-        sec = near
+        sec = 1
     # sd 系文档要整数，其余按官方示例给字符串（两者都被接受，保持与示例一致）
     body["seconds"] = sec if model.startswith("sd") else str(sec)
 
@@ -187,9 +181,9 @@ class LingganyaProvider(Provider):
                 "resolutions": ["", "1080p", "720p", "480p"],
                 "max_refs": 9,
                 "ref_mode": "data_uri",
-                "notes": "每个模型的时长是固定档位不是随便填：sora-2 只有 4/8/12、"
-                         "veo 只有 8、gemini 只有 10、SD 系 4-15 随意。填错会自动吸附到"
-                         "最近的合法值并记一行日志。SD 系带参考图时会自动补 reference_mode"
+                "notes": "每个模型有自己的时长档位（sora-2 4/8/12、veo 8、gemini 10、"
+                         "SD 系 4-15）。**本地不再吸附/纠正秒数**：按你选的原样提交，"
+                         "超出上游范围由服务商拒绝。SD 系带参考图时会自动补 reference_mode"
                          "（2 张=首尾帧 / 多张=素材参考）。"
                          "⚠ sora-2 通道实测极不稳定（随机 task_failed），不建议用于批量。",
             },
@@ -243,7 +237,7 @@ class LingganyaProvider(Provider):
             body["resolution"] = res
         if task.extra.get("reference_mode"):
             body.setdefault("extra", {})["reference_mode"] = task.extra["reference_mode"]
-        # 按模型规格纠正：时长吸附档位、参考图裁到上限、该带的字段补上、不该带的去掉
+        # 补齐请求体：秒数原样、参考图裁到上限、该带的字段补上、不该带的去掉
         body = fit_video(body, log=log)
         log(f"提交 {brief_body(body)}")
         try:

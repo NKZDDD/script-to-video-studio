@@ -262,24 +262,9 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None, *, 
                     raise ValueError(f"清晰度 {p['resolution']} 不在这个视频模型的能力里"
                                      f"（{'、'.join(effective.get('resolutions', [])) or '没有声明'}），"
                                      "在「本次服务商与并发」视频那一行的清晰度里重新选，或选「跟随任务」")
-                rules = {}
-                raw_rules = ((cfg.get("providers") or {}).get(row["provider"], {}).get("durations") or "")
-                for rule in re.split(r"[;\n]+", str(raw_rules)):
-                    if "=" in rule:
-                        model, seconds = rule.split("=", 1)
-                        rules[model.strip()] = [int(s) for s in re.split(r"[,，\s]+", seconds.strip()) if s.isdigit() and int(s) > 0]
-                manual = rules.get(row["model"]) or rules.get("*")
-                durations = manual or effective.get("durations")
-                if not durations or float(p.get("duration", 0)) not in [float(d) for d in durations]:
-                    who = f"「{capmap.get(row['provider'], {}).get('name') or row['provider']} / {row['model']}」"
-                    source = "设置里手填的「已实测的模型时长档位」" if manual else "服务商的模型能力声明"
-                    can = f"只支持 {_seconds(durations)}（来自{source}）" if durations else "没有声明支持哪些时长"
-                    asked = (f"视频那一行选的是 {p.get('duration')} 秒" if row.get("duration")
-                             else f"这一段要 {p.get('duration')} 秒")
-                    raise ValueError(f"{asked}，但视频模型{who}{can}。"
-                                     "处理办法：在「本次服务商与并发」视频那一行的秒数里选一个支持的档位；"
-                                     "换一个支持这个时长的视频模型；或者让 Agent 按不超过上限的时长重新切段；"
-                                     "如果确认服务商实际支持，到设置 → 服务商里补上「已实测的模型时长档位」。")
+                # **出片秒数不再按模型档位拦。** 本地档位会过期，
+                # 选 30 秒被顶回去等于把能力埋掉；真超范围交给服务商裁决，
+                # 任务明细里能看到真实原因。这里只保留 1–60 的合法化。
             t["params"] = p
             if kind not in pcs or pcs[kind].get("model") != row["model"] or pcs[kind].get('provider') != row['provider']:
                 pc = resolve_cfg(cfg, {"provider": row["provider"], "model": row["model"]}, "video" if media == "video" else "asset")

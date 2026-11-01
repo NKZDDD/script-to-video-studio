@@ -77,9 +77,9 @@ class VideoBodyTests(unittest.TestCase):
         b = self.body(prompt="x", model="37")
         self.assertNotIn("with_audio", b)
 
-    def test_duration_is_clamped_to_1_300(self):
-        """按提交时长计费 —— 夹住，别让一次手滑烧穿积分。"""
-        self.assertEqual(self.body(prompt="x", model="37", duration=999)["duration_seconds"], 300)
+    def test_duration_is_sent_as_chosen(self):
+        """本地不再夹到 300 秒：按提交时长计费，超范围交给服务商拒绝。"""
+        self.assertEqual(self.body(prompt="x", model="37", duration=999)["duration_seconds"], 999)
         self.assertEqual(self.body(prompt="x", model="37", duration=1)["duration_seconds"], 1)
 
     def test_no_reference_fields_when_no_materials(self):

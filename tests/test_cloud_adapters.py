@@ -42,7 +42,7 @@ def isolated(tmp_path, monkeypatch):
 
 def test_all_existing_adapters_and_dependencies_load_without_builtin_imports():
     bundle = build('test')
-    assert len(bundle['providers']) == 27
+    assert len(bundle['providers']) == 28
     classes = C.load(bundle)
     assert set(classes) == {p['id'] for p in bundle['providers']}
     assert not {pid:P._check(cls) for pid,cls in classes.items() if P._check(cls)}
@@ -141,10 +141,10 @@ class DenyBuiltins(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0,DenyBuiltins())
 from core.cloud_adapters import load
 classes=load(json.load(open(sys.argv[1],encoding='utf-8')))
-assert len(classes)==27
+assert len(classes)==28
 providers.activate_remote(classes,'test')
 from server import app
-assert len(app.caps_of({}))==27
+assert len(app.caps_of({}))==28
 '''
     r=subprocess.run([sys.executable,'-c',script,str(f)],env=dict(os.environ,STV_MANAGED_ADAPTERS='1',STV_DATA_DIR=str(isolated/'data')),
                      capture_output=True,text=True,timeout=45)

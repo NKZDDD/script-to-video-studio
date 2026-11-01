@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "合成成片支持「统一缩放规格」：本集分段之间的分辨率或编码不一致时，点合成会先提示，确认后自动统一缩放到该集基准规格（相当于剪辑软件把整条时间线放到同一画布），规格一致时仍是原画质拼接、画面不重编码；外部插入视频照旧单独适配。已有任务、引用、配置与产物保留；服务商继续使用后台适配包，无需升级认证服务端。"}
+               "notes": "修复服务商 NY（valeclouds）已完成的视频取不回来：这家查询接口只回 status/progress、不回结果地址，成片只存在于 /v1/videos/{id}/content，此前会一直报「任务完成但未取到结果」且续查永远失败。现在已完成的任务可直接续查取回（原任务 ID 保留、不会重新提交或重复计费）。已有任务、引用、配置与产物保留；其它服务商与认证服务端不受影响。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))

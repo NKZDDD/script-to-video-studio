@@ -253,7 +253,7 @@ class WuxianhuabuProvider(Provider):
         # 最少几张图），一条一条报要跑好几趟；而这些都在发请求之前就知道，
         # 现在停比撞一个 400 便宜 —— 撞 400 的那些家里，有几家是**不报错、
         # 自己挑一个默认值**，那才是最坏的。
-        sec = int(task.duration or 15)
+        sec = max(1, int(task.duration or 15))
         ratio = task.ratio or "9:16"
         if not lim:
             # 表里没有 = 我们不知道它的约束，**不是不允许**。照发。
@@ -263,13 +263,8 @@ class WuxianhuabuProvider(Provider):
                 f"要把它变成有校验的：跑一次 list_models() 看它声明的 "
                 f"capability_schema，补进 core/providers/wuxianhuabu.py 的 MODELS。")
         bad = []
-        if lim.get("durations") and sec not in lim["durations"]:
-            ds = lim["durations"]
-            # 只有一个合法值时别写成「30–30 秒」—— 那句话读起来像个区间，
-            # 人会以为自己填的 15 落在里面，去找别的原因。
-            span = (f"{min(ds)} 秒" if len(ds) == 1
-                    else " / ".join(str(s) for s in ds) + " 秒")
-            bad.append(f"{model} 的时长只能是 {span}，本任务是 {sec} 秒")
+        # 出片秒数不在本地按 lim["durations"] 拦截：本地档位会过期，
+        # 真超范围由平台拒绝，任务明细里能看到真实原因。
         if lim.get("ratios") and ratio not in lim["ratios"]:
             bad.append(f"{model} 不收 {ratio} 这个画幅，它只有 "
                        f"{' / '.join(lim['ratios'])}")

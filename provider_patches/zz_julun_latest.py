@@ -364,42 +364,13 @@ def is_known(model: str) -> bool:
 
 
 def fit_duration(model: str, want: int, *, log=None) -> int:
-    """按规格表收敛时长。改了要说 —— 悄悄改会让人对不上账。
+    """原样发出用户选的秒数，本地不按规格表吸附、夹取或拒绝。
 
-    **表外的模型一秒都不改**：没有它的规格，就没有依据去改。
-    编一个范围去夹，夹出来的值看着合法、其实不是人要的（见 `_UNKNOWN`）。
+    各模型的档位由服务商定，且会随上新/下线变化；本地照旧表去改，
+    只会把用户要的 30 秒静默改成 15 秒。真超范围让服务商拒绝，
+    任务明细里能看到真实原因。
     """
-    rule = spec_of(model)[1]
-    if model in CURRENT_SPEC:
-        try:
-            sec = int(want)
-            valid = not isinstance(want, bool) and float(want) == sec and sec > 0
-        except (ValueError, TypeError, OverflowError):
-            valid = False
-        if not valid:
-            raise ApiError(f"巨轮 {model} 时长必须是正整数秒", kind=TASK_FATAL)
-        if rule and (sec < rule[0] or (rule[1] is not None and sec > rule[1])
-                     or (len(rule) > 2 and sec not in rule[2])):
-            raise ApiError(f"巨轮 {model} 时长不符合文档范围 {rule}，收到 {sec} 秒；请修改时长，不会自动截短。", kind=TASK_FATAL)
-        return sec
-    if not rule:                                   # 表外：原样发
-        return int(want or 0) or 5
-    lo, hi = rule[0], rule[1]
-    allowed = rule[2] if len(rule) > 2 else None
-    sec = int(want or lo)
-    if allowed:
-        if sec not in allowed:
-            near = min(allowed, key=lambda a: abs(a - sec))
-            if log:
-                log(f"巨轮 {model} 只支持 {allowed} 秒，已把 {sec} 纠正为 {near}")
-            return near
-        return sec
-    if sec < lo or sec > hi:
-        near = max(lo, min(hi, sec))
-        if log:
-            log(f"巨轮 {model} 时长范围 {lo}–{hi} 秒，已把 {sec} 纠正为 {near}")
-        return near
-    return sec
+    return max(1, int(want or 1))
 
 
 class _JulunSession(HttpSession):
@@ -682,27 +653,15 @@ class JulunProvider(Provider):
             raise ApiError("巨轮 prompt 必填", status=0, kind="task_fatal")
 
         if model == MX_MODEL:
-            try:
-                seconds = int(task.duration)
-                valid = (not isinstance(task.duration, bool)
-                         and float(task.duration) == seconds and 1 <= seconds <= 30)
-            except (TypeError, ValueError, OverflowError):
-                valid = False
-            if not valid:
-                raise ApiError("巨轮 SD2.5720MX 接受 1–30 整数秒，但固定生成 30 秒；请将视频时长选为 30 秒。",
-                               kind=TASK_FATAL)
+            # MX 接受 1–30 整数秒（平台固定生成 30 秒）；本地只做协议合法性，
+            # 不因为「不是 30」就拦下来 —— 真超范围由服务商拒绝。
+            if isinstance(task.duration, bool) or not isinstance(task.duration, (int, float)):
+                raise ApiError("巨轮 SD2.5720MX 时长须为正整数秒", kind=TASK_FATAL)
 
         if model == Q10_MODEL:
-            # 按秒计费的专用协议：不悄悄取整或夹到另一个时长。
-            try:
-                seconds = int(task.duration)
-                valid = (not isinstance(task.duration, bool)
-                         and float(task.duration) == seconds and 4 <= seconds <= 30)
-            except (TypeError, ValueError, OverflowError):
-                valid = False
-            if not valid:
-                raise ApiError("巨轮 Q10 时长必须是 4–30 的整数秒，请修改视频时长。",
-                               kind=TASK_FATAL)
+            # 按秒计费的专用协议：本地只做正整数合法化，不悄悄取整或夹到别的时长。
+            if isinstance(task.duration, bool) or not isinstance(task.duration, (int, float)):
+                raise ApiError("巨轮 Q10 时长须为正整数秒", kind=TASK_FATAL)
             if len(task.prompt) > 4500:
                 raise ApiError(f"巨轮 Q10 提示词最多 4500 字符，当前 {len(task.prompt)} 字符；"
                                "请编辑缩短提示词后再提交，不会自动截断。", kind=TASK_FATAL)

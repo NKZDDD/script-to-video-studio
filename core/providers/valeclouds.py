@@ -22,7 +22,8 @@ from typing import Callable, Optional
 
 import requests
 
-from ..apiutil import ApiError, TASK_FATAL, extract_image_items, extract_task_id, extract_video_url
+from ..apiutil import (ApiError, DONE_STATES, TASK_FATAL, extract_image_items,
+                       extract_status, extract_task_id, extract_video_url)
 from .base import ImageTask, Provider, VideoTask
 
 # 目录里能出片的视频模型（超分/去字幕这类「编辑」模型不在生产链路里用）。
@@ -168,6 +169,22 @@ class ValeCloudsProvider(Provider):
         return url
 
     # ------------------------------------------------------------- 视频
+    def _result_url(self, data, task_id: str) -> str:
+        """成片的地址。
+
+        2026-11-01 用真任务（vcr1_98c62f87…）实查：查询响应里**只有**
+        status/progress/billing 这些字段，一个结果 URL 都没有；成片在
+        `GET /v1/videos/{id}/content`（直接回 mp4 二进制）。
+        以前这里只等 extract_video_url，于是状态已经 completed 也取不到地址，
+        报「任务完成但未取到结果」，而任务 ID 被一直保留、续查永远失败。
+        """
+        url = extract_video_url(data)
+        if url:
+            return url
+        if extract_status(data) in DONE_STATES:
+            return f"{self.session.base_url}/v1/videos/{extract_task_id(data) or task_id}/content"
+        return ""
+
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
@@ -219,11 +236,29 @@ class ValeCloudsProvider(Provider):
         if not url:
             if not task_id:
                 raise ApiError(f"NY 创建任务没有返回任务号：{str(data)[:300]}")
-            url = self.session.poll("/v1/videos/{id}", task_id, picker=extract_video_url,
+            url = self.session.poll("/v1/videos/{id}", task_id,
+                                    picker=lambda d: self._result_url(d, task_id),
                                     interval=poll_interval, timeout=poll_timeout,
                                     log=log, cancel=cancel)
         self.session.save_item(url, dest, log=log)
         return {"task_id": task_id, "source": url, "provider": self.id, "model": model}
+
+    def resume(self, record, dest: str, *, log: Callable = print,
+               cancel: Optional[Callable] = None,
+               poll_interval: int = 10, poll_timeout: int = 2400) -> dict:
+        """续查已提交的任务。
+
+        成片只能从 `/content` 取（见 `_result_url`），所以不能走基类的
+        「重放 extract_video_url」那条路 —— 那条对这家永远取不到结果。
+        """
+        task_id = str(record.get("task_id") or "")
+        url = self.session.poll("/v1/videos/{id}", task_id,
+                                picker=lambda d: self._result_url(d, task_id),
+                                interval=poll_interval, timeout=poll_timeout,
+                                log=log, cancel=cancel)
+        self.session.save_item(url, dest, log=log)
+        return {"task_id": task_id, "source": str(url)[:200], "provider": self.id,
+                "model": record.get("model", ""), "resumed": True}
 
     # ------------------------------------------------------------- 图片
     def _image_bytes(self, ref: str, index: int) -> tuple:

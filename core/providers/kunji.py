@@ -331,24 +331,20 @@ class KunjiProvider(Provider):
         model = task.model or "veo-3.1-fast-generate-preview"
         self._with_key(self.keys.get("default", ""))
         refs = [r for r in (task.refs or []) if str(r).startswith(("http", "data:"))]
-        dur = int(task.duration or 4)
+        dur = max(1, int(task.duration or 4))
         ratio = task.ratio or "16:9"
 
         multi = len(refs) > 2 or bool(task.extra.get("multi_ref"))
         if multi:
-            # 文档：多参考图必须 -ref 模型，且**固定 8 秒 + 16:9**；
-            # 传 4/6 秒或 9:16 会生成失败 —— 失败虽不扣费，但白等一整轮轮询。
+            # 文档：多参考图必须 -ref 模型；比例固定 16:9。
+            # **秒数不再本地强制 8 秒** —— 用户选多少发多少，真超范围由服务商拒绝。
             if "-ref" not in model:
                 raise ApiError(
                     f"多参考图必须用 veo-3.1-generate-preview-ref，当前是 {model}。",
                     status=0, kind="task_fatal")
-            if dur != 8 or ratio != "16:9":
-                log(f"坤鸡 veo 多参考图固定 8 秒 + 16:9，已把 {dur}秒/{ratio} 纠正")
-                dur, ratio = 8, "16:9"
-        if dur not in VIDEO_DURATIONS:
-            near = min(VIDEO_DURATIONS, key=lambda d: abs(d - dur))
-            log(f"坤鸡 veo 只有 {VIDEO_DURATIONS} 秒，已把 {dur} 纠正为 {near}")
-            dur = near
+            if ratio != "16:9":
+                log(f"坤鸡 veo 多参考图固定 16:9，已把 {ratio} 纠正")
+                ratio = "16:9"
 
         body = {"model": model, "prompt": task.prompt, "duration": dur,
                 "aspect_ratio": ratio,

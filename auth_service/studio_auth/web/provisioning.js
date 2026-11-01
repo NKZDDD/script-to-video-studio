@@ -14,9 +14,9 @@ function shell(title,body){
 function pError(e){const n=provisionDialog.querySelector('#provision-error');if(n)n.textContent=e.message;}
 async function keyLibrary(){
  const d=await api('keys');providerNames=d.providers;
- shell('Key 库',`<p class="help">统一保存并命名，再到账号中勾选授权。图片、视频按模型选择 Key；提示词改写请选择“提示词改写 LLM”，填写地址、Key 和一个模型。改写使用账号排序第一条启用项，不因失败自动换 Key。</p>
+ shell('Key 库',`<p class="help">统一保存并命名，再到账号中勾选，或直接在 Key 行点“分配账号”勾选可用账号——两种方式是同一份授权。图片、视频按模型选择 Key；提示词改写请选择“提示词改写 LLM”，填写地址、Key 和一个模型。改写使用账号排序第一条启用项，不因失败自动换 Key。</p>
  <div class="actions"><button id="config-import">导入 config.json…</button><input id="config-file" type="file" accept=".json,application/json" hidden></div><p id="import-result" role="status"></p>
- <div class="table-wrap"><table><thead><tr><th>名称</th><th>服务商</th><th>模型来源 / 状态</th><th>操作</th></tr></thead><tbody>${d.keys.map((k,i)=>`<tr><td>${esc(k.name)}</td><td>${esc(providerLabel(k.provider))}</td><td>${k.models.length?'绑定 '+k.models.length+' 个模型':'按 Key 自动拉取'} · ${k.enabled?'启用':'停用'}</td><td><button data-key-edit="${i}">编辑</button></td></tr>`).join('')||'<tr><td colspan="4">尚无 Key，请在下方新建。</td></tr>'}</tbody></table></div>
+ <div class="table-wrap"><table><thead><tr><th>名称</th><th>服务商</th><th>模型来源 / 状态</th><th>操作</th></tr></thead><tbody>${d.keys.map((k,i)=>`<tr><td>${esc(k.name)}</td><td>${esc(providerLabel(k.provider))}</td><td>${k.models.length?'绑定 '+k.models.length+' 个模型':'按 Key 自动拉取'} · ${k.enabled?'启用':'停用'}</td><td><button data-key-edit="${i}">编辑</button> <button data-key-users="${i}">分配账号${k.user_count?' ('+k.user_count+')':''}</button></td></tr>`).join('')||'<tr><td colspan="4">尚无 Key，请在下方新建。</td></tr>'}</tbody></table></div>
  <h3 id="key-heading">新增 Key</h3><form id="key-edit"><input type="hidden" name="id"><label>Key 名称<input name="name" required maxlength="100" placeholder="例如：巨轮视频模型组 A"></label><label>服务商<select name="provider">${Object.entries(providerNames).map(([id,label])=>`<option value="${esc(id)}">${esc(label)}</option>`).join('')}<option value="__custom__">自定义外挂…</option></select></label><label id="custom-provider" hidden>外挂服务商 ID<input name="custom_provider" maxlength="64" pattern="[a-zA-Z0-9_-]{1,64}"></label><label>Base URL<input name="base_url" type="url" placeholder="留空使用 Studio 内置 HTTPS 地址"></label><label class="check"><input name="enabled" type="checkbox" checked>启用此 Key</label><div id="key-secrets"></div><label><span id="key-models-label">绑定模型（可选，一行一个完整模型 ID）</span><textarea name="models" rows="4" placeholder="留空：客户端用这把 Key 拉取模型。若服务商清单不区分 Key 权限或没有模型接口，在这里填写准确的模型 ID。"></textarea></label><p class="help">每把 Key 建成独立条目。编辑时密钥留空保留，不回显。停用后停止下发，已运行批次继续使用当时配置。绑定模型优先于自动拉取。</p><div class="actions"><button type="button" id="key-new">清空并新建</button><button class="primary">保存 Key</button></div></form>`);
  const f=provisionDialog.querySelector('#key-edit');
  const fileInput=provisionDialog.querySelector('#config-file');
@@ -37,20 +37,43 @@ async function keyLibrary(){
  provisionDialog.querySelectorAll('[data-key-edit]').forEach(b=>b.onclick=()=>{
   const k=d.keys[+b.dataset.keyEdit];f.reset();f.elements.id.value=k.id;f.elements.name.value=k.name;
   if(!providerNames[k.provider])f.elements.provider.add(new Option(k.provider,k.provider));
-  f.elements.provider.value=k.provider;f.elements.provider.disabled=true;f.elements.base_url.value=k.base_url;
+  f.elements.provider.value=k.provider;f.elements.base_url.value=k.base_url;
   f.elements.enabled.checked=k.enabled;f.elements.models.value=k.models.join('\n');
   provisionDialog.querySelector('#key-heading').textContent='编辑 Key · '+k.name;secrets(k.configured);f.scrollIntoView({block:'start',behavior:'smooth'});
  });
+ provisionDialog.querySelectorAll('[data-key-users]').forEach(b=>b.onclick=()=>safe(()=>provisionKeyUsers(d.keys[+b.dataset.keyUsers])));
  f.onsubmit=async e=>{
   e.preventDefault();const button=f.querySelector('button.primary');button.disabled=true;
   try{const v=Object.fromEntries(new FormData(f));v.provider=f.elements.provider.value==='__custom__'?v.custom_provider:f.elements.provider.value;delete v.custom_provider;v.enabled=f.elements.enabled.checked;v.models=v.models.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);await api('keys',v);f.reset();await keyLibrary();}catch(e){pError(e);}finally{button.disabled=false;}
+ };
+}
+async function provisionKeyUsers(k){
+ const chosen=new Set((await api('keys/'+encodeURIComponent(k.id)+'/users')).usernames);
+ shell('分配账号 · '+k.name,`<p class="help">勾选可以使用这把 Key 的账号。保存后客户端“刷新后台配置”才生效；停用 Key 会立即停止下发。账号页的「授权 Key」与这里是同一份关系，以最后一次保存为准。</p><h3>已选 <span id="key-user-count"></span></h3><div id="key-user-chosen"></div><label>搜索账号<input id="key-user-q" placeholder="输入用户名筛选"></label><div id="key-user-list" class="table-wrap"></div><div class="actions"><button id="save-key-users" class="primary">保存分配</button></div>`);
+ function paint(){
+  provisionDialog.querySelector('#key-user-count').textContent=chosen.size?'· '+chosen.size+' 个账号':'';
+  provisionDialog.querySelector('#key-user-chosen').innerHTML=[...chosen].sort().map(n=>`<span>${esc(n)} <button type="button" data-drop="${esc(n)}" aria-label="移除 ${esc(n)}">×</button></span>`).join('')||'<p class="muted">还没有账号</p>';
+  provisionDialog.querySelectorAll('[data-drop]').forEach(b=>b.onclick=()=>{chosen.delete(b.dataset.drop);paint();});
+ }
+ async function list(q=''){
+  const d=await api('users?q='+encodeURIComponent(q));
+  provisionDialog.querySelector('#key-user-list').innerHTML=`<table><tbody>${d.users.map(u=>`<tr><td><label class="check"><input type="checkbox" data-user="${esc(u.username)}" ${chosen.has(u.username)?'checked':''}>${esc(u.username)}${u.enabled?'':' · 已停用'}</label></td></tr>`).join('')||'<tr><td>没有匹配的账号</td></tr>'}</tbody></table>`;
+  provisionDialog.querySelectorAll('[data-user]').forEach(c=>c.onchange=()=>{c.checked?chosen.add(c.dataset.user):chosen.delete(c.dataset.user);paint();});
+ }
+ paint();await list();
+ let timer;
+ provisionDialog.querySelector('#key-user-q').oninput=e=>{clearTimeout(timer);timer=setTimeout(()=>safe(()=>list(e.target.value)),200);};
+ provisionDialog.querySelector('#save-key-users').onclick=async e=>{
+  const b=e.currentTarget;b.disabled=true;
+  try{await api('keys/'+encodeURIComponent(k.id)+'/users',{usernames:[...chosen]});await keyLibrary();}
+  catch(err){pError(err);}finally{b.disabled=false;}
  };
 }
 async function importKeyConfig(file){
  if(file.size>524288)throw Error('配置文件最多 512 KB，请拆分后导入');
  let content=await file.text();
  const d=await api('keys/import/preview',{content});
- shell('导入 Key 配置预览',`<p class="help">导入 providers 中的服务商 Key、HTTPS 地址和 models，以及 llm 中明确填写的 base_url、api_key、model。每个凭据字段单独建条目，不覆盖已有 Key，不修改项目路径、其他配置或账号授权。Key 内容不回显；导入后可编辑名称，再到账号中勾选分配。</p>${d.warnings.map(w=>`<p class="help">${esc(w)}</p>`).join('')}<div class="table-wrap"><table><thead><tr><th>导入</th><th>名称 / 服务商</th><th>模型 / 地址</th><th>状态</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td><input type="checkbox" data-import-index="${r.index}" aria-label="导入 ${esc(r.name)}" ${r.duplicate?'disabled':'checked'}></td><td>${esc(r.name)}<br><small>${esc(providerLabel(r.provider))} · ${esc(keyFields[r.field])}</small></td><td>${r.models.length?esc(r.models.join('、')):'按 Key 拉取模型'}<br><small>${esc(r.base_url||'使用客户端内置地址')}</small></td><td>${r.duplicate?'重复，跳过':'新建'}</td></tr>`).join('')}</tbody></table></div><div class="actions"><button id="import-cancel">返回 Key 库</button><button id="import-confirm" class="primary">导入所选</button></div>`);
+ shell('导入 Key 配置预览',`<p class="help">导入 providers 中的服务商 Key、HTTPS 地址和 models，以及 llm 中明确填写的 base_url、api_key、model。每个凭据字段单独建条目，不覆盖已有 Key，不修改项目路径、其他配置或账号授权。Key 内容不回显；导入后可编辑名称，再到账号中勾选分配，或在 Key 行点“分配账号”。</p>${d.warnings.map(w=>`<p class="help">${esc(w)}</p>`).join('')}<div class="table-wrap"><table><thead><tr><th>导入</th><th>名称 / 服务商</th><th>模型 / 地址</th><th>状态</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td><input type="checkbox" data-import-index="${r.index}" aria-label="导入 ${esc(r.name)}" ${r.duplicate?'disabled':'checked'}></td><td>${esc(r.name)}<br><small>${esc(providerLabel(r.provider))} · ${esc(keyFields[r.field])}</small></td><td>${r.models.length?esc(r.models.join('、')):'按 Key 拉取模型'}<br><small>${esc(r.base_url||'使用客户端内置地址')}</small></td><td>${r.duplicate?'重复，跳过':'新建'}</td></tr>`).join('')}</tbody></table></div><div class="actions"><button id="import-cancel">返回 Key 库</button><button id="import-confirm" class="primary">导入所选</button></div>`);
  // The selected file exists only in this dialog's closure, never in browser storage.
  const clear=()=>{content='';};provisionDialog.addEventListener('close',clear,{once:true});
  provisionDialog.querySelector('#import-cancel').onclick=()=>{clear();provisionDialog.removeEventListener('close',clear);safe(keyLibrary);};

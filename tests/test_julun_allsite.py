@@ -65,7 +65,7 @@ def test_sd25_preserves_all_30_images_10_videos_and_10_audios_and_controls():
 
 
 @pytest.mark.parametrize('changes', [
-    {'refs':['https://fixture.example/a.png']*31}, {'duration':31}, {'duration':4.5},
+    {'refs':['https://fixture.example/a.png']*31},
     {'resolution':'480p'}, {'extra':{'video_refs':['local.mp4']}},
     {'extra':{'enable_audio':'false'}}, {'extra':{'additional_parameters':'invalid'}},
 ])
@@ -78,12 +78,20 @@ def test_invalid_parameters_stop_before_post(changes, monkeypatch):
     assert not calls
 
 
-def test_fixed_and_discrete_durations_are_not_silently_changed():
+@pytest.mark.parametrize('seconds,expected', [(31, 31), (4.5, 4)])
+def test_chosen_duration_is_sent_without_local_rejection(seconds, expected):
+    # 本地不再按模型档位拦/取整到档位：数值原样发（4.5 只做 int 合法化）。
+    _, body = J.JulunProvider().build_video_body(
+        VideoTask(model='JL-seedance-2.5-720p', prompt='风景', duration=seconds))
+    assert body.get('seconds', body.get('duration')) == expected
+
+
+def test_fixed_and_discrete_durations_are_sent_as_chosen():
     p=J.JulunProvider()
-    with pytest.raises(ApiError):p.build_video_body(VideoTask(model='SD2.0FSDT',prompt='风景',duration=15))
-    with pytest.raises(ApiError):p.build_video_body(VideoTask(model='SDFAST-JL',prompt='风景',duration=12,refs=['https://x/a.png']))
-    _, body=p.build_video_body(VideoTask(model='SD2.0FSDT',prompt='风景',duration=12))
-    assert body['seconds']==12
+    _, body=p.build_video_body(VideoTask(model='SD2.0FSDT',prompt='风景',duration=15))
+    assert body.get('seconds', body.get('duration')) == 15
+    _, body=p.build_video_body(VideoTask(model='SDFAST-JL',prompt='风景',duration=12,refs=['https://x/a.png']))
+    assert body.get('seconds', body.get('duration')) == 12
 
 
 def test_live_h3_total_limit_and_mp3_rule_are_distinct():

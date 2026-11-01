@@ -72,11 +72,11 @@ class ChaomoTests(unittest.TestCase):
             "image_url": {"url": "https://a/1.jpg"},
         }])
 
-    def test_video_duration_clamped(self):
+    def test_video_duration_sent_as_chosen(self):
         p = ChaomoProvider(api_key="k")
         seen = _stub(p, {"id": "t1", "status": "completed", "data": [{"url": "https://x/v.mp4"}]})
         p.generate_video(VideoTask(prompt="x", duration=30, model="seedance2"), "out.mp4")
-        self.assertEqual(seen["body"]["seconds"], "15")
+        self.assertEqual(seen["body"]["seconds"], "30")
 
     def test_video_rejects_local_refs_before_paying(self):
         p = ChaomoProvider(api_key="k")

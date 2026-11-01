@@ -89,26 +89,13 @@ _CTYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 
 
 def _fit_duration(model: str, want: int, *, log=None) -> int:
-    """收敛时长。**只在有明确依据时才改**，没依据就原样发出去。
+    """原样发出用户选的秒数，本地不按模型档位吸附或夹取。
 
-    以前这里对未知模型一律 `min(15, ...)` —— 你要 29 秒，它悄悄发 15 秒出去，
-    片子短了一半、任务还标成功，**没有任何提示**。而那个 15 是文档 r21 里
-    「大多数模型 4-15」的说法，那批模型 2026-08-16 实拉已经全部下线了，
-    等于拿一条过期规则去砍现役模型。
-
-    现在的立场：拿不准就发用户填的值。参数越界网关会 400，**400 不计费**，
-    比默默出一条时长不对的片子安全得多 —— 后者要到成片看完才发现。
+    以前对未知模型一律 `min(15, ...)` —— 你要 29 秒，它悄悄发 15 秒出去，
+    片子短了一半、任务还标成功，**没有任何提示**。上游档位会变，本地猜不准；
+    真超范围让服务商拒绝，那句拒绝是响的，且 400 不计费。
     """
-    sec = int(want or 5)
-    allowed = DURATION_RULES.get(model)
-    if allowed and sec not in allowed:
-        near = min(allowed, key=lambda a: abs(a - sec))
-        if log:
-            log(f"{model} 的时长档位是 {allowed}，已把 {sec} 秒纠正为 {near} 秒")
-        return near
-    if sec < 1:
-        return 1
-    return sec
+    return max(1, int(want or 1))
 
 
 def _is_remote(ref: str) -> bool:

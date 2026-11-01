@@ -53,10 +53,9 @@ def test_catalog_refresh_retains_updated_options():
                         {"rows": [{"id": m} for m in THIRTY]}, "fixture")
     for model in THIRTY:
         options = cap["video"]["model_options"][model]
-        if model == "sd2.5":
-            assert "durations" not in options
-        else:
-            assert 30 in options["durations"]
+        # 实拉目录带回的模型级 durations 会被删掉，候选统一 1–60。
+        assert "durations" not in options
+    assert cap["video"]["durations"] == list(range(1, 61))
     for model in ("seedance_v2.5", "seedance_v2.0-933", "seedance-2.5-deal"):
         assert model in VIDEO_MODELS
 

@@ -115,21 +115,20 @@ class WuxianhuabuModelTests(unittest.TestCase):
         return str(c.exception)
 
     def test_out_of_range_is_refused_before_the_request(self):
-        """★ 发之前就停，而且一次说全。
-
-        一条一条报要跑好几趟；而这些在发请求之前就知道。
-        """
-        # seedance2.5 的时长**只有 30 这一个值**，不是 4–30
-        msg = self._fail(model="seedance2.5", duration=15)
-        self.assertIn("只能是 30 秒", msg)
-        self.assertNotIn("30–30", msg, "单个值别写成区间，读起来像 15 落在里面")
+        """★ 发之前就停 —— 声明里没有的比例仍在本地拦。"""
         # 它声明的六个比例里没有 2:1
         self.assertIn("2:1", self._fail(model="seedance2.5",
                                         duration=30, ratio="2:1"))
-        # 一次说全：时长和比例都错时两条都要出现
-        both = self._fail(model="seedance2.5", duration=15, ratio="2:1")
-        self.assertIn("秒", both)
-        self.assertIn("2:1", both)
+
+    def test_duration_is_sent_as_chosen(self):
+        """秒数不再按模型档位拒绝：提到 30 的模型选 15 也原样发出。"""
+        p = WuxianhuabuProvider(api_key="x")
+        p.session.request = mock.Mock(return_value={"download_url": "https://cdn/v.mp4"})
+        p.session.save_item = mock.Mock()
+        p.generate_video(VideoTask(prompt="正文", refs=["https://x/a.png"], duration=15,
+                                   ratio="9:16", model="seedance2.5"), "out.mp4",
+                         log=lambda *a: None)
+        self.assertEqual(p.session.request.call_args.kwargs["json_body"]["seconds"], 15)
 
     def test_a_model_that_takes_no_video_refs_refuses_one(self):
         """★ 它明说不收视频参考 —— 发过去多半是静默忽略，

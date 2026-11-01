@@ -115,33 +115,12 @@ def branch_of(model: str) -> str:
 
 
 def _seconds_for(model: str, sec: int) -> int:
-    """按族把时长夹进上游认的范围 —— 上游的限制换网关也带不走。
+    """按用户选的秒数原样发出，本地不按模型族夹取。
 
-    固定值的（ad 15 / omni 10 / 按次轮换 15）直接给死值；离散档的
-    （grok 6/10、grok1.5 6/10/15、veo 4/6/8）就近吸附，别让上游替我们挑。
+    以前的族表把 30 秒静默改成 15/20 秒、还按原时长计费。上游档位会变，
+    本地猜不准；真超范围让服务商拒绝，任务明细里能看到真实原因。
     """
-    br = branch_of(model)
-    if br == "grok10":
-        return min((6, 10), key=lambda d: abs(d - sec))
-    if br == "grok15":
-        return min((6, 10, 15), key=lambda d: abs(d - sec))
-    if br == "veo":
-        return min((4, 6, 8), key=lambda d: abs(d - sec))
-    if br == "omni":
-        return 10
-    if br == "ad":
-        return 15
-    if model in ROTATE_FIXED15:
-        return 15
-    if br == "h3":
-        return max(5, min(15, sec))
-    if br == "sd25":
-        return max(4, min(29, sec))
-    if br == "volc":
-        return max(4, min(30 if "2.5" in model else 15, sec))
-    if br == "rotate":
-        return max(4, min(29 if ("按秒" in model and "2.5" in model) else 15, sec))
-    return max(4, min(15, sec))                     # sd2full / dual / sd900 / 没见过的新模型
+    return max(1, int(sec or 1))
 
 
 def _ref_caps(model: str) -> tuple:

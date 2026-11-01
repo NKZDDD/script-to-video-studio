@@ -43,14 +43,41 @@ def test_library_edit_blank_preserves_id_secret_disable_and_unassign(env):
 def test_key_library_authorization_and_atomic_assignment(env):
     c,a,clock=env
     assert c.get('/admin/api/keys').status_code==401
-    login(c);kid=add(c)
+    login(c);kid=add(c);h=client_token(c)
     assert post(c,'keys',{'provider':'julun','name':'a','api_key':'test'},csrf='bad').status_code==403
     post(c,'users/customer/keys',{'key_ids':[kid]})
     for ids in ([kid,kid],[kid,'missing']):
         assert post(c,'users/customer/keys',{'key_ids':ids}).status_code==422
         assert c.get('/admin/api/users/customer/keys').json()['key_ids']==[kid]
-    assert post(c,'keys',{'id':kid,'provider':'chaomo','name':'a'}).status_code==422
+    # 编辑时允许改服务商：Key id 与密钥不变，revision 变化，授权跟着换到新服务商
+    before=verify(c,h).json()['provider_config']['julun']['keys'][0]
+    assert post(c,'keys',{'id':kid,'provider':'chaomo','name':'a'}).status_code==200
+    moved=verify(c,h).json()['provider_config']
+    assert 'julun' not in moved
+    assert moved['chaomo']['keys'][0]['key_id']==kid
+    assert moved['chaomo']['keys'][0]['api_key']==before['api_key']
+    assert moved['chaomo']['keys'][0]['assignment_id']!=before['assignment_id']
     assert post(c,'keys',{'provider':'julun','name':'a','api_key':'x','base_url':'http://unsafe.test'}).status_code==422
+
+
+def test_key_to_users_assignment_and_user_count(env):
+    c,a,clock=env;login(c);kid=add(c)
+    a.create_user('another', 'temporary-another-password')
+    assert c.get('/admin/api/keys/'+kid+'/users').status_code==200
+    assert c.get('/admin/api/keys/'+kid+'/users').json()['usernames']==[]
+    assert post(c,'keys/'+kid+'/users',{'usernames':['customer','another']}).status_code==200
+    assert c.get('/admin/api/keys/'+kid+'/users').json()['usernames']==['another','customer']
+    assert c.get('/admin/api/users/customer/keys').json()['key_ids']==[kid]
+    assert c.get('/admin/api/users/another/keys').json()['key_ids']==[kid]
+    assert {k['id']:k['user_count'] for k in c.get('/admin/api/keys').json()['keys']}[kid]==2
+    # 取消分配后关系表同步收缩
+    assert post(c,'keys/'+kid+'/users',{'usernames':['another']}).status_code==200
+    assert c.get('/admin/api/users/customer/keys').json()['key_ids']==[]
+    assert {k['id']:k['user_count'] for k in c.get('/admin/api/keys').json()['keys']}[kid]==1
+    # 参数与账号校验
+    assert post(c,'keys/'+kid+'/users',{'usernames':['another','another']}).status_code==422
+    assert post(c,'keys/'+kid+'/users',{'usernames':['missing-user']}).status_code==422
+    assert c.get('/admin/api/keys/missing/users').status_code==404
 
 
 def test_usage_grouping_filter_and_legacy_export(env):

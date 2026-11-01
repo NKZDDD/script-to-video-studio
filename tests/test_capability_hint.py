@@ -34,32 +34,29 @@ class Seedance25Tests(unittest.TestCase):
     # 而页面上那个名字选中就是跑起来才失败。
     LIVE_25 = "paisio-seedance-2.5-720p"
 
-    def test_the_model_declares_four_to_twentynine_seconds(self):
+    def test_the_model_declares_one_to_sixty_seconds(self):
+        # 本地不再按上游档位限制候选：出片秒数统一放开成 1–60。
         d = effective("paisio", "video", self.LIVE_25)["durations"]
-        self.assertEqual(min(d), 4)
-        self.assertEqual(max(d), 30)
+        self.assertEqual(d, list(range(1, 61)))
 
-    def test_the_declaration_matches_what_the_request_builder_enforces(self):
-        """★ 声明和校验是两处代码，写歪了就会「页面上能选、发出去被拒」。"""
-        src = io.open(os.path.join(ROOT, "core", "providers", "paisio.py"),
-                      encoding="utf-8").read()
-        self.assertIn("DURATION_RULES", src)   # 按模型查表，不是一刀切
-        # **模型名要用实拉存在的。** 两边合并时各断言了一个已下线的名字
-        # （seedance2.5-4-1-720p / seedance-2.5-720p，2026-08-31 实拉
-        # GET /v1/models 都不在 81 个里）—— 断言一个不存在的型号，
-        # 测试绿着，而页面上那个名字选中就是跑起来才 503。
-        d = effective("paisio", "video", "paisio-seedance-2.5-720p")["durations"]
-        self.assertTrue(d, "实拉存在的 2.5 型号得有时长档位")
+    def test_the_request_builder_sends_the_chosen_seconds(self):
+        """★ 声明和请求体不再按模型档位夹取：用户选 31 就发 31。"""
+        from core.providers.base import VideoTask
+        from core.providers.paisio import PaisioProvider
+        body = PaisioProvider._video_body(
+            VideoTask(prompt="x", duration=31, model=self.LIVE_25), self.LIVE_25)
+        self.assertEqual(body["duration"], 31)
 
-    def test_twentynine_is_not_offered_at_the_provider_level(self):
-        """★ 故意的：30 写成整家通用值的话，切回旧模型时前端还允许选 30，
-        要到付费请求发出去才收到 400。"""
-        base = CAPS["paisio"]["video"]["durations"]
-        self.assertEqual(max(base), 15)
+    def test_model_options_no_longer_narrow_the_candidates(self):
+        """★ 模型级 durations 全部删掉，前端回落到整家的 1–60。"""
+        video = CAPS["paisio"]["video"]
+        self.assertEqual(video["durations"], list(range(1, 61)))
+        self.assertTrue(all("durations" not in (o or {})
+                            for o in (video.get("model_options") or {}).values()))
 
-    def test_an_old_model_on_the_same_provider_still_caps_at_fifteen(self):
-        self.assertEqual(max(effective("paisio", "video", "sd2-pro-720p")["durations"]),
-                         15)
+    def test_an_old_model_on_the_same_provider_also_gets_one_to_sixty(self):
+        self.assertEqual(effective("paisio", "video", "sd2-pro-720p")["durations"],
+                         list(range(1, 61)))
 
     def test_the_model_needs_public_urls_for_references(self):
         """2.5 只收公网链接。没配对象存储的话它会直接拒，值得在页面上提醒。"""

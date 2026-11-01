@@ -265,9 +265,11 @@ class XmdProvider(Provider):
         self._headers("GET", "/v1/me")  # 本地检查凭据，验证完成前不上传/建单。
         if not task.prompt.strip() or len(task.prompt) > 3000:
             raise ApiError("XMD 提示词必须为 1–3000 字符，请缩短本段提示词后重试", kind=TASK_FATAL)
-        if (task.model or MODEL) != MODEL or task.duration != 30:
-            raise ApiError("XMD 仅支持 seedance_2.5、30 秒；请将分段视频时长设为 30 秒后重试",
+        if (task.model or MODEL) != MODEL:
+            raise ApiError("XMD 仅支持 seedance_2.5；请选择该模型后重试",
                            kind=TASK_FATAL)
+        if isinstance(task.duration, bool) or not isinstance(task.duration, (int, float)):
+            raise ApiError("XMD 视频时长须为正整数秒，请修正后重试", kind=TASK_FATAL)
         if task.ratio and task.ratio not in RATIOS:
             raise ApiError(f"XMD 不支持该比例，请改为：{' / '.join(RATIOS)}", kind=TASK_FATAL)
         extra = task.extra or {}
@@ -280,7 +282,7 @@ class XmdProvider(Provider):
             raise ApiError("XMD shield 必须为 true 或 false", kind=TASK_FATAL)
         if extra.get("video_refs") or extra.get("audio_refs"):
             raise ApiError("XMD 接口只支持图片参考，请移除视频/音频参考", kind=TASK_FATAL)
-        obj = {"prompt": task.prompt, "model": MODEL, "duration": 30,
+        obj = {"prompt": task.prompt, "model": MODEL, "duration": max(1, int(task.duration)),
                "client_job_id": "stv-" + secrets.token_hex(16)}
         if task.ratio:
             obj["ratio"] = task.ratio

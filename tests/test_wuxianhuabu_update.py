@@ -35,11 +35,11 @@ def test_every_public_video_model_uses_its_exact_name_and_parameters(model):
 
 
 @pytest.mark.parametrize('model,duration', [('dola-2.5-720p', 15), ('video-sd25-30s', 20)])
-def test_discrete_durations_are_not_treated_as_a_range(model, duration):
+def test_discrete_durations_are_sent_as_chosen(model, duration):
+    # 声明是离散档位也不再本地拦：用户选多少就发多少，超范围交给服务商。
     p = provider()
-    with pytest.raises(ApiError, match='时长只能'):
-        p.generate_video(VideoTask('test', model=model, duration=duration), 'out.mp4')
-    p.session.request.assert_not_called()
+    p.generate_video(VideoTask('test', model=model, duration=duration), 'out.mp4')
+    assert p.session.request.call_args.kwargs['json_body']['seconds'] == duration
 
 
 @pytest.mark.parametrize('model,images,videos,audios', [
@@ -87,7 +87,9 @@ def test_old_snapshot_does_not_hide_new_plugin_models():
                         {'rows': [{'id': 'seedance2.5'}]}, 'old frozen snapshot')
     assert set(MODELS).issubset(cap['video']['models'])
     assert cap['video']['default_model'] == DEFAULT_MODEL
-    assert cap['video']['model_options']['dola-2.5-720p']['durations'] == [5, 10, 30]
+    # 出片候选统一 1–60，模型级 durations 被删掉。
+    assert 'durations' not in cap['video']['model_options']['dola-2.5-720p']
+    assert cap['video']['durations'] == list(range(1, 61))
     assert cap['video']['model_options']['seedance-2.5-dl-720p']['max_audio_refs'] == 1
 
 

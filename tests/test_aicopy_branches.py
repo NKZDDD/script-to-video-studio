@@ -91,30 +91,29 @@ class FamilyKnowledgeTests(unittest.TestCase):
         # 认不出来的退到最通用的族（时长按 4-15 夹），而不是崩掉
         self.assertEqual(branch_of("某个没见过的新模型"), "sd2full")
 
-    def test_durations_are_clamped_per_family(self):
+    def test_durations_are_sent_as_chosen(self):
+        # 本地不再按模型族吸附秒数：用户选多少就发多少，超范围交给服务商拒绝。
         cases = [
-            ("grok-imagine-1.0-video", 7, 6),          # 只有 6/10 档，就近吸附
-            ("grok-1.5-多参接口", 12, 10),              # 6/10/15 档，就近吸附
-            ("veo视频生成", 7, 6),                       # 4/6/8 档（7 与 6/8 平手取小）
-            ("omni-fast-视频生成（无水印）", 15, 10),    # 固定 10
-            ("sd2.0-480fast-ad渠道16x9", 8, 15),        # 固定 15
-            ("sd-720满血-不卡脸（按次）", 8, 15),        # 按次轮换固定 15
-            ("开源h3-720p", 4, 5),                       # h3 最低 5
-            ("sd-2.5-720p不卡脸(按秒)", 29, 29),        # sd-2.5 到 29
-            ("sd-2.5-轮换渠道（按秒）", 25, 25),        # 2.5 轮换按秒到 29
-            ("sd-2.5-轮换渠道（按次）", 25, 15),        # 按次封顶 15
-            ("火山官方2.5-480p", 20, 20),                # 火山 2.5 到 30
-            ("火山官方2.0-480p-mini", 20, 15),           # 火山 2.0 封顶 15
-            ("sd2.0-720满血-不卡脸（按秒）", 29, 15),   # sd2.0 封顶 15
+            ("grok-imagine-1.0-video", 7),
+            ("grok-1.5-多参接口", 12),
+            ("veo视频生成", 7),
+            ("omni-fast-视频生成（无水印）", 15),
+            ("sd2.0-480fast-ad渠道16x9", 8),
+            ("sd-720满血-不卡脸（按次）", 8),
+            ("开源h3-720p", 4),
+            ("sd-2.5-720p不卡脸(按秒)", 29),
+            ("sd-2.5-轮换渠道（按次）", 25),
+            ("火山官方2.5-480p", 20),
+            ("sd2.0-720满血-不卡脸（按秒）", 29),
         ]
-        for model, ask, want in cases:
+        for model, ask in cases:
             # 带一张图：火山官方没有文生模式，不带参考图会先被模式限制拦下
             _, b, _ = body(prompt="x", model=model, duration=ask, refs=[U[0]])
-            self.assertEqual(b["seconds"], want, model)
+            self.assertEqual(b["seconds"], ask, model)
 
-    def test_unknown_models_fall_back_to_4_to_15(self):
+    def test_unknown_models_do_not_get_duration_rewritten(self):
         _, b, _ = body(prompt="x", model="某个没见过的新模型", duration=29)
-        self.assertEqual(b["seconds"], 15)
+        self.assertEqual(b["seconds"], 29)
 
     def test_ref_caps_differ_by_family(self):
         many = [f"https://cdn/{i}.jpg" for i in range(35)]

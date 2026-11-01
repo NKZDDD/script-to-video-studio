@@ -74,16 +74,13 @@ def _remote(ref: str) -> bool:
 
 
 def _duration(model: str, want: int) -> int:
-    sec = int(want or 5)
-    if model.startswith("wan3.0-"):
-        return min(30, max(2, sec))
-    if model == "wan-3.0":
-        return min(60, max(1, sec))
-    if model.startswith("grok-imagine-video-1.5"):
-        return min(15, max(4, sec))
-    if model.startswith("minimax_h3-"):
-        return min(15, max(4, sec))
-    return min(10, max(4, sec)) if "h3" in model.lower() else max(1, sec)
+    """按分镜要求的秒数原样发出，本地不夹。
+
+    各模型的档位由服务商定，且会随上新/下线变化；按模型名前缀猜出来的
+    区间只会把本来能用的秒数改坏（选 30 秒被静默改成 15/20 且照样计费）。
+    真超范围时让服务商拒绝，任务明细能看到真实原因。
+    """
+    return max(1, int(want or 5))
 
 
 def _limits(model: str) -> tuple[int | None, int, int]:
@@ -143,7 +140,7 @@ class AkeProvider(Provider):
                 "models": VIDEO_MODELS,
                 "default_model": "wan3.0-video",
                 "ratios": RATIOS,
-                "durations": list(range(2, 31)),
+                "durations": list(range(1, 61)),
                 "default_duration": 15,
                 "resolutions": RESOLUTIONS,
                 "max_refs": 10,
@@ -151,14 +148,14 @@ class AkeProvider(Provider):
                 "unlimited_ref_model_pattern": "(?i)h3",
                 "ref_mode": "url",
                 "model_options": {
-                    "wan3.0-video": {"max_audio_refs": _limits("wan3.0-video")[2], "durations": list(range(2, 31)), "max_refs": 10},
-                    "wan3.0-video-prime": {"max_audio_refs": _limits("wan3.0-video-prime")[2], "durations": list(range(2, 31)), "max_refs": 10},
-                    "wan3.0-image": {"max_audio_refs": _limits("wan3.0-image")[2], "durations": list(range(2, 31)), "max_refs": 10},
-                    "wan3.0-image-prime": {"max_audio_refs": _limits("wan3.0-image-prime")[2], "durations": list(range(2, 31)), "max_refs": 10},
+                    "wan3.0-video": {"max_audio_refs": _limits("wan3.0-video")[2], "durations": list(range(1, 61)), "max_refs": 10},
+                    "wan3.0-video-prime": {"max_audio_refs": _limits("wan3.0-video-prime")[2], "durations": list(range(1, 61)), "max_refs": 10},
+                    "wan3.0-image": {"max_audio_refs": _limits("wan3.0-image")[2], "durations": list(range(1, 61)), "max_refs": 10},
+                    "wan3.0-image-prime": {"max_audio_refs": _limits("wan3.0-image-prime")[2], "durations": list(range(1, 61)), "max_refs": 10},
                     "grok-imagine-video-1.5": {"max_audio_refs": _limits("grok-imagine-video-1.5")[2],
-                        "durations": list(range(4, 16)), "max_refs": 7},
+                        "durations": list(range(1, 61)), "max_refs": 7},
                     "grok-imagine-video-1.5-preview": {"max_audio_refs": _limits("grok-imagine-video-1.5-preview")[2],
-                        "durations": list(range(4, 16)), "max_refs": 7},
+                        "durations": list(range(1, 61)), "max_refs": 7},
                     "wan-3.0": {"max_audio_refs": _limits("wan-3.0")[2], "durations": list(range(1, 61)), "max_refs": 9},
                 },
                 "notes": "seconds 必须按字符串发送；reference_images 是 {url,role?} 对象数组。"

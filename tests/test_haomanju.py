@@ -112,12 +112,12 @@ class H3Tests(unittest.TestCase):
         self.assertEqual(b["resolution"], "768p")
         self.assertEqual(b["aspect_ratio"], "9:16")
 
-    def test_seconds_clamped_to_five_fifteen(self):
+    def test_seconds_sent_as_chosen(self):
         p = HaomanjuProvider(api_key="k")
         seen = _stub(p, {"task_id": "t1"})
         p.generate_video(VideoTask(prompt="x", refs=URLS, duration=30,
                                    model="minimax_h3"), "o.mp4")
-        self.assertEqual(seen["body"]["seconds"], "15")
+        self.assertEqual(seen["body"]["seconds"], "30")
 
     def test_images_capped_at_eight(self):
         p = HaomanjuProvider(api_key="k")

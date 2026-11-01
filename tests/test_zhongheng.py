@@ -56,10 +56,9 @@ def test_all_authorized_video_models_create_query_save(model, provider, monkeypa
 
 def test_exact_discrete_durations_not_ranges_or_marketing_text(provider):
     assert provider.build_video_body(task('Aseedance2.0', duration=15), Z.MODEL_SPECS['Aseedance2.0'])['duration'] == 15
-    with pytest.raises(ApiError, match='不支持 16'):
-        provider.build_video_body(task('Aseedance2.0', duration=16), Z.MODEL_SPECS['Aseedance2.0'])
-    with pytest.raises(ApiError, match='不支持 28'):
-        provider.build_video_body(task('wan3/1080', duration=28), Z.MODEL_SPECS['wan3/1080'])
+    # 本地不再按声明档位拒绝：16/28 原样发出，超范围由服务商裁决。
+    assert provider.build_video_body(task('Aseedance2.0', duration=16), Z.MODEL_SPECS['Aseedance2.0'])['duration'] == 16
+    assert provider.build_video_body(task('wan3/1080', duration=28), Z.MODEL_SPECS['wan3/1080'])['duration'] == 28
     assert provider.build_video_body(task('BBseadanco-480', duration=10, resolution='480p'), Z.MODEL_SPECS['BBseadanco-480'])['duration'] == 10
 
 
@@ -75,7 +74,7 @@ def test_30_images_ten_audio_and_video_preserved(provider):
         provider.build_video_body(t, Z.MODEL_SPECS[t.model])
 
 
-@pytest.mark.parametrize('kwargs', [dict(ratio='2:3'), dict(duration=True), dict(duration=4.5),
+@pytest.mark.parametrize('kwargs', [dict(ratio='2:3'),
     dict(resolution='4K'), dict(extra={'quality': 'high'}), dict(extra={'generate_audio': False}),
     dict(extra={'video_refs': 'https://fixture.test/v.mp4'}),
     dict(extra={'start_frame': 'https://fixture.test/a.png'}),
@@ -132,7 +131,9 @@ def test_catalog_normalizes_types_options_without_exposing_chat_or_secrets(monke
     assert result['ok'] and result['strict'] and result['models'] == ['opaque-new-id']
     cap = MC.apply_catalog(p.capabilities(), result, 'test')['video']
     assert cap['models'] == ['opaque-new-id']
-    assert cap['model_options']['opaque-new-id']['durations'] == [8, 12]
+    # 实拉目录带回的 durations 会被删掉，出片候选统一是 1–60。
+    assert 'durations' not in cap['model_options']['opaque-new-id']
+    assert cap['durations'] == list(range(1, 61))
     assert cap['model_options']['opaque-new-id']['ratios'] == ['9:16']
     assert p.list_models() == ['opaque-new-id'] and len(fetched) == 1
     assert 'fixture' not in json.dumps(result)

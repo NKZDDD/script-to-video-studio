@@ -576,11 +576,7 @@ class ChaomoProvider(Provider):
                        cancel: Optional[Callable] = None,
                        poll_interval: int = 5, poll_timeout: int = 2400) -> dict:
         model = task.model or "seedance2"
-        sec = int(task.duration or 8)
-        if not 4 <= sec <= 15:
-            near = min(15, max(4, sec))
-            log(f"超模 {model} 只支持 4–15 秒，已把 {sec} 纠正为 {near}")
-            sec = near
+        sec = max(1, int(task.duration or 8))
         size = _to_size(task.resolution)
 
         refs = list(task.refs or [])[:MAX_REFS]

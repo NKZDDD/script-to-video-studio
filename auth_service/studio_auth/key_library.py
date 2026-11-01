@@ -41,10 +41,11 @@ def configuration(db, uid):
     return result
 
 
-def public(row):
+def public(row, user_count: int = 0):
     cfg = json.loads(row['config'])
     return dict(id=row['id'], provider=row['provider'], name=row['name'], enabled=bool(row['enabled']),
-                base_url=cfg.get('base_url', ''), models=cfg.get('models', []), configured=[k for k in KEY_FIELDS if cfg.get(k)])
+                base_url=cfg.get('base_url', ''), models=cfg.get('models', []),
+                configured=[k for k in KEY_FIELDS if cfg.get(k)], user_count=int(user_count or 0))
 
 
 @router.get('/admin/api/keys')
@@ -52,13 +53,15 @@ def keys(request: Request):
     current(request)
     with request.app.state.auth.store.connect() as db:
         rows = db.execute('SELECT * FROM key_library ORDER BY updated_at DESC,id').fetchall()
+        counts = {r['key_id']: r['n'] for r in db.execute(
+            'SELECT key_id,COUNT(*) AS n FROM user_keys GROUP BY key_id').fetchall()}
         from .adapters import _active
         bundle = _active(db)
     names = dict(PROVIDER_NAMES)
     if bundle:
         names.update({p['id']: p['name'] for p in bundle['providers']})
     names[LLM_PROVIDER] = '提示词改写 LLM（OpenAI 兼容接口）'
-    return {'keys': [public(r) for r in rows], 'providers': names}
+    return {'keys': [public(r, counts.get(r['id'], 0)) for r in rows], 'providers': names}
 
 
 class KeyEdit(ProviderConfig):
@@ -78,8 +81,6 @@ def save_key(body: KeyEdit, request: Request):
         old = db.execute('SELECT * FROM key_library WHERE id=?', (body.id,)).fetchone() if body.id else None
         if body.id and not old:
             raise AuthError(404, 'key_missing', 'Key 不存在')
-        if old and old['provider'] != body.provider:
-            raise AuthError(422, 'provider_changed', '已有 Key 的服务商不能更改，请新建一条')
         if not old and db.execute('SELECT COUNT(*) FROM key_library').fetchone()[0] >= 2000:
             raise AuthError(422, 'key_limit', 'Key 库最多 2000 条，请复用已有记录')
         cfg = json.loads(old['config']) if old else {}
@@ -94,10 +95,13 @@ def save_key(body: KeyEdit, request: Request):
             raise AuthError(422, 'key_required', '新建时请填写 Key')
         validate_llm_config(body.provider, cfg)
         kid = body.id or str(uuid.uuid4())
-        revision = old['revision'] if old and cfg == json.loads(old['config']) else str(uuid.uuid4())
+        # 服务商改了这一条 Key 的归属，等于换了一份发放内容：revision 必须变，
+        # 已分配账号与运行中的批次各自留快照，不会悄悄按旧服务商记账。
+        changed = (not old) or cfg != json.loads(old['config']) or old['provider'] != body.provider
+        revision = str(uuid.uuid4()) if changed else old['revision']
         db.execute('INSERT INTO key_library VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
-                   'name=excluded.name,config=excluded.config,revision=excluded.revision,'
-                   'enabled=excluded.enabled,updated_at=excluded.updated_at',
+                   'provider=excluded.provider,name=excluded.name,config=excluded.config,'
+                   'revision=excluded.revision,enabled=excluded.enabled,updated_at=excluded.updated_at',
                    (kid, body.provider, body.name.strip(), json.dumps(cfg), revision, int(body.enabled), auth.now()))
     record(request, actor, 'save_key', kid)
     return {'ok': True, 'id': kid}
@@ -138,4 +142,77 @@ def assign_keys(name: str, body: Assignment, request: Request):
         db.execute('DELETE FROM user_keys WHERE user_id=?', (uid,))
         db.executemany('INSERT INTO user_keys VALUES(?,?,?)', [(uid, k, i) for i, k in enumerate(ids)])
     record(request, actor, 'assign_keys', name)
+    return {'ok': True}
+
+
+class KeyUsers(Body):
+    usernames: list[str] = Field(max_length=2000)
+
+
+@router.get('/admin/api/keys/{kid}/users')
+def key_users(kid: str, request: Request):
+    """这把 Key 现在发给哪些账号 —— Key 视角的授权列表。"""
+    current(request)
+    auth = request.app.state.auth
+    with auth.store.connect() as db:
+        if not db.execute('SELECT 1 FROM key_library WHERE id=?', (kid,)).fetchone():
+            raise AuthError(404, 'key_missing', 'Key 不存在')
+        rows = db.execute('SELECT u.username FROM user_keys a JOIN users u ON u.id=a.user_id '
+                          'WHERE a.key_id=? ORDER BY u.username', (kid,)).fetchall()
+    return {'usernames': [r['username'] for r in rows]}
+
+
+@router.post('/admin/api/keys/{kid}/users')
+def assign_key_users(kid: str, body: KeyUsers, request: Request):
+    """按 Key 分配账号：保存后这把 Key 只发给勾选的账号。
+
+    仍然是同一张 user_keys 关系表，所以「账号页勾 Key」和这里看到的
+    永远是同一份授权，不会出现两套口径。
+    """
+    actor, _ = current(request, csrf=True)
+    auth = request.app.state.auth
+    raw = [str(x).strip() for x in body.usernames]
+    names = list(dict.fromkeys(x for x in raw if x))
+    if len(names) != len([x for x in raw if x]) or any(len(n) > 64 for n in names):
+        raise AuthError(422, 'invalid_users', '账号列表重复或无效')
+    with auth.store.connect(write=True) as db:
+        key = db.execute('SELECT provider FROM key_library WHERE id=?', (kid,)).fetchone()
+        if not key:
+            raise AuthError(404, 'key_missing', 'Key 不存在')
+        if names:
+            marks = ','.join('?' * len(names))
+            rows = db.execute(f'SELECT id,username FROM users WHERE username IN ({marks})',
+                              tuple(names)).fetchall()
+        else:
+            rows = []
+        found = {r['username'] for r in rows}
+        missing = [n for n in names if n not in found]
+        if missing:
+            raise AuthError(422, 'user_missing', f"账号不存在：{'、'.join(missing[:5])}")
+        provider = key['provider']
+        for row in rows:
+            counts = db.execute(
+                'SELECT k.provider,COUNT(*) AS n FROM user_keys a '
+                'JOIN key_library k ON k.id=a.key_id WHERE a.user_id=? AND a.key_id<>? '
+                'GROUP BY k.provider', (row['id'], kid)).fetchall()
+            per = {c['provider']: c['n'] for c in counts}
+            providers = set(per) | {provider}
+            if per.get(provider, 0) + 1 > 32 or len(providers) > 48 or sum(per.values()) + 1 > 256:
+                raise AuthError(422, 'assignment_limit',
+                                f"账号 {row['username']} 已达授权上限（256 条 / 48 家 / 每家 32 把）")
+        keep = {r['id'] for r in rows}
+        if keep:
+            marks = ','.join('?' * len(keep))
+            db.execute(f'DELETE FROM user_keys WHERE key_id=? AND user_id NOT IN ({marks})',
+                       (kid, *keep))
+        else:
+            db.execute('DELETE FROM user_keys WHERE key_id=?', (kid,))
+        for row in rows:
+            if db.execute('SELECT 1 FROM user_keys WHERE user_id=? AND key_id=?',
+                          (row['id'], kid)).fetchone():
+                continue
+            position = db.execute('SELECT COALESCE(MAX(position),-1)+1 FROM user_keys WHERE user_id=?',
+                                  (row['id'],)).fetchone()[0]
+            db.execute('INSERT INTO user_keys VALUES(?,?,?)', (row['id'], kid, position))
+    record(request, actor, 'assign_key_users', kid)
     return {'ok': True}

@@ -18,7 +18,9 @@ def test_q10_capabilities_and_default_resolution_match_document():
     p = JulunProvider()
     cap = apply_catalog(p.capabilities(), {"rows": [{"id": Q10_MODEL}]}, "fixture")
     opts = cap["video"]["model_options"][Q10_MODEL]
-    assert opts["durations"] == list(range(4, 31))
+    # 出片秒数统一放开成 1–60：实拉目录带回的 durations 会被删掉，候选不再被夹窄。
+    assert "durations" not in opts
+    assert cap["video"]["durations"] == list(range(1, 61))
     assert opts["resolutions"] == ["480p"]
     assert opts["ratios"] == ["16:9", "9:16"]
     assert opts["max_refs"] == 30
@@ -46,8 +48,15 @@ def test_valid_seconds_not_changed(duration):
     assert JulunProvider().build_video_body(task(duration=duration))[1]["seconds"] == duration
 
 
-@pytest.mark.parametrize("duration", [0, 3, 31, 4.5, True, None, "invalid"])
-def test_invalid_seconds_rejected_without_clamping(duration):
+@pytest.mark.parametrize("duration", [0, 3, 31, 4.5])
+def test_numeric_seconds_are_not_clamped(duration):
+    # 本地不再按 4–30 拒绝/夹取：数值原样进请求体（0 只做 1 秒的合法化）。
+    seconds = JulunProvider().build_video_body(task(duration=duration))[1]["seconds"]
+    assert seconds == max(1, int(duration))
+
+
+@pytest.mark.parametrize("duration", [True, None, "invalid"])
+def test_non_numeric_seconds_rejected(duration):
     with pytest.raises(ApiError, match="整数秒"):
         JulunProvider().build_video_body(task(duration=duration))
 

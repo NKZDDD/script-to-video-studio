@@ -310,7 +310,8 @@ function serviceRow(kind,label,custom=null) {
  const models=cap[media]?.models||[];
  const resolutions=(cap[media]?.model_options?.[row.model]?.resolutions||cap[media]?.resolutions||[]).map(String);
  const secs=media==='video'?durationsOf(row.provider,row.model).map(String):[],cur=String(row.duration??'');
- const seconds=`<label>秒数<select aria-label="${label}秒数" data-setting="duration">${option('','跟随任务',cur)}${[...new Set([...secs,...(cur?[cur]:[])])].map(v=>option(v,v+' 秒'+(secs.includes(v)?'':'（当前模型未声明）'),cur)).join('')}</select></label>`;
+ const hints=(secs.includes('1')&&secs.includes('60')?['5','10','15','20','30','45','60']:secs).slice(0,8);
+ const seconds=media==='video'?`<label>秒数<input type="number" min="1" max="600" step="1" inputmode="numeric" aria-label="${label}秒数" data-setting="duration" value="${esc(cur)}" placeholder="${hints.length?'常用 '+esc(hints.join(' / ')):'1–600 秒，留空跟随任务'}"></label>`:'';
  const opts=cap[media]?.model_options?.[row.model]||{},shapes=((media==='image'?opts.sizes||cap.image?.sizes:opts.ratios||cap.video?.ratios)||[]).map(String);
  const shapeKey=media==='image'?'size':'ratio',shapeNow=String(row[shapeKey]??'');
  const shapeLabel=media==='video'?'比例':(opts.size_mode==='mixed'?'比例 / 像素尺寸':opts.size_mode==='ratio'||shapes.every(v=>v.includes(':'))?'比例':'尺寸');

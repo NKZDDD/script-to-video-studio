@@ -146,15 +146,15 @@ class JulunHmTests(unittest.TestCase):
             _body("SD 2.0", "@Image1", n_img=1, n_vid=1)
         self.assertIn("不支持参考视频", str(c.exception))
 
-    def test_duration_is_corrected_out_loud(self):
-        """v2.0 上限 15、v2.5 上限 30 —— 改了要说，悄悄改会让人对不上账。"""
+    def test_duration_is_sent_as_chosen(self):
+        """本地不再按 v2.0 上限 15 夹取：用户选 20 就发 20，超范围交给服务商。"""
         said = []
         p = JulunProvider(api_key="k")
         t = VideoTask(prompt="@Image1", refs=["https://x/0.png"], duration=20,
                       ratio="16:9", model="SD 2.0")
         _, b = p.build_video_body(t, log=said.append)
-        self.assertEqual(b["seconds"], 15)
-        self.assertTrue([s for s in said if "15" in s], "纠正了但没说")
+        self.assertEqual(b["seconds"], 20)
+        self.assertEqual(said, [], "不该再有本地纠正日志")
         _, b = _body("SD 2.5", "@Image1", n_img=1, sec=30)
         self.assertEqual(b["seconds"], 30)
 

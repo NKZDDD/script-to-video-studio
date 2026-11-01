@@ -1,5 +1,7 @@
 # Studio 登录服务 API v1
 
+服务端 1.10.3：Key 库编辑可修改服务商，Key id 与密钥保持不变，`assignment_id` 随配置变化；新增 `GET/POST /admin/api/keys/{id}/users`，可从 Key 侧分配账号，与账号页「授权 Key」共用同一份关系表；`GET /admin/api/keys` 每条返回 `user_count`。
+
 服务端 1.10.2：版本发布和构建登记增加可选 `application: studio|batch`，必须与 `flavor` 匹配；旧清单省略时自动推导。版本列表及统计支持 `?application=studio|batch` 筛选。`POST /admin/api/releases/enforcement` 接收 `{application,enabled}`，省略 application 默认为 studio；暂停只影响该应用。公开更新查询支持 application 参数，并返回 application。新批量客户端发送 `X-Respect-Application: batch`，旧 Studio 请求头继续兼容。
 
 服务端 1.10.1 起，版本登记、发布、校验与统计的 `flavor` 额外接受 `batch`（对外批量版）；其版本策略与 `all/v34/v61` 独立。登录、账号 Key 配置、用量上报协议不变。
@@ -161,9 +163,10 @@ else:
 
 ## 1.3.0 Key 库
 
-- `GET /admin/api/keys`：返回可命名 Key 库和服务商中文名称，不含凭据。
-- `POST /admin/api/keys`：新建/编辑，字段 `id`（编辑时填写）、`provider`、`name`、`enabled`、`base_url`、`api_key`、可选 `models`（模型 ID 数组）。保留旧分组字段兼容迁移。空密钥保留，`models:[]` 恢复自动拉取；服务商不可在已有记录上修改。
+- `GET /admin/api/keys`：返回可命名 Key 库和服务商中文名称，不含凭据；每条含 `user_count`（已分配账号数）。
+- `POST /admin/api/keys`：新建/编辑，字段 `id`（编辑时填写）、`provider`、`name`、`enabled`、`base_url`、`api_key`、可选 `models`（模型 ID 数组）。保留旧分组字段兼容迁移。空密钥保留，`models:[]` 恢复自动拉取；已有记录可修改 `provider`，修改后 Key id 与密钥不变、`assignment_id` 变化，授权自动落到新服务商。
 - `GET/POST /admin/api/users/{name}/keys`：读取或替换账号授权，POST 为 `{key_ids:[...]}`；重复或无效 ID 整体拒绝。同模型重叠按列表顺序选择，不做失败换 Key。
+- `GET/POST /admin/api/keys/{id}/users`：Key 视角的授权，GET 返回 `{usernames:[...]}`；POST 为 `{usernames:[...]}`，用这次列表替换该 Key 的账号分配。与账号页使用同一张 `user_keys` 关系表，两处看到的是同一份授权。
 - 有效 `verify` 返回 `provider_config[provider].keys`，每项含 `key_id`、`key_name`、`assignment_id`、凭据、地址及可选 `models`。顶层首项字段保留旧协议兼容，但完整多 Key 功能必须更新客户端。停用记录不下发。
 - 用量事件增加可选 `key_id`、`key_name`；查询增加 `key_id` 筛选，汇总按具体 Key 分组，CSV 包含这两列。旧事件缺失字段按空值处理，不猜测归属。
 - 库最多 2000 条；单账号最多 256 条、48 家服务商、每家 32 条。显式模型绑定最多 100 个、每个 ID 最长 200 字符，仍受请求体大小限制。

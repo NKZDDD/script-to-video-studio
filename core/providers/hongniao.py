@@ -220,9 +220,7 @@ class HongniaoProvider(Provider):
         if not str(task.prompt or "").strip():
             raise ApiError("红鸟视频提示词不能为空", kind=TASK_FATAL)
         try:
-            seconds = int(task.duration)
-            if seconds <= 0 or float(task.duration) != seconds:
-                raise ValueError
+            seconds = max(1, int(task.duration))
         except (TypeError, ValueError):
             raise ApiError("红鸟视频时长须为正整数秒", kind=TASK_FATAL)
         body = {"model": task.model or "video-sd25-30s", "prompt": task.prompt,

@@ -118,15 +118,14 @@ class DeclarationTests(unittest.TestCase):
         self.assertIn("只报有依据的", blk)
         self.assertIn("时长档位", blk, "没告诉人实测过的写在哪")
 
-    def test_per_model_declarations_still_work(self):
-        """paisio 把 29 秒只挂在 seedance2.5 上 —— 那个机制不许被这次改动碰坏。"""
+    def test_per_model_durations_no_longer_narrow_the_ui(self):
+        """秒数统一放开后，模型级 durations 不再下发给前端。"""
         from core.providers import list_capabilities
         c = next(x for x in list_capabilities() if x["id"] == "paisio")
         opts = (c.get("video") or {}).get("model_options") or {}
         self.assertTrue(opts, "paisio 的按模型声明没了")
-        longest = max(max(v.get("durations") or [0]) for v in opts.values())
-        self.assertGreater(longest, max((c["video"].get("durations") or [0])),
-                           "按模型声明该比整家的基线长，否则它没有意义")
+        self.assertTrue(all("durations" not in v for v in opts.values()))
+        self.assertEqual(c["video"]["durations"], list(range(1, 61)))
 
 
 if __name__ == "__main__":

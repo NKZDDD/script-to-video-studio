@@ -281,14 +281,12 @@ class GateProvider(Provider):
         images = list(task.refs or [])
         videos = list(task.extra.get("video_refs") or task.extra.get("videos") or [])
         audios = list(task.extra.get("audio_refs") or task.extra.get("audios") or [])
-        lo, hi = spec["duration"]
-        sec = int(task.duration or 15)
+        # 出片秒数原样发出，本地不按模型声明的 lo/hi 夹取或拒绝 —— 交给服务商裁决。
+        sec = max(1, int(task.duration or 15))
         ratio = task.ratio or "adaptive"
         res = (task.resolution or "720p").lower()
 
         problems = []
-        if not lo <= sec <= hi:
-            problems.append(f"时长只支持 {lo}–{hi} 秒，收到 {sec} 秒")
         if ratio not in RATIOS:
             problems.append(f"比例只支持 {'、'.join(RATIOS)}，收到 {ratio}")
         if res not in spec["resolutions"]:

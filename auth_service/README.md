@@ -1,4 +1,6 @@
-# Respect Studio 登录校验服务端 1.10.2
+# Respect Studio 登录校验服务端 1.10.3
+
+1.10.3 支持编辑 Key 时更换服务商（Key id 与密钥不变，授权自动跟随），并新增从 Key 行「分配账号」直接勾选可用账号；与账号页「授权 Key」共用同一份关系表，见 [Key 库升级说明](KEY-LIBRARY-UPGRADE.md)。
 
 1.10.2 增加双应用选择和独立版本校验开关，批量客户端支持独立安装更新；账号和 Key 库继续共用，见 [双应用升级说明](APPLICATION-UPDATE-UPGRADE.md)。
 

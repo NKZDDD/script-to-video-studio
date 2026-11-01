@@ -106,6 +106,30 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("没有模型清单接口", r["msg"])
 
+    def test_a_provider_can_supply_readable_catalog_rows(self):
+        """★ 有的家 /v1/models 回内部 id（LensForge 是 UUID），不能当模型名。
+
+        这类服务商自己给 catalog_rows（目录里的展示名 + 类型），
+        fetch 必须用它，不能再按 `/v1/models` 的 id 拼清单。
+        """
+        from unittest import mock
+
+        class Fake:
+            class session:
+                api_key = 'k'
+                base_url = 'https://lensforge.example'
+
+            def catalog_rows(self):
+                return [{'id': '渠道5-seedance2.0', 'type': 'video'},
+                        {'id': 'gpt-image-2', 'type': 'image'}]
+
+        with mock.patch.object(MC.providers, 'build', return_value=Fake()):
+            got = MC.fetch('lensforge', {'api_key': 'k'})
+        self.assertTrue(got['ok'], got.get('msg'))
+        self.assertEqual(got['models'], ['gpt-image-2', '渠道5-seedance2.0'])
+        self.assertEqual({r['id']: r.get('type') for r in got['rows']},
+                         {'gpt-image-2': 'image', '渠道5-seedance2.0': 'video'})
+
     def test_the_server_uses_the_catalog_not_the_hardcoded_list(self):
         """★ 页面拿到的必须是过了 catalog 的那份。
 
