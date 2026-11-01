@@ -214,6 +214,15 @@ class LensForgeProvider(Provider):
                 rows.append({"id": name, "type": media, "display_name": name})
         return rows
 
+    def filter_catalog(self, rows) -> list:
+        """旧版客户端的兜底：它只会拿 `/v1/models` 的 id（UUID）当模型名。
+
+        新版 `model_catalog.fetch` 会优先调用 `catalog_rows`；旧版没有这个钩子，
+        但一直支持 `filter_catalog`。这里直接返回目录里的可读行，
+        不理会传进来的 UUID —— 旧客户端导入适配包后也能正常显示名称。
+        """
+        return self.catalog_rows()
+
     def _offering(self, model: str, media: str) -> dict:
         """展示名 / 方案 id → 目录里的方案。名称被改过就重拉一次目录。"""
         name = str(model or "").strip()

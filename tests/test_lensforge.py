@@ -84,6 +84,21 @@ class LensForgeTests(unittest.TestCase):
         self.assertEqual(cap["image"]["models"], IMAGE_MODELS)
         self.assertNotIn("off-20", cap["video"]["models"])
 
+    def test_filter_catalog_rewrites_uuids_for_older_clients(self):
+        """旧客户端只会用 /v1/models 的 UUID；filter_catalog 必须换成展示名。"""
+        from core import model_catalog as MC
+        p = LensForgeProvider(api_key="test-key")
+        p._offers = OFFERS
+        uuids = ["off-20", "off-30", "off-vref", "off-img"]
+        rows = p.filter_catalog([{"id": u} for u in uuids])
+        self.assertEqual({r["id"] for r in rows}, set(VIDEO_MODELS) | set(IMAGE_MODELS))
+        cap = MC.apply_catalog(p.capabilities(),
+                               {"ok": True, "models": uuids, "rows": rows, "strict": True},
+                               "测试")
+        self.assertEqual(cap["video"]["models"], VIDEO_MODELS)
+        self.assertEqual(cap["image"]["models"], IMAGE_MODELS)
+        self.assertFalse([m for m in cap["video"]["models"] if m in uuids])
+
     def test_size_maps_to_ratio_and_tier(self):
         self.assertEqual(_ratio_of("1024x1536", ["1:1", "2:3", "3:2"]), "2:3")
         self.assertEqual(_ratio_of("1536x1024", ["1:1", "2:3", "3:2"]), "3:2")
