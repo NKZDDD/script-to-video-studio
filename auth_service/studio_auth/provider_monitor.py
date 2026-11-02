@@ -220,6 +220,11 @@ def javascript():
     return FileResponse(WEB / 'provider-monitor.js', media_type='text/javascript')
 
 
+@router.get('/admin/provider-monitor.css')
+def stylesheet():
+    return FileResponse(WEB / 'provider-monitor.css', media_type='text/css')
+
+
 def public_result(row, now):
     item = json.loads(row['payload'])
     item.update(source=row['source'], username=row['username'], device=row['device'],
@@ -259,7 +264,8 @@ def view(request: Request):
     with monitor.lock:
         pending = sorted(monitor.pending)
     return {'monitors': specs, 'clients': clients, 'server_time': auth.now(), 'interval': INTERVAL,
-            'pending': pending, 'recording_error': monitor.failed, 'presets': presets, 'adapter_version': version}
+            'pending': pending, 'recording_error': monitor.failed, 'presets': presets, 'adapter_version': version,
+            'adapter_rule_count': sum('reason' not in rule for rule in catalog.values())}
 
 
 @router.post('/admin/api/provider-monitor')

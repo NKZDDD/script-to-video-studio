@@ -1,6 +1,6 @@
 'use strict';
 (() => {
- const button=document.createElement('button');button.textContent='服务商适配包';
+ const button=document.createElement('button');button.id='adapter-library';button.textContent='服务商适配包';
  document.querySelector('#key-library').before(button);
  const dialog=document.createElement('dialog');dialog.className='r2-dialog';dialog.id='adapter-manager';document.body.append(dialog);
  let tab='current';

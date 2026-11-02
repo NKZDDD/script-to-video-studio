@@ -18,6 +18,24 @@ def rules_bundle(rule=None, pid='julun', version='monitor-test'):
     return b
 
 
+def test_page_assets_and_missing_published_rules(env):
+    c, auth, _ = env
+    setup(c, auth)
+    state = c.get('/admin/api/provider-monitor').json()
+    assert state['adapter_rule_count'] == 0
+    assert not state['adapter_version']
+    html = c.get('/admin/').text
+    assert '/admin/provider-monitor.css?v=1.11.2' in html
+    css = c.get('/admin/provider-monitor.css')
+    assert css.status_code == 200 and 'text/css' in css.headers['content-type']
+    assert '#provider-monitor .pm-check input' in css.text
+    imported = post(c, 'adapters/import', {'bundle': bundle('old-no-rules')}).json()
+    post(c, 'adapters/publish', {'sha256': imported['sha256']})
+    state = c.get('/admin/api/provider-monitor').json()
+    assert state['adapter_version'] == 'old-no-rules'
+    assert state['adapter_rule_count'] == 0
+
+
 @pytest.mark.parametrize('base,expected', [
     ('', 'https://provider.example/api/v1/models'),
     ('https://provider.example', 'https://provider.example/api/v1/models'),
@@ -88,6 +106,8 @@ def test_auto_configuration_only_requires_key_and_never_exposes_credentials(env)
     auto = dict(provider='gate', key_id=kid, mode='auto', enabled=True)
     assert post(c, 'provider-monitor', auto).status_code == 200
     state = c.get('/admin/api/provider-monitor').json()
+    assert state['adapter_version'] == 'monitor-info'
+    assert state['adapter_rule_count'] == 1
     assert 'never-show-this-secret' not in json.dumps(state)
     assert state['presets'][0]['available'] and state['presets'][0]['url'] == 'https://provider.example/public/model_group/info'
     assert state['monitors'][0]['mode'] == 'auto'
