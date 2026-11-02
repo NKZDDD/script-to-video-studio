@@ -147,6 +147,7 @@ class HongniaoProvider(Provider):
     id = "hongniao"
     name = "红鸟"
     default_base_url = "https://an.hongniaoai.com/api"
+    monitor = {"path": "/v1/models", "kind": "models", "result_path": "data.models", "auth": "bearer"}
     supports = ("video",)
 
     def __init__(self, api_key="", base_url="", proxy="", timeout=900):

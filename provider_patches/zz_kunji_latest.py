@@ -116,6 +116,9 @@ class KunjiProvider(Provider):
     name = "坤鸡 img.yunfei.best（图片 + veo视频）"
     aliases = ("yunfei", "坤鸡", "banana")
     default_base_url = "https://img.yunfei.best"
+    monitor = {"path": "/v1/models", "kind": "models", "result_path": "data", "auth": "bearer",
+               "key_fields": ["image_1k_api_key", "image_4k_api_key", "video_api_key", "api_key"],
+               "key_prefixes": list(_KEY_ALIAS)}
     supports = ("image", "video")
     # **Key 分四把各自填**（页面上跟超模一样，一把一个框）。
     # 存回 api_key 时拼成 `1k=…;4k=…;high=…;default=…`，`parse_keys` 认这个。

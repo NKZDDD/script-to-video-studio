@@ -58,6 +58,8 @@ def validate(bundle):
         if not isinstance(row['name'], str) or not 1 <= len(row['name']) <= 160:
             raise ValueError('服务商名称不正确')
         ids.add(row['id'])
+    from .monitor_catalog import read_catalog
+    read_catalog(bundle)
     return bundle
 
 

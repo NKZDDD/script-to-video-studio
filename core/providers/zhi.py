@@ -79,6 +79,7 @@ class ZhiProvider(Provider):
     name = "智 zhi168.it.com（图 + 视频）"
     aliases = ("智", "zhi168", "zhi168.it.com")
     default_base_url = "https://www.zhi168.it.com"
+    monitor = {"path": "/api/v1/available-models", "kind": "models", "result_path": "data", "auth": "x-api-key"}
     supports = ("image", "video")
     # 素材全收 *_urls 公网数组（本机图得先配对象存储）
     ref_mode = "url"

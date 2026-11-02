@@ -15,6 +15,7 @@ from pydantic import Field, field_validator
 from .admin import Body, WEB, current, record
 from .service import AuthError, digest
 from .provider_probe import clean_url, probe, same_origin
+from .monitor_catalog import active_catalog, resolve, rule_digest
 
 router = APIRouter()
 INTERVAL = 300
@@ -45,7 +46,8 @@ CREATE INDEX IF NOT EXISTS probe_client_latest ON provider_probe_results(source,
 class Definition(Body):
     provider: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,64}$')
     key_id: str = Field(min_length=1, max_length=64)
-    url: str = Field(max_length=1000)
+    mode: Literal['auto', 'manual'] = 'manual'
+    url: str = Field(default='', max_length=1000)
     kind: Literal['models', 'health', 'http'] = 'models'
     result_path: str = Field(default='data', max_length=100, pattern=r'^(?:[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*)?$')
     auth: Literal['none', 'bearer', 'x-api-key', 'api-key'] = 'bearer'
@@ -55,7 +57,12 @@ class Definition(Body):
     @field_validator('url')
     @classmethod
     def target(cls, value):
-        return clean_url(value.strip())
+        return clean_url(value.strip()) if value.strip() else ''
+
+
+def revision_for(row, rule=None):
+    extra = rule_digest(rule) if rule is not None else ''
+    return hashlib.sha256((row['revision'] + (row['key_revision'] or '') + extra).encode()).hexdigest()
 
 
 def definitions(auth, uid=None, *, secrets=False):
@@ -64,6 +71,7 @@ def definitions(auth, uid=None, *, secrets=False):
                           'k.enabled AS key_enabled,k.provider AS key_provider FROM provider_monitors m '
                           'LEFT JOIN key_library k ON k.id=m.key_id ORDER BY m.provider').fetchall()
         assigned = {r[0] for r in db.execute('SELECT key_id FROM user_keys WHERE user_id=?', (uid,))} if uid else None
+        catalog, version = active_catalog(db)
     result = []
     for row in rows:
         if assigned is not None and row['key_id'] not in assigned:
@@ -72,8 +80,22 @@ def definitions(auth, uid=None, *, secrets=False):
         valid = bool(row['key_enabled']) and row['key_provider'] == row['provider']
         cfg = json.loads(row['config'] or '{}')
         # Key edits invalidate prior results and cached client configurations.
-        revision = hashlib.sha256((row['revision'] + (row['key_revision'] or '')).encode()).hexdigest()
-        if spec['auth'] != 'none' and not cfg.get(spec['key_field']):
+        rule, secret = None, ''
+        spec.setdefault('mode', 'manual')
+        spec['configuration_error'] = ''
+        if spec['mode'] == 'auto':
+            rule = catalog.get(row['provider'], {})
+            spec['adapter_version'] = version
+            try:
+                resolved, secret = resolve(rule, cfg)
+                spec.update(resolved)
+            except ValueError as exc:
+                valid = False
+                spec.update(url='', kind='models', auth='none', result_path='data', key_field='api_key', configuration_error=str(exc))
+        else:
+            secret = cfg.get(spec['key_field'], '') if spec['auth'] != 'none' else ''
+        revision = revision_for(row, rule)
+        if spec['auth'] != 'none' and not secret:
             valid = False
         base = cfg.get('base_url', '')
         if base and not same_origin(base, spec['url']):
@@ -81,7 +103,7 @@ def definitions(auth, uid=None, *, secrets=False):
         spec.update(revision=revision, key_name=row['key_name'] or 'Key 已不存在',
                     configured=valid, enabled=bool(row['enabled']))
         if secrets:
-            spec['secret'] = cfg.get(spec['key_field'], '') if spec['auth'] != 'none' else ''
+            spec['secret'] = secret
         result.append(spec)
     return result
 
@@ -176,13 +198,19 @@ class Monitor:
 
 
 def still_current(db, spec, uid=None):
-    row = db.execute('SELECT m.revision,k.revision AS key_revision,m.enabled,k.enabled AS key_enabled '
+    row = db.execute('SELECT m.revision,k.revision AS key_revision,m.enabled,k.enabled AS key_enabled,m.payload '
                      'FROM provider_monitors m JOIN key_library k ON k.id=m.key_id '
                      'AND k.provider=m.provider WHERE m.provider=? AND m.key_id=?',
                      (spec['provider'], spec['key_id'])).fetchone()
     if not row or not row['enabled'] or not row['key_enabled']:
         return False
-    if hashlib.sha256((row['revision'] + row['key_revision']).encode()).hexdigest() != spec['revision']:
+    rule = None
+    if json.loads(row['payload']).get('mode') == 'auto':
+        catalog, _ = active_catalog(db)
+        rule = catalog.get(spec['provider'])
+        if not rule or 'reason' in rule:
+            return False
+    if revision_for(row, rule) != spec['revision']:
         return False
     return uid is None or bool(db.execute('SELECT 1 FROM user_keys WHERE user_id=? AND key_id=?', (uid, spec['key_id'])).fetchone())
 
@@ -206,6 +234,16 @@ def view(request: Request):
     specs = definitions(auth)
     clients = []
     with auth.store.connect() as db:
+        catalog, version = active_catalog(db)
+        presets = []
+        for key in db.execute('SELECT id,provider,config FROM key_library WHERE enabled=1'):
+            preset = dict(key_id=key['id'], provider=key['provider'], available=False)
+            try:
+                resolved, _ = resolve(catalog.get(key['provider']), json.loads(key['config']))
+                preset.update(resolved, available=True)
+            except ValueError as exc:
+                preset['reason'] = str(exc)
+            presets.append(preset)
         for spec in specs:
             row = db.execute("SELECT * FROM provider_probe_results WHERE provider=? AND revision=? AND source='server' ORDER BY id DESC LIMIT 1",
                              (spec['provider'], spec['revision'])).fetchone()
@@ -221,7 +259,7 @@ def view(request: Request):
     with monitor.lock:
         pending = sorted(monitor.pending)
     return {'monitors': specs, 'clients': clients, 'server_time': auth.now(), 'interval': INTERVAL,
-            'pending': pending, 'recording_error': monitor.failed}
+            'pending': pending, 'recording_error': monitor.failed, 'presets': presets, 'adapter_version': version}
 
 
 @router.post('/admin/api/provider-monitor')
@@ -233,10 +271,22 @@ def configure(body: Definition, request: Request):
         if not key or key['provider'] != body.provider or not key['enabled']:
             raise AuthError(422, 'monitor_key', '请选择该服务商已启用的检测 Key')
         cfg = json.loads(key['config'])
-        if body.auth != 'none' and not cfg.get(body.key_field):
-            raise AuthError(422, 'monitor_key', '所选 Key 未填写该凭据字段')
-        if cfg.get('base_url') and not same_origin(cfg['base_url'], body.url):
-            raise AuthError(422, 'monitor_origin', '检测地址域名必须与所选 Key 的 Base URL 一致')
+        if body.mode == 'auto':
+            catalog, _ = active_catalog(db)
+            try:
+                resolve(catalog.get(body.provider), cfg)
+            except ValueError as exc:
+                # Allow disabling a previously configured automatic monitor even
+                # if the currently published bundle no longer has its rule.
+                if body.enabled:
+                    raise AuthError(422, 'monitor_rule', str(exc)) from None
+        else:
+            if not body.url:
+                raise AuthError(422, 'monitor_url', '手动设置需要填写完整检测地址')
+            if body.auth != 'none' and not cfg.get(body.key_field):
+                raise AuthError(422, 'monitor_key', '所选 Key 未填写该凭据字段')
+            if cfg.get('base_url') and not same_origin(cfg['base_url'], body.url):
+                raise AuthError(422, 'monitor_origin', '检测地址域名必须与所选 Key 的 Base URL 一致')
         if (not db.execute('SELECT 1 FROM provider_monitors WHERE provider=?', (body.provider,)).fetchone()
                 and db.execute('SELECT COUNT(*) FROM provider_monitors').fetchone()[0] >= 64):
             raise AuthError(422, 'monitor_limit', '最多配置 64 家监测服务商')

@@ -654,6 +654,7 @@ class ZhonghengProvider(Provider):
     id = 'zhongheng'
     name = '纵横科技 cnd-coo-new.pages.dev'
     default_base_url = 'https://cnd-coo-new.pages.dev'
+    monitor = {"path": "/v1/models?include_capabilities=1", "kind": "models", "result_path": "data", "auth": "bearer"}
     supports = ('video',)
     ref_mode = 'bytes'
 

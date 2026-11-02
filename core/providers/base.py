@@ -46,6 +46,11 @@ class Provider:
     default_base_url: str = ""
     supports: tuple = ()   # ("image",) / ("video",) / ("image", "video")
 
+    # Build-time declaration only: exported as inert monitoring metadata in the
+    # adapter bundle. Monitoring performs a fresh GET, never calls list_models().
+    monitor = {"path": "/v1/models", "kind": "models", "result_path": "data",
+               "auth": "bearer", "key_fields": ["api_key", "image_1k_api_key", "image_4k_api_key", "video_api_key"]}
+
     # 参考图怎么给：
     #   data_uri —— 能直接吃图片内容（省事，默认）
     #   url      —— 只收公网链接，本机文件必须先上传（core/uploader.py）

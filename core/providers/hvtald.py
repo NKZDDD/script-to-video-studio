@@ -120,6 +120,7 @@ class HvtaldProvider(Provider):
     name = "HVTALD 空间（即梦国际版·15秒）"
     aliases = ("z988", "即梦国际", "hv")
     default_base_url = "http://ha.z988.top"
+    monitor = {"reason": "此服务商使用 WebDAV 与多项账号凭据自检，需专门适配；不能用固定模型列表判断在线。"}
     supports = ("video",)
     # imgs 要「绝对地址」，本机图必须先传对象存储换链接
     ref_mode = "url"

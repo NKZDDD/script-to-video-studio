@@ -12,11 +12,17 @@ from auth_service.studio_auth.adapter_format import digest, encode, validate
 
 def build(version):
     from core.providers import _BUILTIN_ORDER, _classes_in
-    modules, providers = {}, []
+    modules, providers, monitors = {}, [], {}
     for name in _BUILTIN_ORDER:
         modules[name] = (ROOT / 'core/providers' / (name+'.py')).read_text(encoding='utf-8-sig')
         for cls in _classes_in(importlib.import_module('core.providers.'+name)):
             providers.append({'id': cls.id, 'name': cls.name, 'module': name, 'class': cls.__name__})
+            monitors[cls.id] = dict(cls.monitor)
+            if 'reason' not in monitors[cls.id]:
+                monitors[cls.id]['base_url'] = cls.default_base_url
+    # Keep protocol 1 unchanged: old clients accept an extra inert module. The
+    # server reads this literal without importing/executing adapter code.
+    modules['provider_monitor_catalog'] = 'MONITORS = ' + repr(monitors) + '\n'
     return validate(dict(protocol=1, version=version, modules=modules, providers=providers))
 
 

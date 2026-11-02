@@ -52,6 +52,38 @@ def test_all_existing_adapters_and_dependencies_load_without_builtin_imports():
     assert not any('api_key' in p for p in bundle['providers'])
 
 
+def test_monitor_bundle_rules_match_real_model_request_paths(monkeypatch):
+    from auth_service.studio_auth.monitor_catalog import read_catalog, resolve
+    from core.provider_monitor import validate_config
+    b = build('monitor-compat')
+    rules = read_catalog(b)
+    classes = C.load(b)
+    assert len(rules) == 28
+    supported = 0
+    for pid, cls in classes.items():
+        if 'reason' in rules[pid]:
+            assert pid in ('xmd', 'hvtald')
+            continue
+        instance = cls(api_key='test-key', base_url='' if cls.default_base_url else 'https://custom.example')
+        calls = []
+        def request(method, path, *args, **kwargs):
+            calls.append((method, instance.session.base_url + path))
+            return {'data': {'models': []}} if pid == 'hongniao' else {'data': []}
+        monkeypatch.setattr(instance.session, 'request', request)
+        if pid == 'hongniao':
+            monkeypatch.setattr(instance, '_request', request)
+        instance.list_models()
+        spec, secret = resolve(rules[pid], {'base_url': '' if cls.default_base_url else 'https://custom.example', 'api_key':'test-key'})
+        assert calls == [('GET', spec['url'])], pid
+        expected_auth = 'none' if pid == 'gate' else getattr(instance.session, 'auth_style', 'bearer')
+        assert spec['auth'] == expected_auth
+        # Existing 11.02.2 monitor wire format needs no new client feature.
+        wire = dict(spec, provider=pid, secret=secret, key_name='检测 Key', revision='a'*64)
+        assert validate_config({'protocol':1, 'monitors':[wire]})[0]['url'] == spec['url']
+        supported += 1
+    assert supported == 26
+
+
 def test_refresh_atomic_swap_live_instance_and_rollback(isolated):
     owner=object(); first=example(); second=example('2','two')
     C.install(owner,'account',meta(first),lambda h:{'bundle':first})

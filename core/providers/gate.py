@@ -147,6 +147,7 @@ class GateProvider(Provider):
     name = "Gate api-gate.astralmindai.com"
     aliases = ("astralmind", "astralmindai", "Gate", "盖特")
     default_base_url = "https://api-gate.astralmindai.com"
+    monitor = {"path": "/public/model_group/info", "kind": "models", "result_path": "data", "auth": "none"}
     supports = ("image", "video")
     # 图片 Schema 明确收公网 URL / Base64；视频 image_url 必须是网关能取到的 URL。
     ref_mode = "data_uri"

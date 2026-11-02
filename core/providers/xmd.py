@@ -117,6 +117,7 @@ class XmdProvider(Provider):
     id = "xmd"
     name = "XMD 视频（ai.xmdomain.dpdns.org）"
     default_base_url = "https://ai.xmdomain.dpdns.org"
+    monitor = {"reason": "XMD 自检使用动态签名 /v1/me，需专门适配；不能用固定模型列表判断在线。"}
     supports = ("video",)
     ref_mode = "bytes"
 
