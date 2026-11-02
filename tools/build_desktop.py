@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "修复服务商 NY（valeclouds）已完成的视频取不回来：这家查询接口只回 status/progress、不回结果地址，成片只存在于 /v1/videos/{id}/content，此前会一直报「任务完成但未取到结果」且续查永远失败。现在已完成的任务可直接续查取回（原任务 ID 保留、不会重新提交或重复计费）。已有任务、引用、配置与产物保留；其它服务商与认证服务端不受影响。"}
+               "notes": "视频秒数改为自由填写正整数，留空跟随任务；模型时长声明仅作参考，不再被旧声明或本地 60/600 秒上限限制，刷新模型不改写已选时长。固定时长和由模型决定时长的接口单独说明。配套适配包修复 LensForge 参考音视频真实时长上报；配套账号服务 1.10.4 修复 Key 改服务商后的账号授权上限检查、账号勾选同步，并支持点击后台弹窗周边关闭。保留现有配置、项目及产物。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))
