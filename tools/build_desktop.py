@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "视频秒数改为自由填写正整数，留空跟随任务；模型时长声明仅作参考，不再被旧声明或本地 60/600 秒上限限制，刷新模型不改写已选时长。固定时长和由模型决定时长的接口单独说明。配套适配包修复 LensForge 参考音视频真实时长上报；配套账号服务 1.10.4 修复 Key 改服务商后的账号授权上限检查、账号勾选同步，并支持点击后台弹窗周边关闭。保留现有配置、项目及产物。"}
+               "notes": "新增服务商双端状态监测：每家指定一把检测 Key，后台与获授权的客户端分别检测模型或健康接口，显示时间、耗时及错误类型。客户端独立后台运行，断网暂存后补报，不阻塞登录和生产；配置需账号服务 1.11.0。保留秒数自由填写、Key 授权修复及原有配置、项目和产物。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))

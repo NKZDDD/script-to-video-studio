@@ -119,9 +119,12 @@ def create_app(settings=None, *, clock=None):
         app.state.auth = AuthService(settings, **kwargs)
         from .diagnostics import Recorder
         app.state.diagnostics = Recorder(app.state.auth)
+        from .provider_monitor import Monitor
+        app.state.provider_monitor = Monitor(app.state.auth)
         try:
             yield
         finally:
+            app.state.provider_monitor.close()
             app.state.diagnostics.close()
 
     app = FastAPI(title="Respect Studio 登录服务", version=__version__, lifespan=lifespan,
@@ -146,6 +149,8 @@ def create_app(settings=None, *, clock=None):
     app.include_router(storage_router)
     from .adapters import router as adapters_router
     app.include_router(adapters_router)
+    from .provider_monitor import router as monitor_router
+    app.include_router(monitor_router)
 
     @app.exception_handler(AuthError)
     async def auth_error(request, exc):

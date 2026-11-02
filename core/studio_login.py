@@ -236,6 +236,8 @@ class LoginManager:
             if user.get('id'):
                 cloud_diagnostics.activate(self)
                 cloud_usage.start_sender(self)
+                from . import provider_monitor
+                provider_monitor.start(self)
 
     def storage_ticket(self, body, owner):
         for attempt in range(2):

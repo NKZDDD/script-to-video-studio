@@ -2653,6 +2653,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self._login().status(self.headers.get("Cookie", "")))
             if path.startswith("/api/") or path.startswith("/file"):
                 self._login().require(self.headers.get("Cookie", ""))
+            if path == '/api/provider-monitor/status':
+                from core import provider_monitor
+                return self._json(provider_monitor.status(self._login()))
             if path.startswith("/api/"):
                 from server import agent_api
                 import sys
@@ -2746,6 +2749,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/auth/logout":
                 result = self._login().logout(cookie)
                 return self._json(result, headers={"Set-Cookie": f"{LOGIN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"})
+            if path == '/api/provider-monitor/run':
+                from core import provider_monitor
+                return self._json({'queued': provider_monitor.start(self._login()).trigger()})
             from server import agent_api
             import sys
             path = unquote(u.path)

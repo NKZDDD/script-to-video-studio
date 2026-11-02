@@ -20,7 +20,8 @@ RUNTIME_MODULES = ["pypdf", "pymupdf", "fitz", "cryptography", "PIL.Image", "ima
                    "psutil", "webview",
                    "core.agent_projects", "core.agent_runtime", "core.agent_handoff",
                    "core.assemble", "core.bulk_place", "core.recycle", "core.submitted",
-                   "server.agent_api", "core.studio_login"]
+                   "server.agent_api", "core.studio_login", "core.provider_monitor",
+                   "auth_service.studio_auth.provider_probe"]
 
 
 def resource_inventory() -> dict:

@@ -238,3 +238,5 @@ class AuthService:
             db.execute('DELETE FROM admin_audit WHERE at<?', (now-90*86400,))
             from .diagnostics import prune
             prune(db, now)
+            from .provider_monitor import prune as prune_monitors
+            prune_monitors(db, now)

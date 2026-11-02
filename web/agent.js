@@ -535,8 +535,20 @@ function outputList() {
 }
 function settings() {
  main.innerHTML=heading('工作台设置','生产必需配置，始终可见','所有已接入服务商继续可用。设置中只保留图片、视频与本机生产能力。')+
- `<div class="rv-toolbar">${[['providers',S.boot.adapter_status?.managed?'服务商':'服务商与密钥'],['limits','并发与重试'],['llm','提示词改写 LLM'],['upload','参考图上传'],['features','功能包与路径'],['updates','软件更新']].map(([v,l])=>btn(l,'settings-tab',`data-tab="${v}"`,v===S.tab)).join('')}</div><div id="settings-content"></div>`;
- if(S.tab==='providers')providerForm();else if(S.tab==='limits')limitForm();else if(S.tab==='llm')llmForm();else if(S.tab==='upload')uploadForm();else if(S.tab==='updates')updateForm();else featureForm();
+ `<div class="rv-toolbar">${[['providers',S.boot.adapter_status?.managed?'服务商':'服务商与密钥'],['monitor','服务商状态'],['limits','并发与重试'],['llm','提示词改写 LLM'],['upload','参考图上传'],['features','功能包与路径'],['updates','软件更新']].map(([v,l])=>btn(l,'settings-tab',`data-tab="${v}"`,v===S.tab)).join('')}</div><div id="settings-content"></div>`;
+ if(S.tab==='providers')providerForm();else if(S.tab==='monitor')monitorForm();else if(S.tab==='limits')limitForm();else if(S.tab==='llm')llmForm();else if(S.tab==='upload')uploadForm();else if(S.tab==='updates')updateForm();else featureForm();
+}
+async function monitorForm(){
+ clearTimeout(monitorForm.timer);
+ try{
+  const response=await fetch('/api/provider-monitor/status',{cache:'no-store'}),d=await response.json();
+  if(!response.ok)throw Error(d.error?.message||d.error||'读取监测结果失败');
+  if(S.page!=='settings'||S.tab!=='monitor')return;
+  const labels={ok:'接口正常',authentication:'鉴权拒绝',rate_limited:'限流',server_error:'服务商错误',http_error:'HTTP 错误',redirect:'接口重定向',dns:'DNS 失败',tls:'TLS / 证书错误',timeout:'超时',connection:'连接失败',invalid_response:'响应不符合约定',unsafe_target:'目标地址不可用',not_configured:'凭据未配置'};
+  const states={waiting:'等待首次检测',ready:'后台监测运行中',not_assigned:'当前账号没有获授权的监测配置。管理员需配置监测，并将选定的检测 Key 分配给本账号。',server_unavailable:'暂未获取到监测配置，请确认服务端已升级且连接正常；旧结果保留并标明时间。',logged_out:'请先登录',monitor_error:'监测暂不可用，稍后会自动重试'};
+  $('#settings-content').innerHTML=`<section class="rv-panel"><h3>本机 → 服务商</h3><p>${esc(states[d.state]||d.state)}</p><p class="rv-caption">约每 5 分钟直连检测后台指定的接口；不发起生成。服务器的独立结果在管理后台对照查看。接口正常不保证所有模型可生成，公开接口也不一定验证 Key。</p>${btn('立即检测','monitor-run')} ${btn('刷新结果','monitor-refresh')}<p>${d.recording_error?'本机监测结果暂存失败，部分记录可能缺失。':''}</p>${(d.results||[]).map(r=>`<div class="rv-feature"><div><strong>${esc(providerName(r.provider))}</strong><br><small>${esc(r.key_name)} · ${r.auth==='none'?'未携带 Key':'携带 Key 请求'}</small></div><div>${r.stale?'结果已过期 · ':''}${esc(labels[r.category]||r.category)}${r.status?' · HTTP '+esc(r.status):''}<br>${(r.duration_ms/1000).toFixed(3)} 秒 · ${esc(new Date(r.at*1000).toLocaleString())}${r.model_count==null?'':' · '+esc(r.model_count)+' 个模型'}</div></div>`).join('')||'<p>尚无本机检测结果。</p>'}<p class="rv-caption">联网后向后台补报。断网时最多暂存 7 天、2,000 条无密钥记录；超出 15 分钟的结果标记过期。监测状态不会阻止生产或修改 Key。</p></section>`;
+  monitorForm.timer=setTimeout(monitorForm,5000);
+ }catch(e){if(S.page==='settings'&&S.tab==='monitor')notice(e.message,true);}
 }
 async function updateForm(data) {
  clearTimeout(updateForm.timer);
@@ -628,6 +640,8 @@ const actions={
  'save-source':async()=>{await post('source',{source:$('#source-edit').value});closeDialog();notice('已保存原文，Agent 可直接读取。');},
  'providers':()=>{S.tab='providers';show('settings');},
  'settings-tab':e=>{S.tab=e.dataset.tab;settings();},
+ 'monitor-refresh':()=>monitorForm(),
+ 'monitor-run':async()=>{const r=await fetch('/api/provider-monitor/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),d=await r.json();if(!r.ok)throw Error(d.error?.message||d.error||'安排检测失败');notice(d.queued?'已安排后台检测，结果稍后自动刷新。':'距离上次手动检测不足 30 秒，请稍后查看结果。');await monitorForm();},
  'update-check':async()=>{notice('正在检查新版本');await updateForm(await post('updates/check'));},
  'update-download':async()=>updateForm(await post('updates/download')),
  'update-install':async()=>updateForm(await post('updates/install')),
