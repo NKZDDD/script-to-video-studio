@@ -31,9 +31,7 @@ def test_model_survives_old_catalog_with_fixed_duration(mod):
     cap = apply_catalog(mod.JulunProvider().capabilities(), {'rows':[{'id':'sd2.5'}]}, 'old snapshot')
     opts = cap['video']['model_options'][mod.MX_MODEL]
     assert mod.MX_MODEL in cap['video']['models']
-    # 出片秒数统一放开成 1–60：本地不再把候选钉在固定 30 秒上。
-    assert 'durations' not in opts
-    assert cap['video']['durations'] == list(range(1, 61))
+    assert opts['durations'] == [30]  # advertised hint; not an input restriction
     assert set(opts['ratios']) == {'21:9','16:9','4:3','1:1','3:4','9:16'}
     assert (opts['max_refs'],opts['max_video_refs'],opts['max_audio_refs']) == (30,10,10)
 

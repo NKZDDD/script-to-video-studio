@@ -81,7 +81,7 @@ class OverrideTests(unittest.TestCase):
         self.assertIn("blockName === 'video'", self.html[i:i + 700])
 
     def test_the_box_is_only_on_video_providers(self):
-        i = self.html.index("时长档位（实测过的写在这里）")
+        i = self.html.index("参考时长（实测过的写在这里）")
         blk = self.html[max(0, i - 200):i + 400]
         self.assertIn("isVideo ?", blk)
         self.assertIn('data-f="durations"', blk)
@@ -118,14 +118,14 @@ class DeclarationTests(unittest.TestCase):
         self.assertIn("只报有依据的", blk)
         self.assertIn("时长档位", blk, "没告诉人实测过的写在哪")
 
-    def test_per_model_durations_no_longer_narrow_the_ui(self):
-        """秒数统一放开后，模型级 durations 不再下发给前端。"""
+    def test_per_model_durations_remain_available_as_hints(self):
+        """真实模型时长声明保留作参考，不能伪造全模型 1–60。"""
         from core.providers import list_capabilities
         c = next(x for x in list_capabilities() if x["id"] == "paisio")
         opts = (c.get("video") or {}).get("model_options") or {}
         self.assertTrue(opts, "paisio 的按模型声明没了")
-        self.assertTrue(all("durations" not in v for v in opts.values()))
-        self.assertEqual(c["video"]["durations"], list(range(1, 61)))
+        self.assertEqual(opts['paisio-seedance-2.5-720p']['durations'], list(range(4, 31)))
+        self.assertEqual(c['video']['durations'], [4, 5, 8, 10, 12, 15])
 
 
 if __name__ == "__main__":

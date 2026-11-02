@@ -94,6 +94,13 @@ def save_key(body: KeyEdit, request: Request):
         if not any(cfg.get(k) for k in KEY_FIELDS):
             raise AuthError(422, 'key_required', '新建时请填写 Key')
         validate_llm_config(body.provider, cfg)
+        if old and old['provider'] != body.provider:
+            # A provider edit changes every assigned account, just like reassigning
+            # the Key. Validate all of them before changing any saved fields.
+            users = db.execute('SELECT u.id,u.username FROM user_keys a JOIN users u ON u.id=a.user_id '
+                               'WHERE a.key_id=?', (old['id'],)).fetchall()
+            for user in users:
+                check_key_assignment(db, user, old['id'], body.provider)
         kid = body.id or str(uuid.uuid4())
         # 服务商改了这一条 Key 的归属，等于换了一份发放内容：revision 必须变，
         # 已分配账号与运行中的批次各自留快照，不会悄悄按旧服务商记账。
@@ -149,6 +156,17 @@ class KeyUsers(Body):
     usernames: list[str] = Field(max_length=2000)
 
 
+def check_key_assignment(db, user, kid, provider):
+    counts = db.execute(
+        'SELECT k.provider,COUNT(*) AS n FROM user_keys a '
+        'JOIN key_library k ON k.id=a.key_id WHERE a.user_id=? AND a.key_id<>? '
+        'GROUP BY k.provider', (user['id'], kid)).fetchall()
+    per = {c['provider']: c['n'] for c in counts}
+    if per.get(provider, 0) + 1 > 32 or len(set(per) | {provider}) > 48 or sum(per.values()) + 1 > 256:
+        raise AuthError(422, 'assignment_limit',
+                        f"账号 {user['username']} 已达授权上限（256 条 / 48 家 / 每家 32 把）；请先调整该账号的 Key 分配")
+
+
 @router.get('/admin/api/keys/{kid}/users')
 def key_users(kid: str, request: Request):
     """这把 Key 现在发给哪些账号 —— Key 视角的授权列表。"""
@@ -191,15 +209,7 @@ def assign_key_users(kid: str, body: KeyUsers, request: Request):
             raise AuthError(422, 'user_missing', f"账号不存在：{'、'.join(missing[:5])}")
         provider = key['provider']
         for row in rows:
-            counts = db.execute(
-                'SELECT k.provider,COUNT(*) AS n FROM user_keys a '
-                'JOIN key_library k ON k.id=a.key_id WHERE a.user_id=? AND a.key_id<>? '
-                'GROUP BY k.provider', (row['id'], kid)).fetchall()
-            per = {c['provider']: c['n'] for c in counts}
-            providers = set(per) | {provider}
-            if per.get(provider, 0) + 1 > 32 or len(providers) > 48 or sum(per.values()) + 1 > 256:
-                raise AuthError(422, 'assignment_limit',
-                                f"账号 {row['username']} 已达授权上限（256 条 / 48 家 / 每家 32 把）")
+            check_key_assignment(db, row, kid, provider)
         keep = {r['id'] for r in rows}
         if keep:
             marks = ','.join('?' * len(keep))

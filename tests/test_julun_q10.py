@@ -18,9 +18,7 @@ def test_q10_capabilities_and_default_resolution_match_document():
     p = JulunProvider()
     cap = apply_catalog(p.capabilities(), {"rows": [{"id": Q10_MODEL}]}, "fixture")
     opts = cap["video"]["model_options"][Q10_MODEL]
-    # 出片秒数统一放开成 1–60：实拉目录带回的 durations 会被删掉，候选不再被夹窄。
-    assert "durations" not in opts
-    assert cap["video"]["durations"] == list(range(1, 61))
+    assert opts['durations'] == list(range(4, 31))
     assert opts["resolutions"] == ["480p"]
     assert opts["ratios"] == ["16:9", "9:16"]
     assert opts["max_refs"] == 30

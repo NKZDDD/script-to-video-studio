@@ -131,9 +131,7 @@ def test_catalog_normalizes_types_options_without_exposing_chat_or_secrets(monke
     assert result['ok'] and result['strict'] and result['models'] == ['opaque-new-id']
     cap = MC.apply_catalog(p.capabilities(), result, 'test')['video']
     assert cap['models'] == ['opaque-new-id']
-    # 实拉目录带回的 durations 会被删掉，出片候选统一是 1–60。
-    assert 'durations' not in cap['model_options']['opaque-new-id']
-    assert cap['durations'] == list(range(1, 61))
+    assert cap['model_options']['opaque-new-id']['durations'] == [8, 12]
     assert cap['model_options']['opaque-new-id']['ratios'] == ['9:16']
     assert p.list_models() == ['opaque-new-id'] and len(fetched) == 1
     assert 'fixture' not in json.dumps(result)

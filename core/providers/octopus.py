@@ -69,6 +69,7 @@ class OctopusProvider(Provider):
                 "default_model": "veo_3_1-lite",
                 "ratios": ["9:16", "16:9", "1:1"],
                 "durations": [0],
+                "duration_mode": "model",
                 "default_duration": 0,
                 "resolutions": [""],
                 "max_refs": 8,

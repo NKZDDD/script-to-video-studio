@@ -83,9 +83,7 @@ def test_real_http_flow_and_live_catalog(api_server, monkeypatch, tmp_path):
     assert catalog['ok'] and catalog['models'] == ['video-sd25-30s']
     cap = model_catalog.apply_catalog(p.capabilities(), catalog, 'live')
     options = cap['video']['model_options']['video-sd25-30s']
-    # 实拉目录带回的 durations 会被删掉，出片候选统一放开成 1–60。
-    assert 'durations' not in options
-    assert cap['video']['durations'] == list(range(1, 61))
+    assert options['durations'] == [5, 30]  # live hints are retained, not a limit
     assert options['ratios'] == ['9:16']
     assert options['max_refs'] == 30 and options['max_video_refs'] == 2
     monkeypatch.setattr(hongniao, '_wait', lambda *a: None)

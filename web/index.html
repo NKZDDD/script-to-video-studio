@@ -313,7 +313,7 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
         <select id="autoSize"></select></label>
       <label style="margin:0" title="视频画面比例">比例 <select id="autoRatio"></select></label>
       <label style="margin:0" title="每段视频多少秒。和下面「项目参数」里的是同一个 —— 在哪边改都会存进项目参数">单段秒数
-        <select id="autoDur"></select></label>
+        <input id="autoDur" type="number" min="1" step="1" title="正整数原样提交，参考时长不限制输入"></label>
       <label style="margin:0"><input id="autoProduce" type="checkbox" checked> 包含出图出片</label>
       <label style="margin:0"><input id="autoDeliver" type="checkbox" checked> 包含复核+拼接</label>
       <!-- 「只跑生产」：材料导入模式下 LLM 环节的中间产物压根不存在，跑分析
@@ -1003,11 +1003,7 @@ function effectiveBlock(capability, blockName, model) {
   }
   return eff;
 }
-// 上面那三个下拉的选项是**跟着模型走**的，不是跟着服务商走。
-// 不显示来源的话会撞上一个很费解的情况：明明知道 seedance 2.5 能出 29 秒，
-// 下拉里却只有 15 —— 因为链上首选的是别的模型，而整家声明的上限就是 15。
-// （paisio 故意没把 29 写成整家通用值：切回旧模型时前端还允许选 29，
-//   要到付费请求发出去才收到 400。）
+// 模型声明仅供秒数参考；画幅与尺寸仍按模型能力提供候选。
 function capHint(ch) {
   const line = (kind, block, what) => {
     const chain = ch[kind] || [];
@@ -1019,20 +1015,10 @@ function capHint(ch) {
     let s = `<b>${what}</b>：${esc(name)}`;
     if (first.model) s += ` / <code>${esc(first.model)}</code>`;
     const d = eff.durations || [];
-    if (block === 'video' && d.length) {
-      s += `　最长 <b>${Math.max(...d.map(Number))}</b> 秒`;
-      // 链上还有别家时，秒数取交集 —— 后面那家给不了 29，29 就会被交掉。
-      // 这条不说清，人会以为是程序漏了。
-      const others = chain.slice(1).map(x => {
-        const cc = BOOT.capabilities.find(y => y.id === x.provider);
-        return (effectiveBlock(cc, block, x.model).durations || []).map(Number);
-      }).filter(l => l.length);
-      const inter = others.reduce((a, b) => a.filter(x => b.includes(x)),
-                                  d.map(Number));
-      if (others.length && inter.length < d.length)
-        s += `　<span style="color:#fbbf24">⚠ 链上还有 ${chain.length - 1} 家，`
-           + `秒数取交集后只剩到 ${inter.length ? Math.max(...inter) : '—'} 秒`
-           + `（要用长段就让这一类只排一家）</span>`;
+    if (block === 'video') {
+      if(eff.duration_mode==='fixed')s += `　接口固定 ${esc(eff.fixed_duration)} 秒，不发送任务秒数`;
+      else if(eff.duration_mode==='model')s += '　时长由模型 / 服务商决定，不发送任务秒数';
+      else s += (d.length?`　参考时长 ${esc(d.length>8?d[0]+'–'+d[d.length-1]:d.join(' / '))} 秒`:'')+'；可填其他正整数，不按旧声明截短';
     }
     const sz = eff.sizes || [];
     if (block === 'image' && sz.length) s += `　${sz.length} 种尺寸`;
@@ -1060,10 +1046,11 @@ function paramChoices() {
   };
   return {image_size: cross('asset', 'image', 'sizes'),
           ratio: cross('video', 'video', 'ratios'),
-          duration: cross('video', 'video', 'durations')};
+          duration: {list: [], note: '可填正整数，模型声明仅作参考'}};
 }
 // 有候选就渲染成下拉，没有就退回输入框（免得把人锁死在空列表里）
 function paramField(k, label, t, val, attr) {
+  if(k==='duration')return `<div><label>${label} <span class="muted">正整数，原样提交</span></label><input ${attr}="${k}" type="number" min="1" step="1" value="${esc(val??'')}"></div>`;
   const s = paramChoices()[k];
   if (s && s.list.length) {
     return `<div><label>${label} <span class="muted" style="font-size:11px">${esc(s.note)}</span></label>
@@ -1381,7 +1368,7 @@ function renderAuto() {
   const pp = currentParams();
   $('#autoSize').innerHTML  = opt(capOf('asset','image').sizes || ['1024x1536'], pp.image_size);
   $('#autoRatio').innerHTML = opt(capOf('video','video').ratios || ['9:16'], pp.ratio);
-  $('#autoDur').innerHTML   = opt(capOf('video','video').durations || [15], pp.duration);
+  $('#autoDur').value = pp.duration ?? '';
   $('#autoCapHint').innerHTML = capHint(ch);
   const bad = CHAIN_KINDS.some(([k]) => !(ch[k] || []).length);
   $('#autoRun').disabled = bad;
@@ -2748,12 +2735,9 @@ function renderGen() {
                (selected.resolutions || []).map(x =>
                  `<option value="${esc(x)}">`).join('')}</datalist>`
           : '';
-        pbox.innerHTML =
-          `<select class="v-ratio" title="画面比例">${opt(selected.ratios, '')}</select>
-           <select class="v-dur" title="单段时长（秒）">${opt(selected.durations, '')}</select>${res}`;
-        if (!(selected.durations || []).length || String(selected.durations) === '0')
-          pbox.innerHTML = `<select class="v-ratio">${opt(selected.ratios, '')}</select>
-            <span class="muted" style="font-size:11px">时长写在模型名里</span>${res}`;
+        const mode=selected.duration_mode;
+        const dur=['fixed','model'].includes(mode)?`<span class="muted">${mode==='fixed'?`接口固定 ${esc(selected.fixed_duration)} 秒`:'时长由模型 / 服务商决定'}（不发送秒数）</span>`:`<input class="v-dur" type="number" min="1" step="1" placeholder="留空跟随任务" title="正整数原样提交；模型声明仅作参考" style="width:140px">`;
+        pbox.innerHTML = `<select class="v-ratio" title="画面比例">${opt(selected.ratios, '')}</select>${dur}${res}`;
       } else {
         pbox.innerHTML = `<select class="i-size" title="出图尺寸">${
           opt(selected.sizes, '')}</select>`;
@@ -3408,9 +3392,9 @@ function renderProviders() {
           <input data-pv="${c.id}" data-f="poll_interval" type="number" min="2" max="60"
                  value="${saved.poll_interval || pollDef.interval
                           || (isVideo ? 10 : 5)}"></div>
-        ${isVideo ? `<div style="grid-column:1/-1"><label>时长档位（实测过的写在这里）
+        ${isVideo ? `<div style="grid-column:1/-1"><label>参考时长（实测过的写在这里）
           <span class="muted">各家文档对现役模型的秒数常常根本没写 ——
-            程序只报有依据的，你验过的写在这里就会出现在下拉里</span></label>
+            填写的秒数仅作提示，不限制输入，也不截短任务</span></label>
           <input data-pv="${c.id}" data-f="durations"
                  placeholder="sd2.5-720p-301010=4,8,15,30；另一个模型=4,8,12　（* 给这家兜底）"
                  value="${esc(saved.durations || '')}"></div>` : ''}

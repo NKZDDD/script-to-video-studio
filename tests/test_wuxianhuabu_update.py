@@ -87,9 +87,7 @@ def test_old_snapshot_does_not_hide_new_plugin_models():
                         {'rows': [{'id': 'seedance2.5'}]}, 'old frozen snapshot')
     assert set(MODELS).issubset(cap['video']['models'])
     assert cap['video']['default_model'] == DEFAULT_MODEL
-    # 出片候选统一 1–60，模型级 durations 被删掉。
-    assert 'durations' not in cap['video']['model_options']['dola-2.5-720p']
-    assert cap['video']['durations'] == list(range(1, 61))
+    assert cap['video']['model_options']['dola-2.5-720p']['durations'] == [5, 10, 30]
     assert cap['video']['model_options']['seedance-2.5-dl-720p']['max_audio_refs'] == 1
 
 

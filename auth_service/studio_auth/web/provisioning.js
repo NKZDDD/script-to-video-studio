@@ -54,6 +54,7 @@ async function provisionKeyUsers(k){
   provisionDialog.querySelector('#key-user-count').textContent=chosen.size?'· '+chosen.size+' 个账号':'';
   provisionDialog.querySelector('#key-user-chosen').innerHTML=[...chosen].sort().map(n=>`<span>${esc(n)} <button type="button" data-drop="${esc(n)}" aria-label="移除 ${esc(n)}">×</button></span>`).join('')||'<p class="muted">还没有账号</p>';
   provisionDialog.querySelectorAll('[data-drop]').forEach(b=>b.onclick=()=>{chosen.delete(b.dataset.drop);paint();});
+  provisionDialog.querySelectorAll('[data-user]').forEach(c=>{c.checked=chosen.has(c.dataset.user);});
  }
  async function list(q=''){
   const d=await api('users?q='+encodeURIComponent(q));

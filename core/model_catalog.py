@@ -202,9 +202,15 @@ def _from_schema(schema):
     if not isinstance(schema, dict):
         return {}
     out = {}
-    # 出片时长不从这里进 model_options：本地不再按上游档位限制候选，
-    # 统一由 providers.list_capabilities 放开成 1–60（秒数交给服务商裁决）。
-    # 比例、参考图上限这些照旧逐模型合并。
+    # Duration declarations remain useful hints after refresh, never limits.
+    dur = schema.get('duration')
+    if isinstance(dur, dict):
+        if isinstance(dur.get('values'), list) and dur['values']:
+            out['durations'] = [int(x) for x in dur['values']]
+        elif isinstance(dur.get('min'), int) and isinstance(dur.get('max'), int):
+            out['durations'] = list(range(dur['min'], dur['max'] + 1))
+    if 'durations' not in out and isinstance(schema.get('durations'), list) and schema['durations']:
+        out['durations'] = [int(x) for x in schema['durations']]
     for key in ('aspect_ratios', 'aspect_ratio'):        # 单复数都认
         v = schema.get(key)
         if isinstance(v, list) and v:
@@ -315,9 +321,6 @@ def apply_catalog(cap, result, source):
                 options['max_refs'] = row['max_images']
             options.update(_from_schema(row.get('capability_schema')))
             options.update(_from_toplevel(row))
-            # 实拉目录会把各模型的 durations 带回来，合并进去就又把候选夹窄了。
-            # 统一删掉，出片秒数保持 1–60，真超范围让服务商拒绝。
-            options.pop('durations', None)
             if isinstance(options.get('max_refs'), int) and not block.get('refs_unlimited'):
                 options['refs_unlimited'] = False
             pattern = block.get('unlimited_ref_model_pattern')
@@ -329,15 +332,6 @@ def apply_catalog(cap, result, source):
                 options.pop('max_refs', None)
             if options:
                 block.setdefault('model_options', {}).setdefault(row['id'], {}).update(options)
-    # 元数据里也保证出片候选是 1–60：apply_catalog 的入参通常来自
-    # list_capabilities（已放开），但不让其他来源把它改窄。
-    video = cap.get('video')
-    if isinstance(video, dict):
-        video['durations'] = list(providers.ALL_DURATIONS)
-        # 服务商自带 capabilities 里也可能写了模型级 durations，一并删掉。
-        for options in (video.get('model_options') or {}).values():
-            if isinstance(options, dict):
-                options.pop('durations', None)
     cap['model_catalog'] = {'source': source, 'updated_at': result.get('updated_at', ''),
         'total': len(rows), 'unknown': unknown, 'other': other,
         # 哪几类没动 —— 页面要能说清「这一类的清单不是实拉的」，

@@ -1,4 +1,18 @@
 'use strict';
+// Native dialogs report backdrop clicks on the dialog itself. Keep clicks in
+// its padding, and drags that start inside it, from discarding an edit.
+function installDialogDismiss(root){
+ let pressed=null;
+ const outside=e=>{
+  const d=e.target;
+  if(d?.tagName!=='DIALOG'||!d.open)return null;
+  const r=d.getBoundingClientRect();
+  return e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom?d:null;
+ };
+ root.addEventListener('pointerdown',e=>{pressed=e.button===0?outside(e):null;});
+ root.addEventListener('pointercancel',()=>{pressed=null;});
+ root.addEventListener('click',e=>{const d=outside(e);if(d&&d===pressed)d.close();pressed=null;});
+}
 const $=s=>document.querySelector(s);
 let csrf='',page=1,rows=[],editing=null,total=0;
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -16,6 +30,7 @@ async function load(){const d=await api('users?q='+encodeURIComponent($('#query'
  $('#page-label').textContent=`第 ${page} 页 / 共 ${Math.max(1,Math.ceil(total/50))} 页`;$('#prev').disabled=page<=1;$('#next').disabled=page*50>=total;
 }
 async function safe(fn){try{await fn();}catch(e){message(e.message,true);}}
+installDialogDismiss(document);
 $('#login-form').addEventListener('submit',e=>{e.preventDefault();safe(async()=>{const b=e.target.querySelector('button');b.disabled=true;try{const f=new FormData(e.target);await authorized(await api('login',{username:f.get('username').trim(),password:f.get('password')}));}finally{b.disabled=false;e.target.elements.password.value='';}});});
 $('#logout').onclick=()=>safe(async()=>{await api('logout',{});locked();message('已退出后台');});
 $('#search-form').onsubmit=e=>{e.preventDefault();page=1;safe(load);};$('#refresh').onclick=()=>safe(load);

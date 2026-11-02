@@ -186,6 +186,8 @@ class HvtaldProvider(Provider):
                 "ratios": RATIOS,
                 "durations": [FIXED_DURATION],       # 只有 15 秒，别给前端选别的
                 "default_duration": FIXED_DURATION,
+                "duration_mode": "fixed",
+                "fixed_duration": FIXED_DURATION,
                 "resolutions": ["1080p"],
                 "max_refs": MAX_REFS,
                 "ref_mode": "url",

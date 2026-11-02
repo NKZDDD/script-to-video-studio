@@ -34,10 +34,8 @@ class Seedance25Tests(unittest.TestCase):
     # 而页面上那个名字选中就是跑起来才失败。
     LIVE_25 = "paisio-seedance-2.5-720p"
 
-    def test_the_model_declares_one_to_sixty_seconds(self):
-        # 本地不再按上游档位限制候选：出片秒数统一放开成 1–60。
-        d = effective("paisio", "video", self.LIVE_25)["durations"]
-        self.assertEqual(d, list(range(1, 61)))
+    def test_the_model_retains_its_actual_duration_hints(self):
+        self.assertEqual(effective('paisio', 'video', self.LIVE_25)['durations'], list(range(4, 31)))
 
     def test_the_request_builder_sends_the_chosen_seconds(self):
         """★ 声明和请求体不再按模型档位夹取：用户选 31 就发 31。"""
@@ -47,16 +45,9 @@ class Seedance25Tests(unittest.TestCase):
             VideoTask(prompt="x", duration=31, model=self.LIVE_25), self.LIVE_25)
         self.assertEqual(body["duration"], 31)
 
-    def test_model_options_no_longer_narrow_the_candidates(self):
-        """★ 模型级 durations 全部删掉，前端回落到整家的 1–60。"""
-        video = CAPS["paisio"]["video"]
-        self.assertEqual(video["durations"], list(range(1, 61)))
-        self.assertTrue(all("durations" not in (o or {})
-                            for o in (video.get("model_options") or {}).values()))
-
-    def test_an_old_model_on_the_same_provider_also_gets_one_to_sixty(self):
-        self.assertEqual(effective("paisio", "video", "sd2-pro-720p")["durations"],
-                         list(range(1, 61)))
+    def test_provider_and_model_hints_remain_distinct(self):
+        self.assertEqual(CAPS['paisio']['video']['durations'], [4, 5, 8, 10, 12, 15])
+        self.assertEqual(effective('paisio', 'video', self.LIVE_25)['durations'], list(range(4, 31)))
 
     def test_the_model_needs_public_urls_for_references(self):
         """2.5 只收公网链接。没配对象存储的话它会直接拒，值得在页面上提醒。"""
@@ -112,21 +103,17 @@ class HintWiringTests(unittest.TestCase):
         self.assertIn("function capHint(", self.html)
         self.assertIn("$('#autoCapHint').innerHTML = capHint(ch);", self.html)
 
-    def test_it_reports_the_max_seconds_and_the_model(self):
+    def test_it_reports_reference_seconds_and_the_model(self):
         i = self.html.index("function capHint(")
         blk = self.html[i:i + 2200]
-        self.assertIn("最长", blk)
+        self.assertIn("参考时长", blk)
         self.assertIn("first.model", blk)
 
-    def test_it_warns_when_the_chain_intersects_the_durations_away(self):
-        """★ 最容易困惑的一种：选了 2.5 还是只有 15，因为链上还挂着别家。
-
-        秒数在多家之间取交集。不说清这一条，人会以为是程序漏了。
-        """
-        i = self.html.index("function capHint(")
+    def test_it_explains_that_hints_do_not_limit_input(self):
+        i = self.html.index('function capHint(')
         blk = self.html[i:i + 2200]
-        self.assertIn("交集", blk)
-        self.assertIn("只排一家", blk)
+        self.assertIn('可填其他正整数', blk)
+        self.assertNotIn('秒数取交集', blk)
 
     def test_it_warns_about_url_only_models(self):
         i = self.html.index("function capHint(")
@@ -140,19 +127,10 @@ class HintWiringTests(unittest.TestCase):
 
 class AllProvidersTests(unittest.TestCase):
 
-    def test_every_video_provider_declares_some_duration(self):
-        """一个都不声明的话下拉会退回写死的 [15]，而那多半是错的。"""
-        missing = []
-        for cid, c in CAPS.items():
-            v = c.get("video") or {}
-            if not v:
-                continue
-            has = bool(v.get("durations")) or any(
-                (o or {}).get("durations")
-                for o in (v.get("model_options") or {}).values())
-            if not has:
-                missing.append(cid)
-        self.assertEqual(missing, [], f"这几家没声明秒数：{missing}")
+    def test_fixed_protocols_are_not_advertised_as_adjustable(self):
+        self.assertEqual(CAPS['octopus']['video']['duration_mode'], 'model')
+        self.assertEqual(CAPS['hvtald']['video']['duration_mode'], 'fixed')
+        self.assertEqual(CAPS['hvtald']['video']['fixed_duration'], 15)
 
 
 if __name__ == "__main__":

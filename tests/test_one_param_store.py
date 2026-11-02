@@ -104,7 +104,7 @@ class PageTests(unittest.TestCase):
 
     def test_the_panel_reads_the_projects_own_params(self):
         """★ 原来读 `d`（全局默认）—— 项目里存的值被无声盖掉。"""
-        i = HTML.index("$('#autoDur').innerHTML")
+        i = HTML.index("$('#autoDur').value")
         blk = HTML[i - 600:i + 200]
         self.assertIn("currentParams()", blk)
         self.assertIn("pp.duration", blk)

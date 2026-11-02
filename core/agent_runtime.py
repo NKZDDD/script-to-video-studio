@@ -12,6 +12,7 @@ from . import agent_projects as A, audio_refs, diagnose, probe, produce, resourc
 from .apiutil import _wrong_kind, _incomplete_image, MIN_BYTES, MEDIA_IMAGE
 from .executor import GATE, Job, run_batch
 from .store import LOCK, read_json, read_text, write_json, write_text
+from .video_duration import positive_seconds, protocol_note, validate_override
 
 
 @lru_cache(maxsize=4096)
@@ -137,13 +138,14 @@ def validate_settings(value: dict, caps: list) -> dict:
             if seconds in (None, ""):
                 out[kind]["duration"] = ""
             else:
-                if isinstance(seconds, bool) or not 1 <= int(seconds) <= 600:
-                    raise ValueError("视频秒数须在 1–600 之间")
-                out[kind]["duration"] = int(seconds)
+                out[kind]["duration"] = validate_override(seconds, byid[pid], out[kind]['model'])
         override = row.get("override") or {}
         if not isinstance(override, dict) or set(override) - {"size", "ratio", "duration", "resolution"}:
             raise ValueError("不支持的生产参数覆盖")
         out[kind]["override"] = {k: v for k, v in override.items() if v not in (None, "")}
+        if media == 'video' and 'duration' in out[kind]['override']:
+            out[kind]['override']['duration'] = validate_override(
+                out[kind]['override']['duration'], byid[pid], out[kind]['model'])
         backups = row.get('fallbacks') or []
         if not isinstance(backups, list) or any(not isinstance(b, dict) or b.get('fallbacks') for b in backups):
             raise ValueError('备用服务商须为有序列表，不能嵌套')
@@ -219,7 +221,9 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None, *, 
             if media == 'image' and row.get('series'):
                 p['series'] = row['series']
             if media == "video" and row.get("duration"):
-                p["duration"] = int(row["duration"])
+                p["duration"] = validate_override(row["duration"], capmap[row['provider']], row['model'])
+            if media == 'video' and cfg.get('agent_features', {}).get('advanced') and (row.get('override') or {}).get('duration') not in (None, ''):
+                validate_override(row['override']['duration'], capmap[row['provider']], row['model'])
             if media == "video" and row.get("resolution"):
                 p["resolution"] = row["resolution"]
             sizefield = "ratio" if media == "video" else "size"
@@ -262,9 +266,8 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None, *, 
                     raise ValueError(f"清晰度 {p['resolution']} 不在这个视频模型的能力里"
                                      f"（{'、'.join(effective.get('resolutions', [])) or '没有声明'}），"
                                      "在「本次服务商与并发」视频那一行的清晰度里重新选，或选「跟随任务」")
-                # **出片秒数不再按模型档位拦。** 本地档位会过期，
-                # 选 30 秒被顶回去等于把能力埋掉；真超范围交给服务商裁决，
-                # 任务明细里能看到真实原因。这里只保留 1–60 的合法化。
+                # Capability durations are hints, not a clamp or allow-list.
+                p['duration'] = positive_seconds(p['duration'])
             t["params"] = p
             if kind not in pcs or pcs[kind].get("model") != row["model"] or pcs[kind].get('provider') != row['provider']:
                 pc = resolve_cfg(cfg, {"provider": row["provider"], "model": row["model"]}, "video" if media == "video" else "asset")
@@ -295,6 +298,7 @@ def preview(pj, cfg: dict, caps: list, resolve_cfg, only=None, running=None, *, 
             "elsewhere": elsewhere, "max_retry": retries(cfg), "soften_rounds": soften_rounds(cfg),
             "resuming": sum(1 for t in todo if t.get("submitted")),
             "rows": [{"kind": k, **saved[k], "count": sum(t["kind"] == k for t in todo),
+                      "duration_note": protocol_note(capmap.get(saved[k]['provider'], {}), saved[k]['model']) if k == 'video' else '',
                       "global_limit": GATE.snapshot()["global_limit"],
                       "provider_limit": GATE.snapshot()["per_provider_limit"].get(saved[k]["provider"])}
                      for k in saved if any(t["kind"] == k for t in todo)],

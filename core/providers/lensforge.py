@@ -14,7 +14,7 @@
 几个必须照着做的点：
   1. `model` 不是上游模型名，而是**方案 id**。这里对外仍用展示名（下拉框可读），
      创建时换成目录里的 offeringId；展示名被后台改过会自动重拉一次目录再换。
-  2. 参考视频/音频**必须**带真实 `durationSeconds`（2～30 秒）。本机没有现成时长，
+  2. 参考视频/音频**必须**带真实 `durationSeconds`。本机没有现成时长，
      这里用 ffprobe/ffmpeg 读一遍；读不出来就明确报错，不猜一个数去打乱计费。
   3. 创建任务必须带 `Idempotency-Key`：超时重发拿到同一个任务号，不会重复扣费。
   4. 参考图本机文件先上传换 url 再放进 materials；公网链接原样使用，顺序即 @Image1..N。
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import io
+import math
 import re
 import subprocess
 import uuid
@@ -113,7 +114,7 @@ def _tier_of(size: str, allowed: list) -> str:
 def _measured_seconds(url: str) -> float:
     """用 ffprobe/ffmpeg 读参考素材时长。
 
-    该平台的参考视频/音频必须带真实时长（2～30 秒），漏传或乱传会被拒或算错钱。
+    该平台的参考视频/音频必须带真实时长，漏传或乱传会被拒或算错钱。
     这两个工具在拼接阶段本来就有，所以不额外引入依赖；读不出来就明确报错。
     """
     from .. import probe
@@ -358,15 +359,17 @@ class LensForgeProvider(Provider):
             if not _remote(url):
                 raise ApiError(f"LF 的{label}参考只收公网 http(s) 链接：{str(url)[:120]}",
                                kind=TASK_FATAL)
-            if i < len(durations) and durations[i]:
-                seconds = float(durations[i])
-            else:
-                seconds = _measured_seconds(url)
-            fixed = max(2.0, min(30.0, round(seconds, 2)))
-            if fixed != round(seconds, 2):
-                log(f"LF {label}参考 {i + 1} 时长 {seconds}s 超出平台 2～30 秒，按 {fixed}s 提交")
+            raw = durations[i] if i < len(durations) else None
+            try:
+                seconds = float(_measured_seconds(url) if raw in (None, '') else raw)
+                if isinstance(raw, bool) or not math.isfinite(seconds) or seconds <= 0:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ApiError(f"LF {label}参考 {i + 1} 的真实时长无效，请检查素材时长", kind=TASK_FATAL) from exc
+            # The media URL is unchanged: never shorten/extend just its metadata.
+            # Upstream decides whether the actual duration is supported.
             out.append({"type": kind, "role": f"reference_{kind}", "url": url,
-                        "durationSeconds": fixed})
+                        "durationSeconds": seconds})
         return out
 
     def generate_video(self, task: VideoTask, dest: str, *, log: Callable = print,

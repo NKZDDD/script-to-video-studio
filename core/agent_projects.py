@@ -19,6 +19,7 @@ from . import paths, probe, submitted, independent_c, single_handoff
 from .reference_contract import (MARKER as REFERENCE_MARKER, RULES as REFERENCE_RULES,
                                  SCOPE as CONTRACT_SCOPE, SCOPE_MARKER, REVISION as CONTRACT_REVISION)
 from .store import LOCK, Project, read_json, read_text, write_json, write_text
+from .video_duration import positive_seconds
 
 SCHEMA = "studio.production-plan/v1"
 KINDS = {"asset": "资产图", "scstate": "场景状态图", "board": "交接板整板",
@@ -108,10 +109,10 @@ def create_project(base: str, body: dict, capabilities: list) -> Project:
     if not title or len(title) > 100:
         raise ValueError("项目名称须为 1–100 个字符")
     options = dict(DEFAULTS, **{k: v for k, v in (body.get("options") or {}).items() if k in DEFAULTS})
-    for key in ("episode_count", "duration"):
-        options[key] = int(options[key])
-        if not 1 <= options[key] <= (999 if key == "episode_count" else 600):
-            raise ValueError(f"{key} 超出可配置范围")
+    options['episode_count'] = int(options['episode_count'])
+    if not 1 <= options['episode_count'] <= 999:
+        raise ValueError('episode_count 超出可配置范围')
+    options['duration'] = positive_seconds(options['duration'])
     if options["ratio"] not in ("16:9", "9:16", "1:1", "4:3", "3:4", "21:9"):
         raise ValueError("不支持的画幅")
     source = skill_source()
