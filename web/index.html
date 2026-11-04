@@ -749,6 +749,11 @@ pre.log{background:#0a0c10;color:#b8c0cc;padding:10px;border-radius:6px;max-heig
       先 <code>pip install boto3</code>。同一张图全剧只传一次（按内容缓存），重跑也不重传。
     </p>
     <p id="upManaged" class="muted"></p><button class="btn ghost sm" id="refreshUploadConfig">刷新后台 R2 配置</button>
+    <div class="row" style="margin:12px 0;align-items:end">
+      <div><label for="upConcurrency">同时上传文件数（份）</label><input id="upConcurrency" type="number" min="1" step="1" required value="4"></div>
+      <button class="btn sm" id="saveUploadConcurrency">保存上传并发</button>
+    </div>
+    <p class="muted">按文件计数，不是任务条数。完成一份立即接续下一份，不用等整组完成；用户可一次提交全部任务，同图合并上传。后台 R2 和个人对象存储均适用。保存后立即调整，降低上限不会中断已开始的上传。</p>
     <div class="grid g2">
       <div><label>Endpoint <span class="muted">R2: https://&lt;账号id&gt;.r2.cloudflarestorage.com；AWS 留空</span></label>
         <input id="upEndpoint" placeholder="https://xxx.r2.cloudflarestorage.com"></div>
@@ -4571,6 +4576,7 @@ function renderUpload() {
     $('#' + el).value = masked ? '' : (u[key] ?? '');
   }
   $('#upMode').value = u.mode || 'always';
+  $('#upConcurrency').value = u.concurrency ?? 4;
   const ready = u.bucket && u.access_key_set && u.secret_key_set;
   $('#upState').textContent = m.assigned ? (m.available?'后台 R2 已配置，可测试连接':'后台 R2 不可用') : ready
     ? (u.public_base_url ? `已配置（${u.bucket}）——建议点一次「测试连接」`
@@ -4586,8 +4592,16 @@ function collectUpload() {
     else upload[key] = v;
   }
   upload.mode = $('#upMode').value;
+  upload.concurrency = $('#upConcurrency').value;
   return upload;
 }
+$('#saveUploadConcurrency').onclick = async () => {
+  if (!$('#upConcurrency').reportValidity()) return;
+  const r = await api.post('/api/config', {upload:{concurrency:$('#upConcurrency').value}});
+  if(r.error){$('#upResult').textContent=r.error;return;}
+  BOOT=await api.get('/api/bootstrap');renderUpload();
+  $('#upResult').textContent='上传并发已保存，排队中的文件按新上限自动接续。';
+};
 $('#refreshUploadConfig').onclick = async () => {
   const r=await api.post('/api/upload/refresh',{});
   if(r.error){$('#upResult').textContent=r.error;return;}
@@ -4595,7 +4609,9 @@ $('#refreshUploadConfig').onclick = async () => {
   $('#upResult').textContent='后台 R2 配置已刷新';
 };
 $('#saveUpload').onclick = async () => {
-  await api.post('/api/config', {upload: collectUpload()});
+  if (!$('#upConcurrency').reportValidity()) return;
+  const r = await api.post('/api/config', {upload: collectUpload()});
+  if(r.error){$('#upResult').textContent=r.error;return;}
   BOOT = await api.get('/api/bootstrap'); renderUpload();
   $('#upResult').innerHTML = '<div class="alert warn">已保存。建议点一次「测试连接」'
     + '——桶没开公开读、或公开域名填错的话，上传会成功但服务商取不到图，'

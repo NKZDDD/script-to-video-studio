@@ -21,7 +21,7 @@ from core.providers import (REGISTRY as PROVIDER_REGISTRY, build as build_provid
                             list_capabilities, resolve_id as resolve_provider_id)
 from core import paths
 from core import relay as _relay
-from core.store import Project, list_projects, read_json, write_json
+from core.store import Project, list_projects, read_json, write_json, LOCK as STORE_LOCK
 from core.studio_login import LoginManager, LoginRequired, COOKIE as LOGIN_COOKIE
 from core.cloud_diagnostics import local_request
 from core import cloud_config
@@ -132,7 +132,16 @@ def caps_of(cfg: Optional[dict] = None) -> list:
 
 
 def load_config() -> dict:
-    cfg = read_json(paths.config_path(), {}) or {}
+    from core import uploader
+    # 配置读写与上传上限应用保持同序，旧的并发读取不能覆盖刚保存的新上限。
+    with STORE_LOCK:
+        cfg = read_json(paths.config_path(), {}) or {}
+        up = cfg.setdefault("upload", {})
+        try:
+            up["concurrency"] = uploader.validate_concurrency(up.get("concurrency", uploader.DEFAULT_UPLOAD_CONCURRENCY))
+        except ValueError:
+            up["concurrency"] = uploader.DEFAULT_UPLOAD_CONCURRENCY
+        uploader.configure_concurrency(up["concurrency"])
     cfg.setdefault("projects_dir", paths.default_projects_dir())
     cfg.setdefault("providers", {})
     llm_cfg = cfg.setdefault("llm", {})
@@ -186,8 +195,14 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
+    from core import uploader
+    up = dict(cfg.get("upload") or {})
+    up["concurrency"] = uploader.validate_concurrency(up.get("concurrency", uploader.DEFAULT_UPLOAD_CONCURRENCY))
+    cfg = dict(cfg, upload=up)
     os.makedirs(os.path.dirname(paths.config_path()), exist_ok=True)
-    write_json(paths.config_path(), cfg)
+    with STORE_LOCK:
+        write_json(paths.config_path(), cfg)
+        uploader.configure_concurrency(up["concurrency"])
 
 
 def proj_of(body: dict) -> Project:
@@ -1236,6 +1251,8 @@ def api_post(path: str, body: dict) -> dict:
     cfg = load_config()
 
     if path == "/api/config":
+        if "upload" in body and not isinstance(body["upload"], dict):
+            raise ValueError("上传设置必须是对象")
         if 'llm' in body and cloud_config.llm_managed():
             raise ValueError('提示词改写 LLM 由后台统一管理，请在后台 Key 库修改后刷新后台配置')
         if 'providers' in body and cloud_config.client_managed():
@@ -1302,6 +1319,9 @@ def api_post(path: str, body: dict) -> dict:
                     v["max_tokens"] = _max_tokens(v["max_tokens"])
                 if k == "llm" and "timeout" in v:
                     v["timeout"] = _timeout(v["timeout"])
+                if k == "upload" and "concurrency" in v:
+                    from core import uploader
+                    v["concurrency"] = uploader.validate_concurrency(v["concurrency"])
                 cur.setdefault(k, {}).update(v)
             else:
                 cur[k] = v

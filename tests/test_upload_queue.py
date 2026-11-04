@@ -20,7 +20,7 @@ def clean_uploads(monkeypatch):
     manager = object()
     cloud_storage.install(manager, 'test-user', None)
     uploader._MEM.clear()
-    monkeypatch.setattr(uploader, '_UPLOAD_SLOTS', threading.BoundedSemaphore(4))
+    monkeypatch.setattr(uploader, '_UPLOAD_SLOTS', uploader.UploadSlots(4))
     monkeypatch.setattr(uploader, 'encode_ref',
                         lambda path, **kw: (open_bytes(path), 'image/png', '.png', 'original'))
     yield
@@ -164,7 +164,7 @@ def test_failure_is_shared_releases_slot_and_next_attempt_can_retry(monkeypatch,
     joined = observe_waiters(monkeypatch, 5)
     release = threading.Event()
     calls = []
-    monkeypatch.setattr(uploader, '_UPLOAD_SLOTS', threading.BoundedSemaphore(1))
+    monkeypatch.setattr(uploader, '_UPLOAD_SLOTS', uploader.UploadSlots(1))
 
     def put(cfg, data, key):
         calls.append(key)
@@ -217,7 +217,7 @@ def test_cancelled_follower_does_not_cancel_shared_upload(monkeypatch, tmp_path)
 def test_cancelled_queued_owner_allows_other_task_to_take_over(monkeypatch, tmp_path):
     path = image(tmp_path)
     joined = observe_waiters(monkeypatch, 1)
-    slots = threading.BoundedSemaphore(1)
+    slots = uploader.UploadSlots(1)
     slots.acquire()
     monkeypatch.setattr(uploader, '_UPLOAD_SLOTS', slots)
     cancelled = threading.Event()
@@ -270,7 +270,7 @@ def test_managed_queue_rejects_account_or_revision_switch(monkeypatch, tmp_path,
         endpoint='https://test.r2.cloudflarestorage.com', bucket='test',
         public_base_url='https://cdn.test', prefix='account-a')
     cloud_storage.install(manager, 'account-a', config)
-    slots = threading.BoundedSemaphore(1)
+    slots = uploader.UploadSlots(1)
     slots.acquire()
     monkeypatch.setattr(uploader, '_UPLOAD_SLOTS', slots)
     queued = observe_upload_entry(monkeypatch)

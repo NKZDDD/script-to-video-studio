@@ -34,8 +34,58 @@ _MEM_LOCK = threading.RLock()
 
 # 内部上传窗口；用户提交多少任务不受此限制。签名和直传共用名额，
 # 完成一份立即放行下一份，不能把生产并发直接变成上传并发。
-UPLOAD_CONCURRENCY = 4
-_UPLOAD_SLOTS = threading.BoundedSemaphore(UPLOAD_CONCURRENCY)
+DEFAULT_UPLOAD_CONCURRENCY = 4
+
+
+def validate_concurrency(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("同时上传文件数必须是大于等于 1 的整数")
+    try:
+        count = int(value)
+    except ValueError:
+        raise ValueError("同时上传文件数必须是大于等于 1 的整数") from None
+    if count < 1:
+        raise ValueError("同时上传文件数必须是大于等于 1 的整数")
+    return count
+
+
+class UploadSlots:
+    """热调整上限时保留在途计数，不替换信号量、不撤回已发出的上传。"""
+
+    def __init__(self, limit=DEFAULT_UPLOAD_CONCURRENCY):
+        self._changed = threading.Condition()
+        self._limit = validate_concurrency(limit)
+        self._active = 0
+
+    def configure(self, limit):
+        limit = validate_concurrency(limit)
+        with self._changed:
+            if self._limit != limit:
+                self._limit = limit
+                self._changed.notify_all()
+
+    def acquire(self, timeout=None):
+        with self._changed:
+            if not self._changed.wait_for(lambda: self._active < self._limit, timeout):
+                return False
+            self._active += 1
+            return True
+
+    def release(self):
+        with self._changed:
+            if self._active < 1:
+                raise ValueError("upload slot released without acquisition")
+            self._active -= 1
+            self._changed.notify_all()
+
+
+_UPLOAD_SLOTS = UploadSlots()
+
+
+def configure_concurrency(value):
+    _UPLOAD_SLOTS.configure(value)
+
+
 _FLIGHTS: dict[str, Future] = {}
 _FLIGHT_LOCK = threading.Lock()
 
