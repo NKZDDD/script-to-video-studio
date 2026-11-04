@@ -27,7 +27,7 @@ import requests
 from core.apiutil import ApiError, extract_image_items, extract_task_id, extract_video_url
 from core.providers.base import ImageTask, Provider, VideoTask
 
-PATCH_VERSION = "20261009.2"
+PATCH_VERSION = "20261104.1"
 # https://snumom.com/docs/gpt-image-2.html
 # https://snumom.com/docs/grok-imagine-image-2.0.html
 IMAGE_MODELS = ["gpt-image-2", "grok-imagine-image-2.0"]
@@ -63,6 +63,7 @@ def _image_size(task: ImageTask, model: str) -> str:
 
 VIDEO_MODELS = [
     "wan3.0-video", "wan3.0-video-prime", "wan3.0-image", "wan3.0-image-prime",
+    "wan-3.0-video", "wan-3.0-video-prime",
     "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview", "wan-3.0",
 ]
 RATIOS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "adaptive"]
@@ -87,7 +88,7 @@ def _limits(model: str) -> tuple[int | None, int, int]:
     """返回图片/视频/音频上限。None 不做本地张数限制，0 表示不支持。"""
     if "h3" in model.lower():
         return (None, 3, 3) if model.lower().startswith("minimax_h3-") else (None, 0, 0)
-    if model.startswith("wan3.0-video"):
+    if model.startswith(("wan3.0-video", "wan-3.0-video")):
         return 10, 5, 5
     if model.startswith("wan3.0-image"):
         return 10, 0, 5
@@ -150,6 +151,8 @@ class AkeProvider(Provider):
                 "model_options": {
                     "wan3.0-video": {"max_audio_refs": _limits("wan3.0-video")[2], "durations": list(range(1, 61)), "max_refs": 10},
                     "wan3.0-video-prime": {"max_audio_refs": _limits("wan3.0-video-prime")[2], "durations": list(range(1, 61)), "max_refs": 10},
+                    "wan-3.0-video": {"max_audio_refs": _limits("wan-3.0-video")[2], "durations": list(range(1, 61)), "max_refs": 10},
+                    "wan-3.0-video-prime": {"max_audio_refs": _limits("wan-3.0-video-prime")[2], "durations": list(range(1, 61)), "max_refs": 10},
                     "wan3.0-image": {"max_audio_refs": _limits("wan3.0-image")[2], "durations": list(range(1, 61)), "max_refs": 10},
                     "wan3.0-image-prime": {"max_audio_refs": _limits("wan3.0-image-prime")[2], "durations": list(range(1, 61)), "max_refs": 10},
                     "grok-imagine-video-1.5": {"max_audio_refs": _limits("grok-imagine-video-1.5")[2],
@@ -159,7 +162,8 @@ class AkeProvider(Provider):
                     "wan-3.0": {"max_audio_refs": _limits("wan-3.0")[2], "durations": list(range(1, 61)), "max_refs": 9},
                 },
                 "notes": "seconds 必须按字符串发送；reference_images 是 {url,role?} 对象数组。"
-                         "wan3.0-video* 支持 10 图/5 视频/5 音频，wan3.0-image* 不支持参考视频；"
+                         "wan3.0-video* / wan-3.0-video* 支持 10 图/5 视频/5 音频，"
+                         "wan3.0-image* 不支持参考视频；"
                          "Grok 最多 7 图且不支持视频/音频。万相 3.0 未指定 size 时默认 1080P。",
             },
             "notes": "模型清单最终以控制台和 GET /v1/models 为准。万相创建时预扣，"
@@ -286,7 +290,7 @@ class AkeProvider(Provider):
             ]
         if audios:
             body["reference_audios"] = [{"url": ref} for ref in audios]
-        if model.startswith("wan3.0-") and "prompt_extend" in task.extra:
+        if model.startswith(("wan3.0-", "wan-3.0-video")) and "prompt_extend" in task.extra:
             body["prompt_extend"] = bool(task.extra["prompt_extend"])
 
         log(f"阿珂 {model}: seconds='{sec}' size={body.get('size', '默认')} "

@@ -28,6 +28,58 @@ class AkeTests(unittest.TestCase):
         self.assertEqual(_limits("wan3.0-image"), (10, 0, 5))
         self.assertEqual(_limits("grok-imagine-video-1.5"), (7, 0, 0))
 
+    def test_hyphenated_wan_catalog_and_request_keep_ten_images(self):
+        from core.model_catalog import apply_catalog
+        # /v1/models 只返回 ID，新旧拼写必须一致，不能落入未知模型的 4 图分支。
+        for model in ("wan-3.0-video", "wan-3.0-video-prime", "wan3.0-video-nsfw"):
+            with self.subTest(model=model):
+                p = AkeProvider(api_key="test-key")
+                captured = {}
+                def fake(method, path, **kwargs):
+                    self.assertEqual((method, path), ("POST", "/v1/videos"))
+                    captured.update(kwargs["json_body"])
+                    return {"id": "job-1", "metadata": {"url": "https://cdn.example/out.mp4"}}
+                p.session.request = fake
+                p.session.save_item = lambda *_: None
+                refs = [f"https://cdn.example/{i}.png" for i in range(10)]
+                videos = [f"https://cdn.example/{i}.mp4" for i in range(5)]
+                audios = [f"https://cdn.example/{i}.mp3" for i in range(5)]
+                p.generate_video(VideoTask(prompt="test", model=model, refs=refs,
+                    duration=60, extra={"video_refs": videos, "audio_refs": audios,
+                                        "prompt_extend": False}), "out.mp4", log=lambda *_: None)
+                self.assertEqual(captured["model"], model)
+                self.assertEqual(captured["seconds"], "60")
+                self.assertEqual([r["url"] for r in captured["reference_images"]], refs)
+                self.assertEqual([r["url"] for r in captured["reference_videos"]], videos)
+                self.assertEqual([r["url"] for r in captured["reference_audios"]], audios)
+                self.assertIs(captured["prompt_extend"], False)
+                cap = apply_catalog(p.capabilities(), {"rows": [{"id": model}]}, "test")["video"]
+                effective = dict(cap, **cap.get("model_options", {}).get(model, {}))
+                self.assertIn(model, cap["models"])
+                self.assertEqual(effective["max_refs"], 10)
+
+    def test_wan_aliases_preserve_other_reference_limits(self):
+        from unittest.mock import Mock
+        self.assertEqual(_limits("wan-3.0"), (9, 3, 3))
+        self.assertEqual(_limits("unknown-model"), (4, 0, 0))
+        for model in ("wan-3.0-video", "wan-3.0-video-prime"):
+            with self.subTest(model=model):
+                p = AkeProvider(api_key="test-key")
+                p.session.request = Mock()
+                with self.assertRaisesRegex(Exception, "最多 10 张"):
+                    p.generate_video(VideoTask(prompt="test", model=model,
+                        refs=[f"https://cdn.example/{i}.png" for i in range(11)]), "out.mp4")
+                p.session.request.assert_not_called()
+        for model in ("wan3.0-image", "wan3.0-image-prime"):
+            with self.subTest(model=model):
+                self.assertEqual(_limits(model), (10, 0, 5))
+                p = AkeProvider(api_key="test-key")
+                p.session.request = Mock()
+                with self.assertRaisesRegex(Exception, "不支持参考视频"):
+                    p.generate_video(VideoTask(prompt="test", model=model,
+                        extra={"video_refs": ["https://cdn.example/v.mp4"]}), "out.mp4")
+                p.session.request.assert_not_called()
+
     def test_h3_sends_all_references_without_local_count_limit(self):
         from core.model_catalog import apply_catalog
         for model in ("minimax_h3", "minimax_h3-fast", "H3", "h3-pro"):
