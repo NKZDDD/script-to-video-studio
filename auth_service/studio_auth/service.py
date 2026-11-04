@@ -240,3 +240,5 @@ class AuthService:
             prune(db, now)
             from .provider_monitor import prune as prune_monitors
             prune_monitors(db, now)
+            from .client_reports import prune as prune_reports
+            prune_reports(db, now)

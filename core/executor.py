@@ -413,6 +413,8 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
     人还得自己回头找是哪个上游没成。既费钱又难查。
     """
     provider = provider or job.provider
+    from . import cloud_diagnostics, request_trace
+    diagnostic_owner = cloud_diagnostics.identity()
     if job.max_retry is None:
         job.max_retry = max_retry
     for t in tasks:
@@ -435,6 +437,7 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                 return
             job.set_item(key, state="running", msg="")
             for attempt in range(1 + max_retry):
+                diagnostic_started = time.monotonic()
                 if job.cancelled:
                     job.set_item(key, state="aborted" if job.aborted else "cancelled")
                     return
@@ -458,6 +461,7 @@ def run_batch(job: Job, tasks: list, worker: Callable, *,
                         diagnose.record(job.project_root, warn)
                     return
                 except Exception as exc:               # noqa: BLE001
+                    request_trace.task_failure(diagnostic_owner, job, key, diagnostic_started, exc)
                     kind = getattr(exc, "kind", RETRYABLE)
                     diag = diagnose.build(exc, stage=job.kind, target=key,
                                           provider=job.provider, model=job.model)

@@ -117,6 +117,8 @@ class Store:
             db.executescript(SCHEMA)
             from .diagnostics import SCHEMA as DIAGNOSTIC_SCHEMA
             db.executescript(DIAGNOSTIC_SCHEMA)
+            from .client_reports import SCHEMA as REPORT_SCHEMA
+            db.executescript(REPORT_SCHEMA)
             from .provider_monitor import SCHEMA as MONITOR_SCHEMA
             db.executescript(MONITOR_SCHEMA)
             db.execute("PRAGMA user_version=1")

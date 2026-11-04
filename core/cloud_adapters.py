@@ -68,6 +68,7 @@ def load(bundle):
             if cap.get('id') != row['id'] or not cap.get('supports'):
                 raise ValueError('服务商能力声明不正确：'+row['id'])
             classes[row['id']] = cls
+            cls._diagnostic_version = bundle.get('version', '')
     except Exception:
         _packages.pop(name, None)
         for key in list(sys.modules):

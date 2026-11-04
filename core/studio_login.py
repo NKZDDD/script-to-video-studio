@@ -100,7 +100,7 @@ class LoginManager:
                 code, message = "auth_service_error", f"登录服务返回 HTTP {exc.code}，请稍后重试"
             if code == "https_required":
                 message = "登录服务的 HTTPS 代理配置不完整，请联系管理员检查 X-Forwarded-Proto"
-            raise LoginRequired(code, message, exc.code if exc.code in (401, 403, 426, 429) else 503) from None
+            raise LoginRequired(code, message, exc.code if action == 'client-reports' or exc.code in (401, 403, 426, 429) else 503) from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, HTTPException) as exc:
             error = exc
             raise LoginRequired("auth_unavailable", "无法连接登录服务，请检查网络后重试；已有任务不会重新提交", 503) from None

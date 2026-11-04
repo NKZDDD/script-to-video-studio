@@ -7,6 +7,17 @@ const KIND_NAMES={production:'生产批次',assemble:'合成成片'};
 const kindName=k=>KIND_NAMES[k]||k;
 const providerName=id=>S.boot?.capabilities.find(c=>c.id===id)?.name||id;
 const main = $('#main');
+let clientErrorWindow=0,clientErrorCount=0;
+function recordClientError(e){
+ const now=Date.now();if(now-clientErrorWindow>60000){clientErrorWindow=now;clientErrorCount=0;}if(clientErrorCount++>=5)return;
+ const error=e.error||e.reason,match=String(error?.stack||'').match(/(agent\.js|login\.js|updates\.js|output-preview\.js):(\d+):(\d+)/);
+ const name=['Error','TypeError','ReferenceError','SyntaxError','RangeError'].includes(error?.name)?error.name:'UnhandledRejection';
+ let file=match?.[1]||'script';if(e.filename){try{const tail=new URL(e.filename,location.href).pathname.split('/').pop();if(['agent.js','login.js','updates.js','output-preview.js'].includes(tail))file=tail;}catch{}}
+ const line=Number(e.lineno||match?.[2]||0),column=Number(e.colno||match?.[3]||0);
+ // Local endpoint only; never include exception messages, DOM text, URLs or prompts.
+ fetch('/api/agent/client-error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({error_type:name,file,line,column})}).catch(()=>{});
+}
+window.addEventListener('error',recordClientError);window.addEventListener('unhandledrejection',recordClientError);
 const btn = (text, action, extra='', primary=false) => `<button type="button" class="rv-button ${primary?'rv-primary':''}" data-action="${action}" ${extra}>${text}</button>`;
 const option = (value, text, selected) => `<option value="${esc(value)}" ${value===selected?'selected':''}>${esc(text)}</option>`;
 const choices = (values, selected) => values.map(v=>option(v,v,selected)).join('');
@@ -535,9 +546,22 @@ function outputList() {
 }
 function settings() {
  main.innerHTML=heading('工作台设置','生产必需配置，始终可见','所有已接入服务商继续可用。设置中只保留图片、视频与本机生产能力。')+
- `<div class="rv-toolbar">${[['providers',S.boot.adapter_status?.managed?'服务商':'服务商与密钥'],['monitor','服务商状态'],['limits','并发与重试'],['llm','提示词改写 LLM'],['upload','参考图上传'],['features','功能包与路径'],['updates','软件更新']].map(([v,l])=>btn(l,'settings-tab',`data-tab="${v}"`,v===S.tab)).join('')}</div><div id="settings-content"></div>`;
- if(S.tab==='providers')providerForm();else if(S.tab==='monitor')monitorForm();else if(S.tab==='limits')limitForm();else if(S.tab==='llm')llmForm();else if(S.tab==='upload')uploadForm();else if(S.tab==='updates')updateForm();else featureForm();
+ `<div class="rv-toolbar">${[['providers',S.boot.adapter_status?.managed?'服务商':'服务商与密钥'],['monitor','服务商状态'],['limits','并发与重试'],['llm','提示词改写 LLM'],['upload','参考图上传'],['reports','错误日志上报'],['features','功能包与路径'],['updates','软件更新']].map(([v,l])=>btn(l,'settings-tab',`data-tab="${v}"`,v===S.tab)).join('')}</div><div id="settings-content"></div>`;
+ if(S.tab==='providers')providerForm();else if(S.tab==='monitor')monitorForm();else if(S.tab==='limits')limitForm();else if(S.tab==='llm')llmForm();else if(S.tab==='upload')uploadForm();else if(S.tab==='reports')reportForm();else if(S.tab==='updates')updateForm();else featureForm();
 }
+function reportForm(){
+ $('#settings-content').innerHTML=`<section class="rv-panel"><h3>主动上报错误日志</h3><p>遇到问题后点击“上报日志”，管理员可在当前账号下查看这份报告。所有服务商共用此入口。</p><form id="report-form"><div class="rv-fields">${field('问题类型','<select name="reason"><option value="task">生产任务失败</option><option value="network">连接或超时</option><option value="interface">界面操作异常或卡顿</option><option value="other">其他问题</option></select>')}${field('日志范围','<select name="hours"><option value="1">最近 1 小时</option><option value="24">最近 24 小时</option></select>')}</div><p class="rv-caption">点击后发送所选时段最近最多 200 条脱敏诊断，包括成功与失败记录、设备标识、版本、服务商、模型、Key 来源及指纹、接口阶段与耗时。不会发送完整 Key、密码、提示词、素材或本地文件路径。详细日志仅在本机保留最近 7 天、最多 2000 条，升级前的详细请求无法补录。</p>${btn('上报日志','report-send','',true)} ${btn('刷新上报结果','report-refresh')}</form><div id="report-status" role="status"></div></section>`;
+ refreshReport();
+}
+async function refreshReport(){
+ clearTimeout(refreshReport.timer);
+ try{const d=await get('client-reports');if(S.page!=='settings'||S.tab!=='reports')return;
+ const busy=['collecting','sending'].includes(d.state);$('#report-form [data-action="report-send"]').disabled=busy;
+ $('#report-status').innerHTML=`<p>${esc(d.message)}</p>${d.report_id?`<p>上报编号：<code>${esc(d.report_id)}</code></p>`:''}${d.state==='error'?btn('重试本次上报','report-retry',`data-id="${esc(d.report_id)}"`):''}`;
+ if(busy)refreshReport.timer=setTimeout(refreshReport,1500);
+ }catch(e){if(S.page==='settings'&&S.tab==='reports')notice(e.message,true);}
+}
+async function sendReport(retryId){const form=$('#report-form'),d=Object.fromEntries(new FormData(form));await api('client-reports',retryId?{report_id:retryId}:{reason:d.reason,hours:Number(d.hours)});await refreshReport();}
 async function monitorForm(){
  clearTimeout(monitorForm.timer);
  try{
@@ -642,6 +666,9 @@ const actions={
  'save-source':async()=>{await post('source',{source:$('#source-edit').value});closeDialog();notice('已保存原文，Agent 可直接读取。');},
  'providers':()=>{S.tab='providers';show('settings');},
  'settings-tab':e=>{S.tab=e.dataset.tab;settings();},
+ 'report-send':()=>sendReport(),
+ 'report-retry':e=>sendReport(e.dataset.id),
+ 'report-refresh':()=>refreshReport(),
  'monitor-refresh':()=>monitorForm(),
  'monitor-run':async()=>{const r=await fetch('/api/provider-monitor/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),d=await r.json();if(!r.ok)throw Error(d.error?.message||d.error||'安排检测失败');notice(d.queued?'已安排后台检测，结果稍后自动刷新。':'距离上次手动检测不足 30 秒，请稍后查看结果。');await monitorForm();},
  'update-check':async()=>{notice('正在检查新版本');await updateForm(await post('updates/check'));},

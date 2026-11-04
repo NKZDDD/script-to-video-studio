@@ -17,6 +17,7 @@ from typing import Any, Optional
 import requests
 
 from . import submitted
+from . import request_trace
 
 # 完成词。**多收几个同义词是有价值的**，不只是靠下面那支兜底：
 # 认出「完成」之后还有一步 —— 完成了但响应里没给地址时，会去打
@@ -1050,6 +1051,7 @@ class HttpSession:
             return {"http": "", "https": ""}
         return {"http": self.proxy, "https": self.proxy} if self.proxy else None
 
+    @request_trace.request_call
     def request(self, method: str, path: str, *, json_body: Any = None, params: Any = None,
                 files: Any = None, raw_body: Any = None, headers: Optional[dict] = None,
                 retries: int = 3, timeout: Optional[int] = None,
@@ -1066,11 +1068,13 @@ class HttpSession:
                 request_headers = self._headers(multipart=bool(files))
                 if headers:
                     request_headers.update(headers)
+                request_trace.observe_request(request_headers)
                 resp = requests.request(
                     method, url, headers=request_headers,
                     json=json_body, data=raw_body, params=params, files=files,
                     timeout=timeout or self.timeout, proxies=self._proxies(),
                 )
+                request_trace.observe_response(resp)
                 if resp.status_code >= 400:
                     if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "latin-1"):
                         resp.encoding = "utf-8"
@@ -1181,6 +1185,7 @@ class HttpSession:
                and last_status not in RUNNING_STATES else ""),
             status=0, kind=RETRYABLE)
 
+    @request_trace.download_call
     def save_item(self, item: str, dest: str, retries: int = 3, *, log=None) -> str:
         """结果（http / data URI / 裸base64）暂存、校验，再原子发布。
 

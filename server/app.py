@@ -2676,6 +2676,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/provider-monitor/status':
                 from core import provider_monitor
                 return self._json(provider_monitor.status(self._login()))
+            if path == '/api/agent/client-reports':
+                from core import client_reports
+                return self._json(client_reports.status(self._login()))
             if path.startswith("/api/"):
                 from server import agent_api
                 import sys
@@ -2710,6 +2713,7 @@ class Handler(BaseHTTPRequestHandler):
         except LoginRequired as exc:
             return self._login_error(exc)
         except Exception as exc:                          # noqa: BLE001
+            self._diagnostic_exception = exc
             traceback.print_exc()
             return self._json({"error": str(exc)}, 500)
 
@@ -2769,6 +2773,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/auth/logout":
                 result = self._login().logout(cookie)
                 return self._json(result, headers={"Set-Cookie": f"{LOGIN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"})
+            if path == '/api/agent/client-reports':
+                from core import client_reports
+                return self._json(client_reports.start(self._login(), body))
+            if path == '/api/agent/client-error':
+                from core import client_reports
+                return self._json(client_reports.frontend_error(self._login(), body))
             if path == '/api/provider-monitor/run':
                 from core import provider_monitor
                 return self._json({'queued': provider_monitor.start(self._login()).trigger()})
@@ -2795,6 +2805,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return self._login_error(exc)
         except Exception as exc:                          # noqa: BLE001
+            self._diagnostic_exception = exc
             traceback.print_exc()
             return self._json({"error": str(exc)}, 500)
 

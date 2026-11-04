@@ -74,6 +74,8 @@ class Guard:
         limit = 2097152 if scope['path'] in ('/admin/api/keys/import/preview', '/admin/api/keys/import/commit') else 16384
         if scope['path'] == '/admin/api/adapters/import':
             limit = 2097152 + 64
+        if scope['path'] == '/api/v1/auth/client-reports':
+            limit = 262144
         chunks, length = [], 0
         while True:
             message = await receive()
@@ -133,6 +135,8 @@ def create_app(settings=None, *, clock=None):
     from .diagnostics import RequestLog, router as diagnostics_router
     app.add_middleware(RequestLog)
     app.include_router(diagnostics_router)
+    from .client_reports import router as client_reports_router
+    app.include_router(client_reports_router)
     from .admin import router
     app.include_router(router)
     from .provisioning import router as provisioning_router

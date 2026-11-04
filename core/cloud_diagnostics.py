@@ -91,7 +91,8 @@ def version():
     return value if re.fullmatch(r'[0-9]{1,6}(?:\.[0-9]{1,6}){2,3}', value) else ''
 
 
-def emit(owner, kind, operation, started, *, error=None, status=0, request_id='', target=''):
+def emit(owner, kind, operation, started, *, error=None, status=0, request_id='', target='',
+         details=None, local_only=False):
     global _thread, _dropped
     if not owner:
         return
@@ -103,6 +104,10 @@ def emit(owner, kind, operation, started, *, error=None, status=0, request_id=''
             outcome='error' if error is not None or status >= 400 else 'success',
             duration_ms=min(604800000, max(0, round((time.monotonic()-started)*1000))),
             status=status or inferred, category=category, request_id=request_id, host=host(target), version=version())
+        if details is not None:
+            event['details'] = details
+        if local_only:
+            event['_local_only'] = True
         _queue.put_nowait((owner, event))
         with _start_lock:
             if _thread is None or not _thread.is_alive():
@@ -118,6 +123,8 @@ def connect(directory):
     db = sqlite3.connect(Path(directory)/'usage-outbox.sqlite3', timeout=.25)
     db.execute('CREATE TABLE IF NOT EXISTS diagnostics '
                '(id INTEGER PRIMARY KEY, owner TEXT, at INTEGER, payload TEXT)')
+    db.execute('CREATE TABLE IF NOT EXISTS diagnostic_recent '
+               '(id INTEGER PRIMARY KEY, owner TEXT, at INTEGER, payload TEXT)')
     return db
 
 
@@ -129,8 +136,17 @@ def _writer():
             db = connect(owner[2])
             try:
                 with db:
-                    db.execute('INSERT INTO diagnostics(owner,at,payload) VALUES(?,?,?)',
+                    local_only = event.pop('_local_only', False)
+                    db.execute('INSERT INTO diagnostic_recent(owner,at,payload) VALUES(?,?,?)',
                                (owner[0], event['at'], json.dumps(event)))
+                    # Detailed evidence stays on this machine until the user reports it.
+                    if not local_only:
+                        basic = {k: v for k, v in event.items() if k != 'details'}
+                        db.execute('INSERT INTO diagnostics(owner,at,payload) VALUES(?,?,?)',
+                                   (owner[0], event['at'], json.dumps(basic)))
+                    db.execute('DELETE FROM diagnostic_recent WHERE at<?', (int(time.time())-RETENTION,))
+                    db.execute('DELETE FROM diagnostic_recent WHERE id <= '
+                               '(SELECT MAX(id)-? FROM diagnostic_recent)', (MAX_ROWS,))
                     db.execute('DELETE FROM diagnostics WHERE at<?', (int(time.time())-RETENTION,))
                     db.execute('DELETE FROM diagnostics WHERE id <= '
                                '(SELECT MAX(id)-? FROM diagnostics)', (MAX_ROWS,))
@@ -208,7 +224,9 @@ def provider_call(fn):
         if usage.get('owner') and owner and usage['owner'] != owner[0]:
             owner = None
         try:
-            return fn(*args, **kwargs)
+            from . import request_trace
+            with request_trace.production(owner, args, kwargs):
+                return fn(*args, **kwargs)
         except Exception as exc:
             error = exc
             raise
@@ -225,13 +243,18 @@ def local_request(fn):
     def wrapped(self, *args, **kwargs):
         route = urlsplit(self.path).path
         # Local commands/plans, not thumbnail reads, status polling or filesystem paths.
-        selected = route in {'/api/agent/selections', '/api/agent/plan', '/api/agent/preview',
-                             '/api/agent/project', '/api/agent/dependencies'}
+        basic = route in {'/api/agent/selections', '/api/agent/plan', '/api/agent/preview',
+                          '/api/agent/project', '/api/agent/dependencies'}
+        selected = basic or route in {'/api/agent/'+name for name in (
+            'settings', 'start', 'reroll', 'delete', 'import', 'assemble', 'create', 'prompt-edit',
+            'handoff/import', 'handoff/export', 'models/refresh', 'upload/selftest', 'production-settings',
+            'config/refresh', 'providers/reload', 'providers/import', 'paths/data', 'paths/project', 'manual')}
         if not selected:
             return fn(self, *args, **kwargs)
         manager = getattr(self.server, 'studio_login', None)
         owner, started, error = identity(manager) if manager else None, time.monotonic(), None
         self._diagnostic_status = 200
+        self._diagnostic_exception = None
         try:
             return fn(self, *args, **kwargs)
         except Exception as exc:
@@ -240,5 +263,8 @@ def local_request(fn):
         finally:
             if selected and (route != '/api/agent/project' or time.monotonic()-started >= 1 or
                              error is not None or self._diagnostic_status >= 400):
-                emit(owner, 'local', route, started, error=error, status=self._diagnostic_status)
+                error = error or self._diagnostic_exception
+                from .request_trace import error_info
+                emit(owner, 'local', route, started, error=error, status=self._diagnostic_status,
+                     details=dict(stage='request', **error_info(error)) if error else None, local_only=not basic)
     return wrapped
