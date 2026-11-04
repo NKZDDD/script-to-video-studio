@@ -107,3 +107,44 @@ def test_real_client_capture_and_trace_are_accepted_end_to_end(env,tmp_path,monk
     assert len(data['events'])==2 and data['events'][0]['details']['http_status']==401
     for value in ('sk-private-credential','private-project','private-prompt'):
         assert value not in json.dumps(data)
+
+
+@pytest.mark.parametrize('account_expired',[False,True])
+def test_client_report_recovers_access_expiry_with_real_auth_service(env,tmp_path,monkeypatch,account_expired):
+    import sys
+    from pathlib import Path
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
+    from core.studio_login import LoginManager,LoginRequired
+    from core import cloud_adapters,cloud_config,cloud_storage,cloud_diagnostics,cloud_usage,provider_monitor
+    c,auth,clock=env
+    tokens=auth.login('customer',PASSWORD,DEVICE,'test','test')
+    manager=LoginManager();manager._device=DEVICE;manager._diagnostics_dir=str(tmp_path)
+    manager._set_tokens(tokens);manager.user=tokens['user'];manager.local_session='local-cookie'
+    for module in (cloud_adapters,cloud_config,cloud_storage):monkeypatch.setattr(module,'install',lambda *a:None)
+    monkeypatch.setattr(cloud_diagnostics,'activate',lambda *a:None)
+    monkeypatch.setattr(cloud_usage,'start_sender',lambda *a:None)
+    monkeypatch.setattr(provider_monitor,'start',lambda *a:None)
+    calls=[]
+    def post(action,body,access=None):
+        result=c.post('/api/v1/auth/'+action,json=body,headers={'Authorization':'Bearer '+access} if access else {})
+        calls.append((action,result.status_code))
+        if result.status_code>=400:
+            err=result.json()['error']
+            raise LoginRequired(err['code'],err['message'],result.status_code)
+        return result.json()
+    monkeypatch.setattr(manager,'_post',post)
+    clock[0]+=auth.settings.access_seconds+1
+    if account_expired:auth.manage_user('customer',expires_at=clock[0]-1)
+    # Ordinary local navigation remains authorized while short-lived access expires.
+    manager.require('respect_studio_login=local-cookie')
+    body=report()
+    if account_expired:
+        with pytest.raises(LoginRequired) as exc:manager.send_client_report(body,tokens['user']['id'])
+        assert exc.value.code=='account_expired' and manager.tokens is None
+        assert calls==[('client-reports',401),('verify',401),('refresh',403)]
+    else:
+        assert manager.send_client_report(body,tokens['user']['id'])=={'received':True,'report_id':body['report_id']}
+        assert calls==[('client-reports',401),('verify',401),('refresh',200),('verify',200),('client-reports',200)]
+        assert manager.tokens['access_token']!=tokens['access_token']
+    with auth.store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM client_reports').fetchone()[0]==(0 if account_expired else 1)

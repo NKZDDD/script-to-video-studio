@@ -152,6 +152,106 @@ def test_manual_account_isolation_and_old_server_error(recorder):
     with pytest.raises(ValueError):R.start(mgr,{'report_id':created['report_id']})
 
 
+def test_manual_report_renews_expired_access_and_sends_same_report_once(recorder,monkeypatch):
+    mgr,q=recorder;calls=[];refreshes=[]
+    def post(action,body,access):
+        calls.append((action,json.loads(json.dumps(body)),access))
+        if access=='test-access':raise LoginRequired('access_expired','renew required')
+        return {'received':True,'report_id':body['report_id']}
+    def verify():
+        refreshes.append(True)
+        mgr.tokens['access_token']='renewed-access'
+    mgr._post=post;monkeypatch.setattr(mgr,'_verify',verify)
+    created=R.start(mgr,{'reason':'task','hours':1})
+    assert wait_done(mgr)['state']=='sent'
+    assert len(refreshes)==1 and len(calls)==2
+    assert calls[0][1]==calls[1][1] and calls[1][1]['report_id']==created['report_id']
+    assert [c[2] for c in calls]==['test-access','renewed-access']
+
+
+@pytest.mark.parametrize('code,status,label',[
+    ('account_disabled',403,'账号已停用'),
+    ('account_expired',403,'账号使用期限已到'),
+    ('invalid_session',401,'当前登录会话已失效'),
+    ('forbidden',403,'访问权限'),
+])
+def test_manual_report_distinguishes_account_and_permission_errors(recorder,monkeypatch,code,status,label):
+    mgr,q=recorder;calls=[]
+    def post(*args):
+        calls.append(args)
+        raise LoginRequired(code,'private error body',status)
+    mgr._post=post
+    monkeypatch.setattr(mgr,'_verify',lambda:pytest.fail('must not renew a rejected account'))
+    R.start(mgr,{})
+    result=wait_done(mgr)
+    assert result['state']=='error' and label in result['message']
+    assert len(calls)==1 and 'private error body' not in result['message']
+
+
+@pytest.mark.parametrize('code',['access_expired','invalid_session'])
+def test_report_reuses_token_already_rotated_by_concurrent_request(recorder,monkeypatch,code):
+    mgr,q=recorder;calls=[]
+    def post(action,body,access):
+        calls.append(access)
+        if access=='test-access':
+            with mgr.lock:mgr.tokens['access_token']='rotated-access'
+            raise LoginRequired(code,'old token')
+        return {'received':True,'report_id':'same-report'}
+    mgr._post=post
+    monkeypatch.setattr(mgr,'_verify',lambda:pytest.fail('must reuse rotated token'))
+    assert mgr.send_client_report({'report_id':'same-report'},'alice-id')['received']
+    assert calls==['test-access','rotated-access']
+
+
+def test_report_never_retries_under_another_account_after_renewal(recorder,monkeypatch):
+    mgr,q=recorder;calls=[]
+    def post(action,body,access):
+        calls.append(access)
+        raise LoginRequired('access_expired','expired')
+    def verify():
+        with mgr.lock:
+            mgr.user={'id':'bob-id','username':'bob'}
+            mgr.tokens={'access_token':'bob-access'}
+            mgr.generation+=1
+    mgr._post=post;monkeypatch.setattr(mgr,'_verify',verify)
+    with pytest.raises(LoginRequired) as exc:
+        mgr.send_client_report({'report_id':'original-report'},'alice-id')
+    assert exc.value.code=='report_account_changed' and calls==['test-access']
+
+
+def test_report_renewal_retry_is_bounded(recorder,monkeypatch):
+    mgr,q=recorder;calls=[];checks=[]
+    def post(*args):
+        calls.append(args)
+        raise LoginRequired('access_expired','expired')
+    mgr._post=post
+    monkeypatch.setattr(mgr,'_verify',lambda:checks.append(True))
+    with pytest.raises(LoginRequired):mgr.send_client_report({},'alice-id')
+    assert len(calls)==2 and len(checks)==1
+
+
+def test_slow_report_renewal_keeps_local_operations_responsive(recorder,monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    mgr,q=recorder;entered=threading.Event();release=threading.Event()
+    mgr.local_session='local-cookie'
+    def post(action,body,access):
+        if access=='test-access':raise LoginRequired('access_expired','expired')
+        return {'received':True}
+    def verify():
+        entered.set();assert release.wait(3)
+        with mgr.lock:mgr.tokens['access_token']='new-access'
+    mgr._post=post;monkeypatch.setattr(mgr,'_verify',verify)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending=pool.submit(mgr.send_client_report,{},'alice-id')
+        try:
+            assert entered.wait(2)
+            assert mgr.lock.acquire(timeout=.1)
+            try:mgr.require('respect_studio_login=local-cookie')
+            finally:mgr.lock.release()
+        finally:release.set()
+        assert pending.result(timeout=2)['received']
+
+
 def test_capture_bounds_and_retention(recorder):
     mgr,q=recorder;owner=D.identity(mgr)
     with R.connect(owner[2]) as db:

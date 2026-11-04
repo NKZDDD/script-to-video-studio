@@ -120,6 +120,19 @@ def test_uncertain_refresh_requires_login_no_old_token_retry(manager):
     assert sum(a == "refresh" for a, _ in stub.calls) == 1
 
 
+@pytest.mark.parametrize('code,status',[('account_disabled',403),('account_expired',403),
+                                        ('invalid_session',401),('refresh_reused',401)])
+def test_refresh_rejection_preserves_reason_and_clears_session(manager,monkeypatch,code,status):
+    mgr,stub=manager;cookie=logged_in(mgr);stub.expired=True
+    def post(action,body,access=None):
+        if action=='refresh':raise L.LoginRequired(code,'known rejection',status)
+        return stub(action,body,access)
+    monkeypatch.setattr(mgr,'_post',post)
+    with pytest.raises(L.LoginRequired) as exc:mgr.require(cookie,force=True)
+    assert exc.value.code==code and exc.value.status==status
+    assert mgr.tokens is None and not mgr.local_session
+
+
 def test_logout_offline_clears_local_authorization(manager):
     mgr, stub = manager
     cookie = logged_in(mgr)

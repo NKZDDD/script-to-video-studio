@@ -197,9 +197,11 @@ class LoginManager:
                                 self._current(generation)
                                 self._set_tokens(new)
                                 tokens = dict(self.tokens)
-                        except LoginRequired:
+                        except LoginRequired as refresh_error:
                             # Rotation may have succeeded remotely. Never retry the old token.
                             self._clear()
+                            if refresh_error.code in ('account_disabled', 'account_expired', 'invalid_session', 'refresh_reused'):
+                                raise
                             raise LoginRequired("login_required", "登录续期未完成，请重新登录；已有任务不会重新提交") from None
                         continue
                     if exc.status in (401, 403):
@@ -260,6 +262,32 @@ class LoginManager:
                         self._current(generation)
                         refresh = self.tokens and self.tokens['access_token'] == token
                     if refresh:
+                        self._verify()
+
+    def send_client_report(self, body, owner):
+        """Renew only when a user-initiated report meets an expired access token."""
+        for attempt in range(2):
+            with self.lock:
+                if not self.tokens or not self.user or self.user.get('id') != owner:
+                    raise LoginRequired('report_account_changed', '请登录原账号后重试')
+                generation = self.generation
+                token = self.tokens['access_token']
+            try:
+                return self._post('client-reports', body, token)
+            except LoginRequired as exc:
+                if attempt or exc.code not in ('access_expired', 'invalid_session'):
+                    raise
+                with self.network_lock:
+                    with self.lock:
+                        self._current(generation)
+                        if not self.tokens or not self.user or self.user.get('id') != owner:
+                            raise LoginRequired('report_account_changed', '请登录原账号后重试')
+                        rotated = self.tokens['access_token'] != token
+                    # Another request may already have rotated the token. Reuse
+                    # its result rather than refreshing the same session twice.
+                    if not rotated:
+                        if exc.code != 'access_expired':
+                            raise
                         self._verify()
 
     def send_usage(self):

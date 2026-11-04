@@ -137,18 +137,25 @@ def _send(manager, owner, rid, reason, hours, payload):
         with connect(owner[2]) as db:
             db.execute('UPDATE manual_reports SET payload=?,state=?,message=? WHERE id=? AND owner=?',
                        (json.dumps(payload, ensure_ascii=False), 'sending', '正在发送日志', rid, owner[0]))
-        with manager.lock:
-            if not manager.tokens or not manager.user or manager.user.get('id') != owner[0]:
-                raise ValueError('account_changed')
-            access = manager.tokens['access_token']
         try:
-            result = manager._post('client-reports', payload, access)
+            result = manager.send_client_report(payload, owner[0])
         except Exception as exc:
             code = getattr(exc, 'status', 0)
-            message = ('服务端尚未支持主动日志上报，请管理员升级服务端后重试' if code in (404, 405) else
-                       '登录已失效，请重新登录同一账号后重试' if code in (401, 403) else
+            auth_message = {
+                'account_disabled': '账号已停用，请联系管理员；本次日志已保留',
+                'account_expired': '账号使用期限已到，请联系管理员续期后重试；本次日志已保留',
+                'invalid_session': '当前登录会话已失效，请重新登录同一账号后重试',
+                'login_required': '登录续期未完成或会话已失效，请重新登录同一账号后重试',
+                'refresh_reused': '当前登录会话已撤销，请重新登录同一账号后重试',
+                'access_expired': '登录凭证续期后仍未通过，请重新登录同一账号后重试',
+                'report_account_changed': '上报期间登录账号已改变，请登录原账号后重试',
+            }.get(getattr(exc, 'code', ''))
+            message = (auth_message or
+                       ('服务端尚未支持主动日志上报，请管理员升级服务端后重试' if code in (404, 405) else
+                       '日志上报鉴权未通过（HTTP 401），请重新登录同一账号后重试' if code == 401 else
+                       '日志上报被拒绝（HTTP 403），请管理员检查访问权限；本次日志已保留' if code == 403 else
                        '服务端拒绝报告格式，请管理员检查客户端与服务端版本' if code in (413, 422) else
-                       '日志发送未确认成功，请检查连接后点击重试；重试不会重复创建报告')
+                       '日志发送未确认成功，请检查连接后点击重试；重试不会重复创建报告'))
             raise
         if result.get('received') is not True or result.get('report_id') != rid:
             message = '服务端未确认接收，点击重试可继续发送同一份报告'
