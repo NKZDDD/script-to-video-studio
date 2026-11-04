@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "新增服务商双端状态监测：每家指定一把检测 Key，后台与获授权的客户端分别检测模型或健康接口，显示时间、耗时及错误类型。客户端独立后台运行，断网暂存后补报，不阻塞登录和生产；配置需账号服务 1.11.0。保留秒数自由填写、Key 授权修复及原有配置、项目和产物。"}
+               "notes": "新增通用错误日志主动上报：用户在设置中手动发送脱敏报告，后台按账号和设备查看请求阶段、耗时、HTTP 状态及 Key 指纹，需要账号服务 1.12.0。参考图上传支持可调并发与同图复用，上传完成即补下一份；不限制用户提交任务数。保留原有配置、项目和产物。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))
