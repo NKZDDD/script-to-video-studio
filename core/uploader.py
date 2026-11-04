@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import mimetypes
 import os
 import threading
+from concurrent.futures import Future, wait
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from .apiutil import ApiError, TASK_FATAL, encode_ref
@@ -28,6 +31,42 @@ from .store import LOCK, read_json, write_json
 CACHE_NAME = "upload_cache.json"
 _MEM: dict = {}
 _MEM_LOCK = threading.RLock()
+
+# 内部上传窗口；用户提交多少任务不受此限制。签名和直传共用名额，
+# 完成一份立即放行下一份，不能把生产并发直接变成上传并发。
+UPLOAD_CONCURRENCY = 4
+_UPLOAD_SLOTS = threading.BoundedSemaphore(UPLOAD_CONCURRENCY)
+_FLIGHTS: dict[str, Future] = {}
+_FLIGHT_LOCK = threading.Lock()
+
+
+class _UploadCancelled(ApiError):
+    def __init__(self):
+        super().__init__("用户已取消参考图上传", kind=TASK_FATAL)
+
+
+def _check_cancel(cancel):
+    if cancel and cancel():
+        raise _UploadCancelled()
+
+
+@contextmanager
+def _upload_slot(cancel):
+    _check_cancel(cancel)
+    while not _UPLOAD_SLOTS.acquire(timeout=0.2):
+        _check_cancel(cancel)
+    try:
+        _check_cancel(cancel)
+        yield
+    finally:
+        _UPLOAD_SLOTS.release()
+
+
+def _check_storage(cfg):
+    # 排队期间可能退出账号、停用 R2 或发布新配置，旧任务不能借新授权上传。
+    if cfg.get('_storage_source') == 'managed' and effective_config(cfg) != cfg:
+        raise ApiError("等待上传期间后台 R2 配置已改变，请刷新配置后重试", kind=TASK_FATAL)
+
 
 # 配置写错了重试多少次都一样，别浪费时间。
 # endpoint 打错的典型表现是 SSL 握手失败 / 域名解析不了，也算配置问题。
@@ -74,6 +113,18 @@ def _sha(path: str, max_side: int, fmt: str = "") -> str:
 
 def _cache_path(project_root: str) -> str:
     return os.path.join(project_root, "07_检查与记录", CACHE_NAME)
+
+
+def _image_key(cfg: dict, content: str) -> str:
+    if cfg.get('_storage_source') == 'managed':
+        # 保留已有账号/版本缓存，升级后不必重新传一遍。
+        scope = cfg['_storage_owner'] + ':' + cfg['revision']
+    else:
+        # 本地存储也必须隔离目的地和凭据；只持久化摘要，不写入密钥。
+        scope = json.dumps({k: cfg.get(k, '') for k in (
+            'endpoint', 'region', 'bucket', 'prefix', 'public_base_url',
+            'public_acl', 'access_key', 'secret_key')}, sort_keys=True)
+    return hashlib.sha256((scope + ':' + content).encode()).hexdigest()[:32]
 
 
 def _cache_get(project_root: str, key: str) -> str:
@@ -136,9 +187,16 @@ def public_url(cfg: dict, key: str) -> str:
     return f"https://{bucket}.s3.amazonaws.com/{key}"
 
 
-def put(cfg: dict, data: bytes, key: str) -> str:
+def put(cfg: dict, data: bytes, key: str, *, cancel: Optional[Callable] = None) -> str:
     """上传一份字节，返回公网 URL。"""
+    _check_storage(cfg)
     cfg = effective_config(cfg)
+    with _upload_slot(cancel):
+        _check_storage(cfg)
+        return _put(cfg, data, key)
+
+
+def _put(cfg: dict, data: bytes, key: str) -> str:
     if cfg.get('_storage_source') == 'managed':
         from . import cloud_storage
         return cloud_storage.upload(cfg, data, mimetypes.guess_type(key)[0] or 'application/octet-stream')
@@ -160,12 +218,13 @@ def put(cfg: dict, data: bytes, key: str) -> str:
 
 
 def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 0,
-           fmt: str = "", log: Callable = print) -> str:
+           fmt: str = "", log: Callable = print, cancel: Optional[Callable] = None) -> str:
     """本地图片 → 公网 URL。命中缓存就不重复上传。
 
     `max_side=0` 且 `fmt` 为空时，9.5 MB 以下原样上传；超限只压缩上传副本。
     只有这一家自己声明了要求才会重编码，见 `produce._ref_rules`。
     """
+    _check_cancel(cancel)
     if not os.path.isfile(path):
         raise ApiError(f"参考图文件不存在: {path}")
     cfg = effective_config(cfg)
@@ -176,13 +235,62 @@ def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 0,
             "密钥和公开访问域名；或者把这一类任务换成能直接收本地图的服务商。",
             kind=TASK_FATAL)
 
-    h = _sha(path, max_side, fmt)
-    if cfg.get('_storage_source') == 'managed':
-        h = hashlib.sha256((cfg['_storage_owner'] + ':' + cfg['revision'] + ':' + h).encode()).hexdigest()[:32]
-    hit = _cache_get(project_root, h)
-    if hit:
-        return hit
+    h = _image_key(cfg, _sha(path, max_side, fmt))
+    while True:
+        _check_cancel(cancel)
+        _check_storage(cfg)
+        hit = _cache_get(project_root, h)
+        if hit:
+            return hit
+        with _FLIGHT_LOCK:
+            flight = _FLIGHTS.get(h)
+            owner = flight is None
+            if owner:
+                flight = _FLIGHTS[h] = Future()
+        if owner:
+            break
+        # 等待同图时不占上传名额、不持有项目/缓存锁；取消只影响当前任务。
+        while not flight.done():
+            _check_cancel(cancel)
+            _check_storage(cfg)
+            wait([flight], timeout=0.2)
+        _check_cancel(cancel)
+        _check_storage(cfg)
+        try:
+            url = flight.result()
+        except _UploadCancelled:
+            # 负责上传的任务取消了，其他项目仍可接手上传。
+            continue
+        _cache_put(project_root, h, url)
+        return url
 
+    try:
+        # 初次查缓存和登记在途之间，上一位上传者可能刚好完成。
+        url = _cache_get(project_root, h)
+        if not url:
+            url = _upload_image(path, cfg, h, max_side, fmt, log, cancel)
+        _check_storage(cfg)
+        _cache_put(project_root, h, url)
+    except BaseException as exc:
+        with _FLIGHT_LOCK:
+            _FLIGHTS.pop(h)
+            flight.set_exception(exc)
+        raise
+    else:
+        with _FLIGHT_LOCK:
+            _FLIGHTS.pop(h)
+            flight.set_result(url)
+        return url
+
+
+def _upload_image(path, cfg, h, max_side, fmt, log, cancel):
+    # 排队时只保留文件路径，不让几百个任务各持有一份待上传的图片字节。
+    with _upload_slot(cancel):
+        _check_storage(cfg)
+        return _send_image(path, cfg, h, max_side, fmt, log)
+
+
+def _send_image(path, cfg, h, max_side, fmt, log):
     # **默认原样传。** 原来这里无条件压成 JPEG，理由写的是「省流量、
     # 避开各家对 png 透明通道的处理差异」—— 但那是拿画质换的，而且
     # 没人选过：参考图是喂给模型的身份和构图来源。
@@ -196,11 +304,10 @@ def to_url(path: str, cfg: dict, *, project_root: str = "", max_side: int = 0,
 
     # put() 按 key 的扩展名猜 ContentType —— 上面扩展名跟着实际内容走了，
     # 所以这里不用另传一份，两处不会再对不上。
-    url = put(cfg, data, key)
+    url = _put(cfg, data, key)
     # **改没改要说出来。** 原来只写「已上传（57KB）」，而那时它其实被缩到了
     # 682x1024。出来的脸不像时，日志里得有这一行，否则谁都不会想到问题在这儿。
     log(f"已上传 {os.path.basename(path)}　{how}　{len(data)//1024}KB → {url}")
-    _cache_put(project_root, h, url)
     return url
 
 

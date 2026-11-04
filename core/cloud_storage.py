@@ -63,7 +63,10 @@ def effective(local, *, allow_unavailable=False):
 
 
 def upload(config, data, content_type):
-    config = effective(config)
+    current = effective(config)
+    if config.get('_storage_source') == 'managed' and current != config:
+        raise ApiError("上传期间后台 R2 配置已改变，请刷新配置后重试", kind=TASK_FATAL)
+    config = current
     with _lock:
         manager, owner = _manager, _owner
     if not manager or config.get("_storage_owner") != owner:

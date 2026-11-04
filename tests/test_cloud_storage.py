@@ -112,6 +112,14 @@ def test_owner_switch_after_sign_does_not_send_bytes(managed,monkeypatch):
     with pytest.raises(ApiError,match='改变'):C.upload(C.effective({}),b'x','image/png')
 
 
+def test_revision_switch_before_sign_does_not_use_new_grant(managed,monkeypatch):
+    snapshot=C.effective({})
+    C.install(managed,'user-a',descriptor(revision='b'*32))
+    managed.storage_ticket=lambda *a:pytest.fail('must not sign with changed configuration')
+    monkeypatch.setattr(requests,'put',lambda *a,**kw:pytest.fail('must not upload'))
+    with pytest.raises(ApiError,match='配置已改变'):C.upload(snapshot,b'x','image/png')
+
+
 def test_ticket_refreshes_expired_access_once_and_checks_owner(monkeypatch):
     m=LoginManager();m.tokens={'access_token':'old'};m.user={'id':'user-a'};m.checked_until=float('inf')
     monkeypatch.setattr(m,'device_id',lambda:'test-device-123456789')

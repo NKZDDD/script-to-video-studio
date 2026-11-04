@@ -22,7 +22,10 @@
 `Image 3 = LK002 当前造型`，实际只传了骨架那两张，**编号整体错位**。
 """
 import inspect
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from core import produce as P
 from core.run_v34 import with_identity_map as W
@@ -107,11 +110,43 @@ class VideoRefUploadTests(unittest.TestCase):
 
     def test_reference_images_are_uploaded_after_the_spine(self):
         """★ 以前只传 spine + aux_reference，而电影级不设 aux_reference。"""
-        src = inspect.getsource(P.make_video_worker)
-        self.assertIn('task.get("reference_images")', src)
-        i = src.index("refs = [to_ref(s, log) for s in spine]")
-        j = src.index('task.get("reference_images")')
-        self.assertLess(i, j, "补图必须排在骨架之后 —— 顺序决定编号")
+        from PIL import Image
+        from core.providers.base import Provider
+        from core.store import Project, write_text
+
+        class Submitted(Exception):
+            pass
+
+        received, uploaded = [], []
+        cancel = lambda: False
+
+        def resolve(src, log, cancel_fn=None):
+            self.assertIs(cancel_fn, cancel)
+            uploaded.append(src)
+            return 'https://cdn.test/' + src
+
+        def generate(task, *a, **kw):
+            received.extend(task.refs)
+            raise Submitted()  # Stop at submission; never call a paid provider.
+
+        with tempfile.TemporaryDirectory() as folder:
+            pj = Project(folder)
+            pj.init_dirs()
+            Image.new('RGB', (32, 32)).save(Path(folder) / 'spine.png', compress_level=0)
+            write_text(pj.p('prompt.txt'), 'Image 1 = spine 骨架\nImage 2 = A 道具\nImage 3 = B 场景')
+            task = {'key': 'v', 'output': 'result.mp4', 'prompt_ref': 'prompt.txt',
+                    'storyboard_ref': 'spine.png', 'reference_images': [
+                        {'image_n': 3, 'asset_id': 'B', 'file_ref': 'b.png'},
+                        {'image_n': 2, 'asset_id': 'A', 'file_ref': 'a.png'}]}
+            provider = Provider()
+            with patch.object(P, 'build_provider', return_value=provider), \
+                    patch.object(P, 'make_ref_resolver', return_value=resolve), \
+                    patch.object(provider, 'generate_video', side_effect=generate):
+                worker = P.make_video_worker(pj, {'provider': 'test', 'api_key': '', 'agent_mode': True})
+                with self.assertRaises(Submitted):
+                    worker(task, lambda _: None, cancel)
+        self.assertEqual(uploaded, ['spine.png', 'a.png', 'b.png'])
+        self.assertEqual(received, ['https://cdn.test/' + path for path in uploaded])
 
     def test_they_are_sorted_by_image_n(self):
         """★ 按字典顺序传 = 编号错位，而错位不报错。"""

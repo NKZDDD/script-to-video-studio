@@ -249,7 +249,7 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
     effective = dict(block, **block.get('model_options', {}).get(model, {}))
     maximum = min(DEFAULT_MAX_BYTES, int(effective.get('ref_max_bytes') or DEFAULT_MAX_BYTES))
 
-    def resolve(src: str, log: Callable = print) -> str:
+    def resolve(src: str, log: Callable = print, cancel: Optional[Callable] = None) -> str:
         src = (src or "").strip()
         if not src:
             return src
@@ -277,7 +277,7 @@ def make_ref_resolver(pj: Project, prov, provider_cfg: dict, model: str,
                 return prepared
             if not use_url:
                 return resolve_ref(prepared, pj.root)
-            return uploader.to_url(prepared, up, project_root=pj.root, log=log)
+            return uploader.to_url(prepared, up, project_root=pj.root, log=log, cancel=cancel)
         except ApiError as exc:
             raise _why_ref_missing(pj, src, exc) from exc
 
@@ -936,7 +936,7 @@ def make_image_worker(pj: Project, provider_cfg: dict, kind: str,
         ident = submitted.identity(prompt=prompt, refs=[s for _, s in srcs], size=want,
                                    resolution=resolution, provider=provider_cfg["provider"], model=model)
         rec = submitted.load(pj.root, task["output"])
-        refs = [] if rec else [to_ref(s, log) for _, s in srcs]
+        refs = [] if rec else [to_ref(s, log, cancel) for _, s in srcs]
         log(f"{_who_line(provider_cfg, model)}　参考图×{len(srcs)}")
         meta = _deliver(
             pj, task, out, prov, rec, log=log, cancel=cancel, interval=interval, timeout=timeout,
@@ -1116,7 +1116,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
             except ValueError as exc:
                 raise ApiError(str(exc), kind=TASK_FATAL) from exc
             audios = audio_refs.resolve(pj, task, provider_cfg.get('upload') or {}, log)
-        refs = [to_ref(s, log) for s in spine]
+        refs = [to_ref(s, log, cancel) for s in spine]
         # **骨架之后是补图。以前这几张压根没被上传过。**
         #
         # 出片这一层只读 `aux_reference`，而那个字段只有 V6.1 会设
@@ -1149,7 +1149,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
                 dup += 1
                 continue
             seen.add(f)
-            refs.append(to_ref(f, log))
+            refs.append(to_ref(f, log, cancel))
         if dup:
             log(f"⚠️ 补图里有 {dup} 张重复参考，已去重 —— "
                 f"同一张传两次会让后面每张图的编号整体错位（画面出得来、"
@@ -1162,7 +1162,7 @@ def make_video_worker(pj: Project, provider_cfg: dict,
         # 而 image_n 是按上传顺序算的，于是它后面每一张的编号整体错位，
         # 提示词里每条描述都套到别的图上。**画面出得来，参考全是错的。**
         if task.get("aux_reference") and not aux:
-            refs.append(to_ref(task["aux_reference"], log))
+            refs.append(to_ref(task["aux_reference"], log, cancel))
         # ---- 声明的映射 ↔ 实际要上传的清单，两头对账 ----
         #
         # 用户实遇（成片跑完了才发现）：提示词里 Image 1..5 映射了 5 张，
