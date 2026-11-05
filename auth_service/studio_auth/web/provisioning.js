@@ -16,7 +16,7 @@ async function keyLibrary(){
  const d=await api('keys');providerNames=d.providers;
  shell('Key 库',`<p class="help">统一保存并命名，再到账号中勾选，或直接在 Key 行点“分配账号”勾选可用账号——两种方式是同一份授权。图片、视频按模型选择 Key；提示词改写请选择“提示词改写 LLM”，填写地址、Key 和一个模型。改写使用账号排序第一条启用项，不因失败自动换 Key。</p>
  <div class="actions"><button id="config-import">导入 config.json…</button><input id="config-file" type="file" accept=".json,application/json" hidden></div><p id="import-result" role="status"></p>
- <div class="table-wrap"><table><thead><tr><th>名称</th><th>服务商</th><th>模型来源 / 状态</th><th>操作</th></tr></thead><tbody>${d.keys.map((k,i)=>`<tr><td>${esc(k.name)}</td><td>${esc(providerLabel(k.provider))}</td><td>${k.models.length?'绑定 '+k.models.length+' 个模型':'按 Key 自动拉取'} · ${k.enabled?'启用':'停用'}</td><td><button data-key-edit="${i}">编辑</button> <button data-key-users="${i}">分配账号${k.user_count?' ('+k.user_count+')':''}</button></td></tr>`).join('')||'<tr><td colspan="4">尚无 Key，请在下方新建。</td></tr>'}</tbody></table></div>
+ <div class="table-wrap"><table><thead><tr><th>名称</th><th>服务商</th><th>模型来源 / 状态</th><th>操作</th></tr></thead><tbody>${d.keys.map((k,i)=>`<tr><td>${esc(k.name)}</td><td>${esc(providerLabel(k.provider))}</td><td>${k.models.length?'绑定 '+k.models.length+' 个模型':'按 Key 自动拉取'} · ${k.enabled?'启用':'停用'}</td><td><button data-key-edit="${i}">编辑</button> ${k.provider===rewriteProvider?'':`<button data-key-stats="${i}">模型与成功率</button>`} <button data-key-users="${i}">分配账号${k.user_count?' ('+k.user_count+')':''}</button></td></tr>`).join('')||'<tr><td colspan="4">尚无 Key，请在下方新建。</td></tr>'}</tbody></table></div>
  <h3 id="key-heading">新增 Key</h3><form id="key-edit"><input type="hidden" name="id"><label>Key 名称<input name="name" required maxlength="100" placeholder="例如：巨轮视频模型组 A"></label><label>服务商<select name="provider">${Object.entries(providerNames).map(([id,label])=>`<option value="${esc(id)}">${esc(label)}</option>`).join('')}<option value="__custom__">自定义外挂…</option></select></label><label id="custom-provider" hidden>外挂服务商 ID<input name="custom_provider" maxlength="64" pattern="[a-zA-Z0-9_-]{1,64}"></label><label>Base URL<input name="base_url" type="url" placeholder="留空使用 Studio 内置 HTTPS 地址"></label><label class="check"><input name="enabled" type="checkbox" checked>启用此 Key</label><div id="key-secrets"></div><label><span id="key-models-label">绑定模型（可选，一行一个完整模型 ID）</span><textarea name="models" rows="4" placeholder="留空：客户端用这把 Key 拉取模型。若服务商清单不区分 Key 权限或没有模型接口，在这里填写准确的模型 ID。"></textarea></label><div id="key-model-statistics"></div><p class="help">每把 Key 建成独立条目。编辑时密钥留空保留，不回显。停用后停止下发，已运行批次继续使用当时配置。绑定模型优先于自动拉取。</p><div class="actions"><button type="button" id="key-new">清空并新建</button><button class="primary">保存 Key</button></div></form>`);
  const f=provisionDialog.querySelector('#key-edit');
  const fileInput=provisionDialog.querySelector('#config-file');
@@ -24,10 +24,14 @@ async function keyLibrary(){
  fileInput.onchange=async()=>{const file=fileInput.files[0];fileInput.value='';if(file)try{await importKeyConfig(file);}catch(e){pError(e);}};
  function modelStatistics(){
   const target=provisionDialog.querySelector('#key-model-statistics'),pid=f.elements.provider.value;
+  const saved=d.keys.find(k=>k.id===f.elements.id.value);
+  if(!saved||saved.provider!==pid||saved.base_url!==f.elements.base_url.value.trim()||Object.keys(keyFields).some(k=>f.elements[k]?.value.trim())){
+   target.innerHTML=pid===rewriteProvider?'':'<p class="help">保存 Key 后，将直接展示这把 Key 的模型及服务商成功率。</p>';return;
+  }
   target.innerHTML=pid===rewriteProvider||pid==='__custom__'?'':(window.ProviderModelStats?.markup(pid,'',null,'bind')||'');
-  const box=target.firstElementChild;if(box)box.dataset.pmsBase=f.elements.base_url.value.trim();
+  const box=target.firstElementChild;if(box){box.dataset.pmsKey=saved.id;box.dataset.pmsRevision=saved.revision||'';}
  }
- f.elements.base_url.addEventListener('change',modelStatistics);
+ f.addEventListener('input',e=>{if(e.target.name==='base_url'||Object.hasOwn(keyFields,e.target.name))modelStatistics();});
  function secrets(configured=[]){
   const fields=configured.length?configured:['api_key'];
   provisionDialog.querySelector('#key-secrets').innerHTML=fields.map(k=>`<label>${esc(keyFields[k]||k)}<textarea name="${esc(k)}" rows="2" autocomplete="off" maxlength="${k==='api_key'?8000:2000}" placeholder="${configured.includes(k)?'已保存；留空保留':'填写凭据'}"></textarea></label>`).join('');
@@ -48,6 +52,12 @@ async function keyLibrary(){
   provisionDialog.querySelector('#key-heading').textContent='编辑 Key · '+k.name;secrets(k.configured);modelStatistics();f.scrollIntoView({block:'start',behavior:'smooth'});
  });
  provisionDialog.querySelectorAll('[data-key-users]').forEach(b=>b.onclick=()=>safe(()=>provisionKeyUsers(d.keys[+b.dataset.keyUsers])));
+ provisionDialog.querySelectorAll('[data-key-stats]').forEach(b=>b.onclick=()=>{
+  const k=d.keys[+b.dataset.keyStats];
+  shell('模型与成功率 · '+k.name,`<p class="help">${esc(providerLabel(k.provider))} · 模型范围来自此 Key；统计来自服务商平台，非此 Key 的个人任务成功率。</p><button type="button" id="stats-back">返回 Key 库</button>${window.ProviderModelStats?.markup(k.provider,'',null,'view')||''}`);
+  const box=provisionDialog.querySelector('.pms');if(box){box.dataset.pmsKey=k.id;box.dataset.pmsRevision=k.revision||'';}
+  provisionDialog.querySelector('#stats-back').onclick=()=>safe(keyLibrary);
+ });
  f.onsubmit=async e=>{
   e.preventDefault();const button=f.querySelector('button.primary');button.disabled=true;
   try{const v=Object.fromEntries(new FormData(f));v.provider=f.elements.provider.value==='__custom__'?v.custom_provider:f.elements.provider.value;delete v.custom_provider;v.enabled=f.elements.enabled.checked;v.models=v.models.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);await api('keys',v);f.reset();await keyLibrary();}catch(e){pError(e);}finally{button.disabled=false;}

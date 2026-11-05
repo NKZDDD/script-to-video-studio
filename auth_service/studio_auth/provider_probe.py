@@ -111,7 +111,7 @@ def inspect_response(status, raw, kind, result_path):
     return 'invalid_response', None
 
 
-def probe(spec, secret='', *, resolver=None, connection=None):
+def probe(spec, secret='', *, resolver=None, connection=None, model_id_field=None):
     started = time.monotonic()
     result = {'at': int(time.time()), 'status': 0, 'category': 'connection', 'duration_ms': 0,
               'model_count': None}
@@ -176,6 +176,15 @@ def probe(spec, secret='', *, resolver=None, connection=None):
                 result['category'] = 'invalid_response'
                 return result
         result['category'], result['model_count'] = inspect_response(response.status, raw, spec['kind'], spec['result_path'])
+        if model_id_field and result['category'] == 'ok' and spec['kind'] == 'models':
+            rows = select(json.loads(raw), spec['result_path'])
+            ids = [row if isinstance(row, str) else row.get(model_id_field) for row in rows]
+            if len(ids) > 5000 or any(not isinstance(mid, str) or not mid.strip() or len(mid) > 200
+                                      or any(ord(c) < 32 for c in mid) for mid in ids):
+                result['category'] = 'invalid_response'
+            else:
+                # Only exact model IDs leave the probe, never arbitrary response fields.
+                result['models'] = list(dict.fromkeys(mid.strip() for mid in ids))
     except socket.gaierror:
         result['category'] = 'dns'
     except ssl.SSLError:

@@ -60,15 +60,21 @@ def test_production_choice_preserves_exact_id_and_unknown_is_not_zero(page):
     assert page.locator('datalist option').first.get_attribute('label').endswith('95.16%')
     page.evaluate("window.chosen=[];document.addEventListener('change',e=>{if(e.target.dataset.setting==='model')chosen.push(e.target.value)})")
     page.locator('.pms summary').click()
-    assert page.locator('tbody tr').count() == 3
-    assert 'not-authorized' not in page.locator('tbody').inner_text()
-    row = page.locator('tbody tr').filter(has_text='no-statistics')
+    assert page.locator('.pms-card').count() == 3
+    assert 'not-authorized' not in page.locator('.pms-cards').inner_text()
+    row = page.locator('.pms-card').filter(has_text='no-statistics')
     assert '暂无数据' in row.inner_text() and '0.00%' not in row.inner_text()
+    assert row.locator('.pms-known').count() == 0
+    success = page.locator('.pms-card').filter(has_text='wan-3.0-video')
+    assert success.locator('.pms-known .is-lit').count() == 38
+    assert '336.92 秒' in success.inner_text()
     page.locator('[data-pms-search]').fill('wan-exact-suffix')
     page.locator('[data-pms-pick]').click()
     assert page.locator('input[data-setting="model"]').input_value() == 'wan-exact-suffix'
     assert page.evaluate('chosen') == ['wan-exact-suffix']
     playwright.expect(page.locator('[data-pms-note]')).to_contain_text('0.00%')
+    assert page.locator('.pms-selected .pms-zero').count() == 1
+    assert page.locator('.pms-selected .is-lit').count() == 0
 
 
 @pytest.mark.parametrize('width', [390, 1280])
@@ -83,33 +89,38 @@ def test_statistics_panel_stays_inside_viewport(page, width):
 
 
 def test_admin_key_library_adds_exact_unique_model_without_saving_key(page):
-    install(page, admin=True)
+    install(page, {**DATA, 'catalog': {'state': 'ready', 'models': MODELS, 'message': '此 Key 的模型接口返回清单'}}, admin=True)
     page.evaluate("document.body.innerHTML='<button id=key-library>Key 库</button><div id=users></div>'")
-    page.add_script_tag(content=HELPERS + "const safe=fn=>fn();const api=async()=>({keys:[],providers:{ake:'阿珂'}});")
+    page.add_script_tag(content=HELPERS + "const safe=fn=>fn();const api=async()=>({keys:[{id:'key-one',provider:'ake',name:'测试 Key',base_url:'',models:[],configured:['api_key'],revision:'rev1',enabled:true}],providers:{ake:'阿珂'}});")
     page.add_script_tag(path=str(ROOT / 'auth_service/studio_auth/web/provisioning.js'))
     page.locator('#key-library').click()
-    page.locator('.pms summary').click()
+    assert page.locator('.pms').count() == 0  # Unsaved credentials never borrow a supplier-wide list.
+    page.locator('[data-key-edit]').click()
+    playwright.expect(page.locator('.pms-card')).to_have_count(3)
+    page.wait_for_function("statsCalls.some(u=>u.includes('key_id=key-one'))")
     page.locator('[data-pms-search]').fill('wan-exact-suffix')
     page.locator('[data-pms-pick]').click()
     assert page.locator('textarea[name=models]').input_value() == 'wan-exact-suffix'
-    page.locator('.pms summary').click()
     page.locator('[data-pms-pick]').click()
     assert page.locator('textarea[name=models]').input_value() == 'wan-exact-suffix'
     page.locator('input[name=base_url]').fill('https://custom.example')
-    page.locator('input[name=base_url]').dispatch_event('change')
-    page.wait_for_function("statsCalls.some(u=>u.includes('base_url=https%3A%2F%2Fcustom.example'))")
+    assert page.locator('.pms').count() == 0
+    page.locator('[data-key-stats]').click()
+    playwright.expect(page.locator('.pms-card')).to_have_count(3)
+    assert page.locator('[data-pms-pick]').count() == 0
+    assert page.locator('details').get_attribute('open') is not None
 
 
 def test_stale_data_and_untrusted_model_text_are_displayed_safely(page):
     hostile = '<img src=x onerror=alert(1)>'
     data = {**DATA, 'stale': True, 'error': 'timeout', 'state': 'error', 'scope': 'request',
-            'models': [{**DATA['models'][0], 'model': hostile}]}
+            'models': [{**DATA['models'][0], 'model': hostile}], 'catalog': {'models': [hostile], 'message': '此 Key 的模型'}}
     install(page, data)
     page.evaluate('(model)=>{document.body.innerHTML=ProviderModelStats.markup("ake",model,null,"bind")}', hostile)
     playwright.expect(page.locator('[data-pms-note]')).to_contain_text('旧数据，刷新失败')
-    page.locator('summary').click()
     assert page.locator('img').count() == 0
-    assert hostile in page.locator('tbody').inner_text()
+    assert hostile in page.locator('.pms-cards').inner_text()
+    assert page.locator('.pms-known').count() == 0
     assert '请求统计口径' in page.locator('[data-pms-time]').inner_text()
 
 
@@ -144,3 +155,27 @@ def test_wizard_provider_switch_replaces_suggestions_and_keeps_selected_id(page)
     page.locator('.pms summary').click()
     page.locator('[data-pms-pick]').click()
     assert page.locator('input[name=video_model]').input_value() == 'different-exact-id'
+
+
+def test_focusing_model_directly_opens_cards_and_clicking_away_closes_them(page):
+    install(page)
+    production(page)
+    page.locator('input[data-setting=model]').click()
+    playwright.expect(page.locator('.pms-card')).to_have_count(3)
+    assert page.locator('.pms details').get_attribute('open') is not None
+    assert page.locator('input[data-setting=model]').get_attribute('list') is None
+    page.locator('h2').click()
+    assert page.locator('.pms details').get_attribute('open') is None
+
+
+def test_switching_keys_clears_previous_models_while_request_is_pending(page):
+    install(page, admin=True)
+    page.evaluate("fetch=url=>new Promise(resolve=>{(window.pending??=[]).push({url,resolve})});document.body.innerHTML=ProviderModelStats.markup('ake','',null,'view');document.querySelector('.pms').dataset.pmsKey='first'")
+    page.wait_for_function('window.pending?.length===1')
+    page.evaluate("pending[0].resolve({ok:true,json:async()=>({state:'ready',models:[{model:'first-only',rate:95}],catalog:{models:['first-only']}})})")
+    playwright.expect(page.locator('.pms-card')).to_contain_text('first-only')
+    page.evaluate("document.querySelector('.pms').dataset.pmsKey='second'")
+    page.wait_for_function('pending.length===2')
+    assert page.locator('.pms-card').count() == 0
+    page.evaluate("pending[1].resolve({ok:true,json:async()=>({state:'ready',models:[{model:'second-only',rate:85}],catalog:{models:['second-only']}})})")
+    playwright.expect(page.locator('.pms-card')).to_contain_text('second-only')

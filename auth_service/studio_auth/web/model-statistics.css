@@ -1,12 +1,20 @@
 .pms{min-width:0;font-size:12px;line-height:1.5;text-align:left;color:#5b6d86}
 .pms>small{display:block;margin:6px 0;overflow-wrap:anywhere}.pms .pms-stale{color:#9b6300}
-.pms details{position:relative}.pms summary{cursor:pointer;color:#245dc7;padding:4px 0}
-.pms .pms-panel{position:absolute;box-sizing:border-box;z-index:35;top:100%;left:0;width:min(780px,78vw);max-height:420px;overflow:auto;background:#fff;color:#203147;border:1px solid #cbd6e8;border-radius:10px;box-shadow:0 12px 36px #20314725;padding:14px}
+.pms details{position:relative}.pms summary{cursor:pointer;color:#245dc7;padding:6px 0}
+.pms .pms-panel{position:absolute;box-sizing:border-box;z-index:35;top:100%;left:0;width:min(760px,78vw);max-height:480px;overflow:auto;background:#fff;color:#203147;border:1px solid #cbd6e8;border-radius:12px;box-shadow:0 12px 36px #20314725;padding:16px}
 .pms p{margin:0 0 8px}.pms small{font-size:11px;display:block;white-space:normal;font-weight:normal}
 .pms .pms-panel input{width:100%;box-sizing:border-box;margin:10px 0;padding:8px;border:1px solid #cbd6e8;border-radius:6px}
-.pms .pms-scroll{overflow:auto}.pms table{width:100%;border-collapse:collapse;font-size:12px;margin:8px 0}
-.pms th,.pms td{padding:8px;min-width:0;text-align:left;border-bottom:1px solid #e1e7f1;vertical-align:top;white-space:normal}
-.pms td:first-child{max-width:220px;overflow-wrap:anywhere}.pms button{font-size:12px;padding:5px 9px;border:1px solid #cbd6e8;border-radius:6px;background:#f7f9ff;color:#245dc7;cursor:pointer;white-space:nowrap}
+.pms-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:12px}
+.pms .pms-card{min-width:0;border:1px solid #cbd6e8;border-radius:12px;background:linear-gradient(150deg,#f6f9ff,#fff);padding:16px;color:#203147}
+.pms .pms-card header{display:block;margin-bottom:14px;padding:0;background:none;border:0;position:static;min-height:0;height:auto}
+.pms .pms-card header>strong{display:block;font-size:14px;overflow-wrap:anywhere;line-height:1.5}
+.pms-card-metrics,.pms-selected-row{display:flex;align-items:center;flex-wrap:wrap;gap:16px}.pms-selected-row{padding:8px 10px;border:1px solid #e1e7f1;border-radius:8px;margin:5px 0;background:#f8fbff}
+.pms-meter{flex:1 1 150px;min-width:0;max-width:260px;color:#738299}.pms-metric{display:flex;align-items:center;gap:6px}.pms-metric strong{margin-left:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+.pms-light{width:7px;height:7px;border-radius:50%;background:#aab4c2;flex:none}.pms-known .pms-light{background:#0f9c75;box-shadow:0 0 0 3px #0f9c7515}.pms-known strong{color:#087e5f}
+.pms-zero .pms-light{background:#c34343;box-shadow:none}.pms-zero strong{color:#b23528}
+.pms-bars{display:grid;grid-template-columns:repeat(40,minmax(0,1fr));gap:2px;height:13px;margin-top:8px}.pms-bars i{background:#dce4ee;border-radius:1px}.pms-known .pms-bars .is-lit{background:#10ad82}.pms-stale .pms-light,.pms-stale .pms-bars .is-lit{background:#b18431}
+.pms-duration{flex:0 0 auto}.pms-duration strong{display:block;color:#203147;white-space:nowrap;font-size:12px;font-variant-numeric:tabular-nums}
+.pms .pms-basis{margin:12px 0;color:#657890;line-height:1.6}.pms button{font-size:12px;padding:6px 12px;border:1px solid #b9d0f2;border-radius:6px;background:#f1f6ff;color:#245dc7;cursor:pointer;white-space:nowrap}
 .pms-model-field{min-width:0}.pms-model-field>input{width:100%;box-sizing:border-box}
-form .pms[data-pms-mode="bind"] .pms-panel{position:static;width:auto;max-height:390px;box-shadow:none}
-@media(max-width:650px){.pms .pms-panel{position:static;width:auto!important;max-height:380px;box-shadow:none}.pms table{min-width:560px}.pms-model-field{grid-column:1/-1}}
+.pms[data-pms-mode="bind"] .pms-panel,.pms[data-pms-mode="view"] .pms-panel{position:static;width:auto;max-height:none;box-shadow:none}.pms[data-pms-mode="view"] summary{font-size:15px;font-weight:600}
+@media(max-width:650px){.pms .pms-panel{position:static;width:auto!important;max-height:480px;box-shadow:none}.pms-model-field{grid-column:1/-1}.pms-card-metrics{gap:12px}.pms .pms-card{padding:12px}}

@@ -45,7 +45,7 @@ def public(row, user_count: int = 0):
     cfg = json.loads(row['config'])
     return dict(id=row['id'], provider=row['provider'], name=row['name'], enabled=bool(row['enabled']),
                 base_url=cfg.get('base_url', ''), models=cfg.get('models', []),
-                configured=[k for k in KEY_FIELDS if cfg.get(k)], user_count=int(user_count or 0))
+                configured=[k for k in KEY_FIELDS if cfg.get(k)], user_count=int(user_count or 0), revision=row['revision'])
 
 
 @router.get('/admin/api/keys')

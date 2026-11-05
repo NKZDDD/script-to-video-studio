@@ -123,9 +123,12 @@ def create_app(settings=None, *, clock=None):
         app.state.diagnostics = Recorder(app.state.auth)
         from .provider_monitor import Monitor
         app.state.provider_monitor = Monitor(app.state.auth)
+        from .key_model_catalog import KeyModelCatalog
+        app.state.key_model_catalog = KeyModelCatalog()
         try:
             yield
         finally:
+            app.state.key_model_catalog.close()
             app.state.provider_monitor.close()
             app.state.diagnostics.close()
 
