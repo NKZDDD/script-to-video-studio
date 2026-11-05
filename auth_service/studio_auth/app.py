@@ -155,6 +155,8 @@ def create_app(settings=None, *, clock=None):
     app.include_router(adapters_router)
     from .provider_monitor import router as monitor_router
     app.include_router(monitor_router)
+    from .model_statistics_api import router as model_statistics_router
+    app.include_router(model_statistics_router)
 
     @app.exception_handler(AuthError)
     async def auth_error(request, exc):

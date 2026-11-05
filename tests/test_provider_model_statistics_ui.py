@@ -1,0 +1,146 @@
+"""Exercise real selector markup and public statistics widgets in Chromium."""
+from pathlib import Path
+import json
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+playwright = pytest.importorskip('playwright.sync_api')
+
+
+@pytest.fixture
+def page():
+    with playwright.sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except playwright.Error as exc:
+            pytest.skip(f'Chromium unavailable: {exc}')
+        page = browser.new_page(viewport={'width': 1280, 'height': 900})
+        page.set_content('<html lang="zh-CN"><body></body></html>')
+        yield page
+        browser.close()
+
+
+MODELS = ['wan-3.0-video', 'no-statistics', 'wan-exact-suffix']
+DATA = {'state': 'ready', 'fetched_at': 1793836800, 'models': [
+    {'model': MODELS[0], 'rate': 95.16, 'samples': 99, 'seconds': 336.92,
+     'window': '近 24 小时', 'basis': '服务商终态统计'},
+    {'model': MODELS[2], 'rate': 0, 'samples': 3, 'window': '最近 100 次', 'basis': '服务商统计'},
+    {'model': 'not-authorized', 'rate': 100},
+]}
+HELPERS = r"""
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const option=(v,t,s)=>`<option value="${esc(v)}" ${v===s?'selected':''}>${esc(t)}</option>`;
+const input=(n,v,t='text',x='')=>`<input name="${n}" value="${esc(v)}" type="${t}" ${x}>`;
+const durationsOf=()=>[5,10,15];
+"""
+
+
+def install(page, data=DATA, admin=False):
+    page.add_style_tag(path=str(ROOT / ('auth_service/studio_auth/web/style.css' if admin else 'web/agent.css')))
+    page.add_style_tag(path=str(ROOT / 'web/model-statistics.css'))
+    page.evaluate('(data)=>{window.statsCalls=[];window.fetch=async url=>{statsCalls.push(url);return {ok:true,json:async()=>data};};}', data)
+    page.add_script_tag(path=str(ROOT / 'web/model-statistics.js'))
+
+
+def production(page):
+    source = (ROOT / 'web/agent.js').read_text(encoding='utf-8')
+    function = source[source.index('function serviceRow('):source.index('function editChain(')]
+    setup = {'boot': {'features': {'advanced': False}, 'capabilities': [
+        {'id': 'ake', 'name': '阿珂', 'supports': ['video'], 'video': {'models': MODELS, 'ratios': ['16:9']}}]},
+        'data': {'production': {'video': {'provider': 'ake', 'model': MODELS[0], 'concurrency': 4}}}}
+    page.add_script_tag(content=HELPERS + 'const S=' + json.dumps(setup) + ';' + function)
+    page.evaluate("document.body.innerHTML='<main id=\"studio-agent-prototype\" style=\"padding:24px;box-sizing:border-box\"><h2>生产模型</h2>'+serviceRow('video','分段视频')+'</main>'")
+    playwright.expect(page.locator('[data-pms-note]')).to_contain_text('95.16%')
+
+
+def test_production_choice_preserves_exact_id_and_unknown_is_not_zero(page):
+    install(page)
+    production(page)
+    assert page.locator('datalist option').first.get_attribute('label').endswith('95.16%')
+    page.evaluate("window.chosen=[];document.addEventListener('change',e=>{if(e.target.dataset.setting==='model')chosen.push(e.target.value)})")
+    page.locator('.pms summary').click()
+    assert page.locator('tbody tr').count() == 3
+    assert 'not-authorized' not in page.locator('tbody').inner_text()
+    row = page.locator('tbody tr').filter(has_text='no-statistics')
+    assert '暂无数据' in row.inner_text() and '0.00%' not in row.inner_text()
+    page.locator('[data-pms-search]').fill('wan-exact-suffix')
+    page.locator('[data-pms-pick]').click()
+    assert page.locator('input[data-setting="model"]').input_value() == 'wan-exact-suffix'
+    assert page.evaluate('chosen') == ['wan-exact-suffix']
+    playwright.expect(page.locator('[data-pms-note]')).to_contain_text('0.00%')
+
+
+@pytest.mark.parametrize('width', [390, 1280])
+def test_statistics_panel_stays_inside_viewport(page, width):
+    page.set_viewport_size({'width': width, 'height': 900})
+    install(page)
+    production(page)
+    page.locator('.pms summary').click()
+    panel = page.locator('.pms-panel').bounding_box()
+    assert panel['x'] >= 0 and panel['x'] + panel['width'] <= width
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+def test_admin_key_library_adds_exact_unique_model_without_saving_key(page):
+    install(page, admin=True)
+    page.evaluate("document.body.innerHTML='<button id=key-library>Key 库</button><div id=users></div>'")
+    page.add_script_tag(content=HELPERS + "const safe=fn=>fn();const api=async()=>({keys:[],providers:{ake:'阿珂'}});")
+    page.add_script_tag(path=str(ROOT / 'auth_service/studio_auth/web/provisioning.js'))
+    page.locator('#key-library').click()
+    page.locator('.pms summary').click()
+    page.locator('[data-pms-search]').fill('wan-exact-suffix')
+    page.locator('[data-pms-pick]').click()
+    assert page.locator('textarea[name=models]').input_value() == 'wan-exact-suffix'
+    page.locator('.pms summary').click()
+    page.locator('[data-pms-pick]').click()
+    assert page.locator('textarea[name=models]').input_value() == 'wan-exact-suffix'
+    page.locator('input[name=base_url]').fill('https://custom.example')
+    page.locator('input[name=base_url]').dispatch_event('change')
+    page.wait_for_function("statsCalls.some(u=>u.includes('base_url=https%3A%2F%2Fcustom.example'))")
+
+
+def test_stale_data_and_untrusted_model_text_are_displayed_safely(page):
+    hostile = '<img src=x onerror=alert(1)>'
+    data = {**DATA, 'stale': True, 'error': 'timeout', 'state': 'error', 'scope': 'request',
+            'models': [{**DATA['models'][0], 'model': hostile}]}
+    install(page, data)
+    page.evaluate('(model)=>{document.body.innerHTML=ProviderModelStats.markup("ake",model,null,"bind")}', hostile)
+    playwright.expect(page.locator('[data-pms-note]')).to_contain_text('旧数据，刷新失败')
+    page.locator('summary').click()
+    assert page.locator('img').count() == 0
+    assert hostile in page.locator('tbody').inner_text()
+    assert '请求统计口径' in page.locator('[data-pms-time]').inner_text()
+
+
+def test_pending_old_supplier_response_does_not_replace_new_supplier(page):
+    install(page)
+    page.evaluate("fetch=url=>new Promise(resolve=>{(window.pending??=[]).push({url,resolve})});document.body.innerHTML=ProviderModelStats.markup('ake','wan',null)")
+    page.wait_for_function('window.pending?.length===1')
+    page.evaluate("document.querySelector('.pms').dataset.pmsProvider='julun'")
+    page.wait_for_function('pending.length===2')
+    page.evaluate("pending[1].resolve({ok:true,json:async()=>({state:'ready',models:[{model:'wan',rate:80,window:'24h'}]})})")
+    playwright.expect(page.locator('[data-pms-note]')).to_contain_text('80.00%')
+    page.evaluate("pending[0].resolve({ok:true,json:async()=>({state:'ready',models:[{model:'wan',rate:99,window:'24h'}]})})")
+    playwright.expect(page.locator('[data-pms-note]')).to_contain_text('80.00%')
+
+
+def test_wizard_provider_switch_replaces_suggestions_and_keeps_selected_id(page):
+    install(page)
+    source = (ROOT / 'web/agent.js').read_text(encoding='utf-8')
+    function = source[source.index('function wizardModel('):source.index('function wizardSave(')]
+    change = " if(S.page==='wizard'&&" + source.split(" if(S.page==='wizard'&&", 1)[1].split('\n}));', 1)[0]
+    setup = {'page': 'wizard', 'wizard': {'video_provider': 'ake', 'video_model': MODELS[0]},
+             'boot': {'capabilities': [
+                 {'id': 'ake', 'video': {'models': MODELS, 'default_model': MODELS[0]}},
+                 {'id': 'julun', 'video': {'models': ['different-exact-id'], 'default_model': 'different-exact-id'}}]}}
+    page.add_script_tag(content=HELPERS + 'const $=s=>document.querySelector(s);const S=' + json.dumps(setup) + ';' + function +
+                             "document.addEventListener('change',e=>{const el=e.target;" + change + '});')
+    page.evaluate("document.body.innerHTML='<form><select name=video_provider><option>ake</option><option>julun</option></select><label>视频模型'+wizardModel('video')+'</label></form>'")
+    page.locator('select').select_option('julun')
+    assert page.locator('datalist option').count() == 1
+    assert page.locator('datalist option').get_attribute('value') == 'different-exact-id'
+    assert page.locator('.pms').get_attribute('data-pms-provider') == 'julun'
+    page.locator('.pms summary').click()
+    page.locator('[data-pms-pick]').click()
+    assert page.locator('input[name=video_model]').input_value() == 'different-exact-id'

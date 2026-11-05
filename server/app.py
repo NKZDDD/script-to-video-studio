@@ -2676,6 +2676,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/provider-monitor/status':
                 from core import provider_monitor
                 return self._json(provider_monitor.status(self._login()))
+            if path == '/api/provider-model-stats':
+                from core import model_statistics
+                return self._json(model_statistics.snapshot(q.get('provider', [''])[0], load_config()))
             if path == '/api/agent/client-reports':
                 from core import client_reports
                 return self._json(client_reports.status(self._login()))
@@ -2702,7 +2705,7 @@ class Handler(BaseHTTPRequestHandler):
                     ctype += "; charset=utf-8"
                 return self._send_file(full, ctype)
             name = "agent.html" if path in ("/", "", "/index.html") else path.lstrip("/")
-            if name not in ("agent.html", "agent.css", "agent.js", "login.css", "login.js", "updates.js", "output-preview.js", "favicon.ico", "respect-logo.png"):
+            if name not in ("agent.html", "agent.css", "agent.js", "login.css", "login.js", "updates.js", "output-preview.js", "model-statistics.js", "model-statistics.css", "favicon.ico", "respect-logo.png"):
                 return self._json({"error": "404"}, 404)
             full = os.path.join(WEB_DIR, name)
             if os.path.isfile(full):
