@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
@@ -69,6 +70,24 @@ IMAGE_SIZES = ["1024x1536", "1024x1024", "1536x1024", "2048x2048"]
 
 _MIME_BY_EXT = {"mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
                 "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4"}
+
+_KIND_PATTERNS = (
+    ("image", re.compile(r"image|banana|seedream|midjourney|flux|dall|绘图|生图|图片")),
+    ("video", re.compile(r"video|seedance|sora|veo|kling|h3|wan|happy.?horse|"
+                         r"^omni-(?:fast|v2v)|^niulai-pro$|omni_flash|快乐马|可灵|视频|sd[\d.-]")),
+)
+
+
+def _usable_kind(mid: str) -> str:
+    """判断一个模型能不能在 Studio 里出图/出片；纯文本模型返回空。"""
+    if mid in IMAGE_MODELS:
+        return "image"
+    if mid in VIDEO_MODELS:
+        return "video"
+    for kind, pattern in _KIND_PATTERNS:
+        if pattern.search(mid.lower()):
+            return kind
+    return ""
 
 
 def _remote(ref: str) -> bool:
@@ -151,6 +170,24 @@ class ValeCloudsProvider(Provider):
             },
             "notes": "本站基于 New API；模型可用性以 GET /v1/models 和 /v1/video/catalog 为准。",
         }
+
+    def filter_catalog(self, rows) -> list:
+        """只留能出图/出片的模型，并显式标好类型。
+
+        NY 的 `/v1/models` 混着 `gpt-5.6-*` / `gpt-6-*` 这类纯文本模型，
+        以及编辑类模型。旧客户端按名字猜类型，猜不出就整家提示
+        「有模型类型无法识别，请更新客户端适配」——文本模型在 Studio 里
+        本来也用不上，直接剔除；图片/视频按能力表和名字标好 type，
+        新旧客户端都能正确归类。
+        """
+        out = []
+        for row in rows or []:
+            mid = str((row or {}).get("id") or "").strip()
+            kind = _usable_kind(mid)
+            if not kind:
+                continue
+            out.append({"id": mid, "type": kind, "display_name": mid})
+        return out
 
     # ------------------------------------------------------------- 素材
     def _asset(self, ref: str, kind: str, index: int, log: Callable) -> str:

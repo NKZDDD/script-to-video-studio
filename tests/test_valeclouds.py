@@ -27,6 +27,23 @@ class ValeCloudsTests(unittest.TestCase):
         self.assertEqual(set(cap["video"]["models"]), set(VIDEO_MODELS))
         self.assertIn("gpt-image-2.5-sunburst", cap["image"]["models"])
 
+    def test_filter_catalog_drops_text_models_and_types_media(self):
+        """NY 的清单混着 gpt-6 这类文本模型；旧客户端会报「类型无法识别」。"""
+        rows = [{"id": m} for m in (
+            "gpt-6-sol", "gpt-5.6-terra", "gpt-image-2.5-flare", "image2_4k",
+            "gemini-nano-banana-2.1", "sd2.5-s", "Mo-Seedance-2.5-720p",
+            "volc-mediakit-video-enhance-fast", "奥特曼h3-768p（特惠版）")]
+        out = {r["id"]: r["type"] for r in ValeCloudsProvider().filter_catalog(rows)}
+        self.assertNotIn("gpt-6-sol", out)
+        self.assertNotIn("gpt-5.6-terra", out)
+        self.assertEqual(out["gpt-image-2.5-flare"], "image")
+        self.assertEqual(out["image2_4k"], "image")
+        self.assertEqual(out["gemini-nano-banana-2.1"], "image")
+        for mid in ("sd2.5-s", "Mo-Seedance-2.5-720p",
+                    "volc-mediakit-video-enhance-fast", "奥特曼h3-768p（特惠版）"):
+            self.assertEqual(out[mid], "video")
+        self.assertEqual(ValeCloudsProvider().filter_catalog([]), [])
+
     def test_video_quotes_then_creates_with_idempotency_key(self):
         p = ValeCloudsProvider(api_key="k")
         calls = []
