@@ -21,14 +21,15 @@ RUNTIME_MODULES = ["pypdf", "pymupdf", "fitz", "cryptography", "PIL.Image", "ima
                    "core.agent_projects", "core.agent_runtime", "core.agent_handoff",
                    "core.assemble", "core.bulk_place", "core.recycle", "core.submitted",
                    "server.agent_api", "core.studio_login", "core.provider_monitor",
-                   "auth_service.studio_auth.provider_probe"]
+                   "auth_service.studio_auth.provider_probe", "core.model_statistics",
+                   "auth_service.studio_auth.model_statistics"]
 
 
 def resource_inventory() -> dict:
     """Hashes from the actual source/bundle, never from the user's data directory."""
     from . import paths
     base = Path(paths.BUNDLE_DIR)
-    files = [base / "web" / name for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css", "updates.js", "respect-logo.png", "favicon.ico")]
+    files = [base / "web" / name for name in ("agent.html", "agent.js", "agent.css", "login.js", "login.css", "updates.js", "respect-logo.png", "favicon.ico", "model-statistics.js", "model-statistics.css")]
     files += list((base / "prompts").glob("*.md"))
     files += [p for p in (base / "skills" / "production-skill").rglob("*")
               if p.is_file() and "__pycache__" not in p.parts]

@@ -16,6 +16,7 @@ TOP.add("BATCH-CLIENT-UPGRADE.md")
 TOP.add("APPLICATION-UPDATE-UPGRADE.md")
 TOP.add("PROVIDER-MONITOR-UPGRADE.md")
 TOP.add("CLIENT-REPORTS-UPGRADE.md")
+TOP.add("MODEL-STATISTICS-UPGRADE.md")
 TREES = {"studio_auth", "deploy", "examples", "tests", "tools"}
 SUFFIXES = {".py", ".sh", ".service", ".timer", ".conf", ".html", ".css", ".js"}
 
