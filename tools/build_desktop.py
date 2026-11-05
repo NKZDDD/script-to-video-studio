@@ -113,7 +113,7 @@ out = COLLECT(gui, cli, a.binaries, a.datas, name='Respect-Studio')
                "url": "https://login.respect.chat/downloads/" + output.name,
                "sha256": checksum, "bytes": output.stat().st_size,
                "build_sha256": build_hash, "mandatory": False,
-               "notes": "新增服务商模型成功率：生产页、首选/备用模型和创建向导按服务商及完整模型名显示成功率、样本、平均耗时与更新时间。覆盖 10 家已确认公开统计来源，区分请求与任务口径；无数据、过期或读取失败明确标注，后台缓存不阻塞生产。服务端 Key 库选型显示需升级账号服务 1.13.0；本次不要求强制升级。保留原有配置、项目和产物。"}
+               "notes": "模型选择直接展示服务商成功率卡片：完整模型名、绿灯和绿色分段条、平均耗时、样本与统计窗口。仅展示当前账号可用模型，保留完整模型后缀；暂无数据、实际 0% 和旧数据分别标明。统计读取在后台进行，不阻塞生产。配套账号服务 1.13.1 的 Key 库按保存的 Key 拉取或绑定模型，避免混入服务商其他模型。保留配置、项目和产物，本次不要求强制升级。"}
     (build / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
     output.with_suffix(".exe.sha256").write_text(checksum + "  " + output.name + "\n", encoding="ascii")
     print(json.dumps(release, ensure_ascii=False))
